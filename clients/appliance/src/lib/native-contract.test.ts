@@ -6,13 +6,16 @@ import { assertNativeBridgeContract } from "./native-contract.ts";
 
 const EXPECTED_CONTRACT = {
   bridgeApiMajor: 1,
-  bridgeApiMinor: 5,
+  bridgeApiMinor: 6,
   deviceApiMajor: 1,
   deviceApiMinor: 6,
   maxMessageBytes: 512,
   maxLxmfReadChunkBytes: 416,
   maxLxmfBasicTitleBytes: 295,
   maxLxmfBasicContentBytes: 295,
+  maxNomadPagePathBytes: 128,
+  maxNomadPageBytes: 400,
+  maxNomadRequestTimestampUnixMs: 9_007_199_254_740_991n,
 } satisfies NativeBridgeContract;
 
 describe("native Rust bridge contract", () => {

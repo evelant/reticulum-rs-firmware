@@ -12,11 +12,12 @@ test-support = []
 
 [dependencies]
 hex.workspace = true
-reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }
 reticulum-device-client = { path = "../device-client" }
 reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
 reticulum-lxmf-chat-core = { path = "../lxmf-chat-core" }
 reticulum-lxmf-wire = { path = "../lxmf-wire" }
+rete-core.workspace = true
 serde.workspace = true
 tokio.workspace = true
 ts-rs.workspace = true

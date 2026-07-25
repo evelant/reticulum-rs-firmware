@@ -8,7 +8,9 @@ use reticulum_device_api::{
 use reticulum_lxmf_chat_runtime::{
     ApplianceSnapshot, BytesEncoding, BytesView, ConnectionState, ConnectionTransport,
     ContactRequest, ContactView, DeviceView, MAX_CONTACT_NAME_BYTES, MutationOutcome,
-    MutationResponse, NearbyPeerView, SendOutcome, SendRequest, SendResponse, TimelineDirection,
+    MutationResponse, NearbyPeerView, NomadFetchFailure, NomadFetchPhase, NomadFetchPollRequest,
+    NomadFetchPollResponse, NomadFetchStartOutcome, NomadFetchStartRequest,
+    NomadFetchStartResponse, SendOutcome, SendRequest, SendResponse, TimelineDirection,
     TimelineStatus, TimelineView,
 };
 use ts_rs::TS;
@@ -81,6 +83,13 @@ pub fn render_api_bindings() -> String {
     append_declaration::<SendRequest>(&mut output, &config);
     append_declaration::<SendOutcome>(&mut output, &config);
     append_declaration::<SendResponse>(&mut output, &config);
+    append_declaration::<NomadFetchStartRequest>(&mut output, &config);
+    append_declaration::<NomadFetchPollRequest>(&mut output, &config);
+    append_declaration::<NomadFetchStartOutcome>(&mut output, &config);
+    append_declaration::<NomadFetchStartResponse>(&mut output, &config);
+    append_declaration::<NomadFetchPhase>(&mut output, &config);
+    append_declaration::<NomadFetchFailure>(&mut output, &config);
+    append_declaration::<NomadFetchPollResponse>(&mut output, &config);
     append_declaration::<ErrorBody>(&mut output, &config);
     normalize_generated_module(output)
 }

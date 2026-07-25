@@ -35,8 +35,8 @@ wifi-api-proof = [
 [dependencies]
 reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
 reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
-reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
-reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf"] }
+reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf", "experimental-nomad"] }
+reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf", "experimental-nomad"] }
 reticulum-device-api-ble = { path = "../../crates/device-api-ble", default-features = false }
 reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
 reticulum-device-api-credentials = { path = "../../crates/device-api-credentials", default-features = false }

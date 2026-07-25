@@ -9,6 +9,10 @@ import type {
   MutationResponse,
   NearbyPeerView,
   NoContent,
+  NomadFetchPollRequest,
+  NomadFetchPollResponse,
+  NomadFetchStartRequest,
+  NomadFetchStartResponse,
   OnboardingView,
   RecoveryRequest,
   SendRequest,
@@ -72,6 +76,14 @@ export class HttpApplianceClient implements ApplianceClient {
 
   nearbyPeers(): Promise<NearbyPeerView[]> {
     return this.#request("/api/v1/nearby");
+  }
+
+  nomadFetchStart(request: NomadFetchStartRequest): Promise<NomadFetchStartResponse> {
+    return this.#request("/api/v1/nomad/fetches", { method: "POST", body: request });
+  }
+
+  nomadFetchPoll(request: NomadFetchPollRequest): Promise<NomadFetchPollResponse> {
+    return this.#request("/api/v1/nomad/fetches/poll", { method: "POST", body: request });
   }
 
   timeline(destination: string): Promise<TimelineView[]> {

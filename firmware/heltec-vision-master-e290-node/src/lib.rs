@@ -23,6 +23,7 @@ pub mod inbox_admission_fault_hil;
 pub mod live_pairing_handoff;
 pub mod live_pairing_node;
 pub mod lxmf_delivery;
+pub mod nomad_api;
 pub mod nomad_coordinator;
 pub mod nomad_responder;
 pub mod nomad_runtime;
@@ -829,6 +830,8 @@ mod tests {
         assert!(node.contains("*supervisor.destination_hash().as_bytes()"));
         assert!(node.contains("progressed |= step_authenticated_api("));
         assert!(node.contains("storage.dispatch_authenticated_request("));
+        assert!(node.contains("ProductNomadFetchPort::new("));
+        assert!(node.contains("&mut nomad_port,"));
         assert!(node.contains("peer_discovery_incarnation,"));
         assert!(node.contains("discovered_peers,"));
         assert!(node.contains("AuthenticatedApiNodeState::PendingReply(pressure.into_inner())"));
@@ -841,7 +844,7 @@ mod tests {
         assert!(storage.contains(".select_ordinary_session(at, connection, credential_id)"));
         assert!(storage.contains("credential_runtime.dispatch_authenticated_request("));
         assert!(storage.contains(
-            "credential_runtime.dispatch_authenticated_request(request, identity, &mut port)"
+            "credential_runtime.dispatch_authenticated_request(request, identity, &mut port, nomad_port)"
         ));
         assert!(storage.contains("impl SubmissionPort for ProductAuthenticatedApiPort<'_>"));
         assert!(storage.contains("impl InboundMailboxPort for ProductAuthenticatedApiPort<'_>"));
@@ -852,6 +855,10 @@ mod tests {
         assert!(storage.contains("request.authorization()"));
         assert!(storage.contains(".prepare_basic_direct_lxmf_into("));
         assert!(storage.contains("LxmfMessageIntent::new("));
+
+        let authenticated = include_str!("authenticated_api_node.rs");
+        assert!(authenticated.contains("dispatch_with_inbox_lxmf_peer_discovery_and_nomad("));
+        assert!(authenticated.contains("N: NomadFetchPort"));
 
         let usb = include_str!("usb_pairing_task.rs");
         assert!(usb.contains(

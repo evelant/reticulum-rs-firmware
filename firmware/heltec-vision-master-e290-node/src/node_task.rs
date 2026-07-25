@@ -46,6 +46,7 @@ use reticulum_heltec_vision_master_e290_node::{
         retention_action, retry_after_pre_io_deferral, should_relieve_lxmf_retry, stamp_policy,
         wire_limits,
     },
+    nomad_api::{NomadFetchApiState, ProductNomadFetchPort},
     nomad_coordinator::{CoordinatorCommand, CoordinatorOperation, NativeRequestPhase},
     nomad_responder::{
         NOMAD_NODE_ANNOUNCE_APP_DATA, NomadResponderDisposition, classify_nomad_responder_event,
@@ -217,6 +218,7 @@ pub(crate) struct ApplicationVolatileState {
     pending_owner_fault_observed: bool,
     service_fault_observed: bool,
     nomad: ProductNomadRuntimeState,
+    nomad_api: NomadFetchApiState,
 }
 
 impl ApplicationVolatileState {
@@ -233,6 +235,7 @@ impl ApplicationVolatileState {
             pending_owner_fault_observed: false,
             service_fault_observed: false,
             nomad: ProductNomadRuntimeState::new(),
+            nomad_api: NomadFetchApiState::new(),
         }
     }
 }
@@ -494,6 +497,7 @@ pub async fn run(
         pending_owner_fault_observed: lxmf_pending_owner_fault_observed,
         service_fault_observed: lxmf_service_fault_observed,
         nomad,
+        nomad_api,
     } = application_volatile;
     #[cfg(feature = "runtime-measurement-hil")]
     let mut previous_node_loop_us = now_micros();
@@ -1381,6 +1385,9 @@ pub async fn run(
                         discovered_peers,
                         peer_discovery_incarnation,
                         now_millis(),
+                        nomad,
+                        nomad_api,
+                        !fail_closed_draining,
                         identity_summary,
                         &mut authenticated_api,
                         &mut authenticated_api_state,
@@ -3055,6 +3062,9 @@ fn step_authenticated_api(
     >,
     peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
     now_ms: u64,
+    nomad: &mut ProductNomadRuntimeState,
+    nomad_api: &mut NomadFetchApiState,
+    nomad_service_enabled: bool,
     identity: IdentitySummary,
     handoff: &mut NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     state: &mut AuthenticatedApiNodeState,
@@ -3085,11 +3095,18 @@ fn step_authenticated_api(
         };
         #[cfg(feature = "runtime-measurement-hil")]
         let api_dispatch_started_us = now_micros();
+        let mut nomad_port = ProductNomadFetchPort::new(
+            nomad,
+            nomad_api,
+            *peer_discovery_incarnation.as_bytes(),
+            nomad_service_enabled,
+        );
         let dispatch = storage.dispatch_authenticated_request(
             supervisor,
             discovered_peers,
             peer_discovery_incarnation,
             now_ms,
+            &mut nomad_port,
             request,
             identity,
         );

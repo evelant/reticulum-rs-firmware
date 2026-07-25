@@ -12,8 +12,9 @@ use reticulum_device_api::{
     decode_request, encode_response,
 };
 use reticulum_device_api_adapter::{
-    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, PeerDiscoveryPort, SubmissionPort,
-    dispatch, dispatch_with_inbox, dispatch_with_inbox_lxmf_and_peer_discovery,
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, NomadFetchPort, PeerDiscoveryPort,
+    SubmissionPort, dispatch, dispatch_with_inbox,
+    dispatch_with_inbox_lxmf_peer_discovery_and_nomad,
 };
 use reticulum_device_api_credentials::CredentialAuthority;
 use reticulum_device_api_handoff::{
@@ -187,24 +188,27 @@ where
     ))
 }
 
-/// Revalidate and dispatch one authenticated request through a single owner of
-/// durable submission, raw-RNS inbox, and LXMF inbox semantic capabilities.
+/// Revalidate and dispatch one authenticated request through the complete
+/// appliance and bounded NomadNet semantic ports.
 ///
-/// The combined port permits operation-scoped use of one physical flash owner
-/// without creating simultaneous mutable aliases. Authentication failure and
-/// public identity reads still invoke no port method.
+/// The combined appliance port permits operation-scoped use of one physical
+/// flash owner without creating simultaneous mutable aliases. The independent
+/// Nomad port borrows only volatile protocol/API state. Authentication failure
+/// invokes neither port.
 #[allow(
     clippy::result_large_err,
     reason = "terminal failure must retain the exact allocation-free request owner"
 )]
-pub fn dispatch_authenticated_request_with_inbox_and_lxmf<const CREDENTIALS: usize, P>(
+pub fn dispatch_authenticated_request_with_inbox_lxmf_and_nomad<const CREDENTIALS: usize, P, N>(
     request: LocalApiRequest<AuthenticatedGrant>,
     authority: Option<&CredentialAuthority<CREDENTIALS>>,
     identity: IdentitySummary,
     port: &mut P,
+    nomad_port: &mut N,
 ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
 where
     P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
+    N: NomadFetchPort,
 {
     let envelope = match decode_request(request.message().encoded()) {
         Ok(envelope) => envelope,
@@ -219,7 +223,9 @@ where
     let response = match authority.and_then(|authority| request.grant().revalidate(authority).ok())
     {
         Some(lease) => lease.with_dispatch_context(|context| {
-            dispatch_with_inbox_lxmf_and_peer_discovery(port, identity, context, envelope)
+            dispatch_with_inbox_lxmf_peer_discovery_and_nomad(
+                port, nomad_port, identity, context, envelope,
+            )
         }),
         None => ResponseEnvelope {
             version: ApiVersion::CURRENT,
@@ -257,14 +263,19 @@ mod tests {
     use rand_core::{CryptoRng, RngCore};
     use reticulum_device_api::{
         ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability, CapabilitySnapshot,
-        DestinationHash, DeviceRequest, DeviceResponse, IdentitySummary,
-        OP_EXPERIMENTAL_RNS_INBOX_STATUS, OP_SYSTEM_CAPABILITIES, Permissions, PrincipalId,
-        RequestEnvelope, RequestId, ResponseEnvelope, RnsInboxStatus, decode_response,
-        encode_request,
+        DestinationHash, DeviceRequest, DeviceResponse, IdempotencyKey, IdentitySummary,
+        NomadFetchId, NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse,
+        NomadFetchStartAccepted, NomadFetchStartOutcome, NomadFetchStartRequest, NomadPagePath,
+        NomadRequestTimestampUnixMs, OP_EXPERIMENTAL_RNS_INBOX_STATUS, OP_SYSTEM_CAPABILITIES,
+        Permissions, PrincipalId, RequestEnvelope, RequestId, ResponseEnvelope, RnsInboxStatus,
+        decode_response, encode_request,
     };
     use reticulum_device_api_adapter::{
-        InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, SubmissionAcceptance,
-        SubmissionPort, SubmissionPortError,
+        InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, LxmfComposeAcceptance,
+        LxmfComposePort, LxmfComposePortError, LxmfComposeRequest, LxmfInboxPort,
+        LxmfInboxPortError, NomadFetchPort, NomadFetchPortError, NomadFetchStartDisposition,
+        PeerDiscoveryPort, PeerDiscoveryPortError, SubmissionAcceptance, SubmissionPort,
+        SubmissionPortError,
     };
     use reticulum_device_api_credentials::{
         AuthorityRevision, AuthorizationPolicyVersion, CredentialAudit, CredentialAuthority,
@@ -289,6 +300,7 @@ mod tests {
     use super::{
         AuthenticatedApiDispatchFailureKind, dispatch_authenticated_request,
         dispatch_authenticated_request_with_inbox,
+        dispatch_authenticated_request_with_inbox_lxmf_and_nomad,
     };
 
     const CREDENTIAL_ID: CredentialId = CredentialId::new([
@@ -313,6 +325,11 @@ mod tests {
         max_payload_bytes: 383,
         durable: true,
     };
+    const NOMAD_DESTINATION: DestinationHash = DestinationHash([0xa1; 16]);
+    const NOMAD_IDEMPOTENCY_KEY: IdempotencyKey = IdempotencyKey([0xb2; 16]);
+    const NOMAD_PATH: &str = "/page/index.mu";
+    const NOMAD_TIMESTAMP_UNIX_MS: u64 = 1_784_732_100_123;
+    const NOMAD_PEER_APP_DATA_BYTES: u16 = 64;
 
     struct FixedRng {
         bytes: [u8; 32],
@@ -417,6 +434,203 @@ mod tests {
         fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
             self.peek_calls += 1;
             Ok(None)
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingCompletePort {
+        submission_availability_calls: usize,
+        submission_status_calls: usize,
+        submission_accept_calls: usize,
+        inbox_availability_calls: usize,
+        inbox_status_calls: usize,
+        inbox_peek_calls: usize,
+        lxmf_availability_calls: usize,
+        lxmf_next_calls: usize,
+        lxmf_read_calls: usize,
+        compose_availability_calls: usize,
+        compose_calls: usize,
+        peer_availability_calls: usize,
+        peer_max_app_data_calls: usize,
+        peer_next_calls: usize,
+    }
+
+    impl CountingCompletePort {
+        const fn total_calls(&self) -> usize {
+            self.submission_availability_calls
+                + self.submission_status_calls
+                + self.submission_accept_calls
+                + self.inbox_availability_calls
+                + self.inbox_status_calls
+                + self.inbox_peek_calls
+                + self.lxmf_availability_calls
+                + self.lxmf_next_calls
+                + self.lxmf_read_calls
+                + self.compose_availability_calls
+                + self.compose_calls
+                + self.peer_availability_calls
+                + self.peer_max_app_data_calls
+                + self.peer_next_calls
+        }
+    }
+
+    impl SubmissionPort for CountingCompletePort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.submission_availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn submission_state(
+            &mut self,
+            _principal: StoragePrincipalId,
+            _id: StorageSubmissionId,
+        ) -> Result<Option<LifecycleState>, SubmissionPortError> {
+            self.submission_status_calls += 1;
+            Ok(None)
+        }
+
+        fn accept(
+            &mut self,
+            _candidate: AcceptanceCandidate,
+        ) -> Result<SubmissionAcceptance, SubmissionPortError> {
+            self.submission_accept_calls += 1;
+            Ok(SubmissionAcceptance::CapacityExhausted)
+        }
+    }
+
+    impl InboundMailboxPort for CountingCompletePort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.inbox_availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn status(&mut self) -> Result<RnsInboxStatus, InboundMailboxPortError> {
+            self.inbox_status_calls += 1;
+            Ok(INBOX_STATUS)
+        }
+
+        fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+            self.inbox_peek_calls += 1;
+            Ok(None)
+        }
+    }
+
+    impl LxmfInboxPort for CountingCompletePort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.lxmf_availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn next(
+            &mut self,
+            _after: Option<reticulum_device_api::LxmfMessageHandle>,
+        ) -> Result<Option<reticulum_device_api::LxmfMessageSummary>, LxmfInboxPortError> {
+            self.lxmf_next_calls += 1;
+            Ok(None)
+        }
+
+        fn read(
+            &mut self,
+            _handle: reticulum_device_api::LxmfMessageHandle,
+            _offset: u32,
+            _max_bytes: reticulum_device_api::LxmfReadLength,
+        ) -> Result<Option<reticulum_device_api::LxmfReadChunk>, LxmfInboxPortError> {
+            self.lxmf_read_calls += 1;
+            Ok(None)
+        }
+    }
+
+    impl LxmfComposePort for CountingCompletePort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.compose_availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn compose_and_accept(
+            &mut self,
+            _request: LxmfComposeRequest<'_>,
+        ) -> Result<LxmfComposeAcceptance, LxmfComposePortError> {
+            self.compose_calls += 1;
+            Err(LxmfComposePortError::Unavailable)
+        }
+    }
+
+    impl PeerDiscoveryPort for CountingCompletePort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.peer_availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn max_app_data_bytes(&mut self) -> u16 {
+            self.peer_max_app_data_calls += 1;
+            NOMAD_PEER_APP_DATA_BYTES
+        }
+
+        fn next(
+            &mut self,
+            _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
+        ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, PeerDiscoveryPortError> {
+            self.peer_next_calls += 1;
+            Err(PeerDiscoveryPortError::Unavailable)
+        }
+    }
+
+    struct CountingNomadPort {
+        availability_calls: usize,
+        start_calls: usize,
+        poll_calls: usize,
+        start_request_matches: bool,
+        observed_start_principal: Option<PrincipalId>,
+        observed_poll: Option<(PrincipalId, NomadFetchId)>,
+    }
+
+    impl CountingNomadPort {
+        const fn new() -> Self {
+            Self {
+                availability_calls: 0,
+                start_calls: 0,
+                poll_calls: 0,
+                start_request_matches: false,
+                observed_start_principal: None,
+                observed_poll: None,
+            }
+        }
+
+        const fn total_calls(&self) -> usize {
+            self.availability_calls + self.start_calls + self.poll_calls
+        }
+    }
+
+    impl NomadFetchPort for CountingNomadPort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn start(
+            &mut self,
+            principal: PrincipalId,
+            request: NomadFetchStartRequest<'_>,
+        ) -> Result<NomadFetchStartDisposition, NomadFetchPortError> {
+            self.start_calls += 1;
+            self.observed_start_principal = Some(principal);
+            self.start_request_matches = request.destination() == NOMAD_DESTINATION
+                && request.path().as_str() == NOMAD_PATH
+                && request.timestamp_unix_ms().get() == NOMAD_TIMESTAMP_UNIX_MS
+                && request.idempotency_key() == NOMAD_IDEMPOTENCY_KEY;
+            Ok(NomadFetchStartDisposition::Accepted(nomad_fetch_id()))
+        }
+
+        fn poll(
+            &mut self,
+            principal: PrincipalId,
+            id: NomadFetchId,
+        ) -> Result<Option<NomadFetchPollResponse>, NomadFetchPortError> {
+            self.poll_calls += 1;
+            self.observed_poll = Some((principal, id));
+            Ok(Some(NomadFetchPollResponse::Pending(
+                NomadFetchPhase::AwaitingResponse,
+            )))
         }
     }
 
@@ -602,6 +816,48 @@ mod tests {
         let mut encoded = [0_u8; MESSAGE_CAPACITY];
         let length = encode_request(&envelope, &mut encoded)
             .unwrap_or_else(|error| panic!("inbox status request encoding failed: {error:?}"));
+        authenticated_request(OwnedMessage::new(
+            MessageLength::new(length).expect("canonical request fits the handoff capacity"),
+            encoded,
+        ))
+    }
+
+    fn nomad_fetch_id() -> NomadFetchId {
+        NomadFetchId::new([0xc3; 8], 7).expect("fixed fetch ID is valid")
+    }
+
+    fn nomad_start_request(request_id: RequestId) -> LocalApiRequest<AuthenticatedGrant> {
+        let envelope = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id,
+            request: DeviceRequest::NomadFetchStart(NomadFetchStartRequest::new(
+                NOMAD_DESTINATION,
+                NomadPagePath::new(NOMAD_PATH).expect("fixed Nomad path is valid"),
+                NomadRequestTimestampUnixMs::new(NOMAD_TIMESTAMP_UNIX_MS)
+                    .expect("fixed Nomad timestamp is valid"),
+                NOMAD_IDEMPOTENCY_KEY,
+            )),
+        };
+        let mut encoded = [0_u8; MESSAGE_CAPACITY];
+        let length = encode_request(&envelope, &mut encoded)
+            .unwrap_or_else(|error| panic!("Nomad start request encoding failed: {error:?}"));
+        authenticated_request(OwnedMessage::new(
+            MessageLength::new(length).expect("canonical request fits the handoff capacity"),
+            encoded,
+        ))
+    }
+
+    fn nomad_poll_request(request_id: RequestId) -> LocalApiRequest<AuthenticatedGrant> {
+        let envelope = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id,
+            request: DeviceRequest::NomadFetchPoll(NomadFetchPollRequest {
+                id: nomad_fetch_id(),
+            }),
+        };
+        let mut encoded = [0_u8; MESSAGE_CAPACITY];
+        let length = encode_request(&envelope, &mut encoded)
+            .unwrap_or_else(|error| panic!("Nomad poll request encoding failed: {error:?}"));
         authenticated_request(OwnedMessage::new(
             MessageLength::new(length).expect("canonical request fits the handoff capacity"),
             encoded,
@@ -808,6 +1064,152 @@ mod tests {
 
         assert_eq!(submission_port.total_calls(), 0);
         assert_eq!(inbox_port.total_calls(), 0);
+    }
+
+    #[test]
+    fn complete_wrapper_rejects_absent_and_stale_authority_before_either_port() {
+        let mut appliance = CountingCompletePort::default();
+        let mut nomad = CountingNomadPort::new();
+
+        let absent_id = RequestId(41);
+        let absent = dispatch_authenticated_request_with_inbox_lxmf_and_nomad::<1, _, _>(
+            capabilities_request(absent_id),
+            None,
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| panic!("absent authority response failed: {:?}", fault.kind()));
+        assert_authentication_required(absent, absent_id, OP_SYSTEM_CAPABILITIES);
+
+        let stale_id = RequestId(42);
+        let stale_authority = active_authority(CredentialGeneration::new(8));
+        let stale = dispatch_authenticated_request_with_inbox_lxmf_and_nomad(
+            capabilities_request(stale_id),
+            Some(&stale_authority),
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| panic!("stale authority response failed: {:?}", fault.kind()));
+        assert_authentication_required(stale, stale_id, OP_SYSTEM_CAPABILITIES);
+
+        assert_eq!(appliance.total_calls(), 0);
+        assert_eq!(nomad.total_calls(), 0);
+    }
+
+    #[test]
+    fn complete_wrapper_capabilities_include_nomad_and_query_each_availability_once() {
+        let request_id = RequestId(43);
+        let authority = active_authority(GENERATION);
+        let mut appliance = CountingCompletePort::default();
+        let mut nomad = CountingNomadPort::new();
+
+        let reply = dispatch_authenticated_request_with_inbox_lxmf_and_nomad(
+            capabilities_request(request_id),
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| panic!("valid capabilities dispatch failed: {:?}", fault.kind()));
+
+        assert_eq!(reply.key(), EXPECTED_KEY);
+        let response = decode_response(reply.message().encoded())
+            .unwrap_or_else(|error| panic!("capabilities response was not canonical: {error:?}"));
+        assert_eq!(
+            response,
+            ResponseEnvelope {
+                version: ApiVersion::CURRENT,
+                request_id,
+                response: DeviceResponse::SystemCapabilities(
+                    CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+                        true,
+                        CapabilityAvailability::Available,
+                        CapabilityAvailability::Available,
+                        CapabilityAvailability::Available,
+                        CapabilityAvailability::Available,
+                        NOMAD_PEER_APP_DATA_BYTES,
+                    )
+                    .with_dispatch_nomad(CapabilityAvailability::Available),
+                ),
+            }
+        );
+
+        assert_eq!(appliance.submission_availability_calls, 1);
+        assert_eq!(appliance.inbox_availability_calls, 1);
+        assert_eq!(appliance.lxmf_availability_calls, 1);
+        assert_eq!(appliance.compose_availability_calls, 1);
+        assert_eq!(appliance.peer_availability_calls, 1);
+        assert_eq!(appliance.peer_max_app_data_calls, 1);
+        assert_eq!(appliance.total_calls(), 6);
+        assert_eq!(nomad.availability_calls, 1);
+        assert_eq!(nomad.start_calls, 0);
+        assert_eq!(nomad.poll_calls, 0);
+        assert_eq!(nomad.total_calls(), 1);
+    }
+
+    #[test]
+    fn complete_wrapper_nomad_start_and_poll_touch_only_the_nomad_port() {
+        let authority = active_authority(GENERATION);
+        let mut appliance = CountingCompletePort::default();
+        let mut nomad = CountingNomadPort::new();
+
+        let start_id = RequestId(44);
+        let start = dispatch_authenticated_request_with_inbox_lxmf_and_nomad(
+            nomad_start_request(start_id),
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| panic!("valid Nomad start dispatch failed: {:?}", fault.kind()));
+        let start_response = decode_response(start.message().encoded())
+            .unwrap_or_else(|error| panic!("Nomad start response was not canonical: {error:?}"));
+        assert_eq!(
+            start_response,
+            ResponseEnvelope {
+                version: ApiVersion::CURRENT,
+                request_id: start_id,
+                response: DeviceResponse::NomadFetchStartAccepted(NomadFetchStartAccepted {
+                    id: nomad_fetch_id(),
+                    outcome: NomadFetchStartOutcome::Accepted,
+                }),
+            }
+        );
+        assert_eq!(appliance.total_calls(), 0);
+        assert_eq!(nomad.availability_calls, 1);
+        assert_eq!(nomad.start_calls, 1);
+        assert_eq!(nomad.poll_calls, 0);
+        assert_eq!(nomad.observed_start_principal, Some(PRINCIPAL));
+        assert!(nomad.start_request_matches);
+
+        let poll_id = RequestId(45);
+        let poll = dispatch_authenticated_request_with_inbox_lxmf_and_nomad(
+            nomad_poll_request(poll_id),
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| panic!("valid Nomad poll dispatch failed: {:?}", fault.kind()));
+        let poll_response = decode_response(poll.message().encoded())
+            .unwrap_or_else(|error| panic!("Nomad poll response was not canonical: {error:?}"));
+        assert_eq!(
+            poll_response,
+            ResponseEnvelope {
+                version: ApiVersion::CURRENT,
+                request_id: poll_id,
+                response: DeviceResponse::NomadFetchPoll(NomadFetchPollResponse::Pending(
+                    NomadFetchPhase::AwaitingResponse,
+                )),
+            }
+        );
+        assert_eq!(appliance.total_calls(), 0);
+        assert_eq!(nomad.availability_calls, 2);
+        assert_eq!(nomad.start_calls, 1);
+        assert_eq!(nomad.poll_calls, 1);
+        assert_eq!(nomad.observed_poll, Some((PRINCIPAL, nomad_fetch_id())));
     }
 
     #[test]

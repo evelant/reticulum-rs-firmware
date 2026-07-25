@@ -10,7 +10,7 @@ readme = "README.md"
 
 [dependencies]
 rand_core.workspace = true
-reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }
 reticulum-device-api-framing = { path = "../device-api-framing", default-features = false }
 reticulum-device-api-handoff = { path = "../device-api-handoff", default-features = false }
 reticulum-device-api-session = { path = "../device-api-session", default-features = false }

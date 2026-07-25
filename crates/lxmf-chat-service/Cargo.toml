@@ -17,7 +17,7 @@ futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 rand_core.workspace = true
-reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }
 reticulum-device-api-ble = { path = "../device-api-ble" }
 reticulum-device-client = { path = "../device-client" }
 reticulum-device-pairing-client = { path = "../device-pairing-client" }

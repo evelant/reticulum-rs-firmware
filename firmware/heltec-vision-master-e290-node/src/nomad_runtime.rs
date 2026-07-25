@@ -1,9 +1,9 @@
 //! Boot-lifetime product ownership for one bounded outbound Nomad page fetch.
 //!
-//! This module remains independent from the authenticated device API. A future
-//! API adapter can call [`NomadRuntimeState::start`] and inspect the retained
-//! terminal result, while the permanent node task owns all native Reticulum
-//! transitions through the contained coordinator.
+//! This module remains independent from the authenticated device API. The
+//! product's operation-scoped adapter calls [`NomadRuntimeState::start`] and
+//! inspects the retained terminal result, while the permanent node task owns
+//! all native Reticulum transitions through the contained coordinator.
 
 use reticulum_node_core::{ApplicationEvent, ApplicationRequestFailReason, RequestHandle};
 use reticulum_nomad_protocol::{
@@ -80,9 +80,9 @@ impl<Token: Copy + Eq> NomadRuntimeState<Token> {
 
     /// Begin one internal outbound page fetch.
     ///
-    /// This is intentionally not a device API. It is the narrow boot-owner seam
-    /// that a later authenticated adapter can invoke without acquiring native
-    /// Reticulum ownership.
+    /// This is intentionally not itself a device API. It is the narrow
+    /// boot-owner seam used by the authenticated adapter without acquiring
+    /// native Reticulum ownership.
     pub fn start(
         &mut self,
         destination: DestinationHash,
@@ -118,6 +118,11 @@ impl<Token: Copy + Eq> NomadRuntimeState<Token> {
     /// Return the reusable established-Link cache.
     pub const fn cached_link(&self) -> Option<CachedLink> {
         self.coordinator.cached_link()
+    }
+
+    /// Return the first sticky product/native invariant fault.
+    pub const fn fault(&self) -> Option<InvariantFault> {
+        self.coordinator.fault()
     }
 
     /// Whether healthy protocol state is awaiting one fresh native action.

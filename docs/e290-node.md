@@ -488,9 +488,11 @@ Device configuration, Resource and propagated LXMF, responder/backchannel
 reuse, generic capacity-driven
 active-Link close/LRU eviction,
 initiator/backchannel direct receive, durable delete/reclaim and migration
-policy, local NomadNet clients, and production-ready host-facing USB/BLE/Wi-Fi
-services remain visible product work. API 1.4 and the host CLI now provide a
-basic USB LXMF send/list/read POC; they are not the final client surface. The
+policy, independent Nomad announce-directory discovery, Micron rendering,
+Resource-backed Nomad responses, and production-ready host-facing
+USB/BLE/Wi-Fi services remain visible product work. API 1.4 and the host CLI
+now provide a basic USB LXMF send/list/read POC; they are not the final client
+surface. The
 one-entry raw-RNS qualification record remains separate from the dedicated
 opportunistic and responder-side direct-packet LXMF receive store.
 
@@ -1724,9 +1726,20 @@ than 400 bytes as one direct packet. It deliberately has no Resource, forms,
 files, or dynamic content. Response-allocation pressure discards the request;
 an ambiguous terminal response fault may leave the responder fail-stopped until
 reset. These are source and host-test claims only: no powered Nomad responder
-qualification has been recorded. The portable API 1.6 start/poll contract and
-product Nomad client runtime are likewise not yet connected to the permanent
-device API or Expo app.
+qualification has been recorded. The permanent authenticated device API now
+composes API 1.6 fetch start/poll with the transport-neutral product Nomad
+client runtime. Its boot-scoped API owner retains one principal-owned fetch:
+same-principal/key retries with identical semantics replay the original ID, a
+distinct start reports capacity while the fetch is active, terminal polls are
+repeatable, and a later distinct start evicts the terminal result. Paths are
+limited to 128
+UTF-8 bytes and ready pages to one complete 400-byte UTF-8 direct response;
+Resource-backed responses remain unsupported. The Expo client uses the same
+authenticated appliance session for start/poll, displays the exact raw Micron
+response, and derives an associated Nomad destination from each authenticated
+nearby LXMF announce for one-tap browsing. Independent `nomadnetwork.node`
+announce-directory discovery and Micron rendering remain deferred, and the
+outbound API path remains source/host qualified rather than powered-qualified.
 
 Two discovery limitations remain in the current pinned Rete `dfcaa36`
 descendant of `ba73ee4`, `354b875`, `338251b`, `a443173`, `2d07818`, and
@@ -3473,7 +3486,9 @@ first smoke.
   local path-response
   wrapper into an owned Rete implementation with per-interface forwarding state
   before multi-transport routing. Add store delete/reclaim/migration and local
-  LXMF/NomadNet client services or an external cross-platform client.
+  LXMF conversation services; extend the bounded Nomad API client with
+  client-facing announce discovery, Resource responses, and the external
+  cross-platform browse UI.
 - Bound `AdmissionDeferred` lifetime/attempts together with source-identity
   discovery and retention; the first profile can otherwise let sixteen
   never-resolved source identities occupy every application-event slot until

@@ -4,6 +4,10 @@ import type {
   ContactView,
   MutationResponse,
   NoContent,
+  NomadFetchPollRequest,
+  NomadFetchPollResponse,
+  NomadFetchStartRequest,
+  NomadFetchStartResponse,
   OnboardingView,
   RecoveryRequest,
   SendRequest,
@@ -24,6 +28,8 @@ export interface ApplianceClient {
    * unavailable state rather than parsing raw device-API records themselves.
    */
   nearbyPeers?(): Promise<NearbyPeerView[]>;
+  nomadFetchStart(request: NomadFetchStartRequest): Promise<NomadFetchStartResponse>;
+  nomadFetchPoll(request: NomadFetchPollRequest): Promise<NomadFetchPollResponse>;
   timeline(destination: string): Promise<TimelineView[]>;
   upsertContact(destination: string, request: ContactRequest): Promise<MutationResponse>;
   send(request: SendRequest): Promise<SendResponse>;

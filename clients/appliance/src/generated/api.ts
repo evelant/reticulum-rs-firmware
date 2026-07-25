@@ -118,7 +118,7 @@ export type ContactView = { destination: string, name: string, };
  * values. Announce application bytes, Reticulum public keys, cursors, and
  * protocol parsing never cross the Rust/application boundary.
  */
-export type NearbyPeerView = { destination: string, display_name: string | null, hops: number, identity_hash: string, interface_id: number, interface_name: string | null, observed_age_ms: JsonSafeInteger, rssi_dbm: number | null, snr_db: number | null, };
+export type NearbyPeerView = { destination: string, associated_nomad_destination: string, display_name: string | null, hops: number, identity_hash: string, interface_id: number, interface_name: string | null, observed_age_ms: JsonSafeInteger, rssi_dbm: number | null, snr_db: number | null, };
 
 export type BytesEncoding = "utf8" | "hex";
 
@@ -147,5 +147,40 @@ export type SendRequest = { destination: string, timestamp_ms: JsonSafeInteger, 
 export type SendOutcome = "inserted" | "existing";
 
 export type SendResponse = { outbox_id: JsonSafeInteger, outcome: SendOutcome, };
+
+/**
+ * App-facing request to begin one bounded anonymous NomadNet page fetch.
+ */
+export type NomadFetchStartRequest = { destination: string, path: string, timestamp_unix_ms: JsonSafeInteger, idempotency_key: string, };
+
+/**
+ * App-facing request to poll one boot-scoped NomadNet fetch.
+ */
+export type NomadFetchPollRequest = { id: string, };
+
+/**
+ * Whether a successful fetch start was newly accepted or replayed.
+ */
+export type NomadFetchStartOutcome = "accepted" | "replayed";
+
+/**
+ * App-facing acceptance for one NomadNet fetch.
+ */
+export type NomadFetchStartResponse = { id: string, outcome: NomadFetchStartOutcome, };
+
+/**
+ * Non-terminal progress for an app-facing NomadNet fetch.
+ */
+export type NomadFetchPhase = "path_lookup" | "link_establishment" | "request_preparation" | "awaiting_dispatch_confirmation" | "awaiting_response";
+
+/**
+ * Terminal app-facing NomadNet fetch failure.
+ */
+export type NomadFetchFailure = "no_path" | "link" | "request" | "timeout" | "page_too_large" | "invalid_utf8" | "internal";
+
+/**
+ * App-facing state returned by polling one NomadNet fetch.
+ */
+export type NomadFetchPollResponse = { "state": "pending", phase: NomadFetchPhase, } | { "state": "ready", page: string, } | { "state": "failed", failure: NomadFetchFailure, };
 
 export type ErrorBody = { error: string, };

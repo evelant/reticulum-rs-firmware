@@ -28,8 +28,13 @@ use tokio::sync::{oneshot, watch};
 use ts_rs::TS;
 
 mod nearby;
+mod nomad;
 
 pub use nearby::{MAX_NEARBY_PEERS, NearbyPeerView};
+pub use nomad::{
+    NomadFetchFailure, NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse,
+    NomadFetchStartOutcome, NomadFetchStartRequest, NomadFetchStartResponse,
+};
 
 const COMMAND_CAPACITY: usize = 32;
 const COMMAND_WAIT: Duration = Duration::from_millis(50);
@@ -109,6 +114,12 @@ pub enum ClientRequestError {
     InvalidTimestamp,
     /// An idempotency key is not an exact 16-byte hexadecimal value.
     InvalidIdempotencyKey,
+    /// A NomadNet path was empty, relative, or contained a NUL byte.
+    InvalidNomadPath,
+    /// A NomadNet path exceeded the device API's fixed UTF-8 limit.
+    NomadPathTooLong,
+    /// A NomadNet fetch ID was not an exact valid 16-byte hexadecimal value.
+    InvalidNomadFetchId,
 }
 
 impl fmt::Display for ClientRequestError {
@@ -120,9 +131,16 @@ impl fmt::Display for ClientRequestError {
             }
             Self::TitleTooLong => "message title exceeds device limit",
             Self::ContentTooLong => "message content exceeds device limit",
-            Self::InvalidTimestamp => "timestamp is outside the LXMF client range",
+            Self::InvalidTimestamp => "timestamp is outside the client range",
             Self::InvalidIdempotencyKey => {
                 "idempotency key must contain exactly 32 hexadecimal characters"
+            }
+            Self::InvalidNomadPath => {
+                "NomadNet path must be absolute, non-empty, and contain no NUL byte"
+            }
+            Self::NomadPathTooLong => "NomadNet path exceeds device limit",
+            Self::InvalidNomadFetchId => {
+                "NomadNet fetch ID must contain exactly 32 valid hexadecimal characters"
             }
         })
     }
@@ -839,6 +857,14 @@ fn status_name(status: OutboxStatus) -> TimelineStatus {
 enum Command {
     Contacts(oneshot::Sender<Result<Vec<ContactView>, String>>),
     NearbyPeers(oneshot::Sender<Result<Vec<NearbyPeerView>, String>>),
+    NomadFetchStart {
+        request: NomadFetchStartRequest,
+        reply: oneshot::Sender<Result<NomadFetchStartResponse, String>>,
+    },
+    NomadFetchPoll {
+        request: NomadFetchPollRequest,
+        reply: oneshot::Sender<Result<NomadFetchPollResponse, String>>,
+    },
     Timeline {
         peer: DestinationHash,
         reply: oneshot::Sender<Result<Vec<TimelineView>, String>>,
@@ -916,6 +942,27 @@ impl ApplianceHandle {
     /// durable.
     pub async fn nearby_peers(&self) -> Result<Vec<NearbyPeerView>, ServiceError> {
         self.request(Command::NearbyPeers).await
+    }
+
+    /// Begin or idempotently replay one bounded anonymous NomadNet page fetch.
+    ///
+    /// The actor executes this through the same authenticated session that owns
+    /// chat, discovery, and background synchronization.
+    pub async fn nomad_fetch_start(
+        &self,
+        request: NomadFetchStartRequest,
+    ) -> Result<NomadFetchStartResponse, ServiceError> {
+        self.request(|reply| Command::NomadFetchStart { request, reply })
+            .await
+    }
+
+    /// Poll one boot-scoped NomadNet fetch through the actor-owned session.
+    pub async fn nomad_fetch_poll(
+        &self,
+        request: NomadFetchPollRequest,
+    ) -> Result<NomadFetchPollResponse, ServiceError> {
+        self.request(|reply| Command::NomadFetchPoll { request, reply })
+            .await
     }
 
     /// Load the ordered timeline for one peer.
@@ -1178,6 +1225,60 @@ impl<C: Connector> Actor<C> {
                 if session_consumed {
                     let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
                         "nearby peer request consumed the authenticated session".to_owned()
+                    });
+                    self.retry_connection(reason);
+                }
+                let _ = reply.send(result);
+            }
+            Command::NomadFetchStart { request, reply } => {
+                let result = match self.session.as_mut() {
+                    Some(session) => request
+                        .as_device_request()
+                        .map_err(|error| error.to_string())
+                        .and_then(|request| {
+                            session
+                                .nomad_fetch_start(request)
+                                .map(NomadFetchStartResponse::from)
+                                .map_err(|error| error.to_string())
+                        }),
+                    None => Err(
+                        "no authenticated appliance session is ready for NomadNet fetch".to_owned(),
+                    ),
+                };
+                let session_consumed = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.is_usable());
+                if session_consumed {
+                    let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
+                        "NomadNet fetch start consumed the authenticated session".to_owned()
+                    });
+                    self.retry_connection(reason);
+                }
+                let _ = reply.send(result);
+            }
+            Command::NomadFetchPoll { request, reply } => {
+                let result = match self.session.as_mut() {
+                    Some(session) => request
+                        .as_device_id()
+                        .map_err(|error| error.to_string())
+                        .and_then(|id| {
+                            session
+                                .nomad_fetch_poll(id)
+                                .map(NomadFetchPollResponse::from)
+                                .map_err(|error| error.to_string())
+                        }),
+                    None => Err(
+                        "no authenticated appliance session is ready for NomadNet fetch".to_owned(),
+                    ),
+                };
+                let session_consumed = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.is_usable());
+                if session_consumed {
+                    let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
+                        "NomadNet fetch poll consumed the authenticated session".to_owned()
                     });
                     self.retry_connection(reason);
                 }
@@ -1685,6 +1786,20 @@ mod tests {
             unreachable!("ordinary actor tests do not request nearby peers")
         }
 
+        fn nomad_fetch_start(
+            &mut self,
+            _request: reticulum_device_api::NomadFetchStartRequest<'_>,
+        ) -> Result<reticulum_device_api::NomadFetchStartAccepted, Self::Error> {
+            unreachable!("ordinary actor tests do not request NomadNet fetches")
+        }
+
+        fn nomad_fetch_poll(
+            &mut self,
+            _id: reticulum_device_api::NomadFetchId,
+        ) -> Result<reticulum_device_api::NomadFetchPollResponse, Self::Error> {
+            unreachable!("ordinary actor tests do not request NomadNet fetches")
+        }
+
         fn is_usable(&self) -> bool {
             true
         }
@@ -1694,6 +1809,110 @@ mod tests {
         outcomes: VecDeque<ConnectOutcome>,
         attempts: Arc<AtomicUsize>,
         submitted: Arc<Mutex<Vec<OutboxMaterial>>>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct ObservedNomadStart {
+        destination: [u8; 16],
+        path: String,
+        timestamp_unix_ms: u64,
+        idempotency_key: [u8; 16],
+    }
+
+    #[derive(Default)]
+    struct NomadTrace {
+        starts: Vec<ObservedNomadStart>,
+        polls: Vec<reticulum_device_api::NomadFetchId>,
+    }
+
+    struct NomadSession {
+        trace: Arc<Mutex<NomadTrace>>,
+    }
+
+    impl LxmfSession for NomadSession {
+        type Error = DeviceSessionError;
+
+        fn binding(&mut self) -> Result<DeviceBinding, Self::Error> {
+            Ok(binding(0x81))
+        }
+
+        fn submit(&mut self, _material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
+            unreachable!("the Nomad actor test has no outbox work")
+        }
+
+        fn submission_status(&mut self, _id: SubmissionId) -> Result<SubmissionState, Self::Error> {
+            unreachable!("the Nomad actor test has no accepted submissions")
+        }
+
+        fn next_inbox(
+            &mut self,
+            _after: Option<InboxCursor>,
+        ) -> Result<Option<InboxSummary>, Self::Error> {
+            Ok(None)
+        }
+
+        fn read_inbox(&mut self, _summary: InboxSummary) -> Result<InboundMessage, Self::Error> {
+            unreachable!("the Nomad actor test has no inbox messages")
+        }
+
+        fn next_nearby_peer(
+            &mut self,
+            _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
+        ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, Self::Error> {
+            unreachable!("the Nomad actor test does not request nearby peers")
+        }
+
+        fn nomad_fetch_start(
+            &mut self,
+            request: reticulum_device_api::NomadFetchStartRequest<'_>,
+        ) -> Result<reticulum_device_api::NomadFetchStartAccepted, Self::Error> {
+            self.trace.lock().unwrap().starts.push(ObservedNomadStart {
+                destination: request.destination().0,
+                path: request.path().as_str().to_owned(),
+                timestamp_unix_ms: request.timestamp_unix_ms().get(),
+                idempotency_key: request.idempotency_key().0,
+            });
+            Ok(reticulum_device_api::NomadFetchStartAccepted {
+                id: reticulum_device_api::NomadFetchId::new([0x82; 8], 1).unwrap(),
+                outcome: reticulum_device_api::NomadFetchStartOutcome::Accepted,
+            })
+        }
+
+        fn nomad_fetch_poll(
+            &mut self,
+            id: reticulum_device_api::NomadFetchId,
+        ) -> Result<reticulum_device_api::NomadFetchPollResponse, Self::Error> {
+            self.trace.lock().unwrap().polls.push(id);
+            Ok(reticulum_device_api::NomadFetchPollResponse::Ready(
+                reticulum_device_api::NomadPage::new(b">Metalbeard").unwrap(),
+            ))
+        }
+
+        fn is_usable(&self) -> bool {
+            true
+        }
+    }
+
+    struct NomadConnector {
+        trace: Arc<Mutex<NomadTrace>>,
+        connected: bool,
+    }
+
+    impl Connector for NomadConnector {
+        fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
+            if self.connected {
+                return Err(ConnectFailure::retryable(
+                    "test session was already claimed",
+                ));
+            }
+            self.connected = true;
+            Ok(ConnectedSession::new(
+                NomadSession {
+                    trace: self.trace.clone(),
+                },
+                ConnectionMetadata::usb_serial("/dev/fake", "001122334455"),
+            ))
+        }
     }
 
     struct UnavailableConnector {
@@ -1781,6 +2000,20 @@ mod tests {
             &mut self,
             _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
         ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn nomad_fetch_start(
+            &mut self,
+            _request: reticulum_device_api::NomadFetchStartRequest<'_>,
+        ) -> Result<reticulum_device_api::NomadFetchStartAccepted, Self::Error> {
+            Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+        }
+
+        fn nomad_fetch_poll(
+            &mut self,
+            _id: reticulum_device_api::NomadFetchId,
+        ) -> Result<reticulum_device_api::NomadFetchPollResponse, Self::Error> {
             Err(DeviceSessionError::MissingLxmfDeliveryDestination)
         }
 
@@ -1897,6 +2130,66 @@ mod tests {
         handle.shutdown_and_wait().await.unwrap();
         let reopened = SqliteChatStore::open(&database.0).unwrap();
         assert_eq!(reopened.device_binding().unwrap(), Some(expected_binding));
+    }
+
+    #[tokio::test]
+    async fn actor_serializes_nomad_fetches_through_its_existing_session() {
+        let database = TestDatabase::new("nomad-fetch");
+        let trace = Arc::new(Mutex::new(NomadTrace::default()));
+        let connector = NomadConnector {
+            trace: trace.clone(),
+            connected: false,
+        };
+        let store = SqliteChatStore::open(&database.0).unwrap();
+        let handle = start_with_connector(config(&database), store, connector).unwrap();
+        wait_for(&handle, |snapshot| {
+            matches!(snapshot.connection(), ConnectionState::Ready { .. })
+        })
+        .await;
+
+        let start: NomadFetchStartRequest = serde_json::from_value(serde_json::json!({
+            "destination": "83".repeat(16),
+            "path": "/page/index.mu",
+            "timestamp_unix_ms": 1_784_732_100_001_u64,
+            "idempotency_key": "84".repeat(16),
+        }))
+        .unwrap();
+        let accepted = handle.nomad_fetch_start(start).await.unwrap();
+        let id = reticulum_device_api::NomadFetchId::new([0x82; 8], 1).unwrap();
+        assert_eq!(
+            serde_json::to_value(accepted).unwrap(),
+            serde_json::json!({
+                "id": hex::encode(id.as_bytes()),
+                "outcome": "accepted",
+            })
+        );
+
+        let poll: NomadFetchPollRequest = serde_json::from_value(serde_json::json!({
+            "id": hex::encode(id.as_bytes()),
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(handle.nomad_fetch_poll(poll).await.unwrap()).unwrap(),
+            serde_json::json!({
+                "state": "ready",
+                "page": ">Metalbeard",
+            })
+        );
+        {
+            let trace = trace.lock().unwrap();
+            assert_eq!(
+                trace.starts,
+                [ObservedNomadStart {
+                    destination: [0x83; 16],
+                    path: "/page/index.mu".to_owned(),
+                    timestamp_unix_ms: 1_784_732_100_001,
+                    idempotency_key: [0x84; 16],
+                }]
+            );
+            assert_eq!(trace.polls, [id]);
+        }
+
+        handle.shutdown_and_wait().await.unwrap();
     }
 
     #[tokio::test]

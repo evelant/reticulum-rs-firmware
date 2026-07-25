@@ -44,12 +44,22 @@ import {
   nearbyPeerRouteHint,
   nearbyPeerSuggestedName,
 } from "../lib/nearby-peers.ts";
+import {
+  DEFAULT_NOMAD_PAGE_PATH,
+  NOMAD_PRESENTATION_TIMEOUT_MS,
+  NomadBrowserController,
+  type NomadBrowserState,
+  nomadDestinationHintApplication,
+  nomadFetchInputError,
+  nomadRequestProvenance,
+} from "../lib/nomad-browser.ts";
 import { onboardingPresentation } from "../lib/onboarding.ts";
 import { randomHex } from "../lib/random.ts";
 
 const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
 const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
 const KEYBOARD_LAYOUT = keyboardLayoutPolicy(Platform.OS);
+type Workspace = "lxmf" | "nomad";
 
 function connectionLabel(connection: ConnectionState | undefined): string {
   return connection?.state.replaceAll("_", " ") ?? "starting";
@@ -91,6 +101,312 @@ function ActionButton({ disabled = false, label, onPress, secondary = false }: A
     >
       <Text style={[styles.buttonText, secondary && styles.buttonSecondaryText]}>{label}</Text>
     </Pressable>
+  );
+}
+
+function nomadPhaseLabel(phase: string | null): string {
+  switch (phase) {
+    case null:
+      return "Accepted; waiting for the first device update";
+    case "path_lookup":
+      return "Looking up a Reticulum path";
+    case "link_establishment":
+      return "Establishing a Reticulum Link";
+    case "request_preparation":
+      return "Preparing the anonymous page request";
+    case "awaiting_dispatch_confirmation":
+      return "Waiting for radio dispatch confirmation";
+    case "awaiting_response":
+      return "Waiting for the remote page";
+    default:
+      return phase.replaceAll("_", " ");
+  }
+}
+
+function nomadFailureLabel(failure: string): string {
+  switch (failure) {
+    case "no_path":
+      return "No usable Reticulum path was found.";
+    case "link":
+      return "The Reticulum Link could not be established or retained.";
+    case "request":
+      return "The page request could not be prepared, sent, or processed.";
+    case "timeout":
+      return "The remote node did not answer before its request timeout.";
+    case "page_too_large":
+      return "The page exceeds this appliance profile's bounded response size.";
+    case "invalid_utf8":
+      return "The remote response is not valid UTF-8.";
+    case "internal":
+      return "The appliance stopped this fetch after an internal invariant or backend failure.";
+    default:
+      return failure.replaceAll("_", " ");
+  }
+}
+
+function nomadInitialInput(state: NomadBrowserState): {
+  readonly destination: string;
+  readonly path: string;
+} {
+  if ("request" in state) {
+    return { destination: state.request.destination, path: state.request.path };
+  }
+  if (state.status === "input_error") {
+    return { destination: state.destination, path: state.path };
+  }
+  return { destination: "", path: DEFAULT_NOMAD_PAGE_PATH };
+}
+
+interface NomadPanelProps {
+  readonly connected: boolean;
+  readonly controller: NomadBrowserController;
+  readonly destinationHint: string | null;
+  readonly onDestinationHintConsumed: () => void;
+  readonly state: NomadBrowserState;
+}
+
+function NomadPanel({
+  connected,
+  controller,
+  destinationHint,
+  onDestinationHintConsumed,
+  state,
+}: NomadPanelProps) {
+  const slotOwned =
+    state.status === "starting" ||
+    state.status === "pending" ||
+    state.status === "poll_error" ||
+    state.status === "timed_out";
+  const initial = nomadInitialInput(state);
+  const [destination, setDestination] = useState(
+    slotOwned ? initial.destination : (destinationHint ?? initial.destination),
+  );
+  const [path, setPath] = useState(initial.path);
+  const [formError, setFormError] = useState<string | null>(null);
+  const fetchLabel =
+    state.status === "starting" || state.status === "pending"
+      ? "Fetching…"
+      : state.status === "poll_error" || state.status === "timed_out"
+        ? "Resume current fetch"
+        : "Fetch page";
+  const fetchId = "id" in state ? state.id : null;
+  const requestProvenance = nomadRequestProvenance(state);
+
+  useEffect(() => {
+    const application = nomadDestinationHintApplication(destination, destinationHint, slotOwned);
+    if (!application.consumed) return;
+    setDestination(application.destination);
+    setFormError(null);
+    onDestinationHintConsumed();
+  }, [destination, destinationHint, onDestinationHintConsumed, slotOwned]);
+
+  const fetchPage = () => {
+    const normalizedDestination = destination.trim().toLowerCase();
+    const validationError = nomadFetchInputError(normalizedDestination, path);
+    setFormError(validationError);
+    if (validationError === null) void controller.start(normalizedDestination, path);
+  };
+
+  const result = (() => {
+    switch (state.status) {
+      case "idle":
+      case "input_error":
+        return (
+          <Text style={styles.nomadHint}>
+            Enter a Nomad node destination, or choose Browse beside an authenticated nearby peer.
+          </Text>
+        );
+      case "starting":
+        return (
+          <View accessibilityLiveRegion="polite" style={styles.nomadStatus}>
+            <ActivityIndicator color="#91e6a7" />
+            <Text style={styles.secondaryText}>Submitting the bounded page request…</Text>
+          </View>
+        );
+      case "start_error":
+        return (
+          <View accessibilityLiveRegion="assertive" style={styles.nomadResult}>
+            <Text style={styles.inlineError}>{state.error}</Text>
+            <Text style={styles.nomadHint}>
+              The appliance may have accepted the request. Retry preserves its exact timestamp and
+              idempotency key.
+            </Text>
+            <View style={styles.actionRow}>
+              <ActionButton
+                disabled={!connected}
+                label="Retry same start"
+                onPress={() => void controller.retryStart()}
+                secondary
+              />
+            </View>
+          </View>
+        );
+      case "pending":
+        return (
+          <View accessibilityLiveRegion="polite" style={styles.nomadStatus}>
+            <ActivityIndicator color="#91e6a7" />
+            <View style={styles.nomadStatusCopy}>
+              <Text style={styles.nomadResultTitle}>Fetching page</Text>
+              <Text style={styles.secondaryText}>{nomadPhaseLabel(state.phase)}</Text>
+            </View>
+          </View>
+        );
+      case "poll_error":
+        return (
+          <View accessibilityLiveRegion="assertive" style={styles.nomadResult}>
+            <Text style={styles.inlineError}>{state.error}</Text>
+            <Text style={styles.nomadHint}>
+              The fetch ID is retained. Resume after reconnecting. If the board rebooted and made
+              this boot-scoped ID stale, explicitly abandon it before starting another fetch.
+            </Text>
+            <View style={styles.actionRow}>
+              <ActionButton
+                disabled={!connected}
+                label="Resume polling"
+                onPress={() => void controller.resumePolling()}
+                secondary
+              />
+              <ActionButton
+                label="Abandon fetch ID"
+                onPress={() => controller.abandonRetainedFetch()}
+                secondary
+              />
+            </View>
+          </View>
+        );
+      case "timed_out":
+        return (
+          <View accessibilityLiveRegion="polite" style={styles.nomadResult}>
+            <Text style={styles.nomadResultTitle}>Still pending</Text>
+            <Text style={styles.secondaryText}>
+              Local polling paused after {NOMAD_PRESENTATION_TIMEOUT_MS / 1_000} seconds. The
+              boot-scoped fetch ID is retained. Resume it, or explicitly abandon it after a board
+              reset to permit a fresh request.
+            </Text>
+            <View style={styles.actionRow}>
+              <ActionButton
+                disabled={!connected}
+                label="Resume polling"
+                onPress={() => void controller.resumePolling()}
+                secondary
+              />
+              <ActionButton
+                label="Abandon fetch ID"
+                onPress={() => controller.abandonRetainedFetch()}
+                secondary
+              />
+            </View>
+          </View>
+        );
+      case "failed":
+        return (
+          <View accessibilityLiveRegion="assertive" style={styles.nomadResult}>
+            <Text style={styles.nomadResultTitle}>Fetch failed</Text>
+            <Text style={styles.inlineError}>{nomadFailureLabel(state.failure)}</Text>
+          </View>
+        );
+      case "ready":
+        return (
+          <View accessibilityLiveRegion="polite" style={styles.nomadResult}>
+            <Text style={styles.nomadResultTitle}>Raw Micron page</Text>
+            <Text style={styles.nomadHint}>
+              Rendering is deliberately deferred; this first browser surface shows the exact bounded
+              UTF-8 response.
+            </Text>
+            <View style={styles.nomadRawPage}>
+              <Text selectable style={styles.nomadRawText}>
+                {state.page}
+              </Text>
+            </View>
+          </View>
+        );
+    }
+  })();
+
+  const contents = (
+    <View style={styles.nomadCard}>
+      <View style={styles.nomadHeading}>
+        <View style={styles.nomadHeadingCopy}>
+          <Text style={styles.eyebrow}>NOMADNET</Text>
+          <Text style={styles.heading}>Browse a bounded page</Text>
+        </View>
+        <View style={[styles.pill, connected && styles.pillReady]}>
+          <Text style={styles.pillText}>{connected ? "appliance ready" : "disconnected"}</Text>
+        </View>
+      </View>
+      <Text style={styles.label}>Nomad node destination</Text>
+      <TextInput
+        accessibilityLabel="Nomad node destination"
+        autoCapitalize="none"
+        autoCorrect={false}
+        editable={!slotOwned}
+        maxLength={32}
+        onChangeText={setDestination}
+        placeholder="32 hexadecimal characters"
+        placeholderTextColor="#748078"
+        style={[styles.input, styles.monospaceInput]}
+        value={destination}
+      />
+      <Text style={styles.label}>Page path</Text>
+      <TextInput
+        accessibilityLabel="Nomad page path"
+        autoCapitalize="none"
+        autoCorrect={false}
+        editable={!slotOwned}
+        onChangeText={setPath}
+        placeholder={DEFAULT_NOMAD_PAGE_PATH}
+        placeholderTextColor="#748078"
+        style={[styles.input, styles.monospaceInput]}
+        value={path}
+      />
+      {formError === null ? null : <Text style={styles.inlineError}>{formError}</Text>}
+      <View style={styles.nomadFetchRow}>
+        <ActionButton disabled={!connected || slotOwned} label={fetchLabel} onPress={fetchPage} />
+        <Text style={styles.nomadHint}>
+          Anonymous request · one complete page · no Resource yet
+        </Text>
+      </View>
+      {fetchId === null && requestProvenance === null ? null : (
+        <View style={styles.nomadFetchMeta}>
+          {fetchId === null ? null : (
+            <>
+              <Text style={styles.metaLabel}>Fetch ID</Text>
+              <Text selectable style={styles.monospace}>
+                {fetchId}
+              </Text>
+            </>
+          )}
+          {"outcome" in state ? (
+            <Text style={styles.nomadHint}>Start {state.outcome.replaceAll("_", " ")}</Text>
+          ) : null}
+          {requestProvenance === null ? null : (
+            <>
+              <Text style={styles.metaLabel}>Request destination</Text>
+              <Text selectable style={styles.monospace}>
+                {requestProvenance.destination}
+              </Text>
+              <Text style={styles.metaLabel}>Request path</Text>
+              <Text selectable style={styles.monospace}>
+                {requestProvenance.path}
+              </Text>
+            </>
+          )}
+        </View>
+      )}
+      {result}
+    </View>
+  );
+
+  return (
+    <ScrollView
+      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      contentContainerStyle={styles.nomadContent}
+      keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+      keyboardShouldPersistTaps="handled"
+      style={styles.nomadScroller}
+    >
+      {contents}
+    </ScrollView>
   );
 }
 
@@ -157,6 +473,7 @@ interface NearbyPanelProps {
   readonly compact: boolean;
   readonly connected: boolean;
   readonly contacts: ContactView[];
+  readonly onBrowseNomad: (destination: string) => void;
   readonly onRefresh: (() => Promise<NearbyPeerView[]>) | null;
   readonly onSelect: (destination: string) => void;
   readonly onUpsert: (destination: string, name: string) => Promise<boolean>;
@@ -167,6 +484,7 @@ function NearbyPanel({
   compact,
   connected,
   contacts,
+  onBrowseNomad,
   onRefresh,
   onSelect,
   onUpsert,
@@ -229,35 +547,58 @@ function NearbyPanel({
     const existing = contacts.some((contact) => contact.destination === peer.destination);
     const adding = addingDestination === peer.destination;
     return (
-      <Pressable
-        accessibilityHint={
-          existing ? "Opens the existing conversation" : "Adds this authenticated peer as a contact"
-        }
-        accessibilityLabel={`${existing ? "Open" : "Add"} ${nearbyPeerSuggestedName(peer)}`}
-        accessibilityRole="button"
-        disabled={busy}
+      <View
         key={peer.destination}
-        onPress={() => void choosePeer(peer, existing)}
-        style={({ pressed }) => [
+        style={[
           styles.nearbyPeer,
           existing && styles.nearbyPeerAdded,
           busy && styles.buttonDisabled,
-          pressed && !busy && styles.contactPressed,
         ]}
       >
         <View style={styles.nearbyPeerHeading}>
           <Text numberOfLines={1} style={styles.nearbyPeerName}>
             {nearbyPeerSuggestedName(peer)}
           </Text>
-          <Text style={styles.nearbyPeerAction}>
-            {adding ? "Adding…" : existing ? "Open" : "Add"}
-          </Text>
+          <View style={styles.nearbyPeerButtons}>
+            <Pressable
+              accessibilityHint="Opens this peer's associated Nomad node in the browser"
+              accessibilityLabel={`Browse ${nearbyPeerSuggestedName(peer)} on NomadNet`}
+              accessibilityRole="button"
+              disabled={busy}
+              onPress={() => onBrowseNomad(peer.associated_nomad_destination)}
+              style={({ pressed }) => [
+                styles.nearbyPeerButton,
+                pressed && !busy && styles.contactPressed,
+              ]}
+            >
+              <Text style={styles.nearbyPeerAction}>Browse</Text>
+            </Pressable>
+            <Pressable
+              accessibilityHint={
+                existing
+                  ? "Opens the existing conversation"
+                  : "Adds this authenticated peer as a contact"
+              }
+              accessibilityLabel={`${existing ? "Open" : "Add"} ${nearbyPeerSuggestedName(peer)}`}
+              accessibilityRole="button"
+              disabled={busy}
+              onPress={() => void choosePeer(peer, existing)}
+              style={({ pressed }) => [
+                styles.nearbyPeerButton,
+                pressed && !busy && styles.contactPressed,
+              ]}
+            >
+              <Text style={styles.nearbyPeerAction}>
+                {adding ? "Adding…" : existing ? "Open" : "Add"}
+              </Text>
+            </Pressable>
+          </View>
         </View>
         <Text style={styles.nearbyStatus}>{nearbyPeerRouteHint(peer)}</Text>
         <Text selectable style={styles.monospace}>
           ID {nearbyPeerFingerprint(peer)}
         </Text>
-      </Pressable>
+      </View>
     );
   });
 
@@ -320,6 +661,7 @@ interface SidebarProps {
   readonly busy: boolean;
   readonly compact: boolean;
   readonly contacts: ContactView[];
+  readonly onBrowseNomad: (destination: string) => void;
   readonly onRefreshNearby: (() => Promise<NearbyPeerView[]>) | null;
   readonly onSelect: (destination: string) => void;
   readonly onUpsert: (destination: string, name: string) => Promise<boolean>;
@@ -331,6 +673,7 @@ function Sidebar({
   busy,
   compact,
   contacts,
+  onBrowseNomad,
   onRefreshNearby,
   onSelect,
   onUpsert,
@@ -421,6 +764,7 @@ function Sidebar({
           compact={compact}
           connected={readyConnection !== undefined}
           contacts={contacts}
+          onBrowseNomad={onBrowseNomad}
           onRefresh={onRefreshNearby}
           onSelect={onSelect}
           onUpsert={onUpsert}
@@ -638,6 +982,13 @@ function Conversation({
 
 export default function ApplianceScreen() {
   const api = useMemo(() => new ApplianceApi(), []);
+  const nomadBrowser = useMemo(
+    () =>
+      new NomadBrowserController(api, {
+        createIdempotencyKey: () => randomHex(16),
+      }),
+    [api],
+  );
   const { width } = useWindowDimensions();
   const compact = width < 760;
   const [bootstrapped, setBootstrapped] = useState(false);
@@ -651,6 +1002,9 @@ export default function ApplianceScreen() {
   const [reconnectRetry, setReconnectRetry] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineView[]>([]);
+  const [workspace, setWorkspace] = useState<Workspace>("lxmf");
+  const [nomadDestinationHint, setNomadDestinationHint] = useState<string | null>(null);
+  const [nomadState, setNomadState] = useState<NomadBrowserState>(nomadBrowser.state);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const draft = useRef<DraftIdentity | null>(null);
@@ -688,6 +1042,14 @@ export default function ApplianceScreen() {
   }, []);
 
   useEffect(() => () => api.dispose(), [api]);
+
+  useEffect(() => {
+    const unsubscribe = nomadBrowser.subscribe(setNomadState);
+    return () => {
+      unsubscribe();
+      nomadBrowser.dispose();
+    };
+  }, [nomadBrowser]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
@@ -897,12 +1259,21 @@ export default function ApplianceScreen() {
       });
   };
 
+  const browseNomad = useCallback((destination: string) => {
+    setNomadDestinationHint(destination);
+    setWorkspace("nomad");
+  }, []);
+  const consumeNomadDestinationHint = useCallback(() => {
+    setNomadDestinationHint(null);
+  }, []);
+
   const applianceShell = (
     <View style={[styles.shell, compact && styles.shellCompact]}>
       <Sidebar
         busy={busy}
         compact={compact}
         contacts={contacts}
+        onBrowseNomad={browseNomad}
         onRefreshNearby={nearbyReader}
         onSelect={chooseContact}
         onUpsert={upsertContact}
@@ -922,13 +1293,42 @@ export default function ApplianceScreen() {
       />
     </View>
   );
+  const nomadShell = (
+    <NomadPanel
+      connected={snapshot?.connection.state === "ready"}
+      controller={nomadBrowser}
+      destinationHint={nomadDestinationHint}
+      onDestinationHintConsumed={consumeNomadDestinationHint}
+      state={nomadState}
+    />
+  );
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.topbar}>
-        <View>
-          <Text style={styles.eyebrow}>RETICULUM APPLIANCE</Text>
-          <Text style={styles.title}>LXMF</Text>
+        <View style={styles.brandCluster}>
+          <View>
+            <Text style={styles.eyebrow}>RETICULUM APPLIANCE</Text>
+            <Text style={styles.title}>{workspace === "lxmf" ? "LXMF" : "NomadNet"}</Text>
+          </View>
+          <View accessibilityRole="tablist" style={styles.workspaceSwitcher}>
+            <Pressable
+              accessibilityRole="tab"
+              accessibilityState={{ selected: workspace === "lxmf" }}
+              onPress={() => setWorkspace("lxmf")}
+              style={[styles.workspaceTab, workspace === "lxmf" && styles.workspaceTabActive]}
+            >
+              <Text style={styles.workspaceTabText}>Messages</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="tab"
+              accessibilityState={{ selected: workspace === "nomad" }}
+              onPress={() => setWorkspace("nomad")}
+              style={[styles.workspaceTab, workspace === "nomad" && styles.workspaceTabActive]}
+            >
+              <Text style={styles.workspaceTabText}>Browse</Text>
+            </Pressable>
+          </View>
         </View>
         <View style={styles.statusCluster}>
           {nativeCore === null ? null : (
@@ -983,8 +1383,11 @@ export default function ApplianceScreen() {
         style={styles.keyboardAvoiding}
       >
         {ready ? (
-          compact ? (
+          workspace === "nomad" ? (
+            nomadShell
+          ) : compact ? (
             <ScrollView
+              automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
               contentContainerStyle={styles.compactContent}
               keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
               keyboardShouldPersistTaps="handled"
@@ -1040,10 +1443,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 12,
     borderBottomColor: colors.line,
     borderBottomWidth: 1,
     backgroundColor: "#101411f2",
   },
+  brandCluster: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 18 },
   eyebrow: {
     marginBottom: 3,
     color: colors.green,
@@ -1053,7 +1459,23 @@ const styles = StyleSheet.create({
   },
   title: { color: colors.text, fontSize: 24, fontWeight: "800" },
   heading: { color: colors.text, fontSize: 17, fontWeight: "700" },
-  statusCluster: { flexDirection: "row", alignItems: "center", gap: 10 },
+  workspaceSwitcher: {
+    flexDirection: "row",
+    padding: 3,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 9,
+    backgroundColor: colors.panel,
+  },
+  workspaceTab: {
+    minHeight: 30,
+    justifyContent: "center",
+    paddingHorizontal: 11,
+    borderRadius: 6,
+  },
+  workspaceTabActive: { backgroundColor: colors.greenDark },
+  workspaceTabText: { color: "#dfe8df", fontSize: 11, fontWeight: "700" },
+  statusCluster: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 },
   pill: {
     paddingHorizontal: 11,
     paddingVertical: 7,
@@ -1200,6 +1622,15 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   nearbyPeerName: { flex: 1, color: "#dfe8df", fontWeight: "700" },
+  nearbyPeerButtons: { flexDirection: "row", alignItems: "center", gap: 5 },
+  nearbyPeerButton: {
+    minHeight: 28,
+    justifyContent: "center",
+    paddingHorizontal: 8,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 999,
+  },
   nearbyPeerAction: { color: colors.green, fontSize: 11, fontWeight: "700" },
   contactForm: {
     gap: 9,
@@ -1283,6 +1714,79 @@ const styles = StyleSheet.create({
   messageTitle: { marginBottom: 5, color: colors.text, fontWeight: "700" },
   messageContent: { color: colors.text, lineHeight: 21 },
   messageFooter: { marginTop: 8, color: colors.muted, fontSize: 10 },
+  nomadScroller: { flex: 1 },
+  nomadContent: { flexGrow: 1, padding: 22 },
+  nomadCard: {
+    width: "100%",
+    maxWidth: 860,
+    alignSelf: "center",
+    gap: 10,
+    padding: 22,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 14,
+    backgroundColor: colors.panel,
+  },
+  nomadHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 12,
+    marginBottom: 6,
+  },
+  nomadHeadingCopy: { gap: 2 },
+  nomadHint: { flexShrink: 1, color: colors.muted, fontSize: 11, lineHeight: 17 },
+  nomadFetchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 12,
+    marginTop: 4,
+  },
+  nomadFetchMeta: {
+    gap: 5,
+    padding: 11,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.panel2,
+  },
+  nomadStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 8,
+    padding: 14,
+    borderColor: "#356344",
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: colors.greenDark,
+  },
+  nomadStatusCopy: { flex: 1, gap: 3 },
+  nomadResult: {
+    gap: 10,
+    marginTop: 8,
+    padding: 14,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: colors.panel2,
+  },
+  nomadResultTitle: { color: colors.text, fontSize: 15, fontWeight: "700" },
+  nomadRawPage: {
+    padding: 14,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: "#0d110e",
+  },
+  nomadRawText: {
+    color: colors.text,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontSize: 13,
+    lineHeight: 20,
+  },
   compose: {
     gap: 10,
     padding: 16,

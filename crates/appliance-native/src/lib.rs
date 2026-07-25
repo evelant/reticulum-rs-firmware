@@ -11,7 +11,8 @@
 
 use reticulum_device_api::{
     ApiVersion, MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES,
-    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES,
+    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES,
+    MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 };
 use reticulum_device_api_ble::{
     GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, INITIAL_ATT_VALUE_BYTES, RX_UUID, SERVICE_UUID, TX_UUID,
@@ -29,7 +30,7 @@ pub use credential::{NativeCredentialStatus, NativeCredentialSummary};
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 5;
+pub const BRIDGE_API_MINOR: u16 = 6;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -50,6 +51,12 @@ pub struct NativeBridgeContract {
     pub max_lxmf_basic_title_bytes: u32,
     /// Structural maximum for basic LXMF content.
     pub max_lxmf_basic_content_bytes: u32,
+    /// Largest UTF-8 NomadNet page path accepted by the device.
+    pub max_nomad_page_path_bytes: u32,
+    /// Largest complete UTF-8 NomadNet page returned by the device.
+    pub max_nomad_page_bytes: u32,
+    /// Largest exact Unix-millisecond NomadNet request timestamp.
+    pub max_nomad_request_timestamp_unix_ms: u64,
 }
 
 /// BLE GATT profile compiled into the firmware and native client.
@@ -89,6 +96,11 @@ pub fn native_bridge_contract() -> NativeBridgeContract {
             .expect("LXMF title bound must fit u32"),
         max_lxmf_basic_content_bytes: u32::try_from(MAX_LXMF_BASIC_CONTENT_BYTES)
             .expect("LXMF content bound must fit u32"),
+        max_nomad_page_path_bytes: u32::try_from(MAX_NOMAD_PAGE_PATH_BYTES)
+            .expect("NomadNet path bound must fit u32"),
+        max_nomad_page_bytes: u32::try_from(MAX_NOMAD_PAGE_BYTES)
+            .expect("NomadNet page bound must fit u32"),
+        max_nomad_request_timestamp_unix_ms: MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
     }
 }
 
@@ -120,13 +132,16 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 5,
+                bridge_api_minor: 6,
                 device_api_major: 1,
                 device_api_minor: 6,
                 max_message_bytes: 512,
                 max_lxmf_read_chunk_bytes: 416,
                 max_lxmf_basic_title_bytes: 295,
                 max_lxmf_basic_content_bytes: 295,
+                max_nomad_page_path_bytes: 128,
+                max_nomad_page_bytes: 400,
+                max_nomad_request_timestamp_unix_ms: 9_007_199_254_740_991,
             }
         );
     }

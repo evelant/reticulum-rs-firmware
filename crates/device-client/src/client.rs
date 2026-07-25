@@ -9,8 +9,9 @@ use reticulum_device_api::{
     ApiErrorResponse, ApiVersion, DecodeError, DestinationHash, DeviceRequest, DeviceResponse,
     EncodeError, IdempotencyKey, IdentitySummary, LxmfBasicSendAccepted, LxmfMessageHandle,
     LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryPage, LxmfReadLength,
-    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, RequestEnvelope, RequestId, SubmissionId,
-    SubmissionStatus, decode_response, encode_request,
+    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, NomadFetchId, NomadFetchPollRequest,
+    NomadFetchPollResponse, NomadFetchStartAccepted, NomadFetchStartRequest, RequestEnvelope,
+    RequestId, SubmissionId, SubmissionStatus, decode_response, encode_request,
 };
 use reticulum_device_api_framing::{DecodeEvent, Record, StreamDecoder, TxAdvanceError};
 use reticulum_device_api_handoff::{MessageLength, OwnedMessage};
@@ -147,6 +148,10 @@ pub enum Operation {
     LxmfBasicSend,
     /// `experimental.lxmf.peer_next`.
     LxmfPeerNext,
+    /// `experimental.nomad.fetch_start`.
+    NomadFetchStart,
+    /// `experimental.nomad.fetch_poll`.
+    NomadFetchPoll,
 }
 
 impl Operation {
@@ -158,6 +163,8 @@ impl Operation {
             Self::LxmfRead => "experimental.lxmf.read",
             Self::LxmfBasicSend => "experimental.lxmf.basic_send",
             Self::LxmfPeerNext => "experimental.lxmf.peer_next",
+            Self::NomadFetchStart => "experimental.nomad.fetch_start",
+            Self::NomadFetchPoll => "experimental.nomad.fetch_poll",
         }
     }
 }
@@ -790,6 +797,42 @@ impl<T: ClientTransport> DeviceClient<T> {
             }),
             other => Err(ClientError::UnexpectedResponse {
                 operation: Operation::LxmfPeerNext,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Begin or idempotently replay one bounded anonymous NomadNet page fetch.
+    pub fn nomad_fetch_start(
+        &mut self,
+        request: NomadFetchStartRequest<'_>,
+    ) -> Result<NomadFetchStartAccepted, ClientError> {
+        match self.exchange(DeviceRequest::NomadFetchStart(request))? {
+            DeviceResponse::NomadFetchStartAccepted(accepted) => Ok(accepted),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::NomadFetchStart,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::NomadFetchStart,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Poll one principal-owned bounded NomadNet page fetch.
+    pub fn nomad_fetch_poll(
+        &mut self,
+        id: NomadFetchId,
+    ) -> Result<NomadFetchPollResponse, ClientError> {
+        match self.exchange(DeviceRequest::NomadFetchPoll(NomadFetchPollRequest { id }))? {
+            DeviceResponse::NomadFetchPoll(response) => Ok(response),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::NomadFetchPoll,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::NomadFetchPoll,
                 kind: other.kind(),
             }),
         }

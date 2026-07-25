@@ -7,10 +7,13 @@ import {
   MAX_LXMF_BASIC_TITLE_BYTES,
   MAX_LXMF_READ_CHUNK_BYTES,
   MAX_MESSAGE_BYTES,
+  MAX_NOMAD_PAGE_BYTES,
+  MAX_NOMAD_PAGE_PATH_BYTES,
+  MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 } from "../generated/api.ts";
 
 export const NATIVE_BRIDGE_API_MAJOR = 1 as const;
-export const NATIVE_BRIDGE_API_MINOR = 5 as const;
+export const NATIVE_BRIDGE_API_MINOR = 6 as const;
 
 const EXPECTED_FIELDS = {
   bridgeApiMajor: NATIVE_BRIDGE_API_MAJOR,
@@ -21,6 +24,9 @@ const EXPECTED_FIELDS = {
   maxLxmfReadChunkBytes: MAX_LXMF_READ_CHUNK_BYTES,
   maxLxmfBasicTitleBytes: MAX_LXMF_BASIC_TITLE_BYTES,
   maxLxmfBasicContentBytes: MAX_LXMF_BASIC_CONTENT_BYTES,
+  maxNomadPagePathBytes: MAX_NOMAD_PAGE_PATH_BYTES,
+  maxNomadPageBytes: MAX_NOMAD_PAGE_BYTES,
+  maxNomadRequestTimestampUnixMs: BigInt(MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS),
 } as const satisfies NativeBridgeContract;
 
 export function assertNativeBridgeContract(contract: NativeBridgeContract): NativeBridgeContract {

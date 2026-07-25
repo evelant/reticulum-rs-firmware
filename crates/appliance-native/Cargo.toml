@@ -12,7 +12,7 @@ getrandom.workspace = true
 hex.workspace = true
 rand_core.workspace = true
 reticulum-device-client = { path = "../device-client" }
-reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf"] }
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }
 reticulum-device-api-ble = { path = "../device-api-ble" }
 reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
 reticulum-lxmf-chat-runtime = { path = "../lxmf-chat-runtime" }

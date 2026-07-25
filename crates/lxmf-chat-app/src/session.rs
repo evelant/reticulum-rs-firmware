@@ -84,6 +84,18 @@ pub trait LxmfSession {
         after: Option<device_api::LxmfPeerDiscoveryCursor>,
     ) -> Result<device_api::LxmfPeerDiscoveryPage, Self::Error>;
 
+    /// Begin or idempotently replay one bounded anonymous NomadNet page fetch.
+    fn nomad_fetch_start(
+        &mut self,
+        request: device_api::NomadFetchStartRequest<'_>,
+    ) -> Result<device_api::NomadFetchStartAccepted, Self::Error>;
+
+    /// Poll one principal-owned bounded NomadNet page fetch.
+    fn nomad_fetch_poll(
+        &mut self,
+        id: device_api::NomadFetchId,
+    ) -> Result<device_api::NomadFetchPollResponse, Self::Error>;
+
     /// Whether the underlying authenticated session can attempt another call.
     fn is_usable(&self) -> bool;
 }
@@ -265,6 +277,20 @@ impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
         after: Option<device_api::LxmfPeerDiscoveryCursor>,
     ) -> Result<device_api::LxmfPeerDiscoveryPage, Self::Error> {
         Ok(self.client.lxmf_peer_next(after)?)
+    }
+
+    fn nomad_fetch_start(
+        &mut self,
+        request: device_api::NomadFetchStartRequest<'_>,
+    ) -> Result<device_api::NomadFetchStartAccepted, Self::Error> {
+        Ok(self.client.nomad_fetch_start(request)?)
+    }
+
+    fn nomad_fetch_poll(
+        &mut self,
+        id: device_api::NomadFetchId,
+    ) -> Result<device_api::NomadFetchPollResponse, Self::Error> {
+        Ok(self.client.nomad_fetch_poll(id)?)
     }
 
     fn is_usable(&self) -> bool {

@@ -1083,9 +1083,21 @@ Micron page of at most 400 bytes in a direct single-packet response. It has no
 Resource, form, file, or dynamic-content support. Response-allocation pressure
 discards that request, and an ambiguous terminal response fault can fail-stop
 the responder until reset. This source/test composition has not yet received a
-powered responder qualification. The portable API 1.6 start/poll contract and
-product Nomad client runtime also remain unwired to the permanent device API
-and Expo app.
+powered responder qualification. The permanent authenticated device API now
+composes API 1.6 Nomad fetch start/poll with the product's transport-neutral
+client runtime. It retains one principal-owned, boot-scoped fetch at a time:
+same-principal/key retries with identical semantics replay the original ID, a
+distinct request is rejected while that fetch is active, terminal results
+remain repeatable through poll, and the next distinct start evicts the terminal
+result. This client slice
+is limited to absolute paths of at most 128 UTF-8 bytes and complete
+single-packet pages of at most 400 UTF-8 bytes; Resource responses remain
+unsupported. The Expo client now exposes this start/poll surface over the same
+authenticated USB/BLE/HTTP session and derives each nearby LXMF peer's
+associated `nomadnetwork.node` destination in Rust for one-tap browsing. It
+shows the exact UTF-8 Micron source; independent Nomad announce-directory
+discovery and Micron rendering remain deferred. Neither the outbound API path
+nor the responder has powered qualification.
 
 This replaces the historical back-to-back batches: in that powered run B
 processed three distinct A announces but still returned `no-path` for A's LXMF

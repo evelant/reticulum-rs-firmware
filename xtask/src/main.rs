@@ -2786,11 +2786,12 @@ fn validate_e290_firmware_graph_for_root_features(
             .lines()
             .find(|line| line.contains(package))
             .ok_or_else(|| format!("{profile} graph has no {package}line"))?;
-        if !line
-            .ends_with("features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]")
+        if !line.ends_with(
+            "features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]",
+        )
         {
             return Err(format!(
-                "{profile} must enable only the target-safe experimental LXMF, RNS DATA, and durable inbox operations on {package}, observed {line}"
+                "{profile} must enable only the target-safe experimental LXMF, Nomad, RNS DATA, and durable inbox operations on {package}, observed {line}"
             ));
         }
     }
@@ -10492,7 +10493,7 @@ mod tests {
                 "esp-storage" => ("0.9.0", "critical-section,esp32s3"),
                 "reticulum-device-api" | "reticulum-device-api-adapter" => (
                     "0.1.0",
-                    "experimental-lxmf,experimental-rns-data,experimental-rns-inbox",
+                    "experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox",
                 ),
                 "static_cell" => ("2.1.1", ""),
                 _ => ("0.1.0", ""),
@@ -10889,8 +10890,8 @@ mod tests {
                      ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
                      │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
                      │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
-                     ├── reticulum-device-api v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]\n\
-                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api v0.1.0 features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]\n\
                      ├── reticulum-device-api-ble v0.1.0 features=[]\n\
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
@@ -11100,7 +11101,7 @@ mod tests {
 
         for package in ["reticulum-device-api", "reticulum-device-api-adapter"] {
             let expected = format!(
-                "{package} v0.1.0 features=[experimental-lxmf,experimental-rns-data,experimental-rns-inbox]"
+                "{package} v0.1.0 features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]"
             );
             let drifted = format!("{package} v0.1.0 features=[]");
             let feature_drift = valid.replacen(&expected, &drifted, 1);

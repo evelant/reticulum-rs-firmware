@@ -12,9 +12,9 @@
   },
   "assets": [
     {
-      "bytes": 1207090,
+      "bytes": 1226183,
       "path": "app.js",
-      "sha256": "206863278f5f1163e850b8143d34f91179fddbfc14cfc983edbfffe8a779580c"
+      "sha256": "a91169c34e5a90afca650104262c6c4d3297dbefccd92586fcdd60e5e0053d22"
     },
     {
       "bytes": 465,

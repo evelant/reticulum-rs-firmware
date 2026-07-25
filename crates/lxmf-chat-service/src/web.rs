@@ -24,8 +24,8 @@ use ts_rs::TS;
 use crate::onboarding::{OnboardingError, OnboardingHandle, OnboardingSnapshot};
 use reticulum_lxmf_chat_runtime::{
     ApplianceHandle, ApplianceSnapshot, ClientRequestError, ConnectionState, ContactRequest,
-    DeviceView, JsonSafeInteger, MutationResponse, SendRequest, SendResponse, ServiceError,
-    parse_destination, serialize_json_safe_u64,
+    DeviceView, JsonSafeInteger, MutationResponse, NomadFetchPollRequest, NomadFetchStartRequest,
+    SendRequest, SendResponse, ServiceError, parse_destination, serialize_json_safe_u64,
 };
 
 const BODY_LIMIT: usize = 16 * 1024;
@@ -167,6 +167,8 @@ fn router(state: WebState) -> Router {
         .route("/api/v1/contacts/{destination}", put(upsert_contact))
         .route("/api/v1/conversations/{destination}", get(conversation))
         .route("/api/v1/messages", post(send_message))
+        .route("/api/v1/nomad/fetches", post(start_nomad_fetch))
+        .route("/api/v1/nomad/fetches/poll", post(poll_nomad_fetch))
         .route("/api/v1/sync", post(sync_now))
         .route("/api/v1/reconnect", post(reconnect))
         .route("/api/v1/events", get(events))
@@ -497,6 +499,36 @@ async fn send_message(
         .await
         .map_err(HttpError::from_service)?;
     Ok((StatusCode::ACCEPTED, Json(SendResponse::from(outcome))).into_response())
+}
+
+async fn start_nomad_fetch(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<NomadFetchStartRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, true)?;
+    request.validate().map_err(HttpError::from_client_request)?;
+    let response = state
+        .appliance
+        .nomad_fetch_start(request)
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok((StatusCode::ACCEPTED, Json(response)).into_response())
+}
+
+async fn poll_nomad_fetch(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<NomadFetchPollRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, true)?;
+    request.validate().map_err(HttpError::from_client_request)?;
+    let response = state
+        .appliance
+        .nomad_fetch_poll(request)
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok(Json(response).into_response())
 }
 
 async fn sync_now(
@@ -875,6 +907,118 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn nomad_fetch_routes_are_session_guarded_actor_operations() {
+        let app = router(test_state());
+        let start_body = || {
+            Body::from(
+                serde_json::json!({
+                    "destination": "11".repeat(16),
+                    "path": "/page/index.mu",
+                    "timestamp_unix_ms": 1,
+                    "idempotency_key": "22".repeat(16),
+                })
+                .to_string(),
+            )
+        };
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/nomad/fetches")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(ORIGIN, "http://127.0.0.1:43123")
+                    .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(start_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let missing_mutation_proof = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/nomad/fetches")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(start_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_mutation_proof.status(), StatusCode::FORBIDDEN);
+
+        let invalid_start = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/nomad/fetches")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(ORIGIN, "http://127.0.0.1:43123")
+                    .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "destination": "11".repeat(16),
+                            "path": "relative",
+                            "timestamp_unix_ms": 1,
+                            "idempotency_key": "22".repeat(16),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_start.status(), StatusCode::BAD_REQUEST);
+
+        let unavailable_start = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/nomad/fetches")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(ORIGIN, "http://127.0.0.1:43123")
+                    .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(start_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable_start.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let unavailable_poll = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/nomad/fetches/poll")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(ORIGIN, "http://127.0.0.1:43123")
+                    .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "id": format!("{}0000000000000001", "33".repeat(8)) })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable_poll.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

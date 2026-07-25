@@ -20,6 +20,7 @@ pub const MAX_NEARBY_PEERS: usize = 64;
 const MAX_NEARBY_PAGE_REQUESTS: usize = 96;
 const MAX_INCARNATION_RESETS: usize = 2;
 const ANNOUNCE_LIMITS: WireLimits = WireLimits::new(256, 256, 32, 128, 2_048, 8);
+const NOMAD_NODE_EXPANDED_NAME: &str = "nomadnetwork.node";
 
 /// Display-safe public facts from one authenticated LXMF delivery announce.
 ///
@@ -30,6 +31,7 @@ const ANNOUNCE_LIMITS: WireLimits = WireLimits::new(256, 256, 32, 128, 2_048, 8)
 #[allow(missing_docs)]
 pub struct NearbyPeerView {
     destination: String,
+    associated_nomad_destination: String,
     display_name: Option<String>,
     hops: u8,
     identity_hash: String,
@@ -46,6 +48,9 @@ impl NearbyPeerView {
     fn from_peer(peer: &LxmfDiscoveredPeer) -> Self {
         Self {
             destination: hex::encode(peer.destination().0),
+            associated_nomad_destination: associated_nomad_destination(
+                peer.identity_hash().as_bytes(),
+            ),
             display_name: decode_display_name(peer.app_data()),
             hops: peer.hops(),
             identity_hash: hex::encode(peer.identity_hash().as_bytes()),
@@ -56,6 +61,13 @@ impl NearbyPeerView {
             snr_db: peer.snr_db(),
         }
     }
+}
+
+fn associated_nomad_destination(identity_hash: &[u8; 16]) -> String {
+    let identity_hash = rete_core::IdentityHash::new(*identity_hash);
+    hex::encode(
+        rete_core::destination_hash(NOMAD_NODE_EXPANDED_NAME, Some(&identity_hash)).as_bytes(),
+    )
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -383,6 +395,20 @@ mod tests {
             Ok(self.pages.pop_front().expect("scripted page remains"))
         }
 
+        fn nomad_fetch_start(
+            &mut self,
+            _request: reticulum_device_api::NomadFetchStartRequest<'_>,
+        ) -> Result<reticulum_device_api::NomadFetchStartAccepted, Self::Error> {
+            unreachable!("nearby projection does not perform NomadNet fetches")
+        }
+
+        fn nomad_fetch_poll(
+            &mut self,
+            _id: reticulum_device_api::NomadFetchId,
+        ) -> Result<reticulum_device_api::NomadFetchPollResponse, Self::Error> {
+            unreachable!("nearby projection does not perform NomadNet fetches")
+        }
+
         fn is_usable(&self) -> bool {
             true
         }
@@ -403,6 +429,16 @@ mod tests {
             Some("Legacy peer")
         );
         assert_eq!(decode_display_name(&[0x93, 0xc0, 0xc0, 0x90]), None);
+    }
+
+    #[test]
+    fn associated_nomad_destination_matches_the_reticulum_reference_vector() {
+        let identity_hash =
+            hex::decode("1234567890abcdef1234567890abcdef").expect("identity vector is hex");
+        assert_eq!(
+            associated_nomad_destination(identity_hash.as_slice().try_into().unwrap()),
+            "02ecdd8cf33b06e43d0eacf26da44162"
+        );
     }
 
     #[test]
@@ -452,6 +488,10 @@ mod tests {
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].destination, "21".repeat(16));
         assert_eq!(peers[0].identity_hash, "22".repeat(16));
+        assert_eq!(
+            peers[0].associated_nomad_destination,
+            associated_nomad_destination(&[0x22; 16])
+        );
         assert_eq!(peers[0].display_name.as_deref(), Some("Ridg"));
         assert_eq!(peers[0].interface_name.as_deref(), Some("LoRa"));
         assert_eq!(peers[1].display_name.as_deref(), Some("Legacy"));
@@ -521,6 +561,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(view).unwrap(),
             serde_json::json!({
+                "associated_nomad_destination": "61755e5fc78bf685c2187ea8253f382c",
                 "destination": "61".repeat(16),
                 "display_name": "Node",
                 "hops": 97,

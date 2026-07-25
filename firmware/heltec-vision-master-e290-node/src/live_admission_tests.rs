@@ -15,7 +15,7 @@ use reticulum_submission_runtime::{FrameOfferProgress, RecoveryStep, RuntimeErro
 use reticulum_tx_supervisor::NodeInterfaceSupervisorTransition;
 
 use crate::live_admission_test_support::{LORA_INTERFACE, LiveNodeSystem, LiveSubmissionService};
-use std::vec;
+use std::{panic, thread, vec};
 
 const OWNER: ApiPrincipalId = ApiPrincipalId([0x11; 16]);
 const FOREIGN: ApiPrincipalId = ApiPrincipalId([0x22; 16]);
@@ -75,8 +75,32 @@ fn assert_error(response: DeviceResponse, expected: ApiErrorCode) {
     }
 }
 
+// These three cases retain the complete product-capacity storage and routing
+// fixtures by value. The target places equivalent boot owners in external
+// PSRAM, while Rust's host test harness supplies only a 2 MiB worker stack.
+const PRODUCT_SIZED_TEST_STACK_BYTES: usize = 4 * 1024 * 1024;
+
+fn run_product_sized_test(name: &'static str, body: fn()) {
+    let result = thread::Builder::new()
+        .name(name.into())
+        .stack_size(PRODUCT_SIZED_TEST_STACK_BYTES)
+        .spawn(body)
+        .expect("product-sized live admission test thread must spawn")
+        .join();
+    if let Err(payload) = result {
+        panic::resume_unwind(payload);
+    }
+}
+
 #[test]
 fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability() {
+    run_product_sized_test(
+        "authenticated-submission-live-admission",
+        authenticated_submission_crosses_lora_policy_and_scripted_radio_durability_body,
+    );
+}
+
+fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability_body() {
     let (mut service, recovery) = LiveSubmissionService::formatted(7);
     assert_eq!(recovery, vec![RecoveryStep::Complete]);
     let mut system = LiveNodeSystem::new();
@@ -358,6 +382,13 @@ fn radio_actor_offline_report_is_acknowledged_by_the_live_supervisor() {
 
 #[test]
 fn retained_frame_persists_while_ordinary_work_waits_on_the_same_radio() {
+    run_product_sized_test(
+        "retained-frame-live-admission",
+        retained_frame_persists_while_ordinary_work_waits_on_the_same_radio_body,
+    );
+}
+
+fn retained_frame_persists_while_ordinary_work_waits_on_the_same_radio_body() {
     let (mut service, _) = LiveSubmissionService::formatted(10);
     let mut system = LiveNodeSystem::new();
     let destination = *system.destination.as_bytes();
@@ -417,6 +448,13 @@ fn retained_frame_persists_while_ordinary_work_waits_on_the_same_radio() {
 
 #[test]
 fn permanent_post_frame_storage_failure_fail_stops_lora_with_all_owners_retained() {
+    run_product_sized_test(
+        "post-frame-fail-stop-live-admission",
+        permanent_post_frame_storage_failure_fail_stops_lora_with_all_owners_retained_body,
+    );
+}
+
+fn permanent_post_frame_storage_failure_fail_stops_lora_with_all_owners_retained_body() {
     let (mut service, _) = LiveSubmissionService::formatted(11);
     let mut system = LiveNodeSystem::new();
     let destination = *system.destination.as_bytes();

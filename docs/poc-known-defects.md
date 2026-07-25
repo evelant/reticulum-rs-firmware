@@ -16,12 +16,12 @@ proof unless a failing test promotes one into a release blocker.
   ceiling.
   Source/host tests exercise the 128-plus-one boundary; there is not yet a
   powered 128-message fill, remount, pressure, or timing qualification.
-- The generic 128-entry E290 host fixture exceeds Rust's default test-thread
-  stack because it owns the large fake runtime by value. Qualify that package
-  with `RUST_MIN_STACK=16777216 cargo +stable test --locked -p
-  reticulum-heltec-vision-master-e290-node -- --test-threads=1`. This host
-  harness requirement is not target stack evidence; firmware constructs the
-  resident runtime in place in external PSRAM.
+- Three generic 128-entry E290 host cases own the product-capacity fake runtime
+  and routing fixtures by value. Their thin test wrappers use an explicit 4 MiB
+  worker stack, so the ordinary package test command remains reliable without
+  environment overrides. This host-harness accommodation is not target stack
+  evidence; firmware constructs the resident boot owners in external PSRAM and
+  remains subject to the separate linked-ELF stack policy.
 - Earlier one-entry and 16-entry profiles and their proof artifacts remain
   valid only for their named revisions. The 16-entry result is historical
   evidence, not the current device limit and not evidence that the current
@@ -180,9 +180,19 @@ proof unless a failing test promotes one into a release blocker.
   owner.
 - The registration, classification, response preparation, and node-task owner
   ordering are source/host qualified only. There is no powered responder proof
-  yet. API 1.6's portable authenticated start/poll contract and the product
-  Nomad client runtime are not yet connected to the permanent device API or
-  Expo app, so the phone cannot browse this page through the appliance API.
+  yet. The permanent authenticated device API now composes API 1.6 start/poll
+  with the product Nomad client runtime. That client has one boot-scoped slot:
+  it retains one principal-owned active or terminal fetch, replays an exact
+  principal/idempotency-key retry, rejects a distinct start while active, and
+  lets the next distinct start replace a terminal outcome. Poll returns only a
+  complete UTF-8 page of at most 400 bytes or a closed failure; Resource
+  responses are unsupported.
+- The Expo client now drives API 1.6 through its existing authenticated
+  appliance session, displays the exact raw Micron response, and derives a
+  nearby LXMF peer's associated `nomadnetwork.node` destination in Rust for
+  one-tap browsing. It does not yet maintain an independent Nomad announce
+  directory or render Micron. The outbound API path remains source/host
+  qualified rather than powered-qualified.
 
 ## Discovery and multiple transports
 
@@ -476,10 +486,19 @@ proof unless a failing test promotes one into a release blocker.
   53,072/52,816/52,704 bytes and runtime-measurement-HIL sums of
   53,248/53,040/52,928 bytes. Each path must additionally fit a 4,096-byte
   ROM flash-read/interrupt reserve. The initially flashed 128-entry image
-  failed this expanded gate and was not qualified. Current source passes the
-  static gate and a corrected two-message powered run, but still needs
+  failed this expanded gate and was not qualified. A corrected historical
+  image passed the gate and a two-message powered run, but still needs
   allocator, stack-watermark, fill/pressure, and timing qualification before a
   release claim.
+- The installed ESP 15.2.0 toolchain currently emits a 64,288-byte maximum
+  compiler frame for `NodeCore::new`, above the retained 53,680-byte
+  linked-ELF policy ceiling. An older BLE artifact already emitted 62,160
+  bytes, while the new Nomad adapter's largest visible frame is only 448
+  bytes, so this appears to be a pre-existing/toolchain-sensitive
+  requalification problem rather than Nomad runtime growth. Target compilation
+  and strict Clippy pass, but the linked-ELF stack gate must not be claimed
+  until the boot path is remeasured and the policy is deliberately rebaselined
+  or the frame is reduced.
 - Non-PSRAM ESP32 boards may compile reduced profiles with services disabled.
   They do not define the maximum product feature set, and fitting the complete
   stack on the Tracker V2 is not a requirement.

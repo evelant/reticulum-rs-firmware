@@ -12,6 +12,10 @@ import type {
   MutationResponse,
   NearbyPeerView,
   NoContent,
+  NomadFetchPollRequest,
+  NomadFetchPollResponse,
+  NomadFetchStartRequest,
+  NomadFetchStartResponse,
   OnboardingView,
   RecoveryRequest,
   SendRequest,
@@ -346,6 +350,20 @@ export class NativeApplianceClient implements ApplianceClient {
     return parseNativeJson(
       "nearby peers",
       await this.#call((appliance) => appliance.nearbyPeersJson()),
+    );
+  }
+
+  async nomadFetchStart(request: NomadFetchStartRequest): Promise<NomadFetchStartResponse> {
+    return parseNativeJson(
+      "Nomad fetch start response",
+      await this.#call((appliance) => appliance.nomadFetchStartJson(JSON.stringify(request))),
+    );
+  }
+
+  async nomadFetchPoll(request: NomadFetchPollRequest): Promise<NomadFetchPollResponse> {
+    return parseNativeJson(
+      "Nomad fetch poll response",
+      await this.#call((appliance) => appliance.nomadFetchPollJson(JSON.stringify(request))),
     );
   }
 

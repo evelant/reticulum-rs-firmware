@@ -1555,9 +1555,11 @@ the known pair, the post-initial retry events and Rete's five-second native
 retransmissions retain a nominal global separation of at least three seconds.
 An ambiguous pending `StoreFaultHold` retains its exact owner but
 does not currently suppress discovery. The bounded responder-side direct-packet
-delivery owner and static Nomad index request/response are present; general
-application request/response, initiator/backchannel direct delivery, and RNS
-Resource owners remain future consumers. Resource
+delivery owner and static Nomad index request/response are present. The
+permanent authenticated API also exposes one bounded outbound Nomad
+request/response owner through start/poll. Arbitrary concurrent application
+requests, initiator/backchannel direct delivery, and RNS Resource owners remain
+future consumers. Resource
 ingress stays rejected before native mutation until Rete can preflight network-
 controlled allocation, bound output windows, and stream accepted bodies into
 durable blob handles.
@@ -1940,9 +1942,19 @@ UTF-8 Micron page, bounded to 400 bytes, in a direct single-packet response.
 Resource, forms, files, and dynamic content remain disabled. Response-allocation
 pressure discards that request, and an ambiguous terminal response fault can
 fail-stop the responder until reset. This boundary is source/host qualified,
-not powered-qualified. API 1.6's portable authenticated start/poll contract and
-the product Nomad client runtime exist independently, but neither is yet wired
-through the permanent E290 device API to the Expo application.
+not powered-qualified. The permanent E290 authenticated API now composes API
+1.6 start/poll with the transport-neutral product client runtime. Its
+boot-scoped owner retains one principal-owned fetch at a time, replays an exact
+idempotent retry, rejects a distinct start while active, preserves terminal
+polls, and evicts the terminal result for the next distinct start. It accepts
+an absolute path of at most 128 UTF-8 bytes and returns only one complete UTF-8
+page of at most 400 bytes; Resource responses are still unsupported.
+The Expo universal client now drives start/poll through the existing
+authenticated session, offers manual and nearby-peer-associated destinations,
+retains recovery-state IDs behind explicit resume/abandon actions, and displays
+selectable raw Micron text. Independent `nomadnetwork.node` directory discovery
+and Micron rendering remain subsequent client work, and the outbound API path
+has no powered qualification yet.
 
 A bounded file service remains reasonable for a later full-appliance profile.
 Dynamic executable pages are not: do not embed a general Python/Rhai/shell

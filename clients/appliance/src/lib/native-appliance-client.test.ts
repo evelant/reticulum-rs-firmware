@@ -16,6 +16,9 @@ import {
   MAX_LXMF_BASIC_TITLE_BYTES,
   MAX_LXMF_READ_CHUNK_BYTES,
   MAX_MESSAGE_BYTES,
+  MAX_NOMAD_PAGE_BYTES,
+  MAX_NOMAD_PAGE_PATH_BYTES,
+  MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 } from "../generated/api.ts";
 import type { BleCentral, BleConnectOptions } from "./ble-central-types.ts";
 import {
@@ -38,6 +41,9 @@ const CONTRACT: NativeBridgeContract = {
   maxLxmfReadChunkBytes: MAX_LXMF_READ_CHUNK_BYTES,
   maxLxmfBasicTitleBytes: MAX_LXMF_BASIC_TITLE_BYTES,
   maxLxmfBasicContentBytes: MAX_LXMF_BASIC_CONTENT_BYTES,
+  maxNomadPagePathBytes: MAX_NOMAD_PAGE_PATH_BYTES,
+  maxNomadPageBytes: MAX_NOMAD_PAGE_BYTES,
+  maxNomadRequestTimestampUnixMs: BigInt(MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS),
 };
 
 const E290_CREDENTIAL: NativeCredentialSummary = {
@@ -80,6 +86,12 @@ function offlineBleAppliance(): NativeApplianceLike {
     },
     async nearbyPeersJson(): Promise<string> {
       return "[]";
+    },
+    async nomadFetchStartJson(): Promise<string> {
+      return JSON.stringify({ id: `${"33".repeat(8)}0000000000000001`, outcome: "accepted" });
+    },
+    async nomadFetchPollJson(): Promise<string> {
+      return JSON.stringify({ state: "pending", phase: "path_lookup" });
     },
     async reconnect(): Promise<void> {},
     async sendMessageJson(): Promise<string> {
@@ -227,6 +239,7 @@ describe("native appliance adapter loading", () => {
       async nearbyPeersJson(): Promise<string> {
         return JSON.stringify([
           {
+            associated_nomad_destination: "ce".repeat(16),
             destination: "bc".repeat(16),
             display_name: "Ridge relay",
             hops: 1,
@@ -238,6 +251,17 @@ describe("native appliance adapter loading", () => {
             snr_db: 7,
           },
         ]);
+      },
+      async nomadFetchStartJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({
+          id: `${"33".repeat(8)}0000000000000001`,
+          outcome: "accepted",
+        });
+      },
+      async nomadFetchPollJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({ state: "ready", page: ">Metalbeard" });
       },
       async reconnect(): Promise<void> {
         throw bridgeError;
@@ -297,6 +321,7 @@ describe("native appliance adapter loading", () => {
     expect(await client.contacts()).toEqual([{ destination: "ab".repeat(16), name: "Field node" }]);
     expect(await client.nearbyPeers()).toEqual([
       {
+        associated_nomad_destination: "ce".repeat(16),
         destination: "bc".repeat(16),
         display_name: "Ridge relay",
         hops: 1,
@@ -308,6 +333,19 @@ describe("native appliance adapter loading", () => {
         snr_db: 7,
       },
     ]);
+    const fetchId = `${"33".repeat(8)}0000000000000001`;
+    expect(
+      await client.nomadFetchStart({
+        destination: "de".repeat(16),
+        path: "/page/index.mu",
+        timestamp_unix_ms: 2,
+        idempotency_key: "ef".repeat(16),
+      }),
+    ).toEqual({ id: fetchId, outcome: "accepted" });
+    expect(await client.nomadFetchPoll({ id: fetchId })).toEqual({
+      state: "ready",
+      page: ">Metalbeard",
+    });
     expect(await client.upsertContact("ab".repeat(16), { name: "Updated field node" })).toEqual({
       outcome: "inserted",
     });
@@ -321,6 +359,13 @@ describe("native appliance adapter loading", () => {
       }),
     ).toEqual({ outbox_id: 7, outcome: "inserted" });
     expect(requests.map((request) => JSON.parse(request))).toEqual([
+      {
+        destination: "de".repeat(16),
+        path: "/page/index.mu",
+        timestamp_unix_ms: 2,
+        idempotency_key: "ef".repeat(16),
+      },
+      { id: fetchId },
       { name: "Updated field node" },
       {
         destination: "ab".repeat(16),
@@ -399,6 +444,12 @@ describe("native appliance adapter loading", () => {
       },
       async nearbyPeersJson(): Promise<string> {
         return "[]";
+      },
+      async nomadFetchStartJson(): Promise<string> {
+        return JSON.stringify({ id: `${"33".repeat(8)}0000000000000001`, outcome: "accepted" });
+      },
+      async nomadFetchPollJson(): Promise<string> {
+        return JSON.stringify({ state: "pending", phase: "path_lookup" });
       },
       async reconnect(): Promise<void> {},
       async sendMessageJson(): Promise<string> {

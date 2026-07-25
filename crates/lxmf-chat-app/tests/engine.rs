@@ -117,6 +117,20 @@ impl LxmfSession for FakeSession {
         unreachable!("the chat engine does not perform nearby-peer discovery")
     }
 
+    fn nomad_fetch_start(
+        &mut self,
+        _request: reticulum_device_api::NomadFetchStartRequest<'_>,
+    ) -> Result<reticulum_device_api::NomadFetchStartAccepted, Self::Error> {
+        unreachable!("the chat engine does not perform NomadNet fetches")
+    }
+
+    fn nomad_fetch_poll(
+        &mut self,
+        _id: reticulum_device_api::NomadFetchId,
+    ) -> Result<reticulum_device_api::NomadFetchPollResponse, Self::Error> {
+        unreachable!("the chat engine does not perform NomadNet fetches")
+    }
+
     fn is_usable(&self) -> bool {
         true
     }

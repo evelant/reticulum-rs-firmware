@@ -12,7 +12,8 @@ use core::mem;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::IdentitySummary;
 use reticulum_device_api_adapter::{
-    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, PeerDiscoveryPort, SubmissionPort,
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, NomadFetchPort, PeerDiscoveryPort,
+    SubmissionPort,
 };
 use reticulum_device_api_credential_store::{
     BoundCredentialStoreAccess, CommitPairingLifecycleSuccessorError, CredentialStoreBinding,
@@ -43,7 +44,7 @@ use reticulum_device_api_session::AuthenticatedGrant;
 use zeroize::Zeroizing;
 
 use crate::authenticated_api_node::{
-    AuthenticatedApiDispatchFailure, dispatch_authenticated_request_with_inbox_and_lxmf,
+    AuthenticatedApiDispatchFailure, dispatch_authenticated_request_with_inbox_lxmf_and_nomad,
 };
 use crate::credential_boot::{
     CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
@@ -322,11 +323,12 @@ impl CredentialRuntime {
         clippy::result_large_err,
         reason = "terminal failure must retain the exact allocation-free request owner"
     )]
-    pub fn dispatch_authenticated_request<P>(
+    pub fn dispatch_authenticated_request<P, N>(
         &self,
         request: LocalApiRequest<AuthenticatedGrant>,
         identity: IdentitySummary,
         port: &mut P,
+        nomad_port: &mut N,
     ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
     where
         P: SubmissionPort
@@ -334,13 +336,16 @@ impl CredentialRuntime {
             + LxmfInboxPort
             + LxmfComposePort
             + PeerDiscoveryPort,
+        N: NomadFetchPort,
     {
         let authority = self
             .mounted
             .as_ref()
             .and_then(MountedCredentialStore::publishable_authority)
             .filter(|_| self.boot_state.authority_publishable());
-        dispatch_authenticated_request_with_inbox_and_lxmf(request, authority, identity, port)
+        dispatch_authenticated_request_with_inbox_lxmf_and_nomad(
+            request, authority, identity, port, nomad_port,
+        )
     }
 
     /// Whether the retained authority is physically and locally eligible for a

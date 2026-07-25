@@ -5,9 +5,11 @@ use reticulum_device_api::{
     ApiErrorCode, ApiErrorResponse, ApiVersion, DestinationHash, DeviceRequest, DeviceResponse,
     EncodedPacketSha256, IdempotencyKey, IdentitySummary, LxmfBasicSendAccepted, LxmfMessageHandle,
     LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation,
-    LxmfPeerDiscoveryPage, LxmfPeerGeneration, LxmfReadChunk, PreparedPacketDetails,
-    RequestEnvelope, ResponseEnvelope, SubmissionId, SubmissionState, SubmissionStatus,
-    decode_request, encode_response,
+    LxmfPeerDiscoveryPage, LxmfPeerGeneration, LxmfReadChunk, NomadFetchId, NomadFetchPollResponse,
+    NomadFetchStartAccepted, NomadFetchStartOutcome, NomadFetchStartRequest, NomadPage,
+    NomadPagePath, NomadRequestTimestampUnixMs, PreparedPacketDetails, RequestEnvelope,
+    ResponseEnvelope, SubmissionId, SubmissionState, SubmissionStatus, decode_request,
+    encode_response,
 };
 use reticulum_device_api_framing::{DecodeEvent, StreamDecoder};
 use reticulum_device_api_handoff::{LocalApiReply, MessageLength, OwnedMessage};
@@ -29,6 +31,11 @@ const PSK: [u8; 32] = [0x33; 32];
 const PRIMARY: DestinationHash = DestinationHash([0x44; 16]);
 const LXMF_LOCAL: DestinationHash = DestinationHash([0x55; 16]);
 const LXMF_REMOTE: DestinationHash = DestinationHash([0x66; 16]);
+const NOMAD_REMOTE: DestinationHash = DestinationHash([0x77; 16]);
+const NOMAD_FETCH_ID: NomadFetchId = match NomadFetchId::new([0x88; 8], 3) {
+    Ok(id) => id,
+    Err(_) => panic!("test fetch ID is valid"),
+};
 
 struct FixedRng {
     byte: u8,
@@ -78,6 +85,8 @@ struct MockPeer {
     request_count: usize,
     last_send: Option<OwnedSend>,
     last_peer_cursor: Option<Option<LxmfPeerDiscoveryCursor>>,
+    last_nomad_start: Option<OwnedNomadFetch>,
+    last_nomad_poll: Option<NomadFetchId>,
     parameters: ServerParameters,
     max_io_chunk: usize,
 }
@@ -88,6 +97,14 @@ struct OwnedSend {
     timestamp_unix_ms: u64,
     title: Vec<u8>,
     content: Vec<u8>,
+    idempotency_key: IdempotencyKey,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct OwnedNomadFetch {
+    destination: DestinationHash,
+    path: String,
+    timestamp_unix_ms: u64,
     idempotency_key: IdempotencyKey,
 }
 
@@ -126,6 +143,8 @@ impl MockPeer {
             request_count: 0,
             last_send: None,
             last_peer_cursor: None,
+            last_nomad_start: None,
+            last_nomad_poll: None,
             parameters,
             max_io_chunk,
         }
@@ -294,6 +313,24 @@ impl MockPeer {
                     [0xbb; 32],
                 ))
             }
+            DeviceRequest::NomadFetchStart(request) => {
+                self.last_nomad_start = Some(OwnedNomadFetch {
+                    destination: request.destination(),
+                    path: request.path().as_str().to_owned(),
+                    timestamp_unix_ms: request.timestamp_unix_ms().get(),
+                    idempotency_key: request.idempotency_key(),
+                });
+                DeviceResponse::NomadFetchStartAccepted(NomadFetchStartAccepted {
+                    id: NOMAD_FETCH_ID,
+                    outcome: NomadFetchStartOutcome::Accepted,
+                })
+            }
+            DeviceRequest::NomadFetchPoll(request) => {
+                self.last_nomad_poll = Some(request.id);
+                DeviceResponse::NomadFetchPoll(NomadFetchPollResponse::Ready(
+                    NomadPage::new(b">Metalbeard").unwrap(),
+                ))
+            }
             _ => DeviceResponse::Error(ApiErrorResponse {
                 code: ApiErrorCode::UnsupportedOperation,
                 operation: Some(envelope.request.operation()),
@@ -421,7 +458,7 @@ fn activated_state_decoder_rejects_noncanonical_and_non_active_images() {
 }
 
 #[test]
-fn real_handshake_and_multi_request_session_cover_typed_lxmf_surface() {
+fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
     let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
     let config = ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096);
     let mut client = DeviceClient::connect(
@@ -478,10 +515,28 @@ fn real_handshake_and_multi_request_session_cover_typed_lxmf_surface() {
         .expect("status succeeds in same session");
     assert_eq!(status.id, accepted.id);
     assert!(matches!(status.state, SubmissionState::Delivered(_)));
+
+    let nomad_key = IdempotencyKey([0xdd; 16]);
+    let fetch = client
+        .nomad_fetch_start(NomadFetchStartRequest::new(
+            NOMAD_REMOTE,
+            NomadPagePath::new("/page/index.mu").unwrap(),
+            NomadRequestTimestampUnixMs::new(1_784_732_100_001).unwrap(),
+            nomad_key,
+        ))
+        .expect("Nomad fetch start succeeds");
+    assert_eq!(fetch.id, NOMAD_FETCH_ID);
+    assert_eq!(fetch.outcome, NomadFetchStartOutcome::Accepted);
+    assert_eq!(
+        client
+            .nomad_fetch_poll(fetch.id)
+            .expect("Nomad fetch poll succeeds"),
+        NomadFetchPollResponse::Ready(NomadPage::new(b">Metalbeard").unwrap())
+    );
     assert!(client.is_session_available());
 
     let peer = client.into_transport();
-    assert_eq!(peer.request_count, 9);
+    assert_eq!(peer.request_count, 11);
     assert_eq!(peer.last_peer_cursor, Some(Some(nearby.next_cursor())));
     assert_eq!(
         peer.last_send,
@@ -493,6 +548,16 @@ fn real_handshake_and_multi_request_session_cover_typed_lxmf_surface() {
             idempotency_key,
         })
     );
+    assert_eq!(
+        peer.last_nomad_start,
+        Some(OwnedNomadFetch {
+            destination: NOMAD_REMOTE,
+            path: "/page/index.mu".to_owned(),
+            timestamp_unix_ms: 1_784_732_100_001,
+            idempotency_key: nomad_key,
+        })
+    );
+    assert_eq!(peer.last_nomad_poll, Some(NOMAD_FETCH_ID));
 }
 
 #[test]

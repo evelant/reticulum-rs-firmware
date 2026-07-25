@@ -10,6 +10,7 @@ import {
 
 function peer(overrides: Partial<NearbyPeerView> = {}): NearbyPeerView {
   return {
+    associated_nomad_destination: "cd".repeat(16),
     destination: "ab".repeat(16),
     display_name: "Field node",
     hops: 1,

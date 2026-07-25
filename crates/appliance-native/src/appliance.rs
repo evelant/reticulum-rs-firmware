@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use reticulum_lxmf_chat_runtime::{
     ApplianceConfig, ApplianceHandle, ConnectFailure, ConnectionTransport, Connector,
-    ContactRequest, SendRequest, SendResponse, ServiceError, start_appliance,
+    ContactRequest, NomadFetchPollRequest, NomadFetchStartRequest, SendRequest, SendResponse,
+    ServiceError, start_appliance,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -466,6 +467,37 @@ impl NativeAppliance {
         to_json(&peers)
     }
 
+    /// Validate and begin or replay one bounded NomadNet page fetch.
+    pub async fn nomad_fetch_start_json(
+        &self,
+        request_json: String,
+    ) -> Result<String, NativeApplianceError> {
+        let request: NomadFetchStartRequest =
+            from_json(&request_json, "Nomad fetch start request")?;
+        request
+            .validate()
+            .map_err(|error| NativeApplianceError::InvalidArgument {
+                reason: error.to_string(),
+            })?;
+        let response = self.active_handle()?.nomad_fetch_start(request).await?;
+        to_json(&response)
+    }
+
+    /// Validate and poll one boot-scoped NomadNet page fetch.
+    pub async fn nomad_fetch_poll_json(
+        &self,
+        request_json: String,
+    ) -> Result<String, NativeApplianceError> {
+        let request: NomadFetchPollRequest = from_json(&request_json, "Nomad fetch poll request")?;
+        request
+            .validate()
+            .map_err(|error| NativeApplianceError::InvalidArgument {
+                reason: error.to_string(),
+            })?;
+        let response = self.active_handle()?.nomad_fetch_poll(request).await?;
+        to_json(&response)
+    }
+
     /// Return one peer's durable timeline as canonical JSON.
     pub async fn timeline_json(&self, destination: String) -> Result<String, NativeApplianceError> {
         let peer =
@@ -778,6 +810,22 @@ mod tests {
             error,
             NativeApplianceError::InvalidArgument { .. }
         ));
+        let error = appliance
+            .nomad_fetch_start_json(
+                json!({
+                    "destination": "11".repeat(16),
+                    "path": "relative",
+                    "timestamp_unix_ms": 1,
+                    "idempotency_key": "22".repeat(16),
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            NativeApplianceError::InvalidArgument { .. }
+        ));
         appliance.close().await.unwrap();
     }
 
@@ -788,6 +836,34 @@ mod tests {
             NativeAppliance::open(database.path_string(), NativeTransport::UsbSerial).unwrap();
         assert!(matches!(
             appliance.nearby_peers_json().await,
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("no authenticated appliance session")
+        ));
+        appliance.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn nomad_fetch_requires_the_actor_owned_authenticated_session() {
+        let database = TestDatabase::new("nomad-offline");
+        let appliance =
+            NativeAppliance::open(database.path_string(), NativeTransport::UsbSerial).unwrap();
+        let start = json!({
+            "destination": "11".repeat(16),
+            "path": "/page/index.mu",
+            "timestamp_unix_ms": 1,
+            "idempotency_key": "22".repeat(16),
+        })
+        .to_string();
+        assert!(matches!(
+            appliance.nomad_fetch_start_json(start).await,
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("no authenticated appliance session")
+        ));
+        let id = format!("{}0000000000000001", "33".repeat(8));
+        assert!(matches!(
+            appliance
+                .nomad_fetch_poll_json(json!({ "id": id }).to_string())
+                .await,
             Err(NativeApplianceError::Storage { reason })
                 if reason.contains("no authenticated appliance session")
         ));

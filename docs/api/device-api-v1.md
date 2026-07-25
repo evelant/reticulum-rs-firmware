@@ -21,7 +21,9 @@ and semantic journal schema 3 persists its exact credential/policy snapshot on
 acceptance. The portable two-sector raw-NOR credential store is implemented,
 and E290 boot now validates its exact eFuse-derived binding, mounts it
 immediately after flash open, performs bounded deterministic recovery, and
-retains any mounted owner in the sole coordinator. It does not auto-provision
+retains any mounted owner in the sole coordinator. The permanent authenticated
+dispatch path also constructs the independent API 1.6 Nomad port around one
+boot-scoped product fetch slot. It does not auto-provision
 erased media. A separate portable pairing-policy crate implements the exact
 physical-presence window, connection epoch, shared attempt, and operation-
 ownership state. It is now feature-free only in the permanent E290 graph, where
@@ -83,10 +85,16 @@ isolation now covers mount rejection and one same-boot commit failure as
 described below. API 1.3 adds committed LXMF enumeration/readback and the
 optional public `lxmf.delivery` destination; API 1.4 adds source-free basic
 LXMF composition and durable submission; API 1.5 adds bounded authenticated
-nearby-LXMF peer discovery. API 1.6 adds only the portable NomadNet logical
-codec and authenticated adapter boundary in this revision. It has source and
-host-test evidence but is not yet composed into the permanent E290 API bearer
-and has no powered qualification. The
+nearby-LXMF peer discovery. API 1.6 adds the portable NomadNet logical codec and
+authenticated adapter boundary. The permanent E290 API now composes that
+boundary with its transport-neutral Nomad client runtime through the existing
+authenticated bearer path. The one-slot product owner and composition have
+source and host-test evidence but no powered qualification. The Expo universal
+client now exposes manual and nearby-peer-associated destination selection,
+start/poll progress, explicit retained-ID recovery, and selectable raw Micron
+text through that same authenticated session. Independent
+`nomadnetwork.node` directory discovery and Micron rendering remain deferred.
+The
 [2026-07-22 API 1.4 POC](../e290-api14-lxmf-poc.md) powered-qualified same-boot
 bidirectional send, Reticulum delivery proof, peer commit, enumeration, and
 digest-verified readback on the E290 pair. Its final audited image also retained
@@ -125,7 +133,9 @@ boot-lifetime fetches without exposing Link, request, router, radio, or
 firmware-owner types. None of these ports exposes raw physical storage, a
 radio, or private identity material. The E290 combines the durable and LXMF
 traits on one operation-scoped value so its sole flash owner is never mutably
-aliased; the NomadNet port is not yet part of that product composition.
+aliased. It separately constructs an operation-scoped NomadNet port borrowing
+only the boot-lifetime Nomad API metadata and transport-neutral client runtime,
+so the flash-capable owner is neither aliased nor transferred into a fetch.
 The adapter repeats major-version validation,
 applies the codec's authorization policy to trusted context, always emits the
 current response version, echoes the request ID, and performs no direct flash,
@@ -760,6 +770,20 @@ same destination, path, timestamp, and key returns the original ID with outcome
 available returns `CapacityExhausted` and allocates no ID. The portable
 contract defines no cancellation operation in API 1.6.
 
+The current E290 product profile provides exactly one slot. While that slot is
+nonterminal, any distinct principal/key request returns
+`CapacityExhausted`. Exact same-principal/key semantics replay the original ID.
+Ready and failed outcomes remain repeatable until the next distinct accepted
+start, which evicts the terminal outcome and allocates the next boot-scoped ID.
+Polling the evicted ID then returns the same `NotFound` used for foreign and
+stale-boot IDs.
+
+The Expo controller retains the exact ID after a bearer poll error or its
+120-second presentation timeout and blocks distinct starts until the user
+resumes that ID or explicitly abandons it. Abandon is local UI recovery for an
+ID made stale by a board reset; it sends no cancellation and makes no claim
+about a still-running same-boot device fetch.
+
 ### `experimental.nomad.fetch_poll` (`0xf009`)
 
 This authenticated read polls one fetch owned by the current principal.
@@ -810,7 +834,9 @@ response. A ready or failed result is stable only while the bounded
 boot-lifetime owner retains it; API 1.6 makes no persistence or reboot-survival
 claim. The portable codec and adapter tests cover these states, principal
 forwarding, hidden foreign IDs, closed discriminants, and the maximum 400-byte
-page. They do not constitute E290 bearer, RF, or powered qualification.
+page. Product-owner host tests additionally cover the E290 one-slot lifecycle
+and its permanent authenticated-dispatch composition. None of these tests
+constitutes RF or powered qualification.
 
 ### Powered inbox fault-isolation evidence
 
@@ -916,8 +942,8 @@ port call after rejection remain composition rules, not an unforgeable Rust
 capability. The permanent E290 node now follows them: the resident credential
 runtime revalidates current authority, then borrows one credential-disjoint,
 operation-scoped owner implementing submission, raw-inbox, LXMF-read, and
-LXMF-compose ports only for synchronous adapter dispatch. API 1.6's NomadNet
-port remains outside that permanent E290 composition in this revision.
+LXMF-compose ports only for synchronous adapter dispatch, plus an independent
+operation-scoped API 1.6 NomadNet port borrowing its boot-lifetime fetch owner.
 Revalidation failure returns the generic authentication-required response with
 zero port I/O; it never constructs an unauthenticated context. Principal and
 permissions come from the exact active record. Live authority

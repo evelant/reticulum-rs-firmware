@@ -3148,6 +3148,7 @@ name = "reticulum-lxmf-chat-runtime"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "rete-core",
  "reticulum-device-api",
  "reticulum-device-client",
  "reticulum-lxmf-chat-app",

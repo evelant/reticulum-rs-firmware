@@ -28,8 +28,8 @@ use reticulum_device_api::{
 use reticulum_device_api_adapter::{
     InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, LxmfComposeAcceptance,
     LxmfComposePort, LxmfComposePortError, LxmfComposeRequest, LxmfInboxPort, LxmfInboxPortError,
-    PeerDiscoveryPort, PeerDiscoveryPortError, SubmissionAcceptance, SubmissionPort,
-    SubmissionPortError,
+    NomadFetchPort, PeerDiscoveryPort, PeerDiscoveryPortError, SubmissionAcceptance,
+    SubmissionPort, SubmissionPortError,
 };
 use reticulum_device_api_credential_store::{
     BoundCredentialStore, CredentialStoreBinding, CredentialStoreRecovery, MountedCredentialStore,
@@ -1142,10 +1142,11 @@ impl ProductStorageCoordinator {
     /// The public identity summary is copied in from the node owner and is not
     /// stored in or derived by this flash coordinator.
     #[allow(
+        clippy::too_many_arguments,
         clippy::result_large_err,
-        reason = "terminal failure must retain the exact allocation-free request owner"
+        reason = "this sole-owner boundary receives independent bounded semantic owners without storing or aliasing them"
     )]
-    pub(crate) fn dispatch_authenticated_request(
+    pub(crate) fn dispatch_authenticated_request<N>(
         &mut self,
         supervisor: &ProductSupervisor,
         discovered_peers: &DiscoveredPeers<
@@ -1154,9 +1155,13 @@ impl ProductStorageCoordinator {
         >,
         peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
         peer_discovery_now_ms: u64,
+        nomad_port: &mut N,
         request: LocalApiRequest<AuthenticatedGrant>,
         identity: IdentitySummary,
-    ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure> {
+    ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
+    where
+        N: NomadFetchPort,
+    {
         let credential_physical_mutation_outstanding = self
             .credential_runtime
             .credential_physical_mutation_outstanding();
@@ -1191,7 +1196,7 @@ impl ProductStorageCoordinator {
             peer_discovery_incarnation,
             peer_discovery_now_ms,
         };
-        credential_runtime.dispatch_authenticated_request(request, identity, &mut port)
+        credential_runtime.dispatch_authenticated_request(request, identity, &mut port, nomad_port)
     }
 
     /// Admit one ordinary authenticated session and return its exact selected
