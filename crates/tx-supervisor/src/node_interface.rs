@@ -15,13 +15,13 @@ use reticulum_interface_router::{
 };
 use reticulum_node_core::{
     AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, ApplicationEventOfferError,
-    ApplicationEventOfferReport, ApplicationEventOwner, AttemptHandle, CapacitySnapshot,
-    DestinationHash, IngressReport, InitiateLinkError, LinkHandle, LinkState, MaintenanceReport,
-    MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
+    ApplicationEventOfferReport, ApplicationEventOwner, ApplicationLinkBinding, AttemptHandle,
+    CapacitySnapshot, DestinationHash, IngressReport, InitiateLinkError, LinkHandle, LinkState,
+    MaintenanceReport, MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
     OrdinaryActionCapacitySnapshot, OrdinaryPreparedPacket, OutboundDispatchInterval,
     OutboundProtocolToken, PacketInterfaceId, PathRequestError, PrepareBasicLxmfError,
-    PrepareRequestError, PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedPacket,
-    PreparedRequestActions, ReceiptCorrelationError, RequestDispatchConfirmation,
+    PrepareRequestError, PrepareResponseError, PreparedBasicDirectLxmf, PreparedBasicLxmf,
+    PreparedPacket, PreparedRequestActions, ReceiptCorrelationError, RequestDispatchConfirmation,
     RequestDispatchError, RequestHandle, TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy,
     TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope, TxRecoveryObservation, TxRoutePlan,
 };
@@ -153,13 +153,15 @@ mod tests {
         AdvertisedBitrate, InterfaceConfigId, InterfaceCost, InterfaceTxJob, LogicalMtu,
     };
     use reticulum_node_core::{
-        ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventSlot, DestinationHash,
-        MAX_DIRECT_LXMF_WIRE, MAX_OPPORTUNISTIC_LXMF_CARRIER, NodeConfig, NodeIdentity,
-        NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer, PermitResolution,
+        ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventSlot, ApplicationLinkRole,
+        DestinationHash, MAX_DIRECT_LXMF_WIRE, MAX_OPPORTUNISTIC_LXMF_CARRIER, NodeConfig,
+        NodeIdentity, NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer, PermitResolution,
         TxAuthorizationCandidate, TxCompletionCode, TxPacketBuffer, TxPermitRequirements,
         TxPermitReservation, TxPermitResourceId, TxPolicyDecision,
     };
-    use reticulum_rns_rete::{IngressDisposition, PacketType};
+    use reticulum_rns_rete::{
+        IngressDisposition, InterfaceId as RnsInterfaceId, PacketType, TxTarget as RnsTxTarget,
+    };
     use reticulum_tx_handoff::{DataPermitHandoff, OrdinaryPermitHandoff};
     use std::boxed::Box;
     use std::{vec, vec::Vec};
@@ -327,6 +329,59 @@ mod tests {
             .expect("request responder must accept LRRTT");
         assert_eq!(initiator.link_state(link), Some(LinkState::Active));
         (initiator, destination, link)
+    }
+
+    fn active_response_nodes(tag: u8) -> (TestNode, TestNode, DestinationHash, LinkHandle) {
+        let responder_tag = tag.wrapping_add(1);
+        let responder_aspect = "aggregate-response-responder";
+        let mut responder = node(responder_tag, responder_aspect);
+        let destination = responder.destination_hash();
+        responder
+            .set_destination_accepts_links(&destination, true)
+            .expect("response responder must accept Links");
+        let mut initiator = node(tag, "aggregate-response-initiator");
+        initiator
+            .register_peer(
+                &identity(responder_tag),
+                "reticulum",
+                &[responder_aspect],
+                MonotonicSeconds::new(1),
+            )
+            .expect("response responder identity must cache");
+        let mut rng = CounterRng::default();
+        let (request, link) = initiator
+            .initiate_link(&destination, MonotonicSeconds::new(2), &mut rng)
+            .expect("response Link must initiate");
+        let response = responder
+            .ingest(
+                request.packets[0].bytes(),
+                MonotonicSeconds::new(2),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("response responder must accept LINKREQUEST");
+        let established = initiator
+            .ingest(
+                response.actions.packets[0].bytes(),
+                MonotonicSeconds::new(3),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .expect("response initiator must accept LRPROOF");
+        responder
+            .ingest(
+                established.actions.packets[0].bytes(),
+                MonotonicSeconds::new(4),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("response responder must accept LRRTT");
+        assert_eq!(initiator.link_state(link), Some(LinkState::Active));
+        assert_eq!(
+            responder.link_state(LinkHandle::new(*link.as_bytes())),
+            Some(LinkState::Active)
+        );
+        (initiator, responder, destination, link)
     }
 
     fn data_coordinator(node: &mut TestNode) -> DataRouterCoordinator<DATA_BUFFERS> {
@@ -509,6 +564,94 @@ mod tests {
             Ok(()),
             "faulted aggregate must still discharge confirmed authority"
         );
+    }
+
+    #[test]
+    fn response_preparation_preflights_aggregate_fault_and_preserves_exact_action() {
+        let (mut initiator, mut responder, destination, link) = active_response_nodes(74);
+        let mut rng = CounterRng::default();
+        let prepared = initiator
+            .prepare_anonymous_request(link, "/page/index.mu", 1_700_000_000.0, &mut rng)
+            .expect("response request must prepare");
+        let (request_actions, handle) = prepared.into_parts();
+        assert_eq!(
+            initiator.confirm_request_dispatch(handle, MonotonicSeconds::new(5), true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        let inbound = responder
+            .ingest(
+                request_actions.packets[0].bytes(),
+                MonotonicSeconds::new(5),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("response request must reach its retained Link");
+        let [
+            ApplicationEvent::RequestValueReceived {
+                binding, request, ..
+            },
+        ] = inbound.actions.events.as_slice()
+        else {
+            panic!("response request must retain exact application provenance")
+        };
+        assert_eq!(binding.link(), link.as_bytes());
+        assert_eq!(binding.destination(), destination.as_bytes());
+        assert_eq!(binding.role(), ApplicationLinkRole::Responder);
+        assert_eq!(request, handle.request());
+
+        let (mut supervisor, _actors, _) = build_from_node::<1, 1>(responder, destination);
+        supervisor.owner_mismatch_fault = true;
+        let entropy_before_fault = rng.0;
+        assert!(matches!(
+            supervisor.prepare_response_actions(
+                binding,
+                request,
+                &[0x5a; 400],
+                MonotonicSeconds::new(6),
+                &mut rng,
+            ),
+            Err(NodeInterfaceSupervisorFault::DataOwnerMismatch)
+        ));
+        assert_eq!(rng.0, entropy_before_fault);
+
+        supervisor.owner_mismatch_fault = false;
+        let response = supervisor
+            .prepare_response_actions(
+                binding,
+                request,
+                &[0x5a; 400],
+                MonotonicSeconds::new(7),
+                &mut rng,
+            )
+            .expect("cleared aggregate fault permits response preparation")
+            .expect("bounded exact response must prepare");
+        assert!(response.events.is_empty());
+        assert_eq!(response.packets.len(), 1);
+        assert_eq!(response.unroutable_packets, 0);
+        assert_eq!(
+            response.packets[0].target(),
+            RnsTxTarget::Only(RnsInterfaceId(7))
+        );
+        assert_eq!(response.packets[0].protocol_token(), None);
+
+        let received = initiator
+            .ingest(
+                response.packets[0].bytes(),
+                MonotonicSeconds::new(7),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .expect("exact response must return to the request initiator");
+        assert!(matches!(
+            received.actions.events.as_slice(),
+            [ApplicationEvent::ResponseReceived {
+                link: event_link,
+                request: event_request,
+                data,
+            }] if event_link == handle.link()
+                && event_request == handle.request()
+                && data.as_slice() == [0x5a; 400]
+        ));
     }
 
     #[test]
@@ -3901,6 +4044,34 @@ where
         Ok(self
             .node
             .prepare_anonymous_request(link, path, requested_at_secs, rng))
+    }
+
+    /// Prepare one direct response for an exact event-carried request binding.
+    ///
+    /// An outer error is an aggregate fault observed before node allocation,
+    /// entropy consumption or native Link mutation. The inner result is the
+    /// product-owned response-preparation outcome. Success owns exactly one
+    /// ordinary packet action and no receipt, token or cancellation authority.
+    // The exact aggregate fault is copy-only but includes coordinator
+    // correlation detail; boxing is unavailable at this no_std boundary.
+    #[allow(clippy::result_large_err)]
+    pub fn prepare_response_actions<R>(
+        &mut self,
+        binding: &ApplicationLinkBinding,
+        request: &[u8; 16],
+        data: &[u8],
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> Result<Result<NodeActions, PrepareResponseError>, NodeInterfaceSupervisorFault>
+    where
+        R: RngCore + CryptoRng,
+    {
+        if let Some(fault) = self.fault() {
+            return Err(fault);
+        }
+        Ok(self
+            .node
+            .prepare_response_actions(binding, request, data, now, rng))
     }
 
     /// Apply one ordinary-router dispatch decision to an exact request.

@@ -38,6 +38,7 @@ use reticulum_rns_rete::{
     PrepareDirectLxmfLinkDataError as RnsPrepareDirectLxmfLinkDataError,
     PrepareDirectRequestError as RnsPrepareDirectRequestError,
     PrepareOpportunisticLxmfDataError as RnsPrepareOpportunisticLxmfDataError,
+    PrepareResponseError as RnsPrepareResponseError,
     PreparedBasicDirectLxmf as RnsPreparedBasicDirectLxmf,
     PreparedBasicLxmf as RnsPreparedBasicLxmf, PreparedData as RnsPreparedData,
     PreparedLinkData as RnsPreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptKind,
@@ -552,6 +553,54 @@ impl From<RnsPrepareDirectRequestError> for PrepareRequestError {
             RnsPrepareDirectRequestError::Crypto => Self::Crypto,
             RnsPrepareDirectRequestError::PacketBuild => Self::PacketBuild,
             RnsPrepareDirectRequestError::Invariant => Self::Invariant,
+        }
+    }
+}
+
+/// Failure to prepare one direct response action for an event-carried request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrepareResponseError {
+    /// The request binding's Link is no longer retained.
+    LinkNotFound,
+    /// Current retained Link destination or role differs from the binding.
+    LinkBindingMismatch,
+    /// The request binding's Link is no longer active.
+    LinkNotActive,
+    /// The active Link has no authenticated interface binding.
+    LinkInterfaceUnknown,
+    /// The response body cannot fit the Link's negotiated single-packet MDU.
+    ResponseTooLarge {
+        /// Supplied response-body bytes.
+        actual: usize,
+        /// Largest response body that fits the negotiated Link MDU.
+        maximum: usize,
+    },
+    /// Native response packet storage could not be allocated.
+    ResponseAllocationFailed,
+    /// Link encryption failed.
+    Crypto,
+    /// RNS could not build the response packet.
+    PacketBuild,
+    /// The native adapter reported an impossible response state.
+    Invariant,
+    /// The outer ordinary action envelope could not reserve one packet entry.
+    ActionAllocationFailed,
+}
+
+impl From<RnsPrepareResponseError> for PrepareResponseError {
+    fn from(error: RnsPrepareResponseError) -> Self {
+        match error {
+            RnsPrepareResponseError::LinkNotFound => Self::LinkNotFound,
+            RnsPrepareResponseError::LinkBindingMismatch => Self::LinkBindingMismatch,
+            RnsPrepareResponseError::LinkNotActive => Self::LinkNotActive,
+            RnsPrepareResponseError::LinkInterfaceUnknown => Self::LinkInterfaceUnknown,
+            RnsPrepareResponseError::ResponseTooLarge { actual, maximum } => {
+                Self::ResponseTooLarge { actual, maximum }
+            }
+            RnsPrepareResponseError::AllocationFailed => Self::ResponseAllocationFailed,
+            RnsPrepareResponseError::Crypto => Self::Crypto,
+            RnsPrepareResponseError::PacketBuild => Self::PacketBuild,
+            RnsPrepareResponseError::Invariant => Self::Invariant,
         }
     }
 }
@@ -3236,6 +3285,38 @@ impl<
             actions: NodeActions::without_retained_proofs(Default::default(), packets, 0),
             handle,
         })
+    }
+
+    /// Prepare one response for an exact inbound request binding.
+    ///
+    /// The opaque binding is accepted only from a projected application event;
+    /// the adapter revalidates its Link, destination, exact role, lifecycle,
+    /// interface and negotiated MDU before encryption. Outer action storage is
+    /// reserved first, so allocation failure cannot consume entropy or mutate
+    /// retained Link timing. The returned envelope owns exactly one ordinary
+    /// packet and no receipt, protocol-token or cancellation authority.
+    pub fn prepare_response_actions<R: RngCore + CryptoRng>(
+        &mut self,
+        binding: &ApplicationLinkBinding,
+        request: &[u8; 16],
+        data: &[u8],
+        now: MonotonicSeconds,
+        rng: &mut R,
+    ) -> Result<NodeActions, PrepareResponseError> {
+        let mut packets = alloc::vec::Vec::new();
+        packets
+            .try_reserve_exact(1)
+            .map_err(|_| PrepareResponseError::ActionAllocationFailed)?;
+        let packet = self
+            .rns
+            .prepare_response(binding, request, data, now.get(), rng)
+            .map_err(PrepareResponseError::from)?;
+        packets.push(packet);
+        Ok(NodeActions::without_retained_proofs(
+            Default::default(),
+            packets,
+            0,
+        ))
     }
 
     /// Apply one router-observed first-dispatch decision to an exact request.
@@ -7630,6 +7711,87 @@ mod tests {
             initiator.cancel_confirmed_request(handle),
             Err(RequestDispatchError::NotTracked)
         );
+    }
+
+    #[test]
+    fn response_actions_preserve_request_provenance_and_one_exact_packet_owner() {
+        let mut initiator = node::<4, 0>(102, "response-bridge-initiator");
+        let mut responder = node::<4, 0>(103, "response-bridge-responder");
+        let mut rng = CounterRng::default();
+        let (destination, link) =
+            establish_lxmf_link(&mut initiator, &mut responder, 103, &mut rng);
+
+        let prepared = initiator
+            .prepare_anonymous_request(link, "/page/index.mu", 1_700_000_000.125, &mut rng)
+            .expect("anonymous request must prepare");
+        let (request_actions, handle) = prepared.into_parts();
+        assert_eq!(
+            initiator.confirm_request_dispatch(handle, time(103), true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        let inbound = responder
+            .ingest(
+                request_actions.packets[0].bytes(),
+                time(103),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .unwrap();
+        let [
+            ApplicationEvent::RequestValueReceived {
+                binding, request, ..
+            },
+        ] = inbound.actions.events.as_slice()
+        else {
+            panic!("anonymous request must retain exact responder provenance")
+        };
+        assert_eq!(binding.link(), link.as_bytes());
+        assert_eq!(binding.destination(), destination.as_bytes());
+        assert_eq!(binding.role(), ApplicationLinkRole::Responder);
+        assert_eq!(request, handle.request());
+
+        let oversized = [0x44; 410];
+        let entropy_before = rng.0;
+        assert!(matches!(
+            responder.prepare_response_actions(binding, request, &oversized, time(109), &mut rng,),
+            Err(PrepareResponseError::ResponseTooLarge {
+                actual: 410,
+                maximum: 409,
+            })
+        ));
+        assert_eq!(rng.0, entropy_before);
+
+        let response_body = [0x5a; 400];
+        let response_actions = responder
+            .prepare_response_actions(binding, request, &response_body, time(110), &mut rng)
+            .expect("bounded response must prepare");
+        assert!(response_actions.events.is_empty());
+        assert_eq!(response_actions.packets.len(), 1);
+        assert_eq!(response_actions.unroutable_packets, 0);
+        assert_eq!(
+            response_actions.packets[0].target(),
+            RnsTxTarget::Only(RnsInterfaceId(7))
+        );
+        assert_eq!(response_actions.packets[0].protocol_token(), None);
+
+        let received = initiator
+            .ingest(
+                response_actions.packets[0].bytes(),
+                time(110),
+                PacketInterfaceId::new(3),
+                &mut rng,
+            )
+            .unwrap();
+        assert!(matches!(
+            received.actions.events.as_slice(),
+            [ApplicationEvent::ResponseReceived {
+                link: event_link,
+                request: event_request,
+                data,
+            }] if event_link == handle.link()
+                && event_request == handle.request()
+                && data.as_slice() == response_body
+        ));
     }
 
     #[test]

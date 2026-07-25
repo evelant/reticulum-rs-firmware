@@ -95,6 +95,12 @@ const LXMF_APPLICATION_NAME: &str = "lxmf";
 const LXMF_DELIVERY_ASPECT: &str = "delivery";
 const LXMF_DELIVERY_EXPANDED_NAME: &str = "lxmf.delivery";
 const SINGLE_PACKET_REQUEST_OVERHEAD: usize = 1 + 9 + 2 + TRUNCATED_HASH_LEN;
+const RESPONSE_ARRAY_HEADER_LEN: usize = 1;
+const RESPONSE_REQUEST_ID_HEADER_LEN: usize = 2;
+const RESPONSE_REQUEST_ID_LEN: usize = TRUNCATED_HASH_LEN;
+const RESPONSE_BIN8_HEADER_LEN: usize = 2;
+const RESPONSE_BIN16_HEADER_LEN: usize = 3;
+const RESPONSE_BIN8_MAX_LEN: usize = u8::MAX as usize;
 const _: () = assert!(
     LXMF_DESTINATION_HASH_LENGTH
         + LXMF_SIGNATURE_LENGTH
@@ -601,6 +607,59 @@ impl core::fmt::Display for PrepareDirectRequestError {
     }
 }
 
+/// Failure to prepare one direct response for an exact retained request binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareResponseError {
+    /// The binding's Link is no longer retained.
+    LinkNotFound,
+    /// The retained Link no longer matches the event-carried destination or role.
+    LinkBindingMismatch,
+    /// The retained Link is not active.
+    LinkNotActive,
+    /// The active Link has no authenticated interface binding.
+    LinkInterfaceUnknown,
+    /// The response body cannot fit in one packet at the negotiated Link MDU.
+    ResponseTooLarge {
+        /// Supplied response-body bytes.
+        actual: usize,
+        /// Largest response body that fits the negotiated Link MDU.
+        maximum: usize,
+    },
+    /// Native response packet storage could not be allocated.
+    AllocationFailed,
+    /// Link encryption failed.
+    Crypto,
+    /// Rete could not build the response packet.
+    PacketBuild,
+    /// Rete returned a failure impossible after product-owned preflight.
+    Invariant,
+}
+
+impl core::fmt::Display for PrepareResponseError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::LinkNotFound => formatter.write_str("request Link is no longer retained"),
+            Self::LinkBindingMismatch => {
+                formatter.write_str("request binding does not match retained Link state")
+            }
+            Self::LinkNotActive => formatter.write_str("request Link is not active"),
+            Self::LinkInterfaceUnknown => {
+                formatter.write_str("request Link has no authenticated interface binding")
+            }
+            Self::ResponseTooLarge { actual, maximum } => write!(
+                formatter,
+                "response body length {actual} exceeds negotiated direct maximum {maximum}"
+            ),
+            Self::AllocationFailed => {
+                formatter.write_str("response packet storage allocation failed")
+            }
+            Self::Crypto => formatter.write_str("response Link encryption failed"),
+            Self::PacketBuild => formatter.write_str("response packet construction failed"),
+            Self::Invariant => formatter.write_str("unexpected native response failure"),
+        }
+    }
+}
+
 /// Result of applying a router's first-dispatch decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "a confirmed request must be marked dispatched or canceled"]
@@ -711,6 +770,52 @@ fn resolve_origin_packet(packet: OutboundPacket) -> TxPacket {
         bytes: packet.data,
         target,
         protocol_token,
+    }
+}
+
+const fn direct_response_body_maximum(link_mdu: usize) -> Option<usize> {
+    debug_assert!(link_mdu <= rete_transport::LINK_MDU);
+    let bin8_fixed = RESPONSE_ARRAY_HEADER_LEN
+        + RESPONSE_REQUEST_ID_HEADER_LEN
+        + RESPONSE_REQUEST_ID_LEN
+        + RESPONSE_BIN8_HEADER_LEN;
+    let bin16_fixed = RESPONSE_ARRAY_HEADER_LEN
+        + RESPONSE_REQUEST_ID_HEADER_LEN
+        + RESPONSE_REQUEST_ID_LEN
+        + RESPONSE_BIN16_HEADER_LEN;
+    if link_mdu < bin8_fixed {
+        None
+    } else if link_mdu < bin16_fixed + RESPONSE_BIN8_MAX_LEN + 1 {
+        let bin8_maximum = link_mdu - bin8_fixed;
+        Some(if bin8_maximum < RESPONSE_BIN8_MAX_LEN {
+            bin8_maximum
+        } else {
+            RESPONSE_BIN8_MAX_LEN
+        })
+    } else {
+        Some(link_mdu - bin16_fixed)
+    }
+}
+
+fn map_native_response_error(error: SendError) -> PrepareResponseError {
+    match error {
+        SendError::LinkNotFound => PrepareResponseError::LinkNotFound,
+        SendError::LinkNotActive => PrepareResponseError::LinkNotActive,
+        SendError::LinkInterfaceUnknown => PrepareResponseError::LinkInterfaceUnknown,
+        SendError::OutputAllocationFailed => PrepareResponseError::AllocationFailed,
+        SendError::Crypto(_) => PrepareResponseError::Crypto,
+        SendError::PacketBuild(_) => PrepareResponseError::PacketBuild,
+        SendError::UnknownDestination
+        | SendError::LinkAlreadyExists
+        | SendError::LinkTableFull
+        | SendError::KeepaliveRoleMismatch
+        | SendError::WindowFull
+        | SendError::ReceiptTableFull
+        | SendError::ReceiptHashAlreadyTracked
+        | SendError::InvalidRequestValue
+        | SendError::ProtocolTokenExhausted
+        | SendError::ProtocolTokenAssignmentFailed
+        | SendError::ResourceLimit => PrepareResponseError::Invariant,
     }
 }
 
@@ -5126,6 +5231,65 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
     }
 
+    /// Prepare one direct response for an exact retained inbound request binding.
+    ///
+    /// The event-carried binding is revalidated against current native Link
+    /// destination, role, lifecycle, interface and negotiated MDU state before
+    /// encryption consumes entropy. The returned packet owns no receipt,
+    /// protocol token or cancellation authority; callers need only preserve it
+    /// until the ordinary interface path accepts or explicitly rejects it.
+    pub fn prepare_response<R: RngCore + CryptoRng>(
+        &mut self,
+        binding: &ApplicationLinkBinding,
+        request: &[u8; TRUNCATED_HASH_LEN],
+        data: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<TxPacket, PrepareResponseError> {
+        let link_id = LinkId::from(*binding.link());
+        let link = self
+            .core
+            .transport
+            .get_link(&link_id)
+            .ok_or(PrepareResponseError::LinkNotFound)?;
+        if link.destination_hash.as_bytes() != binding.destination()
+            || ApplicationLinkRole::from_retained(link.role) != binding.role()
+        {
+            return Err(PrepareResponseError::LinkBindingMismatch);
+        }
+        if link.state != LinkState::Active {
+            return Err(PrepareResponseError::LinkNotActive);
+        }
+        if link.bound_interface().is_none() {
+            return Err(PrepareResponseError::LinkInterfaceUnknown);
+        }
+        let link_mdu = core::cmp::min(link.mdu(), rete_transport::LINK_MDU);
+        let maximum = direct_response_body_maximum(link_mdu).ok_or(
+            PrepareResponseError::ResponseTooLarge {
+                actual: data.len(),
+                maximum: 0,
+            },
+        )?;
+        if data.len() > maximum {
+            return Err(PrepareResponseError::ResponseTooLarge {
+                actual: data.len(),
+                maximum,
+            });
+        }
+
+        let request_id = rete_core::RequestId::from(*request);
+        let packet = self
+            .core
+            .send_response(&link_id, &request_id, data, rng)
+            .map_err(map_native_response_error)?;
+        if let Some(link) = self.core.transport.get_link_mut(&link_id) {
+            link.last_outbound = MonotonicInstant::from_secs(now);
+        }
+        let packet = resolve_origin_packet(packet);
+        debug_assert_eq!(packet.protocol_token(), None);
+        Ok(packet)
+    }
+
     /// Send bounded best-effort data over an active Link.
     pub fn send_link_data<R: RngCore + CryptoRng>(
         &mut self,
@@ -7866,6 +8030,270 @@ mod tests {
         assert_eq!(responder.link_state(&link_id), Some(LinkState::Active));
         assert_eq!(responder.link_rtt(&link_id), Some(2.0));
         link_id
+    }
+
+    #[test]
+    fn direct_response_is_exactly_routed_and_delivers_a_400_byte_body() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+        let prepared = initiator
+            .prepare_anonymous_request(&link_id, "/page/index.mu", 1_700_000_000.125, &mut rng)
+            .unwrap();
+        let request_handle = prepared.handle();
+        assert_eq!(
+            initiator.confirm_request_dispatch(request_handle, 103, true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        let inbound = responder.ingest(prepared.packet().bytes(), 103, InterfaceId(7), &mut rng);
+        let [
+            ApplicationEvent::RequestValueReceived {
+                binding, request, ..
+            },
+        ] = inbound.actions.events.as_slice()
+        else {
+            panic!("anonymous request must retain exact responder provenance")
+        };
+        assert_eq!(binding.link(), link_id.as_bytes());
+        assert_eq!(
+            binding.destination(),
+            responder.destination_hash().as_bytes()
+        );
+        assert_eq!(binding.role(), ApplicationLinkRole::Responder);
+        assert_eq!(request, request_handle.request());
+
+        let response_body = vec![0x5a; 400];
+        let entropy_before = rng.0;
+        let last_outbound_before = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .last_outbound;
+        let response = responder
+            .prepare_response(binding, request, &response_body, 110, &mut rng)
+            .unwrap();
+        assert!(rng.0 > entropy_before);
+        assert_eq!(response.target(), TxTarget::Only(InterfaceId(7)));
+        assert_eq!(response.protocol_token(), None);
+
+        let packet = Packet::parse(response.bytes()).unwrap();
+        assert_eq!(packet.context, rete_core::CONTEXT_RESPONSE);
+        assert_eq!(packet.dest_type, DestType::Link);
+        assert_eq!(packet.destination_hash, link_id.as_bytes());
+        let mut plaintext = [0_u8; RNS_MTU];
+        let plaintext_len = initiator
+            .core
+            .transport
+            .get_link(&link_id)
+            .unwrap()
+            .decrypt(packet.payload, &mut plaintext)
+            .unwrap();
+        assert_eq!(plaintext_len, 422);
+        let (decoded_request, decoded_body) =
+            rete_transport::parse_response(&plaintext[..plaintext_len]).unwrap();
+        assert_eq!(decoded_request.as_bytes(), request_handle.request());
+        assert_eq!(decoded_body, response_body);
+
+        let last_outbound_after = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .last_outbound;
+        assert!(last_outbound_after > last_outbound_before);
+        assert_eq!(last_outbound_after, MonotonicInstant::from_secs(110));
+
+        let received = initiator.ingest(response.bytes(), 110, InterfaceId(3), &mut rng);
+        assert!(matches!(
+            received.actions.events.as_slice(),
+            [ApplicationEvent::ResponseReceived {
+                link,
+                request,
+                data,
+            }] if link == request_handle.link()
+                && request == request_handle.request()
+                && data == &response_body
+        ));
+        assert_eq!(initiator.request_dispatch_count(), 0);
+    }
+
+    #[test]
+    fn direct_response_preflight_accounts_for_the_bin8_bin16_boundary() {
+        assert_eq!(direct_response_body_maximum(20), None);
+        assert_eq!(direct_response_body_maximum(21), Some(0));
+        assert_eq!(direct_response_body_maximum(276), Some(255));
+        assert_eq!(direct_response_body_maximum(277), Some(255));
+        assert_eq!(direct_response_body_maximum(278), Some(256));
+        assert_eq!(
+            direct_response_body_maximum(rete_transport::LINK_MDU),
+            Some(409)
+        );
+
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+        let prepared = initiator
+            .prepare_anonymous_request(&link_id, "/page/index.mu", 100.0, &mut rng)
+            .unwrap();
+        let inbound = responder.ingest(prepared.packet().bytes(), 103, InterfaceId(7), &mut rng);
+        let [
+            ApplicationEvent::RequestValueReceived {
+                binding, request, ..
+            },
+        ] = inbound.actions.events.as_slice()
+        else {
+            panic!("anonymous request must retain exact responder provenance")
+        };
+
+        for (body_len, packed_len) in [(255, 276), (256, 278)] {
+            let response = responder
+                .prepare_response(binding, request, &vec![0xa5; body_len], 110, &mut rng)
+                .unwrap();
+            let packet = Packet::parse(response.bytes()).unwrap();
+            let mut plaintext = [0_u8; RNS_MTU];
+            let plaintext_len = initiator
+                .core
+                .transport
+                .get_link(&link_id)
+                .unwrap()
+                .decrypt(packet.payload, &mut plaintext)
+                .unwrap();
+            assert_eq!(plaintext_len, packed_len);
+            let (_, decoded_body) =
+                rete_transport::parse_response(&plaintext[..plaintext_len]).unwrap();
+            assert_eq!(decoded_body.len(), body_len);
+        }
+    }
+
+    #[test]
+    fn direct_response_rejects_invalid_retained_state_before_entropy_or_timing_mutation() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+        let prepared = initiator
+            .prepare_anonymous_request(&link_id, "/page/index.mu", 100.0, &mut rng)
+            .unwrap();
+        let inbound = responder.ingest(prepared.packet().bytes(), 103, InterfaceId(7), &mut rng);
+        let [
+            ApplicationEvent::RequestValueReceived {
+                binding, request, ..
+            },
+        ] = inbound.actions.events.as_slice()
+        else {
+            panic!("anonymous request must retain exact responder provenance")
+        };
+
+        let assert_unchanged =
+            |node: &TestNode, entropy: u8, last_outbound: MonotonicInstant, rng: &CounterRng| {
+                assert_eq!(rng.0, entropy);
+                assert_eq!(
+                    node.link_snapshot_for_conformance(&link_id)
+                        .unwrap()
+                        .last_outbound,
+                    last_outbound
+                );
+            };
+
+        let wrong_destination =
+            test_link_binding(*binding.link(), [0x5c; TRUNCATED_HASH_LEN], binding.role());
+        let entropy_before = rng.0;
+        let last_outbound_before = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .last_outbound;
+        assert_eq!(
+            responder.prepare_response(
+                &wrong_destination,
+                request,
+                b"must not encrypt",
+                110,
+                &mut rng,
+            ),
+            Err(PrepareResponseError::LinkBindingMismatch)
+        );
+        assert_unchanged(&responder, entropy_before, last_outbound_before, &rng);
+
+        let wrong_role = test_link_binding(
+            *binding.link(),
+            *binding.destination(),
+            ApplicationLinkRole::Initiator,
+        );
+        let entropy_before = rng.0;
+        let last_outbound_before = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .last_outbound;
+        assert_eq!(
+            responder.prepare_response(&wrong_role, request, b"must not encrypt", 111, &mut rng,),
+            Err(PrepareResponseError::LinkBindingMismatch)
+        );
+        assert_unchanged(&responder, entropy_before, last_outbound_before, &rng);
+
+        responder
+            .core
+            .transport
+            .get_link_mut(&link_id)
+            .unwrap()
+            .state = LinkState::Stale;
+        let entropy_before = rng.0;
+        let last_outbound_before = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .last_outbound;
+        assert_eq!(
+            responder.prepare_response(binding, request, b"must not encrypt", 112, &mut rng),
+            Err(PrepareResponseError::LinkNotActive)
+        );
+        assert_unchanged(&responder, entropy_before, last_outbound_before, &rng);
+
+        let link = responder.core.transport.get_link_mut(&link_id).unwrap();
+        link.state = LinkState::Active;
+        link.signalling = rete_transport::signalling_bytes(300, 1);
+        let negotiated_mdu = rete_transport::compute_link_mdu(300);
+        let maximum = direct_response_body_maximum(negotiated_mdu).unwrap();
+        let oversized = vec![0x33; maximum + 1];
+        let entropy_before = rng.0;
+        let last_outbound_before = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .last_outbound;
+        assert_eq!(
+            responder.prepare_response(binding, request, &oversized, 113, &mut rng),
+            Err(PrepareResponseError::ResponseTooLarge {
+                actual: maximum + 1,
+                maximum,
+            })
+        );
+        assert_unchanged(&responder, entropy_before, last_outbound_before, &rng);
+
+        let default_oversized = vec![0x44; 410];
+        responder
+            .core
+            .transport
+            .get_link_mut(&link_id)
+            .unwrap()
+            .signalling = [0; rete_transport::LINK_MTU_SIZE];
+        let entropy_before = rng.0;
+        let last_outbound_before = responder
+            .link_snapshot_for_conformance(&link_id)
+            .unwrap()
+            .last_outbound;
+        assert_eq!(
+            responder.prepare_response(binding, request, &default_oversized, 114, &mut rng),
+            Err(PrepareResponseError::ResponseTooLarge {
+                actual: 410,
+                maximum: 409,
+            })
+        );
+        assert_unchanged(&responder, entropy_before, last_outbound_before, &rng);
+
+        let _ = responder.close_link(&link_id, &mut rng);
+        let entropy_before = rng.0;
+        assert_eq!(
+            responder.prepare_response(binding, request, b"must not encrypt", 115, &mut rng),
+            Err(PrepareResponseError::LinkNotFound)
+        );
+        assert_eq!(rng.0, entropy_before);
     }
 
     #[test]
