@@ -36,12 +36,15 @@ use reticulum_rns_rete::{
     NodeRole as RnsNodeRole, PathRequestBuildError as RnsPathRequestBuildError,
     PrepareBasicLxmfError as RnsPrepareBasicLxmfError, PrepareDataError as RnsPrepareDataError,
     PrepareDirectLxmfLinkDataError as RnsPrepareDirectLxmfLinkDataError,
+    PrepareDirectRequestError as RnsPrepareDirectRequestError,
     PrepareOpportunisticLxmfDataError as RnsPrepareOpportunisticLxmfDataError,
     PreparedBasicDirectLxmf as RnsPreparedBasicDirectLxmf,
     PreparedBasicLxmf as RnsPreparedBasicLxmf, PreparedData as RnsPreparedData,
     PreparedLinkData as RnsPreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptKind,
     ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
-    ReceiptTerminalSink, TxTarget as RnsTxTarget,
+    ReceiptTerminalSink, RequestDispatchConfirmation as RnsRequestDispatchConfirmation,
+    RequestDispatchError as RnsRequestDispatchError, RequestHandle as RnsRequestHandle,
+    TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
     ApplicationEvent, ApplicationEventAcknowledgeFailure, ApplicationEventCapacitySnapshot,
@@ -383,6 +386,172 @@ impl From<RnsLinkState> for LinkState {
             RnsLinkState::Active => Self::Active,
             RnsLinkState::Stale => Self::Stale,
             RnsLinkState::Closed => Self::Closed,
+        }
+    }
+}
+
+/// Copyable exact correlation for one node-owned direct Link request.
+///
+/// The fields are private so application workers cannot forge a Link/request
+/// association. [`NodeCore`] retains every move-only native preparation or
+/// confirmed-dispatch authority; queues and protocol clients carry only this
+/// scalar.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RequestHandle(RnsRequestHandle);
+
+impl RequestHandle {
+    fn from_rns(handle: RnsRequestHandle) -> Self {
+        Self(handle)
+    }
+
+    fn into_rns(self) -> RnsRequestHandle {
+        self.0
+    }
+
+    /// Complete Link identifier for application-event correlation.
+    pub const fn link(&self) -> &[u8; 16] {
+        self.0.link()
+    }
+
+    /// Complete request identifier for response and failure correlation.
+    pub const fn request(&self) -> &[u8; 16] {
+        self.0.request()
+    }
+}
+
+/// Result of applying one router-observed dispatch decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "a confirmed request must later complete or be canceled"]
+pub enum RequestDispatchConfirmation {
+    /// The router did not report this as the packet's first interface dispatch.
+    NotFirstDispatch,
+    /// The first dispatch started native response-timeout tracking.
+    Confirmed,
+}
+
+impl From<RnsRequestDispatchConfirmation> for RequestDispatchConfirmation {
+    fn from(confirmation: RnsRequestDispatchConfirmation) -> Self {
+        match confirmation {
+            RnsRequestDispatchConfirmation::NotFirstDispatch => Self::NotFirstDispatch,
+            RnsRequestDispatchConfirmation::Confirmed => Self::Confirmed,
+        }
+    }
+}
+
+/// Failure to transition or cancel one exact request authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestDispatchError {
+    /// No native authority is retained for the supplied handle.
+    NotTracked,
+    /// The request is no longer awaiting first dispatch.
+    NotPrepared,
+    /// The request has not entered confirmed-dispatch state.
+    NotConfirmed,
+    /// The request's Link was removed after preparation.
+    LinkNotFound,
+    /// The request's Link stopped being active after preparation.
+    LinkNotActive,
+    /// Native request state and the retained adapter authority disagree.
+    NativeStateMismatch,
+}
+
+impl From<RnsRequestDispatchError> for RequestDispatchError {
+    fn from(error: RnsRequestDispatchError) -> Self {
+        match error {
+            RnsRequestDispatchError::NotTracked => Self::NotTracked,
+            RnsRequestDispatchError::NotPrepared => Self::NotPrepared,
+            RnsRequestDispatchError::NotConfirmed => Self::NotConfirmed,
+            RnsRequestDispatchError::LinkNotFound => Self::LinkNotFound,
+            RnsRequestDispatchError::LinkNotActive => Self::LinkNotActive,
+            RnsRequestDispatchError::NativeStateMismatch => Self::NativeStateMismatch,
+        }
+    }
+}
+
+/// Exact ordinary action envelope and correlation handle for one request.
+///
+/// Splitting this owner moves the complete packet action while returning only
+/// a copyable [`RequestHandle`]. If ordinary routing cannot retain the action,
+/// callers must preserve the unchanged envelope or cancel its handle through
+/// the same node owner.
+#[derive(Debug)]
+#[must_use = "request actions must be durably admitted or their handle canceled"]
+pub struct PreparedRequestActions {
+    actions: NodeActions,
+    handle: RequestHandle,
+}
+
+impl PreparedRequestActions {
+    /// Borrow the exact ordinary action envelope without splitting ownership.
+    pub const fn actions(&self) -> &NodeActions {
+        &self.actions
+    }
+
+    /// Copy the exact Link/request correlation handle.
+    pub const fn handle(&self) -> RequestHandle {
+        self.handle
+    }
+
+    /// Split into the complete action owner and copyable correlation handle.
+    pub fn into_parts(self) -> (NodeActions, RequestHandle) {
+        (self.actions, self.handle)
+    }
+}
+
+/// Failure to prepare one anonymous direct Link request action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrepareRequestError {
+    /// The selected Link is not retained.
+    LinkNotFound,
+    /// The selected Link has not reached the active state.
+    LinkNotActive,
+    /// The active Link has no authenticated interface binding.
+    LinkInterfaceUnknown,
+    /// The canonical request exceeds the negotiated Link MDU.
+    RequestTooLarge {
+        /// Computed request payload size.
+        actual: usize,
+        /// Negotiated maximum Link data size.
+        maximum: usize,
+    },
+    /// Every native request-dispatch authority slot is occupied.
+    DispatchTableFull {
+        /// Configured native authority limit.
+        limit: usize,
+    },
+    /// Fresh entropy reproduced a still-live request identifier.
+    RequestAlreadyTracked,
+    /// Native bounded request storage could not be reserved.
+    RequestAllocationFailed,
+    /// Link encryption failed.
+    Crypto,
+    /// RNS could not build the direct request packet.
+    PacketBuild,
+    /// The native adapter reported an impossible request shape or state.
+    Invariant,
+    /// The outer ordinary action envelope could not reserve one packet entry.
+    ActionAllocationFailed,
+}
+
+impl From<RnsPrepareDirectRequestError> for PrepareRequestError {
+    fn from(error: RnsPrepareDirectRequestError) -> Self {
+        match error {
+            RnsPrepareDirectRequestError::LinkNotFound => Self::LinkNotFound,
+            RnsPrepareDirectRequestError::LinkNotActive => Self::LinkNotActive,
+            RnsPrepareDirectRequestError::LinkInterfaceUnknown => Self::LinkInterfaceUnknown,
+            RnsPrepareDirectRequestError::RequestTooLarge { actual, maximum } => {
+                Self::RequestTooLarge { actual, maximum }
+            }
+            // The anonymous API always supplies canonical MessagePack nil.
+            RnsPrepareDirectRequestError::InvalidRequestValue => Self::Invariant,
+            RnsPrepareDirectRequestError::DispatchTableFull { limit } => {
+                Self::DispatchTableFull { limit }
+            }
+            RnsPrepareDirectRequestError::RequestAlreadyTracked => Self::RequestAlreadyTracked,
+            RnsPrepareDirectRequestError::AllocationFailed => Self::RequestAllocationFailed,
+            RnsPrepareDirectRequestError::Crypto => Self::Crypto,
+            RnsPrepareDirectRequestError::PacketBuild => Self::PacketBuild,
+            RnsPrepareDirectRequestError::Invariant => Self::Invariant,
         }
     }
 }
@@ -3035,6 +3204,76 @@ impl<
             NodeActions::without_retained_proofs(Default::default(), packets, 0),
             LinkHandle::from_rns(link_id),
         ))
+    }
+
+    /// Prepare one canonical anonymous NomadNet request as an ordinary action.
+    ///
+    /// The wire timestamp is encoded unchanged but starts no response timeout.
+    /// The native move-only preparation authority remains inside this node;
+    /// only the returned copyable handle may cross task or queue boundaries.
+    /// Outer action storage is reserved before native preparation, so an
+    /// allocation failure returns without mutating RNS request state.
+    pub fn prepare_anonymous_request<R: RngCore + CryptoRng>(
+        &mut self,
+        link: LinkHandle,
+        path: &str,
+        requested_at_secs: f64,
+        rng: &mut R,
+    ) -> Result<PreparedRequestActions, PrepareRequestError> {
+        let mut packets = alloc::vec::Vec::new();
+        packets
+            .try_reserve_exact(1)
+            .map_err(|_| PrepareRequestError::ActionAllocationFailed)?;
+        let prepared = self
+            .rns
+            .prepare_anonymous_request(&link.into_rns(), path, requested_at_secs, rng)
+            .map_err(PrepareRequestError::from)?;
+        let handle = RequestHandle::from_rns(prepared.handle());
+        let (packet, exact_handle) = prepared.into_parts();
+        debug_assert_eq!(exact_handle, handle.into_rns());
+        packets.push(packet);
+        Ok(PreparedRequestActions {
+            actions: NodeActions::without_retained_proofs(Default::default(), packets, 0),
+            handle,
+        })
+    }
+
+    /// Apply one router-observed first-dispatch decision to an exact request.
+    ///
+    /// `first_dispatch == false` is a no-op. A true decision starts native
+    /// response-timeout tracking at the supplied monotonic whole-second
+    /// sample. The caller should perform this transition only after the
+    /// ordinary router reports successful interface acceptance.
+    pub fn confirm_request_dispatch(
+        &mut self,
+        handle: RequestHandle,
+        sent_at: MonotonicSeconds,
+        first_dispatch: bool,
+    ) -> Result<RequestDispatchConfirmation, RequestDispatchError> {
+        self.rns
+            .confirm_request_dispatch(handle.into_rns(), sent_at.get(), first_dispatch)
+            .map(RequestDispatchConfirmation::from)
+            .map_err(RequestDispatchError::from)
+    }
+
+    /// Cancel an exact request only while it still awaits first dispatch.
+    pub fn cancel_prepared_request(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<(), RequestDispatchError> {
+        self.rns
+            .cancel_prepared_request(handle.into_rns())
+            .map_err(RequestDispatchError::from)
+    }
+
+    /// Cancel an exact request only after first dispatch started its timeout.
+    pub fn cancel_confirmed_request(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<(), RequestDispatchError> {
+        self.rns
+            .cancel_confirmed_request(handle.into_rns())
+            .map_err(RequestDispatchError::from)
     }
 
     /// Read the current lifecycle state of one retained Link.
@@ -7331,6 +7570,106 @@ mod tests {
         assert_eq!(initiator.link_state(link), None);
         assert!(initiator.can_initiate_link());
         assert!(!initiator.abort_unestablished_link(link));
+    }
+
+    #[test]
+    fn anonymous_request_actions_start_timeout_only_on_exact_first_dispatch() {
+        let mut initiator = node::<4, 0>(98, "request-bridge-initiator");
+        let mut responder = node::<4, 0>(99, "request-bridge-responder");
+        let mut rng = CounterRng::default();
+        let (_, link) = establish_lxmf_link(&mut initiator, &mut responder, 99, &mut rng);
+
+        let prepared = initiator
+            .prepare_anonymous_request(link, "/page/index.mu", 1_700_000_000.125, &mut rng)
+            .expect("anonymous request must prepare");
+        assert_eq!(prepared.actions().packets.len(), 1);
+        assert!(prepared.actions().events.is_empty());
+        assert_eq!(prepared.handle().link(), link.as_bytes());
+        let (actions, handle) = prepared.into_parts();
+        let packet = reticulum_rns_rete::parse_packet(actions.packets[0].bytes())
+            .expect("prepared request packet must parse");
+        assert_eq!(packet.packet_type, PacketType::Data);
+        assert_eq!(packet.destination_hash, handle.link());
+
+        assert_eq!(
+            initiator.confirm_request_dispatch(handle, time(20_000), false),
+            Ok(RequestDispatchConfirmation::NotFirstDispatch)
+        );
+        let before_dispatch = initiator.tick_at(
+            time(u64::MAX - 1),
+            MonotonicInstant::from_secs(103),
+            &mut rng,
+        );
+        assert!(!before_dispatch.actions.events.iter().any(|event| matches!(
+            event,
+            ApplicationEvent::RequestFailed { request, .. } if request == handle.request()
+        )));
+
+        assert_eq!(
+            initiator.confirm_request_dispatch(handle, time(20_000), true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        assert_eq!(
+            initiator.confirm_request_dispatch(handle, time(20_001), true),
+            Err(RequestDispatchError::NotPrepared)
+        );
+        let timed_out = initiator.tick_at(
+            time(u64::MAX - 1),
+            MonotonicInstant::from_secs(103),
+            &mut rng,
+        );
+        assert!(timed_out.actions.events.iter().any(|event| matches!(
+            event,
+            ApplicationEvent::RequestFailed {
+                link: event_link,
+                request,
+                reason: ApplicationRequestFailReason::Timeout,
+            } if event_link == handle.link() && request == handle.request()
+        )));
+        assert_eq!(
+            initiator.cancel_confirmed_request(handle),
+            Err(RequestDispatchError::NotTracked)
+        );
+    }
+
+    #[test]
+    fn exact_request_cancel_preserves_phase_on_strict_mismatch() {
+        let mut initiator = node::<4, 0>(100, "request-cancel-initiator");
+        let mut responder = node::<4, 0>(101, "request-cancel-responder");
+        let mut rng = CounterRng::default();
+        let (_, link) = establish_lxmf_link(&mut initiator, &mut responder, 101, &mut rng);
+
+        let prepared = initiator
+            .prepare_anonymous_request(link, "/page/prepared.mu", 120.0, &mut rng)
+            .expect("prepared-phase request must construct");
+        let prepared_handle = prepared.handle();
+        assert_eq!(
+            initiator.cancel_confirmed_request(prepared_handle),
+            Err(RequestDispatchError::NotConfirmed)
+        );
+        assert_eq!(initiator.cancel_prepared_request(prepared_handle), Ok(()));
+        assert_eq!(
+            initiator.cancel_prepared_request(prepared_handle),
+            Err(RequestDispatchError::NotTracked)
+        );
+
+        let confirmed = initiator
+            .prepare_anonymous_request(link, "/page/confirmed.mu", 121.0, &mut rng)
+            .expect("confirmed-phase request must construct");
+        let confirmed_handle = confirmed.handle();
+        assert_eq!(
+            initiator.confirm_request_dispatch(confirmed_handle, time(122), true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        assert_eq!(
+            initiator.cancel_prepared_request(confirmed_handle),
+            Err(RequestDispatchError::NotPrepared)
+        );
+        assert_eq!(initiator.cancel_confirmed_request(confirmed_handle), Ok(()));
+        assert_eq!(
+            initiator.cancel_confirmed_request(confirmed_handle),
+            Err(RequestDispatchError::NotTracked)
+        );
     }
 
     #[test]

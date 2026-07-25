@@ -20,9 +20,10 @@ use reticulum_node_core::{
     MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
     OrdinaryActionCapacitySnapshot, OrdinaryPreparedPacket, OutboundDispatchInterval,
     OutboundProtocolToken, PacketInterfaceId, PathRequestError, PrepareBasicLxmfError,
-    PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedPacket, ReceiptCorrelationError,
-    TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport,
-    TxOwnerScope, TxRecoveryObservation, TxRoutePlan,
+    PrepareRequestError, PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedPacket,
+    PreparedRequestActions, ReceiptCorrelationError, RequestDispatchConfirmation,
+    RequestDispatchError, RequestHandle, TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy,
+    TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope, TxRecoveryObservation, TxRoutePlan,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -272,6 +273,62 @@ mod tests {
         (sender, destination)
     }
 
+    fn active_request_sender(tag: u8) -> (TestNode, DestinationHash, LinkHandle) {
+        let responder_tag = tag.wrapping_add(1);
+        let responder_aspect = "aggregate-request-responder";
+        let mut responder = NodeCore::<8, 4, 8, 8, 0>::new(
+            identity(responder_tag),
+            "reticulum",
+            &[responder_aspect],
+            NodeInstanceId::new([responder_tag.wrapping_add(0x80); 16]),
+            NodeConfig::endpoint(),
+        )
+        .expect("request responder must construct");
+        let destination = responder.destination_hash();
+        responder
+            .set_destination_accepts_links(&destination, true)
+            .expect("request responder must accept Links");
+        let mut initiator = node(tag, "aggregate-request-initiator");
+        initiator
+            .register_peer(
+                &identity(responder_tag),
+                "reticulum",
+                &[responder_aspect],
+                MonotonicSeconds::new(1),
+            )
+            .expect("request responder identity must cache");
+        let mut rng = CounterRng::default();
+        let (request, link) = initiator
+            .initiate_link(&destination, MonotonicSeconds::new(2), &mut rng)
+            .expect("request Link must initiate");
+        let response = responder
+            .ingest(
+                request.packets[0].bytes(),
+                MonotonicSeconds::new(2),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("request responder must accept LINKREQUEST");
+        let established = initiator
+            .ingest(
+                response.actions.packets[0].bytes(),
+                MonotonicSeconds::new(3),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .expect("request initiator must accept LRPROOF");
+        responder
+            .ingest(
+                established.actions.packets[0].bytes(),
+                MonotonicSeconds::new(4),
+                PacketInterfaceId::new(7),
+                &mut rng,
+            )
+            .expect("request responder must accept LRRTT");
+        assert_eq!(initiator.link_state(link), Some(LinkState::Active));
+        (initiator, destination, link)
+    }
+
     fn data_coordinator(node: &mut TestNode) -> DataRouterCoordinator<DATA_BUFFERS> {
         let buffer = Box::leak(Box::new(TxPacketBuffer::new()));
         node.register_packet_buffer(buffer)
@@ -394,6 +451,64 @@ mod tests {
         assert_eq!(supervisor.link_state(link), None);
         assert!(supervisor.can_initiate_link());
         assert!(!supervisor.abort_unestablished_link(link));
+    }
+
+    #[test]
+    fn request_preparation_preflights_fault_while_exact_discharge_remains_available() {
+        let (initiator, destination, link) = active_request_sender(72);
+        let (mut supervisor, _actors, _) = build_from_node::<1, 1>(initiator, destination);
+        let mut rng = CounterRng::default();
+
+        supervisor.owner_mismatch_fault = true;
+        let entropy_before_fault = rng.0;
+        assert!(matches!(
+            supervisor.prepare_anonymous_request(
+                link,
+                "/page/faulted.mu",
+                1_700_000_000.0,
+                &mut rng,
+            ),
+            Err(NodeInterfaceSupervisorFault::DataOwnerMismatch)
+        ));
+        assert_eq!(rng.0, entropy_before_fault);
+
+        supervisor.owner_mismatch_fault = false;
+        let prepared = supervisor
+            .prepare_anonymous_request(link, "/page/prepared.mu", 1_700_000_001.0, &mut rng)
+            .expect("cleared aggregate fault permits preparation")
+            .expect("active Link request must prepare");
+        assert_eq!(prepared.actions().packets.len(), 1);
+        assert_eq!(prepared.handle().link(), link.as_bytes());
+        let (actions, prepared_handle) = prepared.into_parts();
+        assert_eq!(actions.discard().packets(), 1);
+
+        supervisor.owner_mismatch_fault = true;
+        assert_eq!(
+            supervisor.cancel_prepared_request(prepared_handle),
+            Ok(()),
+            "faulted aggregate must still discharge prepared authority"
+        );
+
+        supervisor.owner_mismatch_fault = false;
+        let confirmed = supervisor
+            .prepare_anonymous_request(link, "/page/confirmed.mu", 1_700_000_002.0, &mut rng)
+            .expect("cleared aggregate fault permits another preparation")
+            .expect("second active Link request must prepare");
+        let (actions, confirmed_handle) = confirmed.into_parts();
+        assert_eq!(actions.discard().packets(), 1);
+
+        supervisor.owner_mismatch_fault = true;
+        assert_eq!(
+            supervisor
+                .confirm_request_dispatch(confirmed_handle, MonotonicSeconds::new(100), true,),
+            Ok(RequestDispatchConfirmation::Confirmed),
+            "faulted aggregate must still correlate an already-routed request"
+        );
+        assert_eq!(
+            supervisor.cancel_confirmed_request(confirmed_handle),
+            Ok(()),
+            "faulted aggregate must still discharge confirmed authority"
+        );
     }
 
     #[test]
@@ -3758,6 +3873,66 @@ where
         R: RngCore + CryptoRng,
     {
         self.node.initiate_link(destination, now, rng)
+    }
+
+    /// Prepare one anonymous direct Link request under permanent node ownership.
+    ///
+    /// An outer error is an aggregate fault observed before RNG or native node
+    /// mutation. The inner result is the node preparation outcome. On success,
+    /// the returned owner keeps the exact ordinary action envelope paired with
+    /// only a copyable request handle; native dispatch authorities remain in
+    /// the aggregate.
+    // The exact aggregate fault is copy-only but includes coordinator
+    // correlation detail; boxing is unavailable at this no_std boundary.
+    #[allow(clippy::result_large_err)]
+    pub fn prepare_anonymous_request<R>(
+        &mut self,
+        link: LinkHandle,
+        path: &str,
+        requested_at_secs: f64,
+        rng: &mut R,
+    ) -> Result<Result<PreparedRequestActions, PrepareRequestError>, NodeInterfaceSupervisorFault>
+    where
+        R: RngCore + CryptoRng,
+    {
+        if let Some(fault) = self.fault() {
+            return Err(fault);
+        }
+        Ok(self
+            .node
+            .prepare_anonymous_request(link, path, requested_at_secs, rng))
+    }
+
+    /// Apply one ordinary-router dispatch decision to an exact request.
+    ///
+    /// This authority transition deliberately remains available after an
+    /// aggregate fault: a prepared request may already have reached an
+    /// interface before the unrelated fault was observed, and its native
+    /// owner must still be discharged exactly.
+    pub fn confirm_request_dispatch(
+        &mut self,
+        handle: RequestHandle,
+        sent_at: MonotonicSeconds,
+        first_dispatch: bool,
+    ) -> Result<RequestDispatchConfirmation, RequestDispatchError> {
+        self.node
+            .confirm_request_dispatch(handle, sent_at, first_dispatch)
+    }
+
+    /// Cancel only an exact request that still awaits first dispatch.
+    pub fn cancel_prepared_request(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<(), RequestDispatchError> {
+        self.node.cancel_prepared_request(handle)
+    }
+
+    /// Cancel only an exact request whose first dispatch started its timeout.
+    pub fn cancel_confirmed_request(
+        &mut self,
+        handle: RequestHandle,
+    ) -> Result<(), RequestDispatchError> {
+        self.node.cancel_confirmed_request(handle)
     }
 
     /// Observe the current state of one opaque product-retained Link.
