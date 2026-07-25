@@ -12,9 +12,11 @@ API stay in this project; generic protocol and bounded-state corrections are
 the candidates for upstream review.
 
 The current firmware pin is
-`ba73ee426a3211951f5abb400c5728dd359272be` on fork branch
+`dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08` on fork branch
 `codex/responder-handshake-reclaim`. It descends from
-`338251b285a2447beb10d390d3e7f53694a1a916` and
+`ba73ee426a3211951f5abb400c5728dd359272be`,
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`,
+`338251b285a2447beb10d390d3e7f53694a1a916`, and
 `a443173b0829c2637ce23531a8cde15fdfec185e`, then from
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
 `codex/link-data-receipts`, which descends from
@@ -53,10 +55,13 @@ The `2d07818` descendant also registers ordinary Link-DATA receipts and applies
 the receiving destination's proof policy instead of unconditionally proving
 every context-`NONE` Link DATA packet. Its `a443173` descendant additionally
 reclaims responder `Handshake` state at the Python-compatible establishment
-deadline. The current descendant adds bounded canonical MessagePack request
-values, including anonymous `nil`, and separate prepared/confirmed authorities
-so request timeout registration begins only at exact first dispatch. This is
-direct single-packet request foundation, not full NomadNet or Resource support.
+deadline. The direct-request sequence adds bounded canonical MessagePack
+values, including anonymous `nil`, at `338251b`; separate prepared/confirmed
+authorities and first-dispatch timeout registration at `354b875`; lossless
+inbound encoded values and their original timestamp at `ba73ee4`; and
+phase-agnostic exact request-dispatch reclaim keyed by request and Link IDs
+with prior native-phase reporting at `dfcaa36`. This is direct single-packet
+request foundation, not full NomadNet or Resource support.
 The legacy LXMF event handler without mutable core access still leaves siblings
 to timeout.
 This candidate remains on the project fork; no issue or pull request was opened
@@ -589,8 +594,10 @@ Make DATA preparation one transaction:
    receipt and entropy state.
 
 The generic fix is retained by current project pin
-`ba73ee426a3211951f5abb400c5728dd359272be`, which descends through
-`338251b285a2447beb10d390d3e7f53694a1a916` and
+`dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08`, which descends through
+`ba73ee426a3211951f5abb400c5728dd359272be`,
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`,
+`338251b285a2447beb10d390d3e7f53694a1a916`, and
 `a443173b0829c2637ce23531a8cde15fdfec185e`, then
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` from
 `90570cafc812b3025011cb690ec74a27f287cb3f` (tag
@@ -604,11 +611,13 @@ match the stored full outbound hash and destination Link ID, and relayed
 HEADER_2 proofs bypass local terminal reservation. Direct Transport ingest and
 maintenance results are `must_use`; sink-aware NodeCore paths avoid duplicate
 receipt events; and the
-hosted daemon consumes LXMF terminal output. The current descendant adds
-ordinary Link-DATA receipt correlation, destination proof-policy parity,
-responder-Handshake reclamation, exact canonical request values, and
-prepared-versus-confirmed request dispatch ownership. It also preserves
-validated inbound encoded values and their original request timestamp. The
+hosted daemon consumes LXMF terminal output. Its descendants add ordinary
+Link-DATA receipt correlation, destination proof-policy parity, and
+responder-Handshake reclamation. The direct-request sequence adds exact
+canonical values at `338251b`, prepared-versus-confirmed dispatch ownership at
+`354b875`, inbound encoded values and their original timestamp at `ba73ee4`,
+and phase-agnostic exact request-dispatch reclaim keyed by request and Link IDs
+with prior native-phase reporting at `dfcaa36`. The
 recorded selected
 validation set for the `90570ca` predecessor passed 635 tests:
 271 transport (174 library plus 97 integration), 137 stack (136

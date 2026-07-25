@@ -13,6 +13,7 @@ default = []
 experimental-rns-data = []
 experimental-rns-inbox = []
 experimental-lxmf = []
+experimental-nomad = []
 
 [dependencies]
 minicbor.workspace = true

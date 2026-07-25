@@ -59,8 +59,9 @@ pub use embedded::{
     PreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
     ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
     ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
-    RequestDispatchConfirmation, RequestDispatchError, RequestHandle, RetainedProofInvariant,
-    RouteSnapshot, TransportCounters, TxPacket, TxTarget, project_inbound_data,
+    RequestDispatchConfirmation, RequestDispatchError, RequestDispatchReconciliation,
+    RequestHandle, RetainedProofInvariant, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
+    project_inbound_data,
 };
 pub use rete_core::{
     DestHash, DestType, Identity, IdentityHash, LinkId, MonotonicDuration, MonotonicInstant,
@@ -71,7 +72,7 @@ pub use rete_stack::{DestinationType, Direction};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 
 /// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "ba73ee426a3211951f5abb400c5728dd359272be";
+pub const SOURCE_REVISION: &str = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08";
 
 /// Initial table capacities used only to obtain comparable Phase-0 numbers.
 pub mod probe_capacity {

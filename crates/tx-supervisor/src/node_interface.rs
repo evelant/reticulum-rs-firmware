@@ -22,8 +22,9 @@ use reticulum_node_core::{
     OutboundProtocolToken, PacketInterfaceId, PathRequestError, PrepareBasicLxmfError,
     PrepareRequestError, PrepareResponseError, PreparedBasicDirectLxmf, PreparedBasicLxmf,
     PreparedPacket, PreparedRequestActions, ReceiptCorrelationError, RequestDispatchConfirmation,
-    RequestDispatchError, RequestHandle, TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy,
-    TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope, TxRecoveryObservation, TxRoutePlan,
+    RequestDispatchError, RequestDispatchReconciliation, RequestHandle, TerminalAttempt,
+    TerminalAttempts, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
+    TxRecoveryObservation, TxRoutePlan,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -36,8 +37,8 @@ use crate::{
     DataRouterParkedCounts, DataRouterPrepareRequest, DataRouterPrepareResult, DataRouterStep,
     OrdinaryCompletionAcceptError, OrdinaryPermitServer, OrdinaryPermitServerPhase,
     OrdinaryPermitServerStep, OrdinaryRouterAdmission, OrdinaryRouterCoordinator,
-    OrdinaryRouterFault, OrdinaryRouterOfferError, OrdinaryRouterOfferFailure,
-    OrdinaryRouterRejectedActions, OrdinaryRouterStep,
+    OrdinaryRouterFault, OrdinaryRouterFaultResidueKind, OrdinaryRouterOfferError,
+    OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions, OrdinaryRouterStep,
 };
 
 /// Why permanent node/interface aggregate construction failed.
@@ -563,6 +564,25 @@ mod tests {
             supervisor.cancel_confirmed_request(confirmed_handle),
             Ok(()),
             "faulted aggregate must still discharge confirmed authority"
+        );
+
+        supervisor.owner_mismatch_fault = false;
+        let reconciled = supervisor
+            .prepare_anonymous_request(link, "/page/reconciled.mu", 1_700_000_003.0, &mut rng)
+            .expect("cleared aggregate fault permits reconciliation fixture")
+            .expect("third active Link request must prepare");
+        let (actions, reconciled_handle) = reconciled.into_parts();
+        assert_eq!(actions.discard().packets(), 1);
+
+        supervisor.owner_mismatch_fault = true;
+        assert_eq!(
+            supervisor.reconcile_request_dispatch(reconciled_handle),
+            RequestDispatchReconciliation::ReclaimedPrepared,
+            "faulted aggregate must still reconcile every exact native owner"
+        );
+        assert_eq!(
+            supervisor.reconcile_request_dispatch(reconciled_handle),
+            RequestDispatchReconciliation::Absent
         );
     }
 
@@ -1154,6 +1174,10 @@ mod tests {
                 admission(),
             )
             .unwrap_or_else(|failure| panic!("ordinary offer: {:?}", failure.reason()));
+        assert!(
+            supervisor.ordinary_application_events_pending(),
+            "the offered event must remain visible before ordinary admission"
+        );
         for _ in 0..16 {
             if matches!(
                 supervisor.step(MonotonicMillis::new(10)).transition(),
@@ -1171,6 +1195,10 @@ mod tests {
                 available: 0,
             })
         );
+        assert!(
+            supervisor.ordinary_application_events_pending(),
+            "owner pressure must not hide the retained event"
+        );
         owner
             .lease_next()
             .expect("existing event remains ready")
@@ -1180,6 +1208,10 @@ mod tests {
             NodeInterfaceApplicationEventDrain::Drained(report)
                 if report.accepted_events() == 1
         ));
+        assert!(
+            !supervisor.ordinary_application_events_pending(),
+            "the supervisor no longer owns an event after a successful drain"
+        );
         let lease = owner.lease_next().expect("retried event is ready");
         let ApplicationEvent::DataReceived { payload, .. } = lease.event() else {
             panic!("application event changed variant")
@@ -4090,6 +4122,18 @@ where
             .confirm_request_dispatch(handle, sent_at, first_dispatch)
     }
 
+    /// Reclaim one exact request from every native dispatch owner.
+    ///
+    /// This phase-agnostic operation remains available after an aggregate
+    /// fault and is reserved for invariant recovery. Every result guarantees
+    /// that no exact native request authority remains.
+    pub fn reconcile_request_dispatch(
+        &mut self,
+        handle: RequestHandle,
+    ) -> RequestDispatchReconciliation {
+        self.node.reconcile_request_dispatch(handle)
+    }
+
     /// Cancel only an exact request that still awaits first dispatch.
     pub fn cancel_prepared_request(
         &mut self,
@@ -4172,6 +4216,18 @@ where
             Ok(None) => NodeInterfaceApplicationEventDrain::Idle,
             Err(reason) => NodeInterfaceApplicationEventDrain::Retained(reason),
         }
+    }
+
+    /// Whether an ordinary envelope still owns application events upstream of
+    /// the product event consumer.
+    pub fn ordinary_application_events_pending(&self) -> bool {
+        self.ordinary.application_events_pending()
+    }
+
+    /// Kind of exact ordinary input or packet residue retained by a permanent
+    /// coordinator fault.
+    pub fn ordinary_fault_residue_kind(&self) -> Option<OrdinaryRouterFaultResidueKind> {
+        self.ordinary.fault_residue_kind()
     }
 
     /// Take one recoverably rejected ordinary envelope.

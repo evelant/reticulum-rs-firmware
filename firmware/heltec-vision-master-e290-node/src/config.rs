@@ -245,8 +245,55 @@ pub const NODE_POLL_INTERVAL_MS: u64 = 1;
 /// Fair synchronous lane passes before the node task yields.
 pub const NODE_MAX_IMMEDIATE_PASSES: usize = 16;
 /// Fair node-task lanes: ingress, supervisor, maintenance, announce,
-/// authenticated local API, and storage.
-pub const NODE_FAIR_LANES: u8 = 6;
+/// authenticated local API, outbound Nomad, and storage.
+pub const NODE_FAIR_LANES: u8 = 7;
+
+/// Apply one already-armed reservation for an admitted Nomad fetch.
+///
+/// An exact externally owned Nomad packet already represents that opportunity,
+/// while fail-closed drain forbids every fresh command. The scheduler arms this
+/// only after a Nomad lane was blocked by another owner and releases it after
+/// the next empty-owner attempt, successful or not.
+pub const fn reserve_fresh_nomad_turn(
+    reservation_armed: bool,
+    exact_nomad_packet_owned: bool,
+    fail_closed_draining: bool,
+) -> bool {
+    reservation_armed && !exact_nomad_packet_owned && !fail_closed_draining
+}
+
+/// Decide whether queued native application evidence must outrank Nomad timeout cleanup.
+///
+/// An event already projected into the product-owned FIFO remains
+/// authoritative even after upstream intake has failed closed. Events retained
+/// farther upstream count only while that drain path can still make progress.
+pub const fn application_events_preempt_nomad_timeout(
+    ready_product_event: bool,
+    upstream_drain_healthy: bool,
+    upstream_event_pending: bool,
+) -> bool {
+    ready_product_event || (upstream_drain_healthy && upstream_event_pending)
+}
+
+/// Arm one future protected Nomad turn only when this lane was owner-blocked.
+///
+/// An empty-owner lane consumes the grant regardless of whether the subsequent
+/// native preparation succeeds, preventing persistent native capacity pressure
+/// from suppressing every other fresh producer.
+pub const fn next_fresh_nomad_turn_armed(
+    fresh_command_pending: bool,
+    exact_nomad_packet_owned: bool,
+    fail_closed_draining: bool,
+    ordinary_owners_quiescent: bool,
+) -> bool {
+    fresh_command_pending
+        && !exact_nomad_packet_owned
+        && !fail_closed_draining
+        && !ordinary_owners_quiescent
+}
+
+/// Reviewed upper bound for the PSRAM-resident outbound Nomad owner.
+pub const MAXIMUM_NOMAD_RUNTIME_BYTES: usize = 1_024;
 /// Fixed-RAM ceiling for the static authenticated request/reply channels.
 pub const MAXIMUM_AUTHENTICATED_API_HANDOFF_BYTES: usize = 2_048;
 /// Fixed-RAM ceiling for node-retained authenticated request/reply/quarantine state.
@@ -729,6 +776,43 @@ mod tests {
     fn retry_slot_selection_honors_the_fairness_cursor_when_both_are_live() {
         assert_eq!(action_retry_slot(true, true, true), ActionRetrySlot::Second);
         assert_eq!(action_retry_slot(true, true, false), ActionRetrySlot::First);
+    }
+
+    #[test]
+    fn armed_nomad_turn_reservation_is_exact_and_drain_safe() {
+        assert!(reserve_fresh_nomad_turn(true, false, false));
+        assert!(
+            !reserve_fresh_nomad_turn(true, true, false),
+            "an already-owned Nomad packet is the reserved opportunity"
+        );
+        assert!(
+            !reserve_fresh_nomad_turn(true, false, true),
+            "fail-closed drain never reserves fresh work"
+        );
+        assert!(!reserve_fresh_nomad_turn(false, false, false));
+        assert!(next_fresh_nomad_turn_armed(true, false, false, false));
+        assert!(
+            !next_fresh_nomad_turn_armed(true, false, false, true),
+            "one empty-owner attempt consumes the bounded grant even if preparation rejects"
+        );
+        assert!(!next_fresh_nomad_turn_armed(true, true, false, false));
+        assert!(!next_fresh_nomad_turn_armed(true, false, true, false));
+    }
+
+    #[test]
+    fn ready_product_event_remains_authoritative_after_upstream_fail_closed() {
+        assert!(application_events_preempt_nomad_timeout(true, false, false));
+    }
+
+    #[test]
+    fn upstream_event_preempts_timeout_only_while_its_drain_path_is_healthy() {
+        assert!(application_events_preempt_nomad_timeout(false, true, true));
+        assert!(!application_events_preempt_nomad_timeout(
+            false, false, true
+        ));
+        assert!(!application_events_preempt_nomad_timeout(
+            false, true, false
+        ));
     }
 
     #[test]

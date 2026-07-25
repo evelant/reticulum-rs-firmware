@@ -1,16 +1,17 @@
 # Device API v1 logical protocol
 
-Status: API 1.5 logical codec and portable authenticated dispatch implemented
+Status: API 1.6 logical codec and portable authenticated dispatch implemented
 over one operation-scoped owner exposing narrow durable-submission, raw-inbox,
 committed-LXMF-read, source-free basic-LXMF-compose, and bounded nearby-peer
-ports.
+ports plus an independent bounded NomadNet-fetch port.
 This document freezes the operation and field numbers exercised by
 `reticulum-device-api`; `reticulum-device-api-adapter` implements capabilities,
 the public primary-destination summary, and principal-scoped submission status
 in its default build. It adds target-safe durable experimental outbound RNS DATA
 submission behind `experimental-rns-data`, experimental raw-RNS inbox
 status/peek behind `experimental-rns-inbox`, and committed-LXMF next/read plus
-source-free basic send behind `experimental-lxmf`. Separate portable
+source-free basic send behind `experimental-lxmf`. API 1.6 adds authenticated
+bounded NomadNet fetch start/poll behind `experimental-nomad`. Separate portable
 framing, immutable credential-authority, USB-
 qualification session and boot-lifetime authenticated-job handoff crates now
 exist. The session core emits only a credential ID/generation grant; the
@@ -82,7 +83,10 @@ isolation now covers mount rejection and one same-boot commit failure as
 described below. API 1.3 adds committed LXMF enumeration/readback and the
 optional public `lxmf.delivery` destination; API 1.4 adds source-free basic
 LXMF composition and durable submission; API 1.5 adds bounded authenticated
-nearby-LXMF peer discovery. The
+nearby-LXMF peer discovery. API 1.6 adds only the portable NomadNet logical
+codec and authenticated adapter boundary in this revision. It has source and
+host-test evidence but is not yet composed into the permanent E290 API bearer
+and has no powered qualification. The
 [2026-07-22 API 1.4 POC](../e290-api14-lxmf-poc.md) powered-qualified same-boot
 bidirectional send, Reticulum delivery proof, peer commit, enumeration, and
 digest-verified readback on the E290 pair. Its final audited image also retained
@@ -93,9 +97,9 @@ remain open.
 ## Boundary
 
 The crate is `no_std`, allocation-free, and Rete-independent. It owns logical
-requests, responses, scalar capabilities, submission and inbox response types,
-the indexed-CBOR codec, and a small common authorization policy. It does not
-contain:
+requests, responses, scalar capabilities, submission, inbox, and bounded
+NomadNet response types, the indexed-CBOR codec, and a small common
+authorization policy. It does not contain:
 
 - USB, BLE, Wi-Fi, WebSocket, COBS, length framing, reconnect, or chunking;
 - a node-core dispatcher, queue, storage, firmware, ESP, Embassy, or board code;
@@ -116,9 +120,12 @@ availability, principal-scoped status, and durable acceptance;
 `InboundMailboxPort` exposes bounded raw-inbox reads; `LxmfInboxPort` exposes
 commit-order metadata and bounded exact-wire chunks; and `LxmfComposePort`
 atomically composes with the device-owned source and durably accepts the exact
-carrier. None exposes raw physical storage, a radio, or private identity
-material. The E290 combines these traits on one operation-scoped value so its
-sole flash owner is never mutably aliased.
+carrier. The independent `NomadFetchPort` accepts and polls principal-scoped
+boot-lifetime fetches without exposing Link, request, router, radio, or
+firmware-owner types. None of these ports exposes raw physical storage, a
+radio, or private identity material. The E290 combines the durable and LXMF
+traits on one operation-scoped value so its sole flash owner is never mutably
+aliased; the NomadNet port is not yet part of that product composition.
 The adapter repeats major-version validation,
 applies the codec's authorization policy to trusted context, always emits the
 current response version, echoes the request ID, and performs no direct flash,
@@ -138,8 +145,9 @@ The initial version was `1.0`; version `1.1` added `identity.summary`; version
 `1.2` added optional raw-RNS inbox capability fields and feature-gated
 status/peek; version `1.3` added optional `lxmf.delivery` identity metadata and
 bounded committed-LXMF reads; version `1.4` added source-free basic LXMF
-submission; and the current version is `1.5`, adding bounded nearby-LXMF peer
-discovery. A decoder accepts major
+submission; version `1.5` added bounded nearby-LXMF peer discovery; and the
+current version is `1.6`, adding bounded authenticated NomadNet fetch
+start/poll. A decoder accepts major
 version 1 with any minor version, skips unknown numeric map fields, and rejects
 another major version.
 Encoding an envelope with another major version fails with the typed
@@ -161,7 +169,11 @@ availability, submission state, submission failure, and API error code. Their
 documented discriminants are frozen, unknown discriminants are rejected, and a
 new discriminant requires a new API major version. Minor-version evolution uses
 new optional numeric map fields instead of extending these enums. Experimental
-operations remain exempt from stable compatibility as described below.
+operations remain exempt from stable compatibility as described below. Within
+the current API 1.6 experimental NomadNet contract, start outcome, pending
+phase, poll state, and terminal failure are also closed numeric vocabularies;
+their decoders reject unknown values rather than treating them as another
+state.
 
 The decoder consumes exactly one logical CBOR item. Trailing bytes are rejected;
 stream recovery and message boundaries belong to the separate framing crate.
@@ -182,6 +194,10 @@ operation body or one unknown field value to eight levels.
 | basic LXMF title | 295 bytes | encode and decode; body and composer limits still apply |
 | basic LXMF content | 295 bytes | encode and decode; body and composer limits still apply |
 | nearby LXMF announce application data | 256 bytes | encode and decode |
+| NomadNet page path | 128 UTF-8 bytes | construction, encode, and decode; must be absolute, nonempty, and contain no NUL |
+| NomadNet page response | 400 valid UTF-8 bytes | construction, encode, and decode |
+| NomadNet request timestamp | `1..=9_007_199_254_740_991` whole milliseconds | construction and decode |
+| NomadNet fetch ID | 16 bytes | decode; final eight-byte big-endian sequence must be nonzero |
 | destination hash | 16 bytes | decode |
 | idempotency key | 16 bytes | decode |
 | encoded-packet SHA-256 | 32 bytes | decode |
@@ -191,7 +207,10 @@ boundary used by raw submission and the raw-RNS qualification inbox. It is not
 a promise that either operation or record will become the product LXMF API or
 message-store format. Basic LXMF send now uses a distinct durable intent for
 the exact complete signed wire through 431 bytes, so it does not raise or reuse
-the generic 383-byte RNS DATA ceiling.
+the generic 383-byte RNS DATA ceiling. A maximum NomadNet ready response has a
+407-byte operation body and a 429-byte complete logical message even with a
+maximum-width request ID, so it remains below both fixed limits without
+chunking.
 
 ## Common envelope
 
@@ -221,21 +240,27 @@ authorization credential.
 | `0xf005` | `experimental.lxmf.read` | feature-gated experimental | authenticated principal; no permission bit |
 | `0xf006` | `experimental.lxmf.basic_send` | feature-gated experimental | authenticated + `EXPERIMENTAL_SUBMIT_RNS_DATA` |
 | `0xf007` | `experimental.lxmf.peer_next` | feature-gated experimental | authenticated principal; no permission bit |
+| `0xf008` | `experimental.nomad.fetch_start` | feature-gated experimental | authenticated principal; no permission bit |
+| `0xf009` | `experimental.nomad.fetch_poll` | feature-gated experimental | authenticated principal; no permission bit |
 
 Numbers `0xf000..=0xffff` are experimental and can disappear or change without
 API compatibility. `0xf001` is compiled only with the target-safe
 `experimental-rns-data` Cargo feature; `0xf002` and `0xf003` are compiled only
 with `experimental-rns-inbox`; and `0xf004` through `0xf007` are compiled only
-with `experimental-lxmf`. A build without the corresponding feature returns
-`UnsupportedOperation`. The adapter mirrors all three feature boundaries.
+with `experimental-lxmf`. `0xf008` and `0xf009` are compiled only with
+`experimental-nomad`. A build without the corresponding feature returns
+`UnsupportedOperation`. The adapter mirrors all four feature boundaries.
 `dispatch_with_lxmf` independently exposes LXMF reads and basic send without
 requiring or compiling the raw-RNS qualification mailbox;
 `dispatch_with_inbox_and_lxmf` accepts one owner
 implementing both stores and is compiled only when both corresponding features
-are enabled. Capability responses restrict the codec snapshot to the adapter's
-own compiled operations and each port's runtime availability, so Cargo feature
-unification on another dependency edge cannot make an adapter build advertise
-a missing dispatch arm.
+are enabled. `dispatch_with_nomad` composes independent submission and NomadNet
+ports, while
+`dispatch_with_inbox_lxmf_peer_discovery_and_nomad` adds that independent
+NomadNet owner to the complete existing appliance surface. Capability responses
+restrict the codec snapshot to the adapter's own compiled operations and each
+port's runtime availability, so Cargo feature unification on another dependency
+edge cannot make an adapter build advertise a missing dispatch arm.
 
 ### `system.capabilities` (`0x0001`)
 
@@ -262,6 +287,9 @@ Successful response body:
 | 13 | u16 | no | structural per-field basic-LXMF content limit; 295 when implemented, otherwise 0 |
 | 14 | u8 | no | `experimental_lxmf_peer_discovery`: bounded authenticated nearby-peer reads |
 | 15 | u16 | no | maximum retained announce application data per peer; at most 256 |
+| 16 | u8 | no | `experimental_nomad`: bounded authenticated NomadNet fetch availability; 0 unavailable, 1 disabled, 2 available |
+| 17 | u16 | no | maximum UTF-8 NomadNet page-path bytes; 128 when implemented, otherwise 0 |
+| 18 | u16 | no | maximum valid UTF-8 Micron page bytes returned by one fetch; 400 when implemented, otherwise 0 |
 
 `CapabilitySnapshot::current()` is device-owned and cannot advertise packet
 output or direct-radio TX. Key 2 says nothing about node-owned RNS traffic: an
@@ -271,13 +299,16 @@ higher dispatcher uses `CapabilitySnapshot::for_dispatch` to restrict that
 codec-build snapshot; it can disable a capability but cannot enable one omitted
 from the codec build. API 1.2 introduced keys 7 and 8, API 1.3 introduced keys 9
 and 10, API 1.4 introduced keys 11 through 13, and API 1.5 introduced keys 14
-and 15. All are optional on decode;
+and 15. API 1.6 introduced keys 16 through 18. All are optional on decode;
 an older response therefore maps absent capabilities to unavailable with zero
 limits. The E290 reports raw-inbox and committed-LXMF reads only after their
 exact durable stores mount, and reports basic send only when durable submission
 and the local `lxmf.delivery` source are available. Faults disable the affected
 capability rather than inventing a volatile substitute. Peer discovery is
-advertised only by a dispatcher with the bounded projection port.
+advertised only by a dispatcher with the bounded projection port. NomadNet
+fetch is advertised only by a dispatcher with the independent bounded fetch
+port; keys 17 and 18 are zero when that capability is unavailable and retain
+the structural limits when runtime policy reports it disabled.
 Keys 12 and 13 are independent codec field bounds, not a guarantee that every
 295-byte title/content combination fits the 448-byte request body or the
 current product's 319-byte direct-content/431-byte complete-wire boundary.
@@ -688,6 +719,99 @@ A cursor from an older boot resets to the first retained record with
 `history_gap=true`. The API never fabricates signal data or mutates Rete's path
 table.
 
+### `experimental.nomad.fetch_start` (`0xf008`)
+
+This authenticated mutation begins one bounded, principal-owned NomadNet page
+fetch. It identifies a Reticulum destination and request path but does not
+select LoRa, Wi-Fi, BLE, or any other bearer. Acceptance means that the
+boot-lifetime fetch owner accepted or replayed the semantic request; it does
+not mean that a path, Link, remote response, or page already exists.
+
+Request body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | bytes(16) | yes | complete remote `nomadnetwork.node` destination hash |
+| 1 | text(1..128 UTF-8 bytes) | yes | absolute page path; first byte `/`, with no NUL |
+| 2 | u64 | yes | caller-selected Unix timestamp in whole milliseconds, `1..=9_007_199_254_740_991` |
+| 3 | bytes(16) | yes | principal-scoped idempotency key |
+
+The timestamp range is lossless in JSON and JavaScript integer interchange.
+It does not promise exact binary64 millisecond spacing at extreme dates when a
+product later converts milliseconds to Reticulum's seconds representation.
+Repeating a request must retain the original integer value.
+
+Successful response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | bytes(16) | yes | opaque boot-scoped fetch ID |
+| 1 | u8 | yes | start outcome: 0 accepted, 1 replayed |
+
+The fetch ID's first eight bytes identify the boot incarnation. Its final eight
+bytes are a nonzero big-endian sequence. Clients must compare and return all
+16 bytes without treating either component as authority or deriving another
+ID. The authenticated principal remains the ownership boundary.
+
+Idempotency is scoped by authenticated principal plus key 3. Repeating the
+same destination, path, timestamp, and key returns the original ID with outcome
+1. Reusing that principal/key pair for different semantic content returns
+`IdempotencyConflict`. A fresh request for which no bounded owner slot is
+available returns `CapacityExhausted` and allocates no ID. The portable
+contract defines no cancellation operation in API 1.6.
+
+### `experimental.nomad.fetch_poll` (`0xf009`)
+
+This authenticated read polls one fetch owned by the current principal.
+
+Request body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | bytes(16) | yes | opaque fetch ID returned by `fetch_start` |
+
+Successful response body:
+
+| Key | Type | Required | Meaning |
+| ---: | --- | --- | --- |
+| 0 | u8 | yes | poll state: 0 pending, 1 ready, 2 failed |
+| 1 | state-specific | yes | pending phase, complete page bytes, or terminal failure |
+
+For state 0, key 1 is one pending-phase `u8`:
+
+| Value | Phase |
+| ---: | --- |
+| 0 | path lookup |
+| 1 | Link establishment |
+| 2 | request preparation |
+| 3 | awaiting first-dispatch confirmation |
+| 4 | awaiting the correlated response |
+
+For state 1, key 1 is `bytes(0..400)` containing one complete valid UTF-8
+Micron page. Empty page text is valid. The page is never truncated: an
+oversized or invalid-UTF-8 downstream result becomes a typed failed state
+instead of a partial ready response.
+
+For state 2, key 1 is one terminal-failure `u8`:
+
+| Value | Failure |
+| ---: | --- |
+| 0 | no usable path |
+| 1 | Link preparation, dispatch, establishment, or retention |
+| 2 | request preparation, dispatch, or remote processing |
+| 3 | confirmed-request response timeout |
+| 4 | page too large |
+| 5 | invalid UTF-8 |
+| 6 | internal invariant or backend failure |
+
+The port receives the authenticated principal together with the fetch ID.
+Missing, foreign-principal, and stale-boot IDs all return the same `NotFound`
+response. A ready or failed result is stable only while the bounded
+boot-lifetime owner retains it; API 1.6 makes no persistence or reboot-survival
+claim. The portable codec and adapter tests cover these states, principal
+forwarding, hidden foreign IDs, closed discriminants, and the maximum 400-byte
+page. They do not constitute E290 bearer, RF, or powered qualification.
+
 ### Powered inbox fault-isolation evidence
 
 Four powered E290 boots exercised deterministic mount faults: an interrupted
@@ -734,11 +858,11 @@ A successful response uses the corresponding operation number at envelope key
 Error codes are 1 unsupported operation, 2 unsupported version, 3 authentication
 required, 4 permission denied, 5 not found, 6 invalid request, 7 capability
 unavailable, 8 internal, 9 capacity exhausted, and 10 idempotency conflict.
-Capacity exhaustion is an immediate rejection: no submission ID is allocated,
-and retrying later may succeed. Idempotency conflict means the principal reused
-a key for different request content; repeating the original content remains
-safe. Neither immediate rejection is represented as a terminal state of an
-accepted submission.
+Capacity exhaustion is an immediate rejection: no submission or fetch ID is
+allocated, and retrying later may succeed. Idempotency conflict means the
+principal reused a key for different request content; repeating the original
+content remains safe. Neither immediate rejection is represented as a terminal
+state of an accepted submission or fetch.
 
 Codec failures (`DecodeError`) happen before dispatch and therefore do not have
 a trusted request ID to echo in every case. A transport/session adapter may
@@ -761,7 +885,9 @@ framing rules.
   persisted permission bit;
 - experimental basic LXMF send requires an authenticated principal and reuses
   `EXPERIMENTAL_SUBMIT_RNS_DATA` until a future stable messaging policy is
-  designed.
+  designed;
+- experimental NomadNet fetch start/poll require an authenticated principal but
+  no persisted permission bit.
 
 The logical codec can represent an unauthenticated context for internal callers
 and policy tests. ADR 0006's physical device-API bearers are stricter: every
@@ -776,7 +902,9 @@ any authenticated principal can read the retained LXMF messages, with no
 per-principal mailbox ACL. This is POC policy, not a general authorization
 decision for later multi-user messaging.
 The portable adapter scopes status and experimental-operation idempotency by the
-principal from `DispatchContext`, never by bytes supplied in a request. The
+principal from `DispatchContext`, never by bytes supplied in a request. NomadNet
+polling also supplies that principal to the fetch owner; absent and
+other-principal IDs are deliberately indistinguishable. The
 portable session core deliberately emits only a credential ID/generation grant.
 `AuthenticatedGrant::revalidate` checks that reference against the immutable
 device-owned authority and returns a `DispatchLease` whose borrow remains alive
@@ -788,7 +916,8 @@ port call after rejection remain composition rules, not an unforgeable Rust
 capability. The permanent E290 node now follows them: the resident credential
 runtime revalidates current authority, then borrows one credential-disjoint,
 operation-scoped owner implementing submission, raw-inbox, LXMF-read, and
-LXMF-compose ports only for synchronous adapter dispatch.
+LXMF-compose ports only for synchronous adapter dispatch. API 1.6's NomadNet
+port remains outside that permanent E290 composition in this revision.
 Revalidation failure returns the generic authentication-required response with
 zero port I/O; it never constructs an unauthenticated context. Principal and
 permissions come from the exact active record. Live authority
@@ -816,25 +945,27 @@ returns the original ID and retains the original evidence. See
 
 ## Golden vectors
 
-The canonical API 1.5 `system.capabilities` request for request ID 42 uses minor
-byte `05` and is:
+The canonical API 1.6 `system.capabilities` request for request ID 42 uses minor
+byte `06` and is:
 
 ```text
-a4 00 a2 00 01 01 05 01 18 2a 02 01 03 a0
+a4 00 a2 00 01 01 06 01 18 2a 02 01 03 a0
 ```
 
-The canonical API 1.5 `identity.summary` request for request ID 42 is:
+The canonical API 1.6 `identity.summary` request for request ID 42 is:
 
 ```text
-a4 00 a2 00 01 01 05 01 18 2a 02 03 03 a0
+a4 00 a2 00 01 01 06 01 18 2a 02 03 03 a0
 ```
 
 The wire tests freeze these requests, both identity-response forms, all feature
-compositions of the sixteen-field API 1.5 capability response, older maps with
+compositions of the nineteen-field API 1.6 capability response, older maps with
 absent optional capability fields, typed permission/capacity/idempotency error
 responses, raw submission request/acceptance, exact `0xf002`/`0xf003` inbox
 vectors, exact `0xf004`/`0xf005` LXMF list/read vectors, and source-free
-`0xf006` request/acceptance plus boot-scoped `0xf007` peer-page vectors.
+`0xf006` request/acceptance plus boot-scoped `0xf007` peer-page vectors. API 1.6
+adds exact `0xf008` start request and accepted/replayed response vectors plus
+`0xf009` poll request and pending/ready/failed vectors.
 They also cover every submission failure, state invariants, closed numeric
 enums, unknown fields, unknown operations, missing and duplicate known fields,
 every truncated golden prefix, trailing bytes,
@@ -842,7 +973,12 @@ message/body/payload/nesting limits, indefinite-value rejection, fixed
 byte-string widths, borrowed payload storage, authorization, and the
 packet-output/direct-radio-TX safety values, separate outbound-RNS submission
 advertisement, authenticated-only inbox reads, empty `NotFound`, and bounded
-owned peek payloads.
+owned peek payloads. NomadNet coverage additionally proves absolute/no-NUL
+128-byte path validation, the JavaScript-safe nonzero timestamp bound, nonzero
+fetch-ID sequences, authentication without a new persisted permission bit,
+principal forwarding and hidden foreign IDs, start replay/conflict/capacity
+mapping, closed state/phase/failure values, and the exact 407-byte body /
+429-byte complete-message maximum for a 400-byte page.
 
 ## Validation profiles
 
@@ -864,6 +1000,10 @@ cargo clippy --locked -p reticulum-device-api --all-targets \
 cargo test --locked -p reticulum-device-api --features experimental-lxmf
 cargo clippy --locked -p reticulum-device-api --all-targets \
   --features experimental-lxmf -- -D warnings
+
+cargo test --locked -p reticulum-device-api --features experimental-nomad
+cargo clippy --locked -p reticulum-device-api --all-targets \
+  --features experimental-nomad -- -D warnings
 
 cargo test --locked -p reticulum-device-api --all-features
 cargo clippy --locked -p reticulum-device-api --all-targets \
@@ -898,6 +1038,10 @@ cargo test --locked -p reticulum-device-api-adapter --features experimental-lxmf
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --features experimental-lxmf -- -D warnings
 
+cargo test --locked -p reticulum-device-api-adapter --features experimental-nomad
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features experimental-nomad -- -D warnings
+
 cargo test --locked -p reticulum-device-api-adapter --all-features
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --all-features -- -D warnings
@@ -916,6 +1060,11 @@ cargo test --locked -p reticulum-device-api-adapter \
   --features reticulum-device-api/experimental-lxmf
 cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
   --features reticulum-device-api/experimental-lxmf -- -D warnings
+
+cargo test --locked -p reticulum-device-api-adapter \
+  --features reticulum-device-api/experimental-nomad
+cargo clippy --locked -p reticulum-device-api-adapter --all-targets \
+  --features reticulum-device-api/experimental-nomad -- -D warnings
 
 cargo +esp check --locked --release -p reticulum-device-api-adapter \
   --all-features --target xtensa-esp32s3-none-elf
@@ -982,7 +1131,11 @@ disabled/faulted capability mapping, empty `NotFound`, and an owned maximum-size
 peek response. The standalone LXMF profile proves that `dispatch_with_lxmf`
 needs no raw-inbox feature or port; the combined profile proves that
 `dispatch_with_inbox_and_lxmf` invokes only the selected method on its single
-flash-capable owner. The session crate now exposes both server and public
+flash-capable owner. The NomadNet profile proves authenticated start/poll,
+principal forwarding, hidden foreign IDs, replay/conflict/capacity outcomes,
+independent availability, and composition with the complete existing
+appliance dispatcher without acquiring its flash-capable owner. The session
+crate now exposes both server and public
 allocation-free `no_std` client typestates. Its tests and the live-pairing tests
 plus their independent Python vectors cover canonical hello/proof derivation,
 direction-separated record tags, downgrade/reflection/replay/generation/reset

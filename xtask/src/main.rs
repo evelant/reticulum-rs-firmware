@@ -1015,7 +1015,7 @@ fn graph_policy() -> ExitCode {
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
              the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model and submission-projector edges plus its reviewed test-only rand_core edge; the durable submission runtime uses only reviewed Embassy Sync, embedded-storage, rand_core, node-core, storage-actor, semantic-model, submission-projector and transport-neutral supervisor edges plus its journal-only test fixture; \
-             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus exact experimental-lxmf, experimental-rns-data and experimental-rns-inbox feature forwards; \
+             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus exact experimental-lxmf, experimental-nomad, experimental-rns-data and experimental-rns-inbox feature forwards; \
              the physical-storage HIL has only its reviewed raw-flash, journal, semantic-model, logging and ESP runtime edges and no radio/protocol stack; \
              the submission projector uses only reviewed node-core and storage-model \
              and test-only rand_core and RNS adapter edges"
@@ -6168,8 +6168,8 @@ fn forbidden_lxmf_durable_component_closure_category(
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-ba73ee426a3211951f5abb400c5728dd359272be#\
-ba73ee426a3211951f5abb400c5728dd359272be";
+dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08#\
+dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {
@@ -7220,7 +7220,10 @@ fn validate_device_api_adapter_dependency_boundary(
     let experimental_lxmf = features
         .get("experimental-lxmf")
         .and_then(serde_json::Value::as_array);
-    if features.len() != 4
+    let experimental_nomad = features
+        .get("experimental-nomad")
+        .and_then(serde_json::Value::as_array);
+    if features.len() != 5
         || default.is_none_or(|default| !default.is_empty())
         || experimental_rns_data.is_none_or(|experimental_rns_data| {
             experimental_rns_data.len() != 1
@@ -7236,9 +7239,13 @@ fn validate_device_api_adapter_dependency_boundary(
             experimental_lxmf.len() != 1
                 || experimental_lxmf[0].as_str() != Some("reticulum-device-api/experimental-lxmf")
         })
+        || experimental_nomad.is_none_or(|experimental_nomad| {
+            experimental_nomad.len() != 1
+                || experimental_nomad[0].as_str() != Some("reticulum-device-api/experimental-nomad")
+        })
     {
         return Err(
-            "reticulum-device-api-adapter must expose only default=[] plus exact experimental-lxmf, experimental-rns-data, and experimental-rns-inbox forwards"
+            "reticulum-device-api-adapter must expose only default=[] plus exact experimental-lxmf, experimental-nomad, experimental-rns-data, and experimental-rns-inbox forwards"
                 .to_owned(),
         );
     }
@@ -15106,6 +15113,11 @@ fn sample(layout: Layout) {
                 "experimental-lxmf",
                 serde_json::json!(["reticulum-device-api/unreviewed"]),
             ),
+            ("experimental-nomad", serde_json::json!([])),
+            (
+                "experimental-nomad",
+                serde_json::json!(["reticulum-device-api/unreviewed"]),
+            ),
         ] {
             let mut feature_drift = portable_layers_metadata_fixture(&root);
             feature_drift["packages"][PACKAGE_INDEX]["features"][feature] = value;
@@ -16569,6 +16581,7 @@ fn sample(layout: Layout) {
             "features": {
                 "default": [],
                 "experimental-lxmf": ["reticulum-device-api/experimental-lxmf"],
+                "experimental-nomad": ["reticulum-device-api/experimental-nomad"],
                 "experimental-rns-data": ["reticulum-device-api/experimental-rns-data"],
                 "experimental-rns-inbox": ["reticulum-device-api/experimental-rns-inbox"],
             },

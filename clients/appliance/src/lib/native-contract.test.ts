@@ -8,7 +8,7 @@ const EXPECTED_CONTRACT = {
   bridgeApiMajor: 1,
   bridgeApiMinor: 5,
   deviceApiMajor: 1,
-  deviceApiMinor: 5,
+  deviceApiMinor: 6,
   maxMessageBytes: 512,
   maxLxmfReadChunkBytes: 416,
   maxLxmfBasicTitleBytes: 295,
@@ -26,6 +26,6 @@ describe("native Rust bridge contract", () => {
         ...EXPECTED_CONTRACT,
         deviceApiMinor: EXPECTED_CONTRACT.deviceApiMinor + 1,
       }),
-    ).toThrow("deviceApiMinor: expected 5, observed 6");
+    ).toThrow("deviceApiMinor: expected 6, observed 7");
   });
 });

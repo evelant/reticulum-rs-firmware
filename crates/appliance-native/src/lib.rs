@@ -122,7 +122,7 @@ mod tests {
                 bridge_api_major: 1,
                 bridge_api_minor: 5,
                 device_api_major: 1,
-                device_api_minor: 5,
+                device_api_minor: 6,
                 max_message_bytes: 512,
                 max_lxmf_read_chunk_bytes: 416,
                 max_lxmf_basic_title_bytes: 295,

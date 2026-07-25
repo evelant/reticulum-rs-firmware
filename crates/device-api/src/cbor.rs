@@ -2,7 +2,11 @@
 
 use minicbor::{Decoder, Encoder, data::Type, encode::write::Cursor};
 
-#[cfg(any(feature = "experimental-rns-data", feature = "experimental-lxmf"))]
+#[cfg(any(
+    feature = "experimental-rns-data",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad"
+))]
 use crate::model::IdempotencyKey;
 use crate::model::{
     API_VERSION_MAJOR, ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability,
@@ -19,6 +23,14 @@ use crate::model::{
     MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_PEER_APP_DATA_BYTES, MAX_LXMF_READ_CHUNK_BYTES,
     OP_EXPERIMENTAL_LXMF_BASIC_SEND, OP_EXPERIMENTAL_LXMF_NEXT, OP_EXPERIMENTAL_LXMF_PEER_NEXT,
     OP_EXPERIMENTAL_LXMF_READ,
+};
+#[cfg(feature = "experimental-nomad")]
+use crate::model::{
+    MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES, NomadFetchFailure, NomadFetchId,
+    NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse, NomadFetchStartAccepted,
+    NomadFetchStartOutcome, NomadFetchStartRequest, NomadPage, NomadPagePath,
+    NomadRequestTimestampUnixMs, OP_EXPERIMENTAL_NOMAD_FETCH_POLL,
+    OP_EXPERIMENTAL_NOMAD_FETCH_START,
 };
 #[cfg(feature = "experimental-rns-inbox")]
 use crate::model::{
@@ -90,6 +102,12 @@ pub enum RequiredField {
     CapabilityExperimentalLxmfPeerDiscovery,
     /// Capability maximum nearby-peer application data at body key 15.
     CapabilityMaxLxmfPeerAppDataBytes,
+    /// Capability bounded NomadNet fetch availability at body key 16.
+    CapabilityExperimentalNomad,
+    /// Capability maximum NomadNet page path at body key 17.
+    CapabilityMaxNomadPagePathBytes,
+    /// Capability maximum NomadNet page body at body key 18.
+    CapabilityMaxNomadPageBytes,
     /// Identity summary primary destination hash at body key 0.
     IdentityPrimaryDestination,
     /// Optional identity summary `lxmf.delivery` destination hash at body key 1.
@@ -178,6 +196,28 @@ pub enum RequiredField {
     LxmfPeerObservedAge,
     /// Nonzero peer observation generation at peer key 8.
     LxmfPeerGeneration,
+    /// NomadNet fetch destination at start-request body key 0.
+    NomadFetchDestination,
+    /// NomadNet page path at start-request body key 1.
+    NomadFetchPath,
+    /// NomadNet request timestamp at start-request body key 2.
+    NomadFetchTimestampUnixMs,
+    /// NomadNet idempotency key at start-request body key 3.
+    NomadFetchIdempotencyKey,
+    /// Opaque NomadNet fetch identifier.
+    NomadFetchId,
+    /// Fresh-versus-replayed start outcome at response body key 1.
+    NomadFetchStartOutcome,
+    /// NomadNet poll response state at body key 0.
+    NomadFetchState,
+    /// State-specific NomadNet poll response value at body key 1.
+    NomadFetchValue,
+    /// Non-terminal NomadNet fetch phase at body key 1.
+    NomadFetchPhase,
+    /// Ready NomadNet Micron page at body key 1.
+    NomadFetchPage,
+    /// Terminal NomadNet fetch failure at body key 1.
+    NomadFetchFailure,
     /// Submission state at body key 1.
     SubmissionState,
     /// State-specific prepared packet length at body key 2.
@@ -284,6 +324,26 @@ pub enum DecodeError {
         /// Accepted byte count.
         max: usize,
     },
+    /// A NomadNet page path exceeded its fixed request limit.
+    NomadPagePathTooLarge {
+        /// Supplied byte count.
+        actual: usize,
+        /// Accepted byte count.
+        max: usize,
+    },
+    /// A NomadNet page path was empty, relative, or contained a NUL byte.
+    InvalidNomadPagePath,
+    /// A ready NomadNet page exceeded its fixed response owner.
+    NomadPageTooLarge {
+        /// Supplied byte count.
+        actual: usize,
+        /// Accepted byte count.
+        max: usize,
+    },
+    /// A ready NomadNet page was not valid UTF-8.
+    InvalidNomadPageUtf8,
+    /// A NomadNet fetch identifier contained the reserved zero sequence.
+    InvalidNomadFetchId,
     /// An LXMF summary contained a semantically impossible value combination.
     InvalidLxmfMessageSummary,
     /// An LXMF read response did not fit its declared complete message boundary.
@@ -472,6 +532,24 @@ pub fn encode_request(
                 put!(encoder.u64(after.after_generation()));
             }
         }
+        #[cfg(feature = "experimental-nomad")]
+        DeviceRequest::NomadFetchStart(request) => {
+            put!(encoder.map(4));
+            put!(encoder.u8(0));
+            put!(encoder.bytes(&request.destination().0));
+            put!(encoder.u8(1));
+            put!(encoder.str(request.path().as_str()));
+            put!(encoder.u8(2));
+            put!(encoder.u64(request.timestamp_unix_ms().get()));
+            put!(encoder.u8(3));
+            put!(encoder.bytes(&request.idempotency_key().0));
+        }
+        #[cfg(feature = "experimental-nomad")]
+        DeviceRequest::NomadFetchPoll(request) => {
+            put!(encoder.map(1));
+            put!(encoder.u8(0));
+            put!(encoder.bytes(request.id.as_bytes()));
+        }
         #[cfg(feature = "experimental-rns-data")]
         DeviceRequest::SubmitRnsData {
             destination,
@@ -594,6 +672,14 @@ pub fn encode_response(
         DeviceResponse::LxmfPeerNext(page) => {
             encode_lxmf_peer_discovery_page(&mut encoder, &page)?;
         }
+        #[cfg(feature = "experimental-nomad")]
+        DeviceResponse::NomadFetchStartAccepted(accepted) => {
+            encode_nomad_fetch_start_accepted(&mut encoder, accepted)?;
+        }
+        #[cfg(feature = "experimental-nomad")]
+        DeviceResponse::NomadFetchPoll(response) => {
+            encode_nomad_fetch_poll(&mut encoder, &response)?;
+        }
         #[cfg(feature = "experimental-rns-data")]
         DeviceResponse::SubmitRnsDataAccepted(accepted) => {
             encode_submission_accepted(&mut encoder, accepted)?;
@@ -668,6 +754,14 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
         OP_EXPERIMENTAL_LXMF_PEER_NEXT => {
             DeviceResponse::LxmfPeerNext(decode_lxmf_peer_discovery_page(body)?)
         }
+        #[cfg(feature = "experimental-nomad")]
+        OP_EXPERIMENTAL_NOMAD_FETCH_START => {
+            DeviceResponse::NomadFetchStartAccepted(decode_nomad_fetch_start_accepted(body)?)
+        }
+        #[cfg(feature = "experimental-nomad")]
+        OP_EXPERIMENTAL_NOMAD_FETCH_POLL => {
+            DeviceResponse::NomadFetchPoll(decode_nomad_fetch_poll(body)?)
+        }
         #[cfg(feature = "experimental-rns-data")]
         OP_EXPERIMENTAL_SUBMIT_RNS_DATA => {
             DeviceResponse::SubmitRnsDataAccepted(decode_submission_accepted(body)?)
@@ -731,7 +825,7 @@ fn encode_capabilities(
     encoder: &mut SliceEncoder<'_>,
     capabilities: CapabilitySnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(16));
+    put!(encoder.map(19));
     put!(encoder.u8(0));
     encode_version(encoder, capabilities.api_version)?;
     put!(encoder.u8(1));
@@ -764,6 +858,12 @@ fn encode_capabilities(
     put!(encoder.u8(capabilities.experimental_lxmf_peer_discovery.wire_code(),));
     put!(encoder.u8(15));
     put!(encoder.u16(capabilities.max_lxmf_peer_app_data_bytes));
+    put!(encoder.u8(16));
+    put!(encoder.u8(capabilities.experimental_nomad.wire_code()));
+    put!(encoder.u8(17));
+    put!(encoder.u16(capabilities.max_nomad_page_path_bytes));
+    put!(encoder.u8(18));
+    put!(encoder.u16(capabilities.max_nomad_page_bytes));
     Ok(())
 }
 
@@ -934,6 +1034,42 @@ fn encode_lxmf_discovered_peer(
     put!(encoder.u64(peer.observed_age_ms()));
     put!(encoder.u8(8));
     put!(encoder.u64(peer.generation().get()));
+    Ok(())
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn encode_nomad_fetch_start_accepted(
+    encoder: &mut SliceEncoder<'_>,
+    accepted: NomadFetchStartAccepted,
+) -> Result<(), EncodeError> {
+    put!(encoder.map(2));
+    put!(encoder.u8(0));
+    put!(encoder.bytes(accepted.id.as_bytes()));
+    put!(encoder.u8(1));
+    put!(encoder.u8(accepted.outcome.wire_code()));
+    Ok(())
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn encode_nomad_fetch_poll(
+    encoder: &mut SliceEncoder<'_>,
+    response: &NomadFetchPollResponse,
+) -> Result<(), EncodeError> {
+    put!(encoder.map(2));
+    put!(encoder.u8(0));
+    put!(encoder.u8(response.wire_code()));
+    put!(encoder.u8(1));
+    match response {
+        NomadFetchPollResponse::Pending(phase) => {
+            put!(encoder.u8(phase.wire_code()));
+        }
+        NomadFetchPollResponse::Ready(page) => {
+            put!(encoder.bytes(page.as_bytes()));
+        }
+        NomadFetchPollResponse::Failed(failure) => {
+            put!(encoder.u8(failure.wire_code()));
+        }
+    }
     Ok(())
 }
 
@@ -1189,6 +1325,10 @@ fn decode_request_body<'a>(
         OP_EXPERIMENTAL_LXMF_BASIC_SEND => decode_lxmf_basic_send_request(body),
         #[cfg(feature = "experimental-lxmf")]
         OP_EXPERIMENTAL_LXMF_PEER_NEXT => decode_lxmf_peer_next_request(body),
+        #[cfg(feature = "experimental-nomad")]
+        OP_EXPERIMENTAL_NOMAD_FETCH_START => decode_nomad_fetch_start_request(body),
+        #[cfg(feature = "experimental-nomad")]
+        OP_EXPERIMENTAL_NOMAD_FETCH_POLL => decode_nomad_fetch_poll_request(body),
         other => Err(DecodeError::UnsupportedOperation(other)),
     }
 }
@@ -1409,6 +1549,93 @@ fn decode_lxmf_peer_next_request(body: &[u8]) -> Result<DeviceRequest<'_>, Decod
     Ok(DeviceRequest::LxmfPeerNext { after })
 }
 
+#[cfg(feature = "experimental-nomad")]
+fn decode_nomad_fetch_start_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut destination = None;
+    let mut path = None;
+    let mut timestamp = None;
+    let mut idempotency_key = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(destination.is_some(), RequiredField::NomadFetchDestination)?;
+                destination = Some(DestinationHash(decode_fixed_bytes::<16>(
+                    &mut decoder,
+                    RequiredField::NomadFetchDestination,
+                )?));
+            }
+            1 => {
+                reject_duplicate(path.is_some(), RequiredField::NomadFetchPath)?;
+                let value = decoder.str().map_err(|_| DecodeError::Malformed)?;
+                path = Some(NomadPagePath::new(value).map_err(|error| match error {
+                    crate::InvalidNomadPagePath::Invalid => DecodeError::InvalidNomadPagePath,
+                    crate::InvalidNomadPagePath::TooLong { actual } => {
+                        DecodeError::NomadPagePathTooLarge {
+                            actual,
+                            max: MAX_NOMAD_PAGE_PATH_BYTES,
+                        }
+                    }
+                })?);
+            }
+            2 => {
+                reject_duplicate(
+                    timestamp.is_some(),
+                    RequiredField::NomadFetchTimestampUnixMs,
+                )?;
+                let value = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+                timestamp = Some(NomadRequestTimestampUnixMs::new(value).map_err(|_| {
+                    DecodeError::InvalidValue {
+                        field: RequiredField::NomadFetchTimestampUnixMs,
+                        value,
+                    }
+                })?);
+            }
+            3 => {
+                reject_duplicate(
+                    idempotency_key.is_some(),
+                    RequiredField::NomadFetchIdempotencyKey,
+                )?;
+                idempotency_key = Some(IdempotencyKey(decode_fixed_bytes::<16>(
+                    &mut decoder,
+                    RequiredField::NomadFetchIdempotencyKey,
+                )?));
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    Ok(DeviceRequest::NomadFetchStart(NomadFetchStartRequest::new(
+        require(destination, RequiredField::NomadFetchDestination)?,
+        require(path, RequiredField::NomadFetchPath)?,
+        require(timestamp, RequiredField::NomadFetchTimestampUnixMs)?,
+        require(idempotency_key, RequiredField::NomadFetchIdempotencyKey)?,
+    )))
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn decode_nomad_fetch_poll_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut id = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(id.is_some(), RequiredField::NomadFetchId)?;
+                id = Some(decode_nomad_fetch_id(&mut decoder)?);
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    Ok(DeviceRequest::NomadFetchPoll(NomadFetchPollRequest {
+        id: require(id, RequiredField::NomadFetchId)?,
+    }))
+}
+
 fn decode_capabilities_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -1521,6 +1748,9 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
     let mut max_lxmf_basic_content = None;
     let mut experimental_lxmf_peer_discovery = None;
     let mut max_lxmf_peer_app_data = None;
+    let mut experimental_nomad = None;
+    let mut max_nomad_page_path = None;
+    let mut max_nomad_page = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -1647,6 +1877,31 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                 )?;
                 max_lxmf_peer_app_data = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
             }
+            16 => {
+                reject_duplicate(
+                    experimental_nomad.is_some(),
+                    RequiredField::CapabilityExperimentalNomad,
+                )?;
+                let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+                experimental_nomad = Some(decode_capability_availability(
+                    value,
+                    RequiredField::CapabilityExperimentalNomad,
+                )?);
+            }
+            17 => {
+                reject_duplicate(
+                    max_nomad_page_path.is_some(),
+                    RequiredField::CapabilityMaxNomadPagePathBytes,
+                )?;
+                max_nomad_page_path = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+            }
+            18 => {
+                reject_duplicate(
+                    max_nomad_page.is_some(),
+                    RequiredField::CapabilityMaxNomadPageBytes,
+                )?;
+                max_nomad_page = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+            }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
@@ -1679,6 +1934,9 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
         experimental_lxmf_peer_discovery: experimental_lxmf_peer_discovery
             .unwrap_or(CapabilityAvailability::Unavailable),
         max_lxmf_peer_app_data_bytes: max_lxmf_peer_app_data.unwrap_or(0),
+        experimental_nomad: experimental_nomad.unwrap_or(CapabilityAvailability::Unavailable),
+        max_nomad_page_path_bytes: max_nomad_page_path.unwrap_or(0),
+        max_nomad_page_bytes: max_nomad_page.unwrap_or(0),
     })
 }
 
@@ -2229,6 +2487,131 @@ fn decode_lxmf_peer_generation(
     LxmfPeerGeneration::new(value).map_err(|_| DecodeError::InvalidValue { field, value })
 }
 
+#[cfg(feature = "experimental-nomad")]
+fn decode_nomad_fetch_start_accepted(body: &[u8]) -> Result<NomadFetchStartAccepted, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut id = None;
+    let mut outcome = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(id.is_some(), RequiredField::NomadFetchId)?;
+                id = Some(decode_nomad_fetch_id(&mut decoder)?);
+            }
+            1 => {
+                reject_duplicate(outcome.is_some(), RequiredField::NomadFetchStartOutcome)?;
+                let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+                outcome = Some(match value {
+                    0 => NomadFetchStartOutcome::Accepted,
+                    1 => NomadFetchStartOutcome::Replayed,
+                    other => {
+                        return Err(DecodeError::InvalidValue {
+                            field: RequiredField::NomadFetchStartOutcome,
+                            value: u64::from(other),
+                        });
+                    }
+                });
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    Ok(NomadFetchStartAccepted {
+        id: require(id, RequiredField::NomadFetchId)?,
+        outcome: require(outcome, RequiredField::NomadFetchStartOutcome)?,
+    })
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn decode_nomad_fetch_poll(body: &[u8]) -> Result<NomadFetchPollResponse, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut state = None;
+    let mut value = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(state.is_some(), RequiredField::NomadFetchState)?;
+                state = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+            }
+            1 => {
+                reject_duplicate(value.is_some(), RequiredField::NomadFetchValue)?;
+                value = Some(capture_body(body, &mut decoder)?);
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    let state = require(state, RequiredField::NomadFetchState)?;
+    let value = require(value, RequiredField::NomadFetchValue)?;
+    match state {
+        0 => Ok(NomadFetchPollResponse::Pending(decode_nomad_fetch_phase(
+            value,
+        )?)),
+        1 => {
+            let mut decoder = Decoder::new(value);
+            let bytes = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
+            finish_body(&decoder, value)?;
+            let page = NomadPage::new(bytes).map_err(|error| match error {
+                crate::InvalidNomadPage::TooLarge { actual } => DecodeError::NomadPageTooLarge {
+                    actual,
+                    max: MAX_NOMAD_PAGE_BYTES,
+                },
+                crate::InvalidNomadPage::InvalidUtf8 => DecodeError::InvalidNomadPageUtf8,
+            })?;
+            Ok(NomadFetchPollResponse::Ready(page))
+        }
+        2 => Ok(NomadFetchPollResponse::Failed(decode_nomad_fetch_failure(
+            value,
+        )?)),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::NomadFetchState,
+            value: u64::from(other),
+        }),
+    }
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn decode_nomad_fetch_phase(body: &[u8]) -> Result<NomadFetchPhase, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+    finish_body(&decoder, body)?;
+    match value {
+        0 => Ok(NomadFetchPhase::PathLookup),
+        1 => Ok(NomadFetchPhase::LinkEstablishment),
+        2 => Ok(NomadFetchPhase::RequestPreparation),
+        3 => Ok(NomadFetchPhase::AwaitingDispatchConfirmation),
+        4 => Ok(NomadFetchPhase::AwaitingResponse),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::NomadFetchPhase,
+            value: u64::from(other),
+        }),
+    }
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn decode_nomad_fetch_failure(body: &[u8]) -> Result<NomadFetchFailure, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+    finish_body(&decoder, body)?;
+    match value {
+        0 => Ok(NomadFetchFailure::NoPath),
+        1 => Ok(NomadFetchFailure::Link),
+        2 => Ok(NomadFetchFailure::Request),
+        3 => Ok(NomadFetchFailure::Timeout),
+        4 => Ok(NomadFetchFailure::PageTooLarge),
+        5 => Ok(NomadFetchFailure::InvalidUtf8),
+        6 => Ok(NomadFetchFailure::Internal),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::NomadFetchFailure,
+            value: u64::from(other),
+        }),
+    }
+}
+
 fn decode_submission_status(body: &[u8]) -> Result<SubmissionStatus, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -2337,6 +2720,15 @@ fn decode_error(body: &[u8]) -> Result<ApiErrorResponse, DecodeError> {
         code: require(code, RequiredField::ErrorCode)?,
         operation,
     })
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn decode_nomad_fetch_id(decoder: &mut Decoder<'_>) -> Result<NomadFetchId, DecodeError> {
+    NomadFetchId::from_bytes(decode_fixed_bytes::<16>(
+        decoder,
+        RequiredField::NomadFetchId,
+    )?)
+    .map_err(|_| DecodeError::InvalidNomadFetchId)
 }
 
 fn decode_fixed_bytes<const N: usize>(

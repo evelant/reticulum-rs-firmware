@@ -126,9 +126,10 @@ ordinary Link-DATA receipts and destination proof-policy parity. A later
 bounded powered proof on `2d07818` forced ordinary Link DATA, observed the
 durable receiver commit and returned proof, and reached sender `Delivered`. The
 `a443173` descendant adds responder-Handshake timeout reclamation. The current
-`ba73ee4` descendant additionally adds canonical MessagePack request values,
-separate prepared-versus-confirmed ownership whose timeout begins at exact
-first dispatch, and lossless inbound encoded-value events. Those new lifecycle
+`dfcaa36` descendant contains the ordered `338251b` canonical-value,
+`354b875` first-dispatch-timeout, and `ba73ee4` lossless encoded-value changes,
+then adds phase-agnostic exact request-dispatch reclaim keyed by request and
+Link IDs with prepared-versus-confirmed native-phase reporting. Those new lifecycle
 boundaries remain separate from the
 historical capture here and do not claim full NomadNet or Resource support.
 These are instrumented,
@@ -409,8 +410,10 @@ The reviewed upstream base had a sustained outbound-DATA blocker:
 `NodeCore::build_data_packet()` could release a packet after silently failing
 to retain its receipt, and proof/timeout terminal state was not reclaimed
 through a caller-reservable boundary. The current project pin,
-`ba73ee426a3211951f5abb400c5728dd359272be`, descends through
-`338251b285a2447beb10d390d3e7f53694a1a916` and
+`dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08`, descends through
+`ba73ee426a3211951f5abb400c5728dd359272be`,
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`,
+`338251b285a2447beb10d390d3e7f53694a1a916`, and
 `a443173b0829c2637ce23531a8cde15fdfec185e`, then
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` from
 `90570cafc812b3025011cb690ec74a27f287cb3f` and retains that generic lifecycle

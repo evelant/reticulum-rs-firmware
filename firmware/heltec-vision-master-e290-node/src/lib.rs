@@ -24,6 +24,7 @@ pub mod live_pairing_handoff;
 pub mod live_pairing_node;
 pub mod lxmf_delivery;
 pub mod nomad_coordinator;
+pub mod nomad_runtime;
 pub mod pairing_control_handoff;
 pub mod pairing_control_mapping;
 pub mod partition_contract;
@@ -293,14 +294,10 @@ mod tests {
         assert_eq!(main.matches("try_new_uninit_in(").count(), 1);
         assert!(main.contains("Box::leak(runtime)"));
         assert!(main.contains("Some(Box::leak(runtime))"));
-        assert!(
-            main.contains("Box::try_new_in(node_task::LxmfVolatileState::new(), ExternalMemory)")
-        );
-        assert!(
-            main.contains(
-                "let lxmf_volatile: &'static mut node_task::LxmfVolatileState = Box::leak"
-            )
-        );
+        assert!(main.contains("node_task::ApplicationVolatileState::new()"));
+        assert!(main.contains(
+            "let application_volatile: &'static mut node_task::ApplicationVolatileState"
+        ));
         assert!(main.contains("let mut delayed_proof_storage = Vec::new_in(ExternalMemory)"));
         assert!(main.contains(".try_reserve_exact(config::LXMF_DELAYED_PROOF_SLOTS)"));
         assert!(main.contains("delayed_proof_storage.len() != config::LXMF_DELAYED_PROOF_SLOTS"));
@@ -329,15 +326,25 @@ mod tests {
             .expect("successful direct replay must convert the initialized allocation");
         assert!(direct_mount < typed_box);
         assert!(main.contains("DelayedProofOwner::new(delayed_proof_storage)"));
-        assert!(main.contains("lxmf_volatile_placement=external-psram"));
+        assert!(main.contains("application_volatile_placement=external-psram"));
         assert!(main.contains("lxmf_delayed_proof_placement=external-psram"));
 
         let node_task = include_str!("node_task.rs");
-        assert!(node_task.contains("pub(crate) struct LxmfVolatileState"));
+        assert!(node_task.contains("pub(crate) struct ApplicationVolatileState"));
         assert!(node_task.contains("retries: LxmfRetrySet"));
         assert!(node_task.contains("proof_holder: LxmfProofActionsHolder"));
         assert!(node_task.contains("authority_faults: LxmfAuthorityFault"));
-        assert!(node_task.contains("lxmf_volatile: &'static mut LxmfVolatileState"));
+        assert!(node_task.contains("nomad: ProductNomadRuntimeState"));
+        assert!(node_task.contains("application_volatile: &'static mut ApplicationVolatileState"));
+        assert!(node_task.contains("enum OrdinaryProtocolDispatch"));
+        assert!(node_task.contains("OrdinaryProtocolDispatch::Nomad"));
+        assert!(node_task.contains("NomadEventObservation::Applied"));
+        assert!(node_task.contains("5 => {"));
+        assert!(node_task.contains("let nomad_progressed = drive_one_nomad_command("));
+        assert!(
+            node_task.contains("fresh_nomad_turn_armed = config::next_fresh_nomad_turn_armed(")
+        );
+        assert!(node_task.contains("ApplicationEvent::RequestValueReceived { .. } =>"));
         assert!(node_task.contains("ApplicationEvent::LinkData {"));
         assert!(node_task.contains("*context == APPLICATION_LINK_CONTEXT_NONE"));
         assert!(node_task.contains("binding.role() == ApplicationLinkRole::Responder"));
@@ -848,7 +855,7 @@ mod tests {
         assert!(session.contains("SessionEpochAllocator"));
         assert!(session.contains("one handshake attempt per accepted connection"));
         assert!(session.contains("one authenticated request"));
-        assert_eq!(config::NODE_FAIR_LANES, 6);
+        assert_eq!(config::NODE_FAIR_LANES, 7);
     }
 
     #[test]
@@ -921,7 +928,7 @@ mod tests {
             .expect("one rejected interface hop must have an explicit nonterminal policy");
         assert!(rejected.contains("status=HOP-REJECTED"));
         assert!(rejected.contains("await-next-route-or-terminal-return"));
-        assert!(!rejected.contains("pending_submission_protocol.take()"));
+        assert!(!rejected.contains("pending_protocol_dispatch.take()"));
         assert!(!rejected.contains("disable_submission_for_path_fault("));
 
         let returned = source
@@ -929,7 +936,7 @@ mod tests {
             .nth(1)
             .and_then(|tail| tail.split("OrdinaryRouterStep::PendingJobExpired").next())
             .expect("route exhaustion must have an explicit terminal policy");
-        assert!(returned.contains("pending_submission_protocol.take()"));
+        assert!(returned.contains("pending_protocol_dispatch.take()"));
         assert!(returned.contains("submission-protocol-routes-exhausted"));
         assert!(returned.contains("disable_submission_for_path_fault("));
     }

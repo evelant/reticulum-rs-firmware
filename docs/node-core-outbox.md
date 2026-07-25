@@ -10,18 +10,23 @@ DATA/LXMF submission, client delivery, and full powered E290 qualification of
 the product image remain open.
 The permanent image's bounded source-`96e38aa` boot/interface/ordinary-TX smoke
 has passed, without controlled peer RX or DATA.
-**Rete pin:** `ba73ee426a3211951f5abb400c5728dd359272be` on
+**Rete pin:** `dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08` on
 `codex/responder-handshake-reclaim`, descending from
-`338251b285a2447beb10d390d3e7f53694a1a916` and
+`ba73ee426a3211951f5abb400c5728dd359272be`,
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`,
+`338251b285a2447beb10d390d3e7f53694a1a916`, and
 `a443173b0829c2637ce23531a8cde15fdfec185e`, then from
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
 `codex/link-data-receipts`, which descends from tagged predecessor
 `90570cafc812b3025011cb690ec74a27f287cb3f`
 (`firmware-pin-90570ca`). The current revision has no designated durable tag.
-It adds bounded canonical MessagePack request values, including anonymous
-`nil`, and separates prepared request ownership from confirmed-dispatch
-timeout ownership. It also preserves validated inbound encoded request values
-and their original timestamp. The `a443173` predecessor adds responder-Handshake timeout
+The direct-request sequence adds bounded canonical MessagePack values,
+including anonymous `nil`, at `338251b`; prepared-versus-confirmed dispatch and
+first-dispatch timeout ownership at `354b875`; validated inbound encoded values
+and their original timestamp at `ba73ee4`; and phase-agnostic exact
+request-dispatch reclaim keyed by request and Link IDs with prior native-phase
+reporting at `dfcaa36`. The
+`a443173` predecessor adds responder-Handshake timeout
 reclamation to ordinary Link-DATA receipts and destination proof-policy parity.
 These request primitives are not full NomadNet or Resource support.
 

@@ -12,6 +12,7 @@ default = []
 experimental-rns-data = ["reticulum-device-api/experimental-rns-data"]
 experimental-rns-inbox = ["reticulum-device-api/experimental-rns-inbox"]
 experimental-lxmf = ["reticulum-device-api/experimental-lxmf"]
+experimental-nomad = ["reticulum-device-api/experimental-nomad"]
 
 [dependencies]
 reticulum-device-api = { path = "../device-api", default-features = false }

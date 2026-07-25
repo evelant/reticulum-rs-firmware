@@ -1,5 +1,7 @@
 extern crate std;
 
+#[cfg(feature = "experimental-nomad")]
+use std::string::String;
 use std::{
     ops::{Deref, DerefMut},
     vec,
@@ -342,6 +344,80 @@ impl SubmissionPort for UnavailablePort {
     }
 }
 
+#[cfg(feature = "experimental-nomad")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedNomadStart {
+    principal: api::PrincipalId,
+    destination: api::DestinationHash,
+    path: String,
+    timestamp_unix_ms: u64,
+    idempotency_key: api::IdempotencyKey,
+}
+
+#[cfg(feature = "experimental-nomad")]
+struct FakeNomadPort {
+    availability: CapabilityAvailability,
+    start_result: Result<NomadFetchStartDisposition, NomadFetchPortError>,
+    poll_result: Result<Option<api::NomadFetchPollResponse>, NomadFetchPortError>,
+    availability_calls: usize,
+    start_calls: usize,
+    poll_calls: usize,
+    observed_start: Option<ObservedNomadStart>,
+    observed_poll: Option<(api::PrincipalId, api::NomadFetchId)>,
+}
+
+#[cfg(feature = "experimental-nomad")]
+impl FakeNomadPort {
+    fn available(id: api::NomadFetchId) -> Self {
+        Self {
+            availability: CapabilityAvailability::Available,
+            start_result: Ok(NomadFetchStartDisposition::Accepted(id)),
+            poll_result: Ok(Some(api::NomadFetchPollResponse::Pending(
+                api::NomadFetchPhase::AwaitingResponse,
+            ))),
+            availability_calls: 0,
+            start_calls: 0,
+            poll_calls: 0,
+            observed_start: None,
+            observed_poll: None,
+        }
+    }
+}
+
+#[cfg(feature = "experimental-nomad")]
+impl NomadFetchPort for FakeNomadPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        self.availability_calls += 1;
+        self.availability
+    }
+
+    fn start(
+        &mut self,
+        principal: api::PrincipalId,
+        request: api::NomadFetchStartRequest<'_>,
+    ) -> Result<NomadFetchStartDisposition, NomadFetchPortError> {
+        self.start_calls += 1;
+        self.observed_start = Some(ObservedNomadStart {
+            principal,
+            destination: request.destination(),
+            path: request.path().as_str().into(),
+            timestamp_unix_ms: request.timestamp_unix_ms().get(),
+            idempotency_key: request.idempotency_key(),
+        });
+        self.start_result
+    }
+
+    fn poll(
+        &mut self,
+        principal: api::PrincipalId,
+        id: api::NomadFetchId,
+    ) -> Result<Option<api::NomadFetchPollResponse>, NomadFetchPortError> {
+        self.poll_calls += 1;
+        self.observed_poll = Some((principal, id));
+        self.poll_result
+    }
+}
+
 #[cfg(feature = "experimental-rns-inbox")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FakeInboxCalls {
@@ -534,6 +610,27 @@ impl PeerDiscoveryPort for FakeLxmfOnlyPort {
             after.is_some_and(|cursor| cursor.incarnation() != incarnation),
             Some(peer),
         ))
+    }
+}
+
+#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+impl InboundMailboxPort for FakeLxmfOnlyPort {
+    fn availability(&mut self) -> CapabilityAvailability {
+        CapabilityAvailability::Available
+    }
+
+    fn status(&mut self) -> Result<api::RnsInboxStatus, InboundMailboxPortError> {
+        Ok(api::RnsInboxStatus {
+            depth: 0,
+            capacity: 1,
+            dropped_since_boot: 0,
+            max_payload_bytes: api::MAX_RNS_INBOX_PAYLOAD_BYTES as u16,
+            durable: false,
+        })
+    }
+
+    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
+        Ok(None)
     }
 }
 
@@ -770,6 +867,254 @@ fn error_code(response: DeviceResponse) -> ApiErrorCode {
         DeviceResponse::Error(error) => error.code,
         other => panic!("expected API error, received {other:?}"),
     }
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn nomad_id() -> api::NomadFetchId {
+    api::NomadFetchId::new([0xa5; 8], 7).unwrap()
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn nomad_start_request() -> api::NomadFetchStartRequest<'static> {
+    api::NomadFetchStartRequest::new(
+        api::DestinationHash([0x22; 16]),
+        api::NomadPagePath::new("/status").unwrap(),
+        api::NomadRequestTimestampUnixMs::new(1_700_000_000_123).unwrap(),
+        api::IdempotencyKey([0x33; 16]),
+    )
+}
+
+#[cfg(feature = "experimental-nomad")]
+#[test]
+fn nomad_dispatch_advertises_independent_runtime_limits_and_isolates_public_reads() {
+    let mut submission = UnavailablePort::default();
+    let mut nomad = FakeNomadPort::available(nomad_id());
+    nomad.availability = CapabilityAvailability::Disabled;
+    let response = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(200, DeviceRequest::SystemCapabilities),
+    );
+    assert_eq!(
+        response.response,
+        DeviceResponse::SystemCapabilities(CapabilitySnapshot::for_dispatch_with_nomad(
+            false,
+            CapabilityAvailability::Disabled
+        ))
+    );
+    assert_eq!(
+        submission.availability_calls,
+        usize::from(cfg!(feature = "experimental-rns-data"))
+    );
+    assert_eq!(nomad.availability_calls, 1);
+    assert_eq!(nomad.start_calls, 0);
+    assert_eq!(nomad.poll_calls, 0);
+
+    let identity = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(201, DeviceRequest::IdentitySummary),
+    );
+    assert_eq!(
+        identity.response,
+        DeviceResponse::IdentitySummary(identity_summary())
+    );
+    assert_eq!(
+        submission.availability_calls,
+        usize::from(cfg!(feature = "experimental-rns-data"))
+    );
+    assert_eq!(nomad.availability_calls, 1);
+}
+
+#[cfg(feature = "experimental-nomad")]
+#[test]
+fn nomad_start_is_authenticated_principal_scoped_and_distinguishes_replay() {
+    let request = DeviceRequest::NomadFetchStart(nomad_start_request());
+    let mut submission = UnavailablePort::default();
+    let mut nomad = FakeNomadPort::available(nomad_id());
+    let unauthenticated = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(202, request),
+    );
+    assert_eq!(
+        error_code(unauthenticated.response),
+        ApiErrorCode::AuthenticationRequired
+    );
+    assert_eq!(nomad.availability_calls, 0);
+    assert_eq!(nomad.start_calls, 0);
+
+    let accepted = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(7, Permissions::NONE),
+        envelope(203, request),
+    );
+    assert_eq!(
+        accepted.response,
+        DeviceResponse::NomadFetchStartAccepted(api::NomadFetchStartAccepted {
+            id: nomad_id(),
+            outcome: api::NomadFetchStartOutcome::Accepted,
+        })
+    );
+    assert_eq!(
+        nomad.observed_start,
+        Some(ObservedNomadStart {
+            principal: api::PrincipalId([7; 16]),
+            destination: api::DestinationHash([0x22; 16]),
+            path: "/status".into(),
+            timestamp_unix_ms: 1_700_000_000_123,
+            idempotency_key: api::IdempotencyKey([0x33; 16]),
+        })
+    );
+
+    nomad.start_result = Ok(NomadFetchStartDisposition::Replay(nomad_id()));
+    let replayed = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(7, Permissions::NONE),
+        envelope(204, request),
+    );
+    assert_eq!(
+        replayed.response,
+        DeviceResponse::NomadFetchStartAccepted(api::NomadFetchStartAccepted {
+            id: nomad_id(),
+            outcome: api::NomadFetchStartOutcome::Replayed,
+        })
+    );
+
+    nomad.start_result = Ok(NomadFetchStartDisposition::IdempotencyConflict);
+    let conflict = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(7, Permissions::NONE),
+        envelope(205, request),
+    );
+    assert_eq!(
+        error_code(conflict.response),
+        ApiErrorCode::IdempotencyConflict
+    );
+
+    nomad.start_result = Ok(NomadFetchStartDisposition::CapacityExhausted);
+    let full = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(7, Permissions::NONE),
+        envelope(206, request),
+    );
+    assert_eq!(error_code(full.response), ApiErrorCode::CapacityExhausted);
+}
+
+#[cfg(feature = "experimental-nomad")]
+#[test]
+fn nomad_poll_hides_foreign_ids_and_maps_port_failures() {
+    let mut submission = UnavailablePort::default();
+    let mut nomad = FakeNomadPort::available(nomad_id());
+    let request = DeviceRequest::NomadFetchPoll(api::NomadFetchPollRequest { id: nomad_id() });
+    let pending = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(9, Permissions::NONE),
+        envelope(207, request),
+    );
+    assert_eq!(
+        pending.response,
+        DeviceResponse::NomadFetchPoll(api::NomadFetchPollResponse::Pending(
+            api::NomadFetchPhase::AwaitingResponse
+        ))
+    );
+    assert_eq!(
+        nomad.observed_poll,
+        Some((api::PrincipalId([9; 16]), nomad_id()))
+    );
+
+    nomad.poll_result = Ok(None);
+    let missing = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(9, Permissions::NONE),
+        envelope(208, request),
+    );
+    assert_eq!(error_code(missing.response), ApiErrorCode::NotFound);
+
+    nomad.poll_result = Err(NomadFetchPortError::InvalidRequest);
+    let invalid = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(9, Permissions::NONE),
+        envelope(209, request),
+    );
+    assert_eq!(error_code(invalid.response), ApiErrorCode::InvalidRequest);
+
+    nomad.poll_result = Err(NomadFetchPortError::Backend);
+    let failed = super::dispatch_with_nomad(
+        &mut submission,
+        &mut nomad,
+        identity_summary(),
+        &authenticated(9, Permissions::NONE),
+        envelope(210, request),
+    );
+    assert_eq!(error_code(failed.response), ApiErrorCode::Internal);
+}
+
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad"
+))]
+#[test]
+fn full_appliance_dispatch_composes_existing_capabilities_with_nomad() {
+    let mut appliance = FakeLxmfOnlyPort::default();
+    let mut nomad = FakeNomadPort::available(nomad_id());
+    let response = super::dispatch_with_inbox_lxmf_peer_discovery_and_nomad(
+        &mut appliance,
+        &mut nomad,
+        identity_summary(),
+        &DispatchContext::UNAUTHENTICATED,
+        envelope(211, DeviceRequest::SystemCapabilities),
+    );
+    let expected = CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+        cfg!(feature = "experimental-rns-data"),
+        CapabilityAvailability::Available,
+        CapabilityAvailability::Available,
+        CapabilityAvailability::Available,
+        CapabilityAvailability::Available,
+        64,
+    )
+    .with_dispatch_nomad(CapabilityAvailability::Available);
+    assert_eq!(
+        response.response,
+        DeviceResponse::SystemCapabilities(expected)
+    );
+    assert_eq!(
+        expected.experimental_lxmf_peer_discovery(),
+        CapabilityAvailability::Available
+    );
+    assert_eq!(
+        expected.experimental_nomad(),
+        CapabilityAvailability::Available
+    );
+    assert_eq!(
+        expected.max_nomad_page_path_bytes(),
+        api::MAX_NOMAD_PAGE_PATH_BYTES as u16
+    );
+    assert_eq!(
+        expected.max_nomad_page_bytes(),
+        api::MAX_NOMAD_PAGE_BYTES as u16
+    );
 }
 
 fn durable_candidate(principal: u8, key: u8, payload: &[u8]) -> AcceptanceCandidate {

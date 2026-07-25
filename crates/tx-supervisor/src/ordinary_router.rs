@@ -805,6 +805,41 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
         self.rejected_actions.take()
     }
 
+    /// Whether one retained ordinary envelope still contains application events.
+    ///
+    /// This spans every pre-consumer ownership phase so a product timeout cannot
+    /// overtake a native terminal event merely because that event has not yet
+    /// reached the caller-provided application-event slots.
+    pub fn application_events_pending(&self) -> bool {
+        let has_events = |actions: &NodeActions| !actions.events.is_empty();
+        self.pending_actions
+            .as_ref()
+            .is_some_and(|(actions, _)| has_events(actions))
+            || self
+                .batch
+                .as_ref()
+                .is_some_and(|batch| has_events(batch.non_packet_actions()))
+            || self.non_packet_actions.as_ref().is_some_and(has_events)
+            || self
+                .rejected_actions
+                .as_ref()
+                .is_some_and(|rejected| has_events(&rejected.actions))
+            || self.input_fault_residue.as_ref().is_some_and(|residue| {
+                match residue {
+                    OrdinaryRouterFaultResidue::Actions { actions, .. } => has_events(actions),
+                    // The admission failure owns an opaque action envelope.
+                    // Conservatively preserve terminal-event precedence after
+                    // an aggregate fault instead of guessing that it is empty.
+                    OrdinaryRouterFaultResidue::AdmissionFailure { .. } => true,
+                    OrdinaryRouterFaultResidue::CompletionFailure(_)
+                    | OrdinaryRouterFaultResidue::Completion(_)
+                    | OrdinaryRouterFaultResidue::Quarantine(_)
+                    | OrdinaryRouterFaultResidue::ParkingReturn(_)
+                    | OrdinaryRouterFaultResidue::Job(_) => false,
+                }
+            })
+    }
+
     /// Complete retained fault, if this coordinator is permanently disabled.
     pub const fn fault(&self) -> Option<OrdinaryRouterFault> {
         self.fault

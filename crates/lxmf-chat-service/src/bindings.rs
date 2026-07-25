@@ -2,7 +2,8 @@
 
 use reticulum_device_api::{
     API_VERSION_MAJOR, API_VERSION_MINOR, MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES,
-    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES,
+    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES,
+    MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 };
 use reticulum_lxmf_chat_runtime::{
     ApplianceSnapshot, BytesEncoding, BytesView, ConnectionState, ConnectionTransport,
@@ -44,7 +45,10 @@ pub fn render_api_bindings() -> String {
          export const MAX_LXMF_READ_CHUNK_BYTES = {MAX_LXMF_READ_CHUNK_BYTES} as const;\n\
          export const MAX_CONTACT_NAME_BYTES = {MAX_CONTACT_NAME_BYTES} as const;\n\
          export const MAX_LXMF_BASIC_TITLE_BYTES = {MAX_LXMF_BASIC_TITLE_BYTES} as const;\n\
-         export const MAX_LXMF_BASIC_CONTENT_BYTES = {MAX_LXMF_BASIC_CONTENT_BYTES} as const;\n\n"
+         export const MAX_LXMF_BASIC_CONTENT_BYTES = {MAX_LXMF_BASIC_CONTENT_BYTES} as const;\n\
+         export const MAX_NOMAD_PAGE_PATH_BYTES = {MAX_NOMAD_PAGE_PATH_BYTES} as const;\n\
+         export const MAX_NOMAD_PAGE_BYTES = {MAX_NOMAD_PAGE_BYTES} as const;\n\
+         export const MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS = {MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS} as const;\n\n"
     ));
 
     append_declaration::<JsonSafeInteger>(&mut output, &config);

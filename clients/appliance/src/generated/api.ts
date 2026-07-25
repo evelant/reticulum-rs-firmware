@@ -5,12 +5,15 @@
 // 0..=Number.MAX_SAFE_INTEGER. Rust validates this contract at the wire boundary.
 
 export const DEVICE_API_VERSION_MAJOR = 1 as const;
-export const DEVICE_API_VERSION_MINOR = 5 as const;
+export const DEVICE_API_VERSION_MINOR = 6 as const;
 export const MAX_MESSAGE_BYTES = 512 as const;
 export const MAX_LXMF_READ_CHUNK_BYTES = 416 as const;
 export const MAX_CONTACT_NAME_BYTES = 256 as const;
 export const MAX_LXMF_BASIC_TITLE_BYTES = 295 as const;
 export const MAX_LXMF_BASIC_CONTENT_BYTES = 295 as const;
+export const MAX_NOMAD_PAGE_PATH_BYTES = 128 as const;
+export const MAX_NOMAD_PAGE_BYTES = 400 as const;
+export const MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS = 9007199254740991 as const;
 
 /**
  * A JSON number constrained to JavaScript's lossless integer range.

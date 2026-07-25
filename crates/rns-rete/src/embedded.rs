@@ -679,6 +679,22 @@ pub enum CanceledRequestDispatch {
     Confirmed,
 }
 
+/// Definitive result of reconciling one exact request dispatch owner.
+///
+/// Every variant guarantees that neither the adapter table nor Rete's native
+/// pending-request table retains the supplied Link/request pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestDispatchReconciliation {
+    /// Neither ownership table retained the supplied request.
+    Absent,
+    /// Both ownership tables consistently retained and released a prepared request.
+    ReclaimedPrepared,
+    /// Both ownership tables consistently retained and released a confirmed request.
+    ReclaimedConfirmed,
+    /// At least one table retained the request, but their phases or presence disagreed.
+    ReclaimedInconsistent,
+}
+
 /// Failure to transition or cancel one exact request dispatch authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestDispatchError {
@@ -5001,6 +5017,9 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 Ok(RequestDispatchConfirmation::Confirmed)
             }
             Err(error) => {
+                let request = rete_core::RequestId::from(*handle.request());
+                let link = LinkId::from(*handle.link());
+                let _ = self.core.reclaim_request_dispatch(&request, &link);
                 self.request_dispatches[index] = None;
                 Err(match error {
                     NativeRequestDispatchError::LinkNotFound => RequestDispatchError::LinkNotFound,
@@ -5030,20 +5049,71 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let entry = self.request_dispatches[index]
             .take()
             .ok_or(RequestDispatchError::NativeStateMismatch)?;
-        match entry
+        let phase = match entry
             .authority
             .ok_or(RequestDispatchError::NativeStateMismatch)?
         {
-            NativeRequestDispatchAuthority::Prepared(confirmation) => self
-                .core
-                .cancel_prepared_request(confirmation)
-                .then_some(CanceledRequestDispatch::Prepared)
-                .ok_or(RequestDispatchError::NativeStateMismatch),
-            NativeRequestDispatchAuthority::Confirmed(confirmed) => self
-                .core
-                .cancel_confirmed_request(confirmed)
-                .then_some(CanceledRequestDispatch::Confirmed)
-                .ok_or(RequestDispatchError::NativeStateMismatch),
+            NativeRequestDispatchAuthority::Prepared(confirmation) => (
+                CanceledRequestDispatch::Prepared,
+                self.core.cancel_prepared_request(confirmation),
+            ),
+            NativeRequestDispatchAuthority::Confirmed(confirmed) => (
+                CanceledRequestDispatch::Confirmed,
+                self.core.cancel_confirmed_request(confirmed),
+            ),
+        };
+        if phase.1 {
+            Ok(phase.0)
+        } else {
+            let request = rete_core::RequestId::from(*handle.request());
+            let link = LinkId::from(*handle.link());
+            let _ = self.core.reclaim_request_dispatch(&request, &link);
+            Err(RequestDispatchError::NativeStateMismatch)
+        }
+    }
+
+    /// Reclaim one exact request from both adapter and native ownership tables.
+    ///
+    /// This phase-agnostic operation is reserved for invariant recovery after
+    /// router evidence or native dispatch confirmation disagrees with retained
+    /// state. It is allocation-free, idempotent, and cannot fail partway
+    /// through cleanup. Unrelated requests, including siblings on the same
+    /// Link, remain untouched.
+    pub fn reconcile_request_dispatch(
+        &mut self,
+        handle: RequestHandle,
+    ) -> RequestDispatchReconciliation {
+        let adapter = self
+            .request_dispatches
+            .iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.handle == handle))
+            .and_then(|index| self.request_dispatches[index].take())
+            .and_then(|entry| entry.authority)
+            .map(|authority| match authority {
+                NativeRequestDispatchAuthority::Prepared(_) => CanceledRequestDispatch::Prepared,
+                NativeRequestDispatchAuthority::Confirmed(_) => CanceledRequestDispatch::Confirmed,
+            });
+        let request = rete_core::RequestId::from(*handle.request());
+        let link = LinkId::from(*handle.link());
+        let native =
+            self.core
+                .reclaim_request_dispatch(&request, &link)
+                .map(|status| match status {
+                    rete_stack::RequestStatus::Prepared => Some(CanceledRequestDispatch::Prepared),
+                    rete_stack::RequestStatus::Sent => Some(CanceledRequestDispatch::Confirmed),
+                    _ => None,
+                });
+        match (adapter, native) {
+            (None, None) => RequestDispatchReconciliation::Absent,
+            (
+                Some(CanceledRequestDispatch::Prepared),
+                Some(Some(CanceledRequestDispatch::Prepared)),
+            ) => RequestDispatchReconciliation::ReclaimedPrepared,
+            (
+                Some(CanceledRequestDispatch::Confirmed),
+                Some(Some(CanceledRequestDispatch::Confirmed)),
+            ) => RequestDispatchReconciliation::ReclaimedConfirmed,
+            _ => RequestDispatchReconciliation::ReclaimedInconsistent,
         }
     }
 
@@ -5071,10 +5141,14 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let Some(NativeRequestDispatchAuthority::Prepared(confirmation)) = entry.authority else {
             return Err(RequestDispatchError::NativeStateMismatch);
         };
-        self.core
-            .cancel_prepared_request(confirmation)
-            .then_some(())
-            .ok_or(RequestDispatchError::NativeStateMismatch)
+        if self.core.cancel_prepared_request(confirmation) {
+            Ok(())
+        } else {
+            let request = rete_core::RequestId::from(*handle.request());
+            let link = LinkId::from(*handle.link());
+            let _ = self.core.reclaim_request_dispatch(&request, &link);
+            Err(RequestDispatchError::NativeStateMismatch)
+        }
     }
 
     /// Cancel only when first dispatch already started timeout tracking.
@@ -5101,10 +5175,14 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let Some(NativeRequestDispatchAuthority::Confirmed(confirmed)) = entry.authority else {
             return Err(RequestDispatchError::NativeStateMismatch);
         };
-        self.core
-            .cancel_confirmed_request(confirmed)
-            .then_some(())
-            .ok_or(RequestDispatchError::NativeStateMismatch)
+        if self.core.cancel_confirmed_request(confirmed) {
+            Ok(())
+        } else {
+            let request = rete_core::RequestId::from(*handle.request());
+            let link = LinkId::from(*handle.link());
+            let _ = self.core.reclaim_request_dispatch(&request, &link);
+            Err(RequestDispatchError::NativeStateMismatch)
+        }
     }
 
     #[cfg(test)]
@@ -8456,6 +8534,101 @@ mod tests {
             Ok(CanceledRequestDispatch::Confirmed)
         );
         assert_eq!(initiator.request_dispatch_count(), 0);
+    }
+
+    #[test]
+    fn request_dispatch_reconciliation_is_exact_idempotent_and_phase_agnostic() {
+        let mut initiator = node(1);
+        let mut responder = node(2);
+        let mut rng = CounterRng::default();
+        let link_id = establish_bound_link(&mut initiator, &mut responder, &mut rng);
+
+        let first = initiator
+            .prepare_anonymous_request(&link_id, "/page/first.mu", 100.0, &mut rng)
+            .unwrap()
+            .handle();
+        let sibling = initiator
+            .prepare_anonymous_request(&link_id, "/page/sibling.mu", 101.0, &mut rng)
+            .unwrap()
+            .handle();
+        assert_eq!(
+            initiator.reconcile_request_dispatch(first),
+            RequestDispatchReconciliation::ReclaimedPrepared
+        );
+        assert_eq!(
+            initiator.reconcile_request_dispatch(first),
+            RequestDispatchReconciliation::Absent
+        );
+        assert_eq!(initiator.request_dispatch_count(), 1);
+        assert_eq!(
+            initiator.cancel_request(sibling),
+            Ok(CanceledRequestDispatch::Prepared)
+        );
+
+        let confirmed = initiator
+            .prepare_anonymous_request(&link_id, "/page/confirmed.mu", 102.0, &mut rng)
+            .unwrap()
+            .handle();
+        assert_eq!(
+            initiator.confirm_request_dispatch(confirmed, 103, true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        assert_eq!(
+            initiator.reconcile_request_dispatch(confirmed),
+            RequestDispatchReconciliation::ReclaimedConfirmed
+        );
+
+        let adapter_only = initiator
+            .prepare_anonymous_request(&link_id, "/page/adapter-only.mu", 104.0, &mut rng)
+            .unwrap()
+            .handle();
+        let request = rete_core::RequestId::from(*adapter_only.request());
+        assert_eq!(
+            initiator.core.reclaim_request_dispatch(&request, &link_id),
+            Some(rete_stack::RequestStatus::Prepared)
+        );
+        assert_eq!(
+            initiator.reconcile_request_dispatch(adapter_only),
+            RequestDispatchReconciliation::ReclaimedInconsistent
+        );
+
+        let native_only = initiator
+            .prepare_anonymous_request(&link_id, "/page/native-only.mu", 105.0, &mut rng)
+            .unwrap()
+            .handle();
+        let index = initiator
+            .request_dispatches
+            .iter()
+            .position(|entry| {
+                entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.handle == native_only)
+            })
+            .unwrap();
+        let entry = initiator.request_dispatches[index].take().unwrap();
+        let Some(NativeRequestDispatchAuthority::Prepared(confirmation)) = entry.authority else {
+            panic!("fresh request must retain prepared authority");
+        };
+        let confirmed = initiator
+            .core
+            .confirm_prepared_request(confirmation, 106)
+            .unwrap();
+        let _ = confirmed.dispatched();
+        assert_eq!(
+            initiator.reconcile_request_dispatch(native_only),
+            RequestDispatchReconciliation::ReclaimedInconsistent
+        );
+        assert_eq!(
+            initiator.reconcile_request_dispatch(native_only),
+            RequestDispatchReconciliation::Absent
+        );
+        assert_eq!(initiator.request_dispatch_count(), 0);
+        assert_eq!(
+            initiator
+                .core
+                .get_request_status(&rete_core::RequestId::from(*native_only.request())),
+            None
+        );
     }
 
     #[test]

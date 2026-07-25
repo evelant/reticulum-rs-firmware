@@ -418,6 +418,65 @@ pub trait PeerDiscoveryPort {
     ) -> Result<api::LxmfPeerDiscoveryPage, PeerDiscoveryPortError>;
 }
 
+/// Principal-scoped outcome of beginning one bounded NomadNet fetch.
+#[cfg(feature = "experimental-nomad")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NomadFetchStartDisposition {
+    /// A fresh fetch was accepted.
+    Accepted(api::NomadFetchId),
+    /// An identical request for the same principal and idempotency key exists.
+    Replay(api::NomadFetchId),
+    /// The idempotency key already names different semantic content.
+    IdempotencyConflict,
+    /// No bounded runtime slot is currently available for a fresh fetch.
+    CapacityExhausted,
+}
+
+/// Closed failure vocabulary exposed by the bounded NomadNet fetch port.
+#[cfg(feature = "experimental-nomad")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NomadFetchPortError {
+    /// The product profile or current runtime has disabled NomadNet fetch.
+    Unavailable,
+    /// The supplied semantic request cannot be prepared by the product owner.
+    InvalidRequest,
+    /// The sole request owner is temporarily occupied.
+    Busy,
+    /// Reticulum or another product-owned backend failed.
+    Backend,
+    /// The request owner latched an invariant fault.
+    Faulted,
+    /// The owner returned a result that contradicts the portable contract.
+    Invariant,
+}
+
+/// Narrow authenticated, transport-neutral port for bounded NomadNet fetch.
+///
+/// This port deliberately contains no flash, journal, radio, Link, or request
+/// owner types. Successful and missing lookups are scoped by the authenticated
+/// principal before crossing this boundary.
+#[cfg(feature = "experimental-nomad")]
+pub trait NomadFetchPort {
+    /// Current product/runtime availability of bounded NomadNet fetch.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Begin or idempotently replay one principal-owned fetch.
+    fn start(
+        &mut self,
+        principal: api::PrincipalId,
+        request: api::NomadFetchStartRequest<'_>,
+    ) -> Result<NomadFetchStartDisposition, NomadFetchPortError>;
+
+    /// Poll one principal-owned fetch.
+    ///
+    /// Missing and foreign identifiers must both return `Ok(None)`.
+    fn poll(
+        &mut self,
+        principal: api::PrincipalId,
+        id: api::NomadFetchId,
+    ) -> Result<Option<api::NomadFetchPollResponse>, NomadFetchPortError>;
+}
+
 /// Authorize and dispatch one decoded logical request against a narrow
 /// durable-submission port.
 ///
@@ -445,6 +504,47 @@ where
     } else {
         match authorize_request(context, &request) {
             Ok(()) => dispatch_authorized(port, identity, context, request, operation),
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
+/// Authorize and dispatch against independent durable-submission and NomadNet ports.
+///
+/// Identity reads invoke neither port. Capability reads consult both ports,
+/// while each stateful operation invokes only its owning port.
+#[cfg(feature = "experimental-nomad")]
+pub fn dispatch_with_nomad<P, N>(
+    submission_port: &mut P,
+    nomad_port: &mut N,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort,
+    N: NomadFetchPort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => dispatch_authorized_with_nomad(
+                submission_port,
+                nomad_port,
+                identity,
+                context,
+                request,
+                operation,
+            ),
             Err(error) => authorization_error(error, operation),
         }
     };
@@ -633,6 +733,48 @@ where
     }
 }
 
+/// Authorize and dispatch the complete existing appliance surface plus NomadNet fetch.
+///
+/// The existing submission/inbox/LXMF owner remains separate from the
+/// NomadNet request owner. This composition helper preserves every capability
+/// selected by the existing dispatcher while adding the independently
+/// reported NomadNet port.
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad"
+))]
+pub fn dispatch_with_inbox_lxmf_peer_discovery_and_nomad<P, N>(
+    port: &mut P,
+    nomad_port: &mut N,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
+    N: NomadFetchPort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => dispatch_authorized_with_inbox_lxmf_peer_discovery_and_nomad(
+                port, nomad_port, identity, context, request, operation,
+            ),
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
 fn dispatch_authorized<P>(
     port: &mut P,
     identity: api::IdentitySummary,
@@ -709,6 +851,146 @@ where
             acceptance_response(port.accept(candidate), operation)
         }
         _ => api_error(ApiErrorCode::UnsupportedOperation, operation),
+    }
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn dispatch_authorized_with_nomad<P, N>(
+    submission_port: &mut P,
+    nomad_port: &mut N,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort,
+    N: NomadFetchPort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && submission_port.availability() == CapabilityAvailability::Available;
+            let capabilities = api::CapabilitySnapshot::for_dispatch(submit_available)
+                .with_dispatch_nomad(nomad_port.availability());
+            DeviceResponse::SystemCapabilities(capabilities)
+        }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
+        DeviceRequest::NomadFetchStart(request) => {
+            dispatch_nomad_start(nomad_port, context, request, operation)
+        }
+        DeviceRequest::NomadFetchPoll(request) => {
+            dispatch_nomad_poll(nomad_port, context, request.id, operation)
+        }
+        other => dispatch_authorized(submission_port, identity, context, other, operation),
+    }
+}
+
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad"
+))]
+fn dispatch_authorized_with_inbox_lxmf_peer_discovery_and_nomad<P, N>(
+    port: &mut P,
+    nomad_port: &mut N,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort + InboundMailboxPort + LxmfInboxPort + LxmfComposePort + PeerDiscoveryPort,
+    N: NomadFetchPort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && SubmissionPort::availability(port) == CapabilityAvailability::Available;
+            let capabilities =
+                api::CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+                    submit_available,
+                    InboundMailboxPort::availability(port),
+                    LxmfInboxPort::availability(port),
+                    LxmfComposePort::availability(port),
+                    PeerDiscoveryPort::availability(port),
+                    PeerDiscoveryPort::max_app_data_bytes(port),
+                )
+                .with_dispatch_nomad(nomad_port.availability());
+            DeviceResponse::SystemCapabilities(capabilities)
+        }
+        DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(identity),
+        DeviceRequest::NomadFetchStart(request) => {
+            dispatch_nomad_start(nomad_port, context, request, operation)
+        }
+        DeviceRequest::NomadFetchPoll(request) => {
+            dispatch_nomad_poll(nomad_port, context, request.id, operation)
+        }
+        other => dispatch_authorized_with_inbox_lxmf_and_peer_discovery(
+            port, identity, context, other, operation,
+        ),
+    }
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn dispatch_nomad_start<N>(
+    port: &mut N,
+    context: &DispatchContext,
+    request: api::NomadFetchStartRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    N: NomadFetchPort,
+{
+    let Some(principal) = context.principal() else {
+        return api_error(ApiErrorCode::AuthenticationRequired, operation);
+    };
+    if port.availability() != CapabilityAvailability::Available {
+        return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+    }
+    match port.start(principal, request) {
+        Ok(NomadFetchStartDisposition::Accepted(id)) => {
+            DeviceResponse::NomadFetchStartAccepted(api::NomadFetchStartAccepted {
+                id,
+                outcome: api::NomadFetchStartOutcome::Accepted,
+            })
+        }
+        Ok(NomadFetchStartDisposition::Replay(id)) => {
+            DeviceResponse::NomadFetchStartAccepted(api::NomadFetchStartAccepted {
+                id,
+                outcome: api::NomadFetchStartOutcome::Replayed,
+            })
+        }
+        Ok(NomadFetchStartDisposition::IdempotencyConflict) => {
+            api_error(ApiErrorCode::IdempotencyConflict, operation)
+        }
+        Ok(NomadFetchStartDisposition::CapacityExhausted) => {
+            api_error(ApiErrorCode::CapacityExhausted, operation)
+        }
+        Err(error) => nomad_port_error(error, operation),
+    }
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn dispatch_nomad_poll<N>(
+    port: &mut N,
+    context: &DispatchContext,
+    id: api::NomadFetchId,
+    operation: u16,
+) -> DeviceResponse
+where
+    N: NomadFetchPort,
+{
+    let Some(principal) = context.principal() else {
+        return api_error(ApiErrorCode::AuthenticationRequired, operation);
+    };
+    if port.availability() != CapabilityAvailability::Available {
+        return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+    }
+    match port.poll(principal, id) {
+        Ok(Some(response)) => DeviceResponse::NomadFetchPoll(response),
+        Ok(None) => api_error(ApiErrorCode::NotFound, operation),
+        Err(error) => nomad_port_error(error, operation),
     }
 }
 
@@ -1086,6 +1368,19 @@ fn peer_discovery_port_error(error: PeerDiscoveryPortError, operation: u16) -> D
         PeerDiscoveryPortError::Busy
         | PeerDiscoveryPortError::Backend
         | PeerDiscoveryPortError::Faulted => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+#[cfg(feature = "experimental-nomad")]
+fn nomad_port_error(error: NomadFetchPortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        NomadFetchPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        NomadFetchPortError::InvalidRequest => ApiErrorCode::InvalidRequest,
+        NomadFetchPortError::Busy
+        | NomadFetchPortError::Backend
+        | NomadFetchPortError::Faulted
+        | NomadFetchPortError::Invariant => ApiErrorCode::Internal,
     };
     api_error(code, operation)
 }

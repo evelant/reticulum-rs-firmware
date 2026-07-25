@@ -46,6 +46,8 @@ use reticulum_heltec_vision_master_e290_node::{
         retention_action, retry_after_pre_io_deferral, should_relieve_lxmf_retry, stamp_policy,
         wire_limits,
     },
+    nomad_coordinator::{CoordinatorCommand, CoordinatorOperation, NativeRequestPhase},
+    nomad_runtime::{NomadDriveStep, NomadEventObservation, ProductNomadRuntimeState},
     pairing_control_handoff::{
         ButtonObservationReply, ExclusiveAcquisitionReply, LifecycleAcknowledgement,
         NodePairingHandoff, PairingControlCommand, PairingControlReply, PairingControlReplyKind,
@@ -68,11 +70,16 @@ use reticulum_node_core::{
     ApplicationEventLease, ApplicationEventOfferError, ApplicationEventOwner,
     ApplicationEventQuarantineReason, ApplicationLinkRole, AuthorizedFrameObservation,
     DelayedProofOwner, DestinationHash, InitiateLinkError, LinkHandle, MonotonicInstant,
-    MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval,
-    ReceiptCorrelationError, TxLeaseDeadline,
+    MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval, PrepareRequestError,
+    ReceiptCorrelationError, RequestDispatchConfirmation, RequestDispatchError,
+    RequestDispatchReconciliation, RequestHandle, TxLeaseDeadline,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
+use reticulum_nomad_protocol::{
+    DestinationHash as NomadDestinationHash, LinkFailure, LinkFailureStage, LinkId,
+    MonotonicMillis as NomadMillis, RequestFailure, RequestFailureStage, RequestId,
+};
 use reticulum_peer_discovery::{
     AuthenticatedAnnounceObservation, DestinationHash as PeerDestinationHash, DiscoveredPeers,
     IdentityHash as PeerIdentityHash, IdentityPublicKey, MonotonicMillis as PeerObservedMillis,
@@ -88,7 +95,7 @@ use reticulum_tx_supervisor::{
     NodeInterfaceAnnounceFlushResult, NodeInterfaceApplicationEventDrain,
     NodeInterfaceIngressActionFault, NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep,
     NodeInterfaceOrdinaryOfferFailure, NodeInterfaceSupervisorTransition, NodeInterfaceTickResult,
-    OrdinaryRouterCompletionProgress, OrdinaryRouterStep,
+    OrdinaryRouterCompletionProgress, OrdinaryRouterFaultResidueKind, OrdinaryRouterStep,
 };
 
 use crate::{
@@ -103,7 +110,7 @@ use crate::{
 struct RetainedActions {
     actions: NodeActions,
     admission: reticulum_tx_supervisor::OrdinaryRouterAdmission,
-    submission_protocol: Option<SubmissionProtocolDispatch>,
+    protocol_dispatch: Option<OrdinaryProtocolDispatch>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +122,40 @@ enum SubmissionProtocolDispatch {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NomadProtocolDispatch {
+    Path {
+        destination: NomadDestinationHash,
+    },
+    Link {
+        destination: NomadDestinationHash,
+        link: LinkHandle,
+    },
+    Request {
+        handle: RequestHandle,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrdinaryProtocolDispatch {
+    Submission(SubmissionProtocolDispatch),
+    Nomad(NomadProtocolDispatch),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NomadDispatchResolution {
+    Committed,
+    Reconciled,
+    InvariantReconciled,
+    CleanupTransferred,
+}
+
+impl NomadDispatchResolution {
+    const fn requires_fail_closed_drain(self) -> bool {
+        matches!(self, Self::InvariantReconciled | Self::CleanupTransferred)
+    }
+}
+
 impl RetainedActions {
     fn ordinary(
         actions: NodeActions,
@@ -123,18 +164,26 @@ impl RetainedActions {
         Self {
             actions,
             admission,
-            submission_protocol: None,
+            protocol_dispatch: None,
         }
     }
 
-    fn with_submission_protocol(mut self, protocol: SubmissionProtocolDispatch) -> Self {
-        debug_assert!(self.submission_protocol.is_none());
-        self.submission_protocol = Some(protocol);
+    fn with_protocol_dispatch(mut self, protocol: OrdinaryProtocolDispatch) -> Self {
+        debug_assert!(self.protocol_dispatch.is_none());
+        self.protocol_dispatch = Some(protocol);
         self
     }
 
-    fn submission_protocol(&self) -> Option<SubmissionProtocolDispatch> {
-        self.submission_protocol
+    fn protocol_dispatch(&self) -> Option<OrdinaryProtocolDispatch> {
+        self.protocol_dispatch
+    }
+
+    fn take_protocol_dispatch(&mut self) -> Option<OrdinaryProtocolDispatch> {
+        self.protocol_dispatch.take()
+    }
+
+    fn has_application_events(&self) -> bool {
+        !self.actions.events.is_empty()
     }
 
     fn into_parts(
@@ -142,9 +191,9 @@ impl RetainedActions {
     ) -> (
         NodeActions,
         reticulum_tx_supervisor::OrdinaryRouterAdmission,
-        Option<SubmissionProtocolDispatch>,
+        Option<OrdinaryProtocolDispatch>,
     ) {
-        (self.actions, self.admission, self.submission_protocol)
+        (self.actions, self.admission, self.protocol_dispatch)
     }
 }
 type QuarantinedIngressBuffer = (NodeInterfaceIngressRecycleFault, SealedIngressPacket);
@@ -154,7 +203,7 @@ type QuarantinedIngressBuffer = (NodeInterfaceIngressRecycleFault, SealedIngress
 /// Application-event slots remain in their existing internal static storage;
 /// every token here is only structural authority over one of those slots.
 #[must_use = "the LXMF volatile owner graph must remain alive for the node task"]
-pub(crate) struct LxmfVolatileState {
+pub(crate) struct ApplicationVolatileState {
     retries: LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
     proof_holder: LxmfProofActionsHolder,
     authority_faults: LxmfAuthorityFault<'static, { config::APPLICATION_EVENT_SLOTS }>,
@@ -164,9 +213,10 @@ pub(crate) struct LxmfVolatileState {
     >,
     pending_owner_fault_observed: bool,
     service_fault_observed: bool,
+    nomad: ProductNomadRuntimeState,
 }
 
-impl LxmfVolatileState {
+impl ApplicationVolatileState {
     /// Construct the empty boot-time owner graph before any event is admitted.
     pub(crate) const fn new() -> Self {
         Self {
@@ -179,6 +229,7 @@ impl LxmfVolatileState {
             },
             pending_owner_fault_observed: false,
             service_fault_observed: false,
+            nomad: ProductNomadRuntimeState::new(),
         }
     }
 }
@@ -195,7 +246,7 @@ enum LxmfProofOfferHandling {
 }
 
 enum ActionRetryStep {
-    Accepted(Option<SubmissionProtocolDispatch>),
+    Accepted(Option<OrdinaryProtocolDispatch>),
     Busy,
     Terminal,
 }
@@ -372,7 +423,7 @@ pub async fn run(
     storage: &'static mut ProductStorageCoordinator,
     mut application_events: ApplicationEventOwner<'static>,
     mut delayed_proofs: DelayedProofOwner<'static>,
-    lxmf_volatile: &'static mut LxmfVolatileState,
+    application_volatile: &'static mut ApplicationVolatileState,
     lxmf_destination: Option<DestinationHash>,
     peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
     handoffs: NodeHandoffs,
@@ -405,7 +456,7 @@ pub async fn run(
     // backpressured envelope or an exact coordinator-rejected envelope.
     let mut retry_actions_a: Option<RetainedActions> = None;
     let mut retry_actions_b: Option<RetainedActions> = None;
-    let mut pending_submission_protocol: Option<SubmissionProtocolDispatch> = None;
+    let mut pending_protocol_dispatch: Option<OrdinaryProtocolDispatch> = None;
     let mut quarantined_actions: Option<RetainedActions> = None;
     let mut quarantined_ingress_buffer: Option<QuarantinedIngressBuffer> = None;
     let mut prefer_retry_b = true;
@@ -421,6 +472,7 @@ pub async fn run(
         lxmf_destination.is_some(),
     );
     let mut lane = 0_u8;
+    let mut fresh_nomad_turn_armed = false;
     let mut observed_recycle_fault: Option<NodeInterfaceIngressRecycleFault> = None;
     let mut durability_service =
         DurabilityServiceState::from_runtime_available(storage.submission_service_available());
@@ -430,14 +482,15 @@ pub async fn run(
     let mut authenticated_api_state = AuthenticatedApiNodeState::new();
     let mut pending_inbound: Option<InboxCandidate> = None;
     let mut application_event_drain_fault: Option<ApplicationEventOfferError> = None;
-    let LxmfVolatileState {
+    let ApplicationVolatileState {
         retries: lxmf_retries,
         proof_holder: lxmf_proof_holder,
         authority_faults: lxmf_authority_fault,
         discovered_peers,
         pending_owner_fault_observed: lxmf_pending_owner_fault_observed,
         service_fault_observed: lxmf_service_fault_observed,
-    } = lxmf_volatile;
+        nomad,
+    } = application_volatile;
     #[cfg(feature = "runtime-measurement-hil")]
     let mut previous_node_loop_us = now_micros();
 
@@ -573,19 +626,13 @@ pub async fn run(
             {
                 let reason = rejected.reason();
                 let (actions, elapsed_admission) = rejected.into_parts();
-                let submission_protocol = pending_submission_protocol.take();
-                let (retained, terminal) = match config::rejected_action_disposition(reason) {
+                let protocol_dispatch = pending_protocol_dispatch.take();
+                let retained = match config::rejected_action_disposition(reason) {
                     config::RejectedActionDisposition::RefreshDeadline => {
                         warn!(
                             "e290-node stage=ordinary-admission status=RETRY-WITH-FRESH-DEADLINE reason={reason:?}"
                         );
-                        (
-                            RetainedActions::ordinary(
-                                actions,
-                                config::ordinary_admission(now_millis()),
-                            ),
-                            false,
-                        )
+                        RetainedActions::ordinary(actions, config::ordinary_admission(now_millis()))
                     }
                     config::RejectedActionDisposition::FailStop => {
                         error!(
@@ -595,26 +642,13 @@ pub async fn run(
                             actions.unroutable_packets,
                         );
                         fail_closed_draining = true;
-                        (RetainedActions::ordinary(actions, elapsed_admission), true)
+                        RetainedActions::ordinary(actions, elapsed_admission)
                     }
                 };
-                let retained = match submission_protocol {
-                    Some(protocol) => retained.with_submission_protocol(protocol),
+                let retained = match protocol_dispatch {
+                    Some(protocol) => retained.with_protocol_dispatch(protocol),
                     None => retained,
                 };
-                if terminal && let Some(protocol) = submission_protocol {
-                    abort_unestablished_submission_link(supervisor, protocol);
-                    disable_submission_for_path_fault(
-                        storage,
-                        &mut durability_service,
-                        &retained_frame,
-                        &pending_frame_acknowledgement,
-                        supervisor,
-                        lora_descriptor,
-                        &mut fail_closed_draining,
-                        "path-request-return-terminal",
-                    );
-                }
                 if retry_actions_a.is_none() {
                     retry_actions_a = Some(retained);
                 } else {
@@ -622,6 +656,44 @@ pub async fn run(
                     retry_actions_b = Some(retained);
                 }
             }
+
+            let exact_nomad_packet_owned = [
+                retry_actions_a
+                    .as_ref()
+                    .and_then(RetainedActions::protocol_dispatch),
+                retry_actions_b
+                    .as_ref()
+                    .and_then(RetainedActions::protocol_dispatch),
+                pending_protocol_dispatch,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|protocol| matches!(protocol, OrdinaryProtocolDispatch::Nomad(_)));
+            if !nomad.fresh_command_pending() || exact_nomad_packet_owned || fail_closed_draining {
+                fresh_nomad_turn_armed = false;
+            }
+            let fresh_nomad_turn_reserved = config::reserve_fresh_nomad_turn(
+                fresh_nomad_turn_armed,
+                exact_nomad_packet_owned,
+                fail_closed_draining,
+            );
+            // A projected event already in the product-owned FIFO stays
+            // authoritative even after upstream intake has failed closed. It
+            // may be the exact response/failure/close that resolves the active
+            // Nomad request, so timeout cleanup must not overtake it. Upstream
+            // owners count only while their remaining drain path is healthy.
+            let native_terminal_events_pending = config::application_events_preempt_nomad_timeout(
+                application_events.capacities().ready != 0,
+                !fail_closed_draining && application_event_drain_fault.is_none(),
+                supervisor.ordinary_application_events_pending()
+                    || supervisor.ingress_actions_pending()
+                    || retry_actions_a
+                        .as_ref()
+                        .is_some_and(RetainedActions::has_application_events)
+                    || retry_actions_b
+                        .as_ref()
+                        .is_some_and(RetainedActions::has_application_events),
+            );
 
             match lane {
                 0 => {
@@ -645,7 +717,8 @@ pub async fn run(
                     // RX buffer or moves an existing terminal residue.
                     if (!fail_closed_draining
                         && retry_capacity_available
-                        && pending_submission_protocol.is_none())
+                        && !fresh_nomad_turn_reserved
+                        && pending_protocol_dispatch.is_none())
                         || settling_ingress
                     {
                         let local_quarantine_available = quarantined_actions.is_none();
@@ -743,11 +816,13 @@ pub async fn run(
                             progressed = true;
                         }
 
-                        if let Some(pending) = pending_submission_protocol {
+                        if let Some(pending) = pending_protocol_dispatch {
                             let dispatched_at =
                                 MonotonicMillis::new(dispatch_completed_at.as_micros() / 1_000);
                             match pending {
-                                SubmissionProtocolDispatch::Path(offer) => {
+                                OrdinaryProtocolDispatch::Submission(
+                                    SubmissionProtocolDispatch::Path(offer),
+                                ) => {
                                     if !first_dispatch || protocol_token.is_some() {
                                         error!(
                                             "e290-node stage=path-discovery status=FAIL reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={} interface={} action=disable-submissions",
@@ -765,7 +840,7 @@ pub async fn run(
                                             "path-request-dispatch-correlation",
                                         );
                                     } else {
-                                        pending_submission_protocol = None;
+                                        pending_protocol_dispatch = None;
                                         match storage.acknowledge_path_request_dispatched(
                                             offer,
                                             dispatched_at,
@@ -798,7 +873,9 @@ pub async fn run(
                                         progressed = true;
                                     }
                                 }
-                                SubmissionProtocolDispatch::Link { offer, link } => {
+                                OrdinaryProtocolDispatch::Submission(
+                                    SubmissionProtocolDispatch::Link { offer, link },
+                                ) => {
                                     if !first_dispatch
                                         || protocol_token.is_none()
                                         || confirmation != Some(true)
@@ -823,7 +900,7 @@ pub async fn run(
                                             "link-request-dispatch-correlation",
                                         );
                                     } else {
-                                        pending_submission_protocol = None;
+                                        pending_protocol_dispatch = None;
                                         match storage.acknowledge_link_request_dispatched(
                                             offer,
                                             link,
@@ -861,13 +938,30 @@ pub async fn run(
                                         progressed = true;
                                     }
                                 }
+                                OrdinaryProtocolDispatch::Nomad(protocol) => {
+                                    let resolution = confirm_nomad_dispatch(
+                                        supervisor,
+                                        nomad,
+                                        protocol,
+                                        first_dispatch,
+                                        protocol_token.is_some(),
+                                        confirmation == Some(true),
+                                        native_terminal_events_pending,
+                                        dispatched_at,
+                                    );
+                                    pending_protocol_dispatch = None;
+                                    if resolution.requires_fail_closed_drain() {
+                                        fail_closed_draining = true;
+                                    }
+                                    progressed = true;
+                                }
                             }
                         }
                     }
                     if let NodeInterfaceSupervisorTransition::Ordinary(
                         OrdinaryRouterStep::RouteRejected { slot, reason },
                     ) = transition
-                        && pending_submission_protocol.is_some()
+                        && pending_protocol_dispatch.is_some()
                     {
                         // Rejection is scoped to one selected interface. The
                         // ordinary router may still advance the same packet to
@@ -885,66 +979,118 @@ pub async fn run(
                             OrdinaryRouterCompletionProgress::Returned { slot },
                         ),
                     ) = transition
-                        && let Some(protocol) = pending_submission_protocol.take()
+                        && let Some(protocol) = pending_protocol_dispatch.take()
                     {
-                        abort_unestablished_submission_link(supervisor, protocol);
-                        error!(
-                            "e290-node stage=submission-protocol-dispatch status=DISABLED reason=all-routes-returned slot={} first_dispatch=false local_submission_admission=closed",
-                            slot.get(),
-                        );
-                        disable_submission_for_path_fault(
-                            storage,
-                            &mut durability_service,
-                            &retained_frame,
-                            &pending_frame_acknowledgement,
-                            supervisor,
-                            lora_descriptor,
-                            &mut fail_closed_draining,
-                            "submission-protocol-routes-exhausted",
-                        );
+                        let submission =
+                            matches!(protocol, OrdinaryProtocolDispatch::Submission(_));
+                        let cleanup_invariant =
+                            handle_terminal_protocol_dispatch(supervisor, nomad, protocol, false);
+                        if cleanup_invariant {
+                            fail_closed_draining = true;
+                        }
+                        if submission {
+                            error!(
+                                "e290-node stage=submission-protocol-dispatch status=DISABLED reason=all-routes-returned slot={} first_dispatch=false local_submission_admission=closed",
+                                slot.get(),
+                            );
+                            disable_submission_for_path_fault(
+                                storage,
+                                &mut durability_service,
+                                &retained_frame,
+                                &pending_frame_acknowledgement,
+                                supervisor,
+                                lora_descriptor,
+                                &mut fail_closed_draining,
+                                "submission-protocol-routes-exhausted",
+                            );
+                        }
                         progressed = true;
                     }
                     if let NodeInterfaceSupervisorTransition::Ordinary(
                         OrdinaryRouterStep::PendingJobExpired { slot }
                         | OrdinaryRouterStep::PendingJobCancelledForFault { slot },
                     ) = transition
-                        && let Some(protocol) = pending_submission_protocol.take()
+                        && let Some(protocol) = pending_protocol_dispatch.take()
                     {
-                        abort_unestablished_submission_link(supervisor, protocol);
+                        let submission =
+                            matches!(protocol, OrdinaryProtocolDispatch::Submission(_));
+                        let cleanup_invariant =
+                            handle_terminal_protocol_dispatch(supervisor, nomad, protocol, true);
+                        if cleanup_invariant {
+                            fail_closed_draining = true;
+                        }
+                        if submission {
+                            error!(
+                                "e290-node stage=submission-protocol-dispatch status=DISABLED reason=pre-dispatch-cancelled-or-expired slot={} first_dispatch=false local_submission_admission=closed",
+                                slot.get(),
+                            );
+                            disable_submission_for_path_fault(
+                                storage,
+                                &mut durability_service,
+                                &retained_frame,
+                                &pending_frame_acknowledgement,
+                                supervisor,
+                                lora_descriptor,
+                                &mut fail_closed_draining,
+                                "submission-protocol-pre-dispatch-terminal",
+                            );
+                        }
+                        progressed = true;
+                    }
+                    let input_fault_terminated_protocol = matches!(
+                        transition,
+                        NodeInterfaceSupervisorTransition::Ordinary(
+                            OrdinaryRouterStep::PendingActionsRetainedForFault
+                        )
+                    ) || matches!(
+                        transition,
+                        NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Disabled(
+                            _
+                        ))
+                    ) && matches!(
+                        supervisor.ordinary_fault_residue_kind(),
+                        Some(
+                            OrdinaryRouterFaultResidueKind::Actions
+                                | OrdinaryRouterFaultResidueKind::AdmissionFailure
+                        )
+                    );
+                    if input_fault_terminated_protocol
+                        && let Some(protocol) = pending_protocol_dispatch.take()
+                    {
+                        let submission =
+                            matches!(protocol, OrdinaryProtocolDispatch::Submission(_));
+                        let cleanup_invariant =
+                            handle_terminal_protocol_dispatch(supervisor, nomad, protocol, true);
+                        if cleanup_invariant {
+                            fail_closed_draining = true;
+                        }
+                        if submission {
+                            disable_submission_for_path_fault(
+                                storage,
+                                &mut durability_service,
+                                &retained_frame,
+                                &pending_frame_acknowledgement,
+                                supervisor,
+                                lora_descriptor,
+                                &mut fail_closed_draining,
+                                "submission-protocol-input-fault-residue",
+                            );
+                        }
                         error!(
-                            "e290-node stage=submission-protocol-dispatch status=DISABLED reason=pre-dispatch-cancelled-or-expired slot={} first_dispatch=false local_submission_admission=closed",
-                            slot.get(),
+                            "e290-node stage=protocol-dispatch status=TERMINAL reason=ordinary-input-fault-residue action=retain-action-evidence-and-clean-exact-protocol-owner"
                         );
-                        disable_submission_for_path_fault(
-                            storage,
-                            &mut durability_service,
-                            &retained_frame,
-                            &pending_frame_acknowledgement,
-                            supervisor,
-                            lora_descriptor,
-                            &mut fail_closed_draining,
-                            "submission-protocol-pre-dispatch-terminal",
-                        );
+                        fail_closed_draining = true;
                         progressed = true;
                     }
                     match config::supervisor_transition_disposition(transition) {
                         config::SupervisorTransitionDisposition::Idle => {}
                         config::SupervisorTransitionDisposition::Progress => progressed = true,
                         config::SupervisorTransitionDisposition::TerminalFailClosedDrain => {
+                            // Aggregate failure may be unrelated to the
+                            // ordinary job already owned by the router. Keep
+                            // its protocol correlation until that job reports
+                            // Routed, Returned, Expired, or Cancelled.
                             fail_closed_draining = true;
-                            if let Some(protocol) = pending_submission_protocol {
-                                abort_unestablished_submission_link(supervisor, protocol);
-                                disable_submission_for_path_fault(
-                                    storage,
-                                    &mut durability_service,
-                                    &retained_frame,
-                                    &pending_frame_acknowledgement,
-                                    supervisor,
-                                    lora_descriptor,
-                                    &mut fail_closed_draining,
-                                    "submission-protocol-router-terminal",
-                                );
-                            }
                             let observation = terminal_transition_observation(transition);
                             if observed_terminal_transitions & observation == 0 {
                                 observed_terminal_transitions |= observation;
@@ -965,38 +1111,20 @@ pub async fn run(
                         ) {
                             config::ActionRetrySlot::First => {
                                 prefer_retry_b = true;
-                                let retry_submission_protocol = retry_actions_a
-                                    .as_ref()
-                                    .and_then(RetainedActions::submission_protocol);
                                 match retry_retained_actions(
                                     supervisor,
                                     &mut retry_actions_a,
                                     "action-retry-a",
                                 ) {
-                                    ActionRetryStep::Accepted(submission_protocol) => {
-                                        if let Some(protocol) = submission_protocol {
-                                            debug_assert!(pending_submission_protocol.is_none());
-                                            pending_submission_protocol = Some(protocol);
+                                    ActionRetryStep::Accepted(protocol_dispatch) => {
+                                        if let Some(protocol) = protocol_dispatch {
+                                            debug_assert!(pending_protocol_dispatch.is_none());
+                                            pending_protocol_dispatch = Some(protocol);
                                         }
                                         progressed = true;
                                     }
                                     ActionRetryStep::Busy => {}
                                     ActionRetryStep::Terminal => {
-                                        if let Some(protocol) = retry_submission_protocol {
-                                            abort_unestablished_submission_link(
-                                                supervisor, protocol,
-                                            );
-                                            disable_submission_for_path_fault(
-                                                storage,
-                                                &mut durability_service,
-                                                &retained_frame,
-                                                &pending_frame_acknowledgement,
-                                                supervisor,
-                                                lora_descriptor,
-                                                &mut fail_closed_draining,
-                                                "path-request-retry-terminal",
-                                            );
-                                        }
                                         fail_closed_draining = true;
                                         progressed = true;
                                     }
@@ -1004,38 +1132,20 @@ pub async fn run(
                             }
                             config::ActionRetrySlot::Second => {
                                 prefer_retry_b = false;
-                                let retry_submission_protocol = retry_actions_b
-                                    .as_ref()
-                                    .and_then(RetainedActions::submission_protocol);
                                 match retry_retained_actions(
                                     supervisor,
                                     &mut retry_actions_b,
                                     "action-retry-b",
                                 ) {
-                                    ActionRetryStep::Accepted(submission_protocol) => {
-                                        if let Some(protocol) = submission_protocol {
-                                            debug_assert!(pending_submission_protocol.is_none());
-                                            pending_submission_protocol = Some(protocol);
+                                    ActionRetryStep::Accepted(protocol_dispatch) => {
+                                        if let Some(protocol) = protocol_dispatch {
+                                            debug_assert!(pending_protocol_dispatch.is_none());
+                                            pending_protocol_dispatch = Some(protocol);
                                         }
                                         progressed = true;
                                     }
                                     ActionRetryStep::Busy => {}
                                     ActionRetryStep::Terminal => {
-                                        if let Some(protocol) = retry_submission_protocol {
-                                            abort_unestablished_submission_link(
-                                                supervisor, protocol,
-                                            );
-                                            disable_submission_for_path_fault(
-                                                storage,
-                                                &mut durability_service,
-                                                &retained_frame,
-                                                &pending_frame_acknowledgement,
-                                                supervisor,
-                                                lora_descriptor,
-                                                &mut fail_closed_draining,
-                                                "path-request-retry-terminal",
-                                            );
-                                        }
                                         fail_closed_draining = true;
                                         progressed = true;
                                     }
@@ -1043,7 +1153,7 @@ pub async fn run(
                             }
                             config::ActionRetrySlot::None => {
                                 let now = now_seconds();
-                                if pending_submission_protocol.is_none()
+                                if pending_protocol_dispatch.is_none()
                                     && !supervisor.ingress_actions_pending()
                                     && now >= next_tick_seconds
                                 {
@@ -1132,9 +1242,10 @@ pub async fn run(
                     if retry_actions_a.is_none()
                         && retry_actions_b.is_none()
                         && quarantined_actions.is_none()
-                        && pending_submission_protocol.is_none()
+                        && pending_protocol_dispatch.is_none()
                         && !supervisor.ingress_actions_pending()
                         && !fail_closed_draining
+                        && !fresh_nomad_turn_reserved
                         && !announce_clock.is_exhausted()
                         && let Some(scheduled) = announce_schedule.due(now)
                     {
@@ -1243,12 +1354,41 @@ pub async fn run(
                         &mut authenticated_api_state,
                     );
                 }
+                5 => {
+                    let fresh_command_pending = nomad.fresh_command_pending();
+                    let ordinary_owners_quiescent = retry_actions_a.is_none()
+                        && retry_actions_b.is_none()
+                        && quarantined_actions.is_none()
+                        && pending_protocol_dispatch.is_none()
+                        && !supervisor.ingress_actions_pending()
+                        && ordinary_router_is_idle(supervisor)
+                        && !fail_closed_draining;
+                    let nomad_progressed = drive_one_nomad_command(
+                        supervisor,
+                        nomad,
+                        &mut retry_actions_a,
+                        &mut retry_actions_b,
+                        &mut pending_protocol_dispatch,
+                        &mut fail_closed_draining,
+                        native_terminal_events_pending,
+                        ordinary_owners_quiescent,
+                        &mut rng,
+                        now_millis(),
+                    );
+                    progressed |= nomad_progressed;
+                    fresh_nomad_turn_armed = config::next_fresh_nomad_turn_armed(
+                        fresh_command_pending,
+                        exact_nomad_packet_owned,
+                        fail_closed_draining,
+                        ordinary_owners_quiescent,
+                    );
+                }
                 _ => {
                     let owner_now = now_millis();
                     let ordinary_owners_quiescent = retry_actions_a.is_none()
                         && retry_actions_b.is_none()
                         && quarantined_actions.is_none()
-                        && pending_submission_protocol.is_none()
+                        && pending_protocol_dispatch.is_none()
                         && !supervisor.ingress_actions_pending()
                         && ordinary_router_is_idle(supervisor);
                     let ordinary_control_step_pending =
@@ -1257,7 +1397,8 @@ pub async fn run(
                         storage_step_attempted,
                         durability_service.storage_step_due(owner_now),
                         retained_frame.is_some(),
-                        ordinary_owners_quiescent,
+                        ordinary_owners_quiescent
+                            && (!fresh_nomad_turn_reserved || ordinary_control_step_pending),
                         fail_closed_draining,
                         ordinary_control_step_pending,
                     ) {
@@ -1350,11 +1491,11 @@ pub async fn run(
                                         let admission = config::ordinary_admission(owner_now);
                                         match supervisor.try_offer_actions(actions, admission) {
                                             Ok(()) => {
-                                                debug_assert!(
-                                                    pending_submission_protocol.is_none()
-                                                );
-                                                pending_submission_protocol =
-                                                    Some(SubmissionProtocolDispatch::Path(offer));
+                                                debug_assert!(pending_protocol_dispatch.is_none());
+                                                pending_protocol_dispatch =
+                                                    Some(OrdinaryProtocolDispatch::Submission(
+                                                        SubmissionProtocolDispatch::Path(offer),
+                                                    ));
                                                 info!(
                                                     "e290-node stage=path-discovery status=ADMITTED submission={} ordinal={} progress={progress:?} response_clock=awaiting-first-dispatch",
                                                     offer.id().get(),
@@ -1375,20 +1516,12 @@ pub async fn run(
                                                         retained,
                                                     ) => (retained, true),
                                                 };
-                                                let retained = retained.with_submission_protocol(
-                                                    SubmissionProtocolDispatch::Path(offer),
+                                                let retained = retained.with_protocol_dispatch(
+                                                    OrdinaryProtocolDispatch::Submission(
+                                                        SubmissionProtocolDispatch::Path(offer),
+                                                    ),
                                                 );
                                                 if terminal {
-                                                    disable_submission_for_path_fault(
-                                                        storage,
-                                                        &mut durability_service,
-                                                        &retained_frame,
-                                                        &pending_frame_acknowledgement,
-                                                        supervisor,
-                                                        lora_descriptor,
-                                                        &mut fail_closed_draining,
-                                                        "path-request-offer-terminal",
-                                                    );
                                                     fail_closed_draining = true;
                                                 }
                                                 if retry_actions_a.is_none() {
@@ -1433,10 +1566,12 @@ pub async fn run(
                                     Ok((actions, link)) => {
                                         match storage.attach_created_link(offer, link) {
                                             Ok(()) => {
-                                                let protocol = SubmissionProtocolDispatch::Link {
-                                                    offer,
-                                                    link,
-                                                };
+                                                let protocol = OrdinaryProtocolDispatch::Submission(
+                                                    SubmissionProtocolDispatch::Link {
+                                                        offer,
+                                                        link,
+                                                    },
+                                                );
                                                 let admission =
                                                     config::ordinary_admission(owner_now);
                                                 match supervisor
@@ -1444,10 +1579,9 @@ pub async fn run(
                                                 {
                                                     Ok(()) => {
                                                         debug_assert!(
-                                                            pending_submission_protocol.is_none()
+                                                            pending_protocol_dispatch.is_none()
                                                         );
-                                                        pending_submission_protocol =
-                                                            Some(protocol);
+                                                        pending_protocol_dispatch = Some(protocol);
                                                         info!(
                                                             "e290-node stage=link-establishment status=ADMITTED submission={} generation={} link={:02x?} progress={progress:?} establishment_clock=awaiting-first-dispatch",
                                                             offer.id().get(),
@@ -1470,25 +1604,13 @@ pub async fn run(
                                                             ) => (retained, true),
                                                         };
                                                         let retained = retained
-                                                            .with_submission_protocol(protocol);
+                                                            .with_protocol_dispatch(protocol);
                                                         if terminal {
-                                                            let aborted = supervisor
-                                                                .abort_unestablished_link(link);
                                                             error!(
-                                                                "e290-node stage=link-establishment status=FAIL reason=ordinary-offer-terminal submission={} generation={} link={:02x?} pending_link_aborted={aborted} action=disable-submissions",
+                                                                "e290-node stage=link-establishment status=FAIL reason=ordinary-offer-terminal submission={} generation={} link={:02x?} action=retain-actions-detach-protocol-and-disable-submissions",
                                                                 offer.id().get(),
                                                                 offer.generation(),
                                                                 link.as_bytes(),
-                                                            );
-                                                            disable_submission_for_path_fault(
-                                                                storage,
-                                                                &mut durability_service,
-                                                                &retained_frame,
-                                                                &pending_frame_acknowledgement,
-                                                                supervisor,
-                                                                lora_descriptor,
-                                                                &mut fail_closed_draining,
-                                                                "link-request-offer-terminal",
                                                             );
                                                             fail_closed_draining = true;
                                                         }
@@ -1790,7 +1912,7 @@ pub async fn run(
             let ordinary_lane_available = retry_actions_a.is_none()
                 && retry_actions_b.is_none()
                 && quarantined_actions.is_none()
-                && pending_submission_protocol.is_none()
+                && pending_protocol_dispatch.is_none()
                 && !supervisor.ingress_actions_pending()
                 && !fail_closed_draining;
             if ordinary_lane_available {
@@ -1799,6 +1921,7 @@ pub async fn run(
                     &mut delayed_proofs,
                     lxmf_proof_holder,
                     &mut fail_closed_draining,
+                    !fresh_nomad_turn_reserved,
                 );
             }
             let lxmf_proof_backpressured = should_relieve_lxmf_retry(
@@ -1813,6 +1936,7 @@ pub async fn run(
                 lxmf_retries,
                 storage,
                 supervisor,
+                nomad,
                 discovered_peers,
                 lxmf_destination,
                 &mut pending_inbound,
@@ -1834,12 +1958,54 @@ pub async fn run(
                 *lxmf_pending_owner_fault_observed = true;
             }
             if fail_closed_draining {
+                // Retry slots still own their exact action bytes, but those
+                // bytes can no longer be re-offered after aggregate
+                // fail-closed begins. Detach each pre-dispatch protocol owner
+                // before cleaning it so later drain passes retain only the
+                // immutable action evidence and cannot clean twice.
+                for (slot, trigger, protocol) in [
+                    (
+                        "a",
+                        "submission-protocol-retry-a-fail-closed",
+                        retry_actions_a
+                            .as_mut()
+                            .and_then(RetainedActions::take_protocol_dispatch),
+                    ),
+                    (
+                        "b",
+                        "submission-protocol-retry-b-fail-closed",
+                        retry_actions_b
+                            .as_mut()
+                            .and_then(RetainedActions::take_protocol_dispatch),
+                    ),
+                ] {
+                    let Some(protocol) = protocol else {
+                        continue;
+                    };
+                    warn!(
+                        "e290-node stage=ordinary-retry-protocol status=DETACHED slot={slot} reason=aggregate-fail-closed action=retain-action-bytes-and-clean-exact-protocol-owner"
+                    );
+                    let _ = handle_terminal_protocol_dispatch(supervisor, nomad, protocol, true);
+                    if matches!(protocol, OrdinaryProtocolDispatch::Submission(_)) {
+                        disable_submission_for_path_fault(
+                            storage,
+                            &mut durability_service,
+                            &retained_frame,
+                            &pending_frame_acknowledgement,
+                            supervisor,
+                            lora_descriptor,
+                            &mut fail_closed_draining,
+                            trigger,
+                        );
+                    }
+                    progressed = true;
+                }
                 // Keep terminal local evidence live while portable machines
                 // finish forced denials and exact completion return.
                 let _ = (
                     retry_actions_a.as_ref(),
                     retry_actions_b.as_ref(),
-                    pending_submission_protocol.as_ref(),
+                    pending_protocol_dispatch.as_ref(),
                     quarantined_actions.as_ref(),
                     quarantined_ingress_buffer.as_ref(),
                     terminal_correlation_fault.as_ref(),
@@ -1861,8 +2027,12 @@ fn drive_one_lxmf_proof(
     delayed_proofs: &mut DelayedProofOwner<'static>,
     holder: &mut LxmfProofActionsHolder,
     fail_closed_draining: &mut bool,
+    allow_fresh_staging: bool,
 ) -> bool {
     let staged = if !holder.is_occupied() {
+        if !allow_fresh_staging {
+            return false;
+        }
         let Some(proof) = delayed_proofs.lease_next() else {
             return false;
         };
@@ -1939,6 +2109,7 @@ fn drive_one_application_event(
     retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
     storage: &mut ProductStorageCoordinator,
     supervisor: &ProductSupervisor,
+    nomad: &mut ProductNomadRuntimeState,
     discovered_peers: &mut DiscoveredPeers<
         { config::LXMF_DISCOVERED_PEERS },
         { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
@@ -2122,6 +2293,7 @@ fn drive_one_application_event(
         lease,
         storage,
         supervisor,
+        nomad,
         discovered_peers,
         pending_inbound,
         now_ms,
@@ -2132,6 +2304,7 @@ fn drive_non_lxmf_application_event(
     lease: ApplicationEventLease<'_, 'static>,
     storage: &mut ProductStorageCoordinator,
     supervisor: &ProductSupervisor,
+    nomad: &mut ProductNomadRuntimeState,
     discovered_peers: &mut DiscoveredPeers<
         { config::LXMF_DISCOVERED_PEERS },
         { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
@@ -2142,6 +2315,32 @@ fn drive_non_lxmf_application_event(
     let event_id = lease.id();
     let sequence = lease.sequence();
     let kind = lease.event().kind();
+
+    match nomad.observe_application_event(lease.event()) {
+        NomadEventObservation::Applied => {
+            let event = lease.acknowledge();
+            drop(event);
+            info!(
+                "e290-node stage=nomad-application-event status=ACKNOWLEDGED kind={kind} slot={} generation={} sequence={}",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            return true;
+        }
+        NomadEventObservation::Fault(fault) => {
+            let event = lease.acknowledge();
+            drop(event);
+            error!(
+                "e290-node stage=nomad-application-event status=FAULT-CLEANED kind={kind} slot={} generation={} sequence={} reason={fault:?}",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            return true;
+        }
+        NomadEventObservation::Unrelated => {}
+    }
 
     match lease.event() {
         ApplicationEvent::DataReceived {
@@ -2240,6 +2439,17 @@ fn drive_non_lxmf_application_event(
             );
             lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
         }
+        // Inbound Link request values belong to the future destination-bound
+        // Nomad responder and are never outbound response completions.
+        ApplicationEvent::RequestValueReceived { .. } => {
+            warn!(
+                "e290-node stage=application-event-consumer status=DISCARDED kind={kind} slot={} generation={} sequence={} reason=consumer-unavailable future_consumer=nomad-responder",
+                event_id.slot().get(),
+                event_id.generation().get(),
+                sequence.get(),
+            );
+            lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+        }
         ApplicationEvent::ProofReceived { .. }
         | ApplicationEvent::ReceiptFailed { .. }
         | ApplicationEvent::LinkEstablished { .. }
@@ -2250,7 +2460,6 @@ fn drive_non_lxmf_application_event(
         // responder surface. Keep them explicit and unavailable until the
         // responder owns response dispatch end to end.
         | ApplicationEvent::RequestReceived { .. }
-        | ApplicationEvent::RequestValueReceived { .. }
         | ApplicationEvent::ResponseReceived { .. }
         | ApplicationEvent::LinkClosed { .. }
         | ApplicationEvent::LinkIdentified { .. }
@@ -3167,18 +3376,713 @@ fn authorized_frame_durability(
     }
 }
 
-fn abort_unestablished_submission_link(
+const NOMAD_LINK_PREPARATION_PROTOCOL_CODE: u16 = 1;
+const NOMAD_LINK_PREPARATION_STATE_CODE: u16 = 2;
+const NOMAD_LINK_PREPARATION_ROLLBACK_CODE: u16 = 3;
+const NOMAD_REQUEST_LINK_UNAVAILABLE_CODE: u16 = 1;
+const NOMAD_REQUEST_PREPARATION_SIZE_CODE: u16 = 2;
+const NOMAD_REQUEST_PREPARATION_CRYPTO_CODE: u16 = 3;
+const NOMAD_REQUEST_PREPARATION_PACKET_CODE: u16 = 4;
+const NOMAD_REQUEST_PREPARATION_INVARIANT_CODE: u16 = 5;
+const NOMAD_REQUEST_DISPATCH_TERMINAL_CODE: u16 = 1;
+const NOMAD_REQUEST_DISPATCH_NATIVE_CODE: u16 = 3;
+const NOMAD_LINK_DISPATCH_CORRELATION_CODE: u16 = 4;
+const NOMAD_LINK_TIMEOUT_CODE: u16 = 1;
+
+#[allow(clippy::too_many_arguments)]
+fn drive_one_nomad_command(
     supervisor: &mut ProductSupervisor,
-    protocol: SubmissionProtocolDispatch,
-) {
-    if let SubmissionProtocolDispatch::Link { offer, link } = protocol {
-        let aborted = supervisor.abort_unestablished_link(link);
-        warn!(
-            "e290-node stage=link-establishment status=ABORT submission={} generation={} link={:02x?} pending_link_aborted={aborted}",
-            offer.id().get(),
-            offer.generation(),
-            link.as_bytes(),
-        );
+    nomad: &mut ProductNomadRuntimeState,
+    retry_actions_a: &mut Option<RetainedActions>,
+    retry_actions_b: &mut Option<RetainedActions>,
+    pending_protocol_dispatch: &mut Option<OrdinaryProtocolDispatch>,
+    fail_closed_draining: &mut bool,
+    native_terminal_events_pending: bool,
+    ordinary_owners_quiescent: bool,
+    rng: &mut Trng,
+    now_ms: u64,
+) -> bool {
+    let exact_undispatched_path_owner = [
+        retry_actions_a
+            .as_ref()
+            .and_then(RetainedActions::protocol_dispatch),
+        retry_actions_b
+            .as_ref()
+            .and_then(RetainedActions::protocol_dispatch),
+        *pending_protocol_dispatch,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|protocol| {
+        matches!(
+            protocol,
+            OrdinaryProtocolDispatch::Nomad(NomadProtocolDispatch::Path { .. })
+        )
+    });
+    let usable_path = nomad.active_destination().is_some_and(|destination| {
+        supervisor.has_usable_path(&DestinationHash::new(*destination.as_bytes()))
+    });
+    let command = match nomad.next_step(
+        NomadMillis::new(now_ms),
+        usable_path,
+        exact_undispatched_path_owner,
+    ) {
+        Ok(NomadDriveStep::Progressed) => return true,
+        Ok(NomadDriveStep::Command(command)) => command,
+        Ok(NomadDriveStep::Idle) => return false,
+        Err(fault) => {
+            error!("e290-node stage=nomad-path-observation status=FAULT reason={fault:?}");
+            return true;
+        }
+    };
+    let fresh_command = matches!(
+        command,
+        CoordinatorCommand::RequestPath { .. }
+            | CoordinatorCommand::EstablishLink { .. }
+            | CoordinatorCommand::PrepareAnonymousRequest { .. }
+    );
+    if fresh_command && !ordinary_owners_quiescent {
+        return false;
+    }
+    if native_terminal_events_pending
+        && matches!(
+            command,
+            CoordinatorCommand::AbortTimedOutLink { .. }
+                | CoordinatorCommand::CancelTimedOutRequest { .. }
+        )
+    {
+        return false;
+    }
+
+    match command {
+        CoordinatorCommand::RequestPath { destination } => {
+            let native_destination = DestinationHash::new(*destination.as_bytes());
+            if supervisor.has_usable_path(&native_destination) {
+                if let Err(fault) = nomad.coordinator_mut().path_already_available(destination) {
+                    error!(
+                        "e290-node stage=nomad-path status=FAULT reason=already-available-transition destination={:02x?} fault={fault:?}",
+                        destination.as_bytes(),
+                    );
+                }
+                return true;
+            }
+            match supervisor.request_path(&native_destination, rng) {
+                Ok(actions) => offer_nomad_actions(
+                    supervisor,
+                    nomad,
+                    actions,
+                    OrdinaryProtocolDispatch::Nomad(NomadProtocolDispatch::Path { destination }),
+                    retry_actions_a,
+                    retry_actions_b,
+                    pending_protocol_dispatch,
+                    fail_closed_draining,
+                    now_ms,
+                ),
+                Err(reason) => {
+                    warn!(
+                        "e290-node stage=nomad-path status=DEFERRED reason=prepare:{reason:?} destination={:02x?}",
+                        destination.as_bytes(),
+                    );
+                    true
+                }
+            }
+        }
+        CoordinatorCommand::EstablishLink { destination } => {
+            let native_destination = DestinationHash::new(*destination.as_bytes());
+            match supervisor.initiate_link(
+                &native_destination,
+                MonotonicSeconds::new(now_ms / 1_000),
+                rng,
+            ) {
+                Ok((actions, link)) => offer_nomad_actions(
+                    supervisor,
+                    nomad,
+                    actions,
+                    OrdinaryProtocolDispatch::Nomad(NomadProtocolDispatch::Link {
+                        destination,
+                        link,
+                    }),
+                    retry_actions_a,
+                    retry_actions_b,
+                    pending_protocol_dispatch,
+                    fail_closed_draining,
+                    now_ms,
+                ),
+                Err(
+                    InitiateLinkError::LinkTableFull { .. }
+                    | InitiateLinkError::LinkIdCollision
+                    | InitiateLinkError::ActionAllocationFailed,
+                ) => false,
+                Err(reason) => {
+                    let code = match reason {
+                        InitiateLinkError::Protocol => NOMAD_LINK_PREPARATION_PROTOCOL_CODE,
+                        InitiateLinkError::LinkStateNotRetained => {
+                            NOMAD_LINK_PREPARATION_STATE_CODE
+                        }
+                        InitiateLinkError::RollbackFailed => NOMAD_LINK_PREPARATION_ROLLBACK_CODE,
+                        InitiateLinkError::LinkTableFull { .. }
+                        | InitiateLinkError::LinkIdCollision
+                        | InitiateLinkError::ActionAllocationFailed => unreachable!(),
+                    };
+                    if let Err(fault) = nomad.coordinator_mut().link_preparation_failed(
+                        destination,
+                        LinkFailure::new(LinkFailureStage::Preparation, code),
+                    ) {
+                        error!(
+                            "e290-node stage=nomad-link status=FAULT reason=preparation-transition destination={:02x?} fault={fault:?}",
+                            destination.as_bytes(),
+                        );
+                    }
+                    true
+                }
+            }
+        }
+        CoordinatorCommand::PrepareAnonymousRequest {
+            destination: _,
+            link,
+            path,
+            requested_at,
+        } => {
+            let native_link = LinkHandle::new(*link.as_bytes());
+            match supervisor.prepare_anonymous_request(
+                native_link,
+                path.as_str(),
+                requested_at.as_seconds_f64(),
+                rng,
+            ) {
+                Ok(Ok(prepared)) => {
+                    let handle = prepared.handle();
+                    let (actions, _) = prepared.into_parts();
+                    match nomad.coordinator_mut().request_prepared(
+                        link,
+                        RequestId::new(*handle.request()),
+                        handle,
+                    ) {
+                        Ok(_) => offer_nomad_actions(
+                            supervisor,
+                            nomad,
+                            actions,
+                            OrdinaryProtocolDispatch::Nomad(NomadProtocolDispatch::Request {
+                                handle,
+                            }),
+                            retry_actions_a,
+                            retry_actions_b,
+                            pending_protocol_dispatch,
+                            fail_closed_draining,
+                            now_ms,
+                        ),
+                        Err(fault) => {
+                            let reconciliation = supervisor.reconcile_request_dispatch(handle);
+                            let acknowledgement = nomad
+                                .coordinator_mut()
+                                .acknowledge_invariant_request_cancellation(handle);
+                            let expected_reconciliation =
+                                reconciliation == RequestDispatchReconciliation::ReclaimedPrepared;
+                            if !expected_reconciliation {
+                                *fail_closed_draining = true;
+                            }
+                            error!(
+                                "e290-node stage=nomad-request status=FAULT reason=request-prepared-transition link={:02x?} request={:02x?} fault={fault:?} native_reconciliation={reconciliation:?} expected_prepared={expected_reconciliation} cleanup_ack={acknowledgement:?}",
+                                handle.link(),
+                                handle.request(),
+                            );
+                            true
+                        }
+                    }
+                }
+                Ok(Err(
+                    PrepareRequestError::LinkNotFound
+                    | PrepareRequestError::LinkNotActive
+                    | PrepareRequestError::LinkInterfaceUnknown,
+                )) => {
+                    if let Err(fault) = nomad
+                        .coordinator_mut()
+                        .request_link_unavailable(link, NOMAD_REQUEST_LINK_UNAVAILABLE_CODE)
+                    {
+                        error!(
+                            "e290-node stage=nomad-request status=FAULT reason=link-unavailable-transition link={:02x?} fault={fault:?}",
+                            link.as_bytes(),
+                        );
+                    }
+                    true
+                }
+                Ok(Err(
+                    PrepareRequestError::DispatchTableFull { .. }
+                    | PrepareRequestError::RequestAlreadyTracked
+                    | PrepareRequestError::RequestAllocationFailed
+                    | PrepareRequestError::ActionAllocationFailed,
+                )) => false,
+                Ok(Err(reason)) => {
+                    let code = match reason {
+                        PrepareRequestError::RequestTooLarge { .. } => {
+                            NOMAD_REQUEST_PREPARATION_SIZE_CODE
+                        }
+                        PrepareRequestError::Crypto => NOMAD_REQUEST_PREPARATION_CRYPTO_CODE,
+                        PrepareRequestError::PacketBuild => NOMAD_REQUEST_PREPARATION_PACKET_CODE,
+                        PrepareRequestError::Invariant => NOMAD_REQUEST_PREPARATION_INVARIANT_CODE,
+                        PrepareRequestError::LinkNotFound
+                        | PrepareRequestError::LinkNotActive
+                        | PrepareRequestError::LinkInterfaceUnknown
+                        | PrepareRequestError::DispatchTableFull { .. }
+                        | PrepareRequestError::RequestAlreadyTracked
+                        | PrepareRequestError::RequestAllocationFailed
+                        | PrepareRequestError::ActionAllocationFailed => unreachable!(),
+                    };
+                    if let Err(fault) = nomad.coordinator_mut().request_preparation_failed(
+                        link,
+                        RequestFailure::new(RequestFailureStage::Preparation, code),
+                    ) {
+                        error!(
+                            "e290-node stage=nomad-request status=FAULT reason=preparation-transition link={:02x?} fault={fault:?}",
+                            link.as_bytes(),
+                        );
+                    }
+                    true
+                }
+                Err(fault) => {
+                    error!(
+                        "e290-node stage=nomad-request status=DEFERRED reason=supervisor-fault fault={fault:?}"
+                    );
+                    false
+                }
+            }
+        }
+        CoordinatorCommand::ExpirePath { candidate } => {
+            if let Err(fault) = nomad.coordinator_mut().confirm_path_timeout(candidate) {
+                error!("e290-node stage=nomad-path status=FAULT reason=timeout fault={fault:?}");
+            }
+            true
+        }
+        CoordinatorCommand::AbortTimedOutLink { candidate } => {
+            let link = LinkHandle::new(*candidate.link().as_bytes());
+            if supervisor.abort_unestablished_link(link) {
+                if let Err(fault) = nomad
+                    .coordinator_mut()
+                    .confirm_link_timeout_after_abort(candidate, NOMAD_LINK_TIMEOUT_CODE)
+                {
+                    error!(
+                        "e290-node stage=nomad-link status=FAULT reason=timeout-after-abort fault={fault:?}"
+                    );
+                }
+                true
+            } else {
+                let native_state = supervisor.link_state(link);
+                let fault = nomad.coordinator_mut().link_native_reconciliation_failed(
+                    candidate.destination(),
+                    candidate.link(),
+                    CoordinatorOperation::LinkFailed,
+                );
+                *fail_closed_draining = true;
+                error!(
+                    "e290-node stage=nomad-link status=FAULT reason=timeout-native-phase link={:02x?} native_state={native_state:?} fault={fault:?} action=no-timeout-outcome-and-fail-closed-drain",
+                    link.as_bytes(),
+                );
+                true
+            }
+        }
+        CoordinatorCommand::AbortLinkForInvariant { candidate } => {
+            let link = LinkHandle::new(*candidate.link().as_bytes());
+            let aborted = supervisor.abort_unestablished_link(link);
+            if aborted || supervisor.link_state(link).is_none() {
+                if let Err(fault) = nomad
+                    .coordinator_mut()
+                    .acknowledge_invariant_link_abort(candidate)
+                {
+                    error!(
+                        "e290-node stage=nomad-link status=FAULT reason=invariant-abort-ack fault={fault:?}"
+                    );
+                }
+                true
+            } else {
+                let native_state = supervisor.link_state(link);
+                let acknowledgement = nomad
+                    .coordinator_mut()
+                    .acknowledge_invariant_link_abort(candidate);
+                *fail_closed_draining = true;
+                error!(
+                    "e290-node stage=nomad-link status=FAULT reason=invariant-abort-native-phase link={:02x?} native_state={native_state:?} cleanup_ack={acknowledgement:?} action=retain-sticky-fault-and-require-reset",
+                    link.as_bytes(),
+                );
+                true
+            }
+        }
+        CoordinatorCommand::CancelTimedOutRequest { token, candidate } => {
+            let reconciliation = supervisor.reconcile_request_dispatch(token);
+            if reconciliation == RequestDispatchReconciliation::ReclaimedConfirmed {
+                if let Err(fault) = nomad
+                    .coordinator_mut()
+                    .confirm_request_timeout_after_native_cancel(token, candidate)
+                {
+                    *fail_closed_draining = true;
+                    error!(
+                        "e290-node stage=nomad-request status=FAULT reason=timeout-after-reclaim native_reconciliation={reconciliation:?} fault={fault:?} action=fail-closed-drain"
+                    );
+                }
+            } else {
+                let fault = nomad
+                    .coordinator_mut()
+                    .request_native_reconciliation_failed(
+                        token,
+                        NativeRequestPhase::Confirmed,
+                        CoordinatorOperation::ConfirmRequestTimeout,
+                    );
+                *fail_closed_draining = true;
+                error!(
+                    "e290-node stage=nomad-request status=FAULT reason=timeout-native-phase native_reconciliation={reconciliation:?} fault={fault:?} action=no-timeout-outcome-and-fail-closed-drain"
+                );
+            }
+            true
+        }
+        CoordinatorCommand::CancelRequestForInvariant {
+            token,
+            link: _,
+            request: _,
+            phase: _,
+        } => {
+            let reconciliation = supervisor.reconcile_request_dispatch(token);
+            if let Err(fault) = nomad
+                .coordinator_mut()
+                .acknowledge_invariant_request_cancellation(token)
+            {
+                error!(
+                    "e290-node stage=nomad-request status=FAULT reason=invariant-reclaim-ack native_reconciliation={reconciliation:?} fault={fault:?}"
+                );
+            }
+            true
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn offer_nomad_actions(
+    supervisor: &mut ProductSupervisor,
+    nomad: &mut ProductNomadRuntimeState,
+    actions: NodeActions,
+    protocol: OrdinaryProtocolDispatch,
+    retry_actions_a: &mut Option<RetainedActions>,
+    retry_actions_b: &mut Option<RetainedActions>,
+    pending_protocol_dispatch: &mut Option<OrdinaryProtocolDispatch>,
+    fail_closed_draining: &mut bool,
+    now_ms: u64,
+) -> bool {
+    match supervisor.try_offer_actions(actions, config::ordinary_admission(now_ms)) {
+        Ok(()) => {
+            debug_assert!(pending_protocol_dispatch.is_none());
+            *pending_protocol_dispatch = Some(protocol);
+        }
+        Err(failure) => {
+            let handling = handle_action_offer_failure(failure, "nomad-command");
+            let (retained, terminal) = match handling {
+                ActionOfferHandling::Retry(retained) => {
+                    (retained.with_protocol_dispatch(protocol), false)
+                }
+                ActionOfferHandling::RetainAndDrain(retained) => {
+                    let _ = handle_terminal_protocol_dispatch(supervisor, nomad, protocol, true);
+                    (retained, true)
+                }
+            };
+            if retry_actions_a.is_none() {
+                *retry_actions_a = Some(retained);
+            } else {
+                debug_assert!(retry_actions_b.is_none());
+                *retry_actions_b = Some(retained);
+            }
+            if terminal {
+                *fail_closed_draining = true;
+                error!(
+                    "e290-node stage=nomad-command status=FAIL-STOP reason=ordinary-offer-terminal"
+                );
+            }
+        }
+    }
+    true
+}
+
+fn confirm_nomad_dispatch(
+    supervisor: &mut ProductSupervisor,
+    nomad: &mut ProductNomadRuntimeState,
+    protocol: NomadProtocolDispatch,
+    first_dispatch: bool,
+    protocol_token_present: bool,
+    protocol_confirmed: bool,
+    native_terminal_events_pending: bool,
+    dispatched_at: MonotonicMillis,
+) -> NomadDispatchResolution {
+    match protocol {
+        NomadProtocolDispatch::Path { destination } => {
+            if !first_dispatch || protocol_token_present {
+                let dispatch = nomad
+                    .coordinator_mut()
+                    .path_request_dispatched(destination, NomadMillis::new(dispatched_at.get()));
+                let terminal = dispatch.and_then(|()| {
+                    nomad
+                        .coordinator_mut()
+                        .path_unavailable(destination)
+                        .map(|_| ())
+                });
+                error!(
+                    "e290-node stage=nomad-path status=FAULT reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={protocol_token_present} terminal_reconciliation={terminal:?}"
+                );
+                return NomadDispatchResolution::InvariantReconciled;
+            }
+            match nomad
+                .coordinator_mut()
+                .path_request_dispatched(destination, NomadMillis::new(dispatched_at.get()))
+            {
+                Ok(()) => NomadDispatchResolution::Committed,
+                Err(fault) => {
+                    error!("e290-node stage=nomad-path status=FAULT reason={fault:?}");
+                    NomadDispatchResolution::InvariantReconciled
+                }
+            }
+        }
+        NomadProtocolDispatch::Link { destination, link } => {
+            if !first_dispatch || !protocol_token_present || !protocol_confirmed {
+                let aborted = supervisor.abort_unestablished_link(link);
+                let terminal = nomad.coordinator_mut().link_preparation_failed(
+                    destination,
+                    LinkFailure::new(
+                        LinkFailureStage::Dispatch,
+                        NOMAD_LINK_DISPATCH_CORRELATION_CODE,
+                    ),
+                );
+                error!(
+                    "e290-node stage=nomad-link status=FAULT reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={protocol_token_present} protocol_confirmed={protocol_confirmed} pending_link_aborted={aborted} terminal_reconciliation={terminal:?}"
+                );
+                return NomadDispatchResolution::InvariantReconciled;
+            }
+            let result = nomad.coordinator_mut().link_request_dispatched(
+                destination,
+                LinkId::new(*link.as_bytes()),
+                NomadMillis::new(dispatched_at.get()),
+            );
+            match result {
+                Ok(()) => NomadDispatchResolution::Committed,
+                Err(fault) => {
+                    let cleanup = nomad.next_command(NomadMillis::new(dispatched_at.get()));
+                    let cleanup_transferred = if let Some(
+                        CoordinatorCommand::AbortLinkForInvariant { candidate },
+                    ) = cleanup
+                    {
+                        let aborted = supervisor.abort_unestablished_link(link);
+                        if aborted {
+                            let acknowledgement = nomad
+                                .coordinator_mut()
+                                .acknowledge_invariant_link_abort(candidate);
+                            error!(
+                                "e290-node stage=nomad-link status=FAULT reason=dispatch-transition fault={fault:?} pending_link_aborted=true cleanup_ack={acknowledgement:?}"
+                            );
+                            false
+                        } else {
+                            error!(
+                                "e290-node stage=nomad-link status=FAULT reason=dispatch-transition fault={fault:?} pending_link_aborted=false action=retain-coordinator-cleanup"
+                            );
+                            true
+                        }
+                    } else {
+                        error!(
+                            "e290-node stage=nomad-link status=FAULT reason=dispatch-transition fault={fault:?} cleanup_command={cleanup:?}"
+                        );
+                        false
+                    };
+                    if cleanup_transferred {
+                        NomadDispatchResolution::CleanupTransferred
+                    } else {
+                        NomadDispatchResolution::InvariantReconciled
+                    }
+                }
+            }
+        }
+        NomadProtocolDispatch::Request { handle } => {
+            if !first_dispatch || protocol_token_present {
+                let reconciliation = supervisor.reconcile_request_dispatch(handle);
+                let fault = nomad
+                    .coordinator_mut()
+                    .request_native_reconciliation_failed(
+                        handle,
+                        NativeRequestPhase::Prepared,
+                        CoordinatorOperation::ConfirmRequestDispatch,
+                    );
+                error!(
+                    "e290-node stage=nomad-request status=FAULT reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={protocol_token_present} native_reconciliation={reconciliation:?} fault={fault:?}"
+                );
+                return NomadDispatchResolution::InvariantReconciled;
+            }
+            match supervisor.confirm_request_dispatch(
+                handle,
+                MonotonicSeconds::new(dispatched_at.get() / 1_000),
+                first_dispatch,
+            ) {
+                Ok(RequestDispatchConfirmation::Confirmed) => {
+                    match nomad
+                        .coordinator_mut()
+                        .request_dispatch_confirmed(handle, NomadMillis::new(dispatched_at.get()))
+                    {
+                        Ok(()) => NomadDispatchResolution::Committed,
+                        Err(fault) => {
+                            let reconciliation = supervisor.reconcile_request_dispatch(handle);
+                            let acknowledgement = nomad
+                                .coordinator_mut()
+                                .acknowledge_invariant_request_cancellation(handle);
+                            error!(
+                                "e290-node stage=nomad-request status=FAULT reason=coordinator-dispatch-confirmation fault={fault:?} native_reconciliation={reconciliation:?} cleanup_ack={acknowledgement:?}"
+                            );
+                            NomadDispatchResolution::InvariantReconciled
+                        }
+                    }
+                }
+                Ok(RequestDispatchConfirmation::NotFirstDispatch) => {
+                    let reconciliation = supervisor.reconcile_request_dispatch(handle);
+                    let fault = nomad
+                        .coordinator_mut()
+                        .request_native_reconciliation_failed(
+                            handle,
+                            NativeRequestPhase::Prepared,
+                            CoordinatorOperation::ConfirmRequestDispatch,
+                        );
+                    error!(
+                        "e290-node stage=nomad-request status=FAULT reason=native-not-first-after-router-first native_reconciliation={reconciliation:?} fault={fault:?}"
+                    );
+                    NomadDispatchResolution::InvariantReconciled
+                }
+                Err(RequestDispatchError::NotTracked) if native_terminal_events_pending => {
+                    match nomad
+                        .coordinator_mut()
+                        .request_dispatch_confirmed(handle, NomadMillis::new(dispatched_at.get()))
+                    {
+                        Ok(()) => {
+                            warn!(
+                                "e290-node stage=nomad-request status=TERMINAL-EVENT-PENDING reason=native-request-already-reclaimed action=preserve-product-correlation-until-event-drain"
+                            );
+                            NomadDispatchResolution::Committed
+                        }
+                        Err(fault) => {
+                            error!(
+                                "e290-node stage=nomad-request status=FAULT reason=terminal-event-pending-transition fault={fault:?}"
+                            );
+                            NomadDispatchResolution::InvariantReconciled
+                        }
+                    }
+                }
+                Err(reason) => {
+                    let reconciliation = supervisor.reconcile_request_dispatch(handle);
+                    let lifecycle_race = matches!(
+                        reason,
+                        RequestDispatchError::LinkNotFound | RequestDispatchError::LinkNotActive
+                    );
+                    if lifecycle_race && reconciliation == RequestDispatchReconciliation::Absent {
+                        let terminal = nomad
+                            .coordinator_mut()
+                            .request_dispatch_failed_after_native_reclaim(
+                                handle,
+                                RequestFailure::new(
+                                    RequestFailureStage::Dispatch,
+                                    NOMAD_REQUEST_DISPATCH_NATIVE_CODE,
+                                ),
+                            );
+                        error!(
+                            "e290-node stage=nomad-request status=RECONCILED reason=native-dispatch-confirmation:{reason:?} native_reconciliation={reconciliation:?} terminal_reconciliation={terminal:?}"
+                        );
+                        if terminal.is_ok() {
+                            NomadDispatchResolution::Reconciled
+                        } else {
+                            NomadDispatchResolution::InvariantReconciled
+                        }
+                    } else {
+                        let fault = nomad
+                            .coordinator_mut()
+                            .request_native_reconciliation_failed(
+                                handle,
+                                NativeRequestPhase::Prepared,
+                                CoordinatorOperation::ConfirmRequestDispatch,
+                            );
+                        error!(
+                            "e290-node stage=nomad-request status=FAULT reason=native-dispatch-confirmation:{reason:?} native_reconciliation={reconciliation:?} fault={fault:?}"
+                        );
+                        NomadDispatchResolution::InvariantReconciled
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_terminal_protocol_dispatch(
+    supervisor: &mut ProductSupervisor,
+    nomad: &mut ProductNomadRuntimeState,
+    protocol: OrdinaryProtocolDispatch,
+    terminal: bool,
+) -> bool {
+    match protocol {
+        OrdinaryProtocolDispatch::Submission(SubmissionProtocolDispatch::Path(_)) => false,
+        OrdinaryProtocolDispatch::Submission(SubmissionProtocolDispatch::Link { offer, link }) => {
+            let aborted = supervisor.abort_unestablished_link(link);
+            warn!(
+                "e290-node stage=link-establishment status=ABORT submission={} generation={} link={:02x?} pending_link_aborted={aborted}",
+                offer.id().get(),
+                offer.generation(),
+                link.as_bytes(),
+            );
+            false
+        }
+        OrdinaryProtocolDispatch::Nomad(NomadProtocolDispatch::Path { destination }) => {
+            warn!(
+                "e290-node stage=nomad-path status=RELEASED reason=pre-dispatch-return destination={:02x?}",
+                destination.as_bytes(),
+            );
+            false
+        }
+        OrdinaryProtocolDispatch::Nomad(NomadProtocolDispatch::Link { destination, link }) => {
+            let aborted = supervisor.abort_unestablished_link(link);
+            let native_state = supervisor.link_state(link);
+            let reconciliation_fault = (!aborted && native_state.is_some()).then(|| {
+                nomad.coordinator_mut().link_native_reconciliation_failed(
+                    destination,
+                    LinkId::new(*link.as_bytes()),
+                    CoordinatorOperation::ConfirmLinkRequest,
+                )
+            });
+            warn!(
+                "e290-node stage=nomad-link status=ABORT reason=pre-dispatch-return destination={:02x?} link={:02x?} pending_link_aborted={aborted} native_state={native_state:?} reconciliation_fault={reconciliation_fault:?}",
+                destination.as_bytes(),
+                link.as_bytes(),
+            );
+            reconciliation_fault.is_some()
+        }
+        OrdinaryProtocolDispatch::Nomad(NomadProtocolDispatch::Request { handle }) => {
+            let reconciliation = supervisor.reconcile_request_dispatch(handle);
+            let expected_pre_dispatch =
+                reconciliation == RequestDispatchReconciliation::ReclaimedPrepared;
+            let result = if !expected_pre_dispatch {
+                Err(nomad
+                    .coordinator_mut()
+                    .request_native_reconciliation_failed(
+                        handle,
+                        NativeRequestPhase::Prepared,
+                        CoordinatorOperation::CancelRequestDispatch,
+                    ))
+            } else if terminal {
+                nomad
+                    .coordinator_mut()
+                    .request_dispatch_failed_after_native_reclaim(
+                        handle,
+                        RequestFailure::new(
+                            RequestFailureStage::Dispatch,
+                            NOMAD_REQUEST_DISPATCH_TERMINAL_CODE,
+                        ),
+                    )
+            } else {
+                nomad
+                    .coordinator_mut()
+                    .request_dispatch_canceled_after_native_cancel(handle)
+            };
+            if let Err(fault) = result {
+                error!(
+                    "e290-node stage=nomad-request status=FAULT reason=pre-dispatch-reconciliation terminal={terminal} native_reconciliation={reconciliation:?} expected_pre_dispatch={expected_pre_dispatch} fault={fault:?}"
+                );
+            }
+            !expected_pre_dispatch || result.is_err()
+        }
     }
 }
 
@@ -3565,7 +4469,7 @@ fn retry_retained_actions(
 ) -> ActionRetryStep {
     if retained
         .as_ref()
-        .and_then(RetainedActions::submission_protocol)
+        .and_then(RetainedActions::protocol_dispatch)
         .is_some()
         && !ordinary_router_is_idle(supervisor)
     {
@@ -3577,20 +4481,20 @@ fn retry_retained_actions(
         );
         return ActionRetryStep::Terminal;
     };
-    let (actions, admission, submission_protocol) = owner.into_parts();
+    let (actions, admission, protocol_dispatch) = owner.into_parts();
     match supervisor.try_offer_actions(actions, admission) {
-        Ok(()) => ActionRetryStep::Accepted(submission_protocol),
+        Ok(()) => ActionRetryStep::Accepted(protocol_dispatch),
         Err(failure) => match handle_action_offer_failure(failure, stage) {
             ActionOfferHandling::Retry(owner) => {
-                *retained = Some(match submission_protocol {
-                    Some(protocol) => owner.with_submission_protocol(protocol),
+                *retained = Some(match protocol_dispatch {
+                    Some(protocol) => owner.with_protocol_dispatch(protocol),
                     None => owner,
                 });
                 ActionRetryStep::Busy
             }
             ActionOfferHandling::RetainAndDrain(owner) => {
-                *retained = Some(match submission_protocol {
-                    Some(protocol) => owner.with_submission_protocol(protocol),
+                *retained = Some(match protocol_dispatch {
+                    Some(protocol) => owner.with_protocol_dispatch(protocol),
                     None => owner,
                 });
                 ActionRetryStep::Terminal

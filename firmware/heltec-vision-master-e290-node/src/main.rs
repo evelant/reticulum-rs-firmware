@@ -422,41 +422,51 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timers.timer0, software_interrupts.software_interrupt0);
 
-    let lxmf_volatile = match Box::try_new_in(node_task::LxmfVolatileState::new(), ExternalMemory) {
+    let application_volatile = match Box::try_new_in(
+        node_task::ApplicationVolatileState::new(),
+        ExternalMemory,
+    ) {
         Ok(state) => state,
         Err(_) => {
             error!(
-                "e290-node stage=lxmf-volatile status=FAIL reason=external-allocation expected_bytes={}",
-                mem::size_of::<node_task::LxmfVolatileState>(),
+                "e290-node stage=application-volatile status=FAIL reason=external-allocation expected_bytes={}",
+                mem::size_of::<node_task::ApplicationVolatileState>(),
             );
             inert_forever().await
         }
     };
-    let lxmf_volatile_bytes = mem::size_of_val(&*lxmf_volatile);
-    let lxmf_volatile_start = (&*lxmf_volatile as *const node_task::LxmfVolatileState) as usize;
-    let lxmf_volatile_end = match lxmf_volatile_start.checked_add(lxmf_volatile_bytes) {
+    let application_volatile_bytes = mem::size_of_val(&*application_volatile);
+    let application_volatile_start =
+        (&*application_volatile as *const node_task::ApplicationVolatileState) as usize;
+    let application_volatile_end = match application_volatile_start
+        .checked_add(application_volatile_bytes)
+    {
         Some(end) => end,
         None => {
-            error!("e290-node stage=lxmf-volatile status=FAIL reason=allocation-range-overflow");
+            error!(
+                "e290-node stage=application-volatile status=FAIL reason=allocation-range-overflow"
+            );
             inert_forever().await
         }
     };
-    if lxmf_volatile_bytes != mem::size_of::<node_task::LxmfVolatileState>()
-        || !lxmf_volatile_start.is_multiple_of(mem::align_of::<node_task::LxmfVolatileState>())
-        || lxmf_volatile_start < psram_start_address
-        || lxmf_volatile_end > psram_end_address
+    if application_volatile_bytes != mem::size_of::<node_task::ApplicationVolatileState>()
+        || !application_volatile_start
+            .is_multiple_of(mem::align_of::<node_task::ApplicationVolatileState>())
+        || application_volatile_start < psram_start_address
+        || application_volatile_end > psram_end_address
     {
         error!(
-            "e290-node stage=lxmf-volatile status=FAIL reason=external-address allocation_start=0x{lxmf_volatile_start:08x} allocation_end=0x{lxmf_volatile_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={lxmf_volatile_bytes} alignment={}",
-            mem::size_of::<node_task::LxmfVolatileState>(),
-            mem::align_of::<node_task::LxmfVolatileState>(),
+            "e290-node stage=application-volatile status=FAIL reason=external-address allocation_start=0x{application_volatile_start:08x} allocation_end=0x{application_volatile_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={application_volatile_bytes} alignment={}",
+            mem::size_of::<node_task::ApplicationVolatileState>(),
+            mem::align_of::<node_task::ApplicationVolatileState>(),
         );
         inert_forever().await
     }
     info!(
-        "e290-node stage=lxmf-volatile status=PASS ownership=boot-lifetime-external bytes={lxmf_volatile_bytes} start=0x{lxmf_volatile_start:08x} end=0x{lxmf_volatile_end:08x}"
+        "e290-node stage=application-volatile status=PASS ownership=boot-lifetime-external bytes={application_volatile_bytes} start=0x{application_volatile_start:08x} end=0x{application_volatile_end:08x} nomad=resident"
     );
-    let lxmf_volatile: &'static mut node_task::LxmfVolatileState = Box::leak(lxmf_volatile);
+    let application_volatile: &'static mut node_task::ApplicationVolatileState =
+        Box::leak(application_volatile);
 
     let mut delayed_proof_storage = Vec::new_in(ExternalMemory);
     if delayed_proof_storage
@@ -1195,7 +1205,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         storage_coordinator,
         application_events,
         delayed_proofs,
-        lxmf_volatile,
+        application_volatile,
         lxmf_destination,
         peer_discovery_incarnation,
         node_task::NodeHandoffs::new(
@@ -1311,7 +1321,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
     #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     info!(
-        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission={lxmf_delivery_admission} lxmf_volatile_placement=external-psram lxmf_volatile_bytes={lxmf_volatile_bytes} lxmf_delayed_proof_placement=external-psram lxmf_delayed_proof_slots={} lxmf_delayed_proof_bytes={delayed_proof_storage_bytes} application_event_placement=internal-static credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission={lxmf_delivery_admission} application_volatile_placement=external-psram application_volatile_bytes={application_volatile_bytes} nomad=resident lxmf_delayed_proof_placement=external-psram lxmf_delayed_proof_slots={} lxmf_delayed_proof_bytes={delayed_proof_storage_bytes} application_event_placement=internal-static credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
         config::LXMF_INDEX_SLOTS,
         config::LXMF_DELAYED_PROOF_SLOTS,
         credential_binding.absolute_offset(),

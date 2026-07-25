@@ -44,8 +44,9 @@ use reticulum_rns_rete::{
     PreparedLinkData as RnsPreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptKind,
     ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
     ReceiptTerminalSink, RequestDispatchConfirmation as RnsRequestDispatchConfirmation,
-    RequestDispatchError as RnsRequestDispatchError, RequestHandle as RnsRequestHandle,
-    TxTarget as RnsTxTarget,
+    RequestDispatchError as RnsRequestDispatchError,
+    RequestDispatchReconciliation as RnsRequestDispatchReconciliation,
+    RequestHandle as RnsRequestHandle, TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
     ApplicationEvent, ApplicationEventAcknowledgeFailure, ApplicationEventCapacitySnapshot,
@@ -435,6 +436,33 @@ impl From<RnsRequestDispatchConfirmation> for RequestDispatchConfirmation {
         match confirmation {
             RnsRequestDispatchConfirmation::NotFirstDispatch => Self::NotFirstDispatch,
             RnsRequestDispatchConfirmation::Confirmed => Self::Confirmed,
+        }
+    }
+}
+
+/// Definitive result of reclaiming one exact request from every native owner.
+///
+/// Every variant guarantees that the supplied request is absent from both the
+/// integration adapter and the underlying Rete pending-request table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestDispatchReconciliation {
+    /// Neither native table retained the supplied request.
+    Absent,
+    /// Both tables consistently retained and released a prepared request.
+    ReclaimedPrepared,
+    /// Both tables consistently retained and released a confirmed request.
+    ReclaimedConfirmed,
+    /// Native tables disagreed, but every exact residual owner was reclaimed.
+    ReclaimedInconsistent,
+}
+
+impl From<RnsRequestDispatchReconciliation> for RequestDispatchReconciliation {
+    fn from(reconciliation: RnsRequestDispatchReconciliation) -> Self {
+        match reconciliation {
+            RnsRequestDispatchReconciliation::Absent => Self::Absent,
+            RnsRequestDispatchReconciliation::ReclaimedPrepared => Self::ReclaimedPrepared,
+            RnsRequestDispatchReconciliation::ReclaimedConfirmed => Self::ReclaimedConfirmed,
+            RnsRequestDispatchReconciliation::ReclaimedInconsistent => Self::ReclaimedInconsistent,
         }
     }
 }
@@ -3335,6 +3363,20 @@ impl<
             .confirm_request_dispatch(handle.into_rns(), sent_at.get(), first_dispatch)
             .map(RequestDispatchConfirmation::from)
             .map_err(RequestDispatchError::from)
+    }
+
+    /// Reclaim one exact request from every native dispatch owner.
+    ///
+    /// This phase-agnostic operation is allocation-free and idempotent. It is
+    /// intended for invariant recovery after router evidence or native state
+    /// disagrees with the product coordinator, not normal cancellation.
+    pub fn reconcile_request_dispatch(
+        &mut self,
+        handle: RequestHandle,
+    ) -> RequestDispatchReconciliation {
+        self.rns
+            .reconcile_request_dispatch(handle.into_rns())
+            .into()
     }
 
     /// Cancel an exact request only while it still awaits first dispatch.
@@ -7710,6 +7752,44 @@ mod tests {
         assert_eq!(
             initiator.cancel_confirmed_request(handle),
             Err(RequestDispatchError::NotTracked)
+        );
+    }
+
+    #[test]
+    fn request_dispatch_reconciliation_maps_exact_native_cleanup() {
+        let mut initiator = node::<4, 0>(100, "request-reconcile-initiator");
+        let mut responder = node::<4, 0>(101, "request-reconcile-responder");
+        let mut rng = CounterRng::default();
+        let (_, link) = establish_lxmf_link(&mut initiator, &mut responder, 101, &mut rng);
+
+        let prepared = initiator
+            .prepare_anonymous_request(link, "/page/prepared.mu", 1_700_000_001.0, &mut rng)
+            .expect("prepared request must construct")
+            .handle();
+        assert_eq!(
+            initiator.reconcile_request_dispatch(prepared),
+            RequestDispatchReconciliation::ReclaimedPrepared
+        );
+        assert_eq!(
+            initiator.reconcile_request_dispatch(prepared),
+            RequestDispatchReconciliation::Absent
+        );
+
+        let confirmed = initiator
+            .prepare_anonymous_request(link, "/page/confirmed.mu", 1_700_000_002.0, &mut rng)
+            .expect("confirmed request must construct")
+            .handle();
+        assert_eq!(
+            initiator.confirm_request_dispatch(confirmed, time(20_000), true),
+            Ok(RequestDispatchConfirmation::Confirmed)
+        );
+        assert_eq!(
+            initiator.reconcile_request_dispatch(confirmed),
+            RequestDispatchReconciliation::ReclaimedConfirmed
+        );
+        assert_eq!(
+            initiator.reconcile_request_dispatch(confirmed),
+            RequestDispatchReconciliation::Absent
         );
     }
 

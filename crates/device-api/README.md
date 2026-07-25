@@ -5,11 +5,12 @@ used by USB, BLE, and Wi-Fi sessions. It owns bounded CBOR models and common
 authorization policy, but no framing, executor, storage, board, radio, or Rete
 state.
 
-API 1.5 adds bounded nearby-LXMF peer discovery. It retains the API 1.3
-optional public `lxmf.delivery` destination on `identity.summary` and the API
-1.4 source-free basic-send operation. Existing identity responses remain
-valid: body key `0` is the required primary destination and key `1` is the
-optional 16-byte LXMF delivery destination.
+API 1.6 adds bounded authenticated NomadNet page fetches. It retains the API
+1.5 nearby-LXMF peer discovery, API 1.3 optional public `lxmf.delivery`
+destination on `identity.summary`, and API 1.4 source-free basic-send
+operation. Existing identity responses remain valid: body key `0` is the
+required primary destination and key `1` is the optional 16-byte LXMF delivery
+destination.
 
 ## Experimental LXMF operations
 
@@ -57,6 +58,40 @@ partial reads without coupling the protocol to the underlying store.
 Capability body keys `9` and `10` report LXMF availability (`0` unavailable,
 `1` disabled, `2` available) and the maximum chunk length. Older responses
 that omit them decode as unavailable with a zero limit.
+
+## Experimental NomadNet fetch
+
+API 1.6 reserves two bearer-neutral operations behind `experimental-nomad`:
+
+| Operation | ID | Request body | Successful response body |
+| --- | ---: | --- | --- |
+| `experimental.nomad.fetch_start` | `0xf008` | destination, absolute path, timestamp, and idempotency key | boot-scoped fetch ID and accepted/replayed outcome |
+| `experimental.nomad.fetch_poll` | `0xf009` | fetch ID | pending phase, complete UTF-8 page, or terminal failure |
+
+Both operations require an authenticated principal and consume no persisted
+permission bit. Start is a mutation with principal-scoped idempotency; poll is
+read-only and hides missing, foreign-principal, and stale-boot IDs behind the
+same `NotFound` response.
+
+A start request uses a 16-byte remote `nomadnetwork.node` destination, an
+absolute nonempty UTF-8 path of at most 128 bytes with no NUL, a whole-
+millisecond timestamp in `1..=9_007_199_254_740_991`, and a 16-byte
+idempotency key. Its 16-byte fetch ID contains an eight-byte boot incarnation
+followed by a nonzero big-endian sequence. Start outcomes are closed: `0`
+accepted and `1` replayed.
+
+Poll state is also closed: `0` pending, `1` ready, and `2` failed. Pending
+phases are path lookup (`0`), Link establishment (`1`), request preparation
+(`2`), awaiting dispatch confirmation (`3`), and awaiting response (`4`).
+Failures are no path (`0`), Link (`1`), request (`2`), timeout (`3`), page too
+large (`4`), invalid UTF-8 (`5`), and internal (`6`). A ready response owns one
+complete valid UTF-8 Micron page of at most 400 bytes; it is never a truncated
+page.
+
+Capability key `16` reports NomadNet fetch availability (`0` unavailable, `1`
+disabled, `2` available), key `17` reports the 128-byte maximum path, and key
+`18` reports the 400-byte maximum page. Older responses omit these keys and
+decode as unavailable with zero limits.
 
 ## Experimental nearby LXMF peers
 

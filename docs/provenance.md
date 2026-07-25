@@ -9,7 +9,7 @@ authoritative in the lockfile.
 | Component | Source | Pin | License used here | Build role |
 | --- | --- | --- | --- | --- |
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
-| Rete integration fork | <https://github.com/evelant/rete> | `ba73ee426a3211951f5abb400c5728dd359272be` on `codex/responder-handshake-reclaim`, descending from `338251b285a2447beb10d390d3e7f53694a1a916`, `a443173b0829c2637ce23531a8cde15fdfec185e`, `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on `codex/link-data-receipts`, then `90570cafc812b3025011cb690ec74a27f287cb3f` (tagged predecessor `firmware-pin-90570ca`) and upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`; the current revision has no designated durable tag | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, transactional channel send/retry receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, ordinary Link-DATA receipts with destination proof-policy enforcement, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, microsecond/binary64 LRRTT timing with dispatch confirmation, Handshake/Active/Stale LRRTT lifecycle updates and authenticated-malformed teardown, Python-compatible responder-Handshake timeout reclamation, bounded canonical MessagePack request values including anonymous `nil`, prepared-versus-confirmed request ownership with timeout start at exact first dispatch, validated inbound encoded-value events with their original request timestamp, identities-only snapshot restoration, and LXMF attempt correlation. These request primitives do not constitute full NomadNet or Resource support. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle, routing, Link-DATA receipt, responder-timeout, and request work remains fork-local unless the user directly approves an upstream issue or PR. |
+| Rete integration fork | <https://github.com/evelant/rete> | `dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08` on `codex/responder-handshake-reclaim`, descending through `ba73ee426a3211951f5abb400c5728dd359272be`, `354b8757bea63b9d1e27dec14f109fe6c7e03c5a`, `338251b285a2447beb10d390d3e7f53694a1a916`, `a443173b0829c2637ce23531a8cde15fdfec185e`, `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on `codex/link-data-receipts`, then `90570cafc812b3025011cb690ec74a27f287cb3f` (tagged predecessor `firmware-pin-90570ca`) and upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`; the current revision has no designated durable tag | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, transactional channel send/retry receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, ordinary Link-DATA receipts with destination proof-policy enforcement, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, microsecond/binary64 LRRTT timing with dispatch confirmation, Handshake/Active/Stale LRRTT lifecycle updates and authenticated-malformed teardown, Python-compatible responder-Handshake timeout reclamation, bounded canonical MessagePack request values including anonymous `nil` at `338251b`, prepared-versus-confirmed request ownership with timeout start at exact first dispatch at `354b875`, validated inbound encoded-value events with their original request timestamp at `ba73ee4`, phase-agnostic exact request-dispatch reclaim keyed by request and Link IDs with prior native-phase reporting at `dfcaa36`, identities-only snapshot restoration, and LXMF attempt correlation. These request primitives do not constitute full NomadNet or Resource support. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle, routing, Link-DATA receipt, responder-timeout, and request work remains fork-local unless the user directly approves an upstream issue or PR. |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
 | esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
 | esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
@@ -18,9 +18,11 @@ authoritative in the lockfile.
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
 
 The current exact pin is
-`ba73ee426a3211951f5abb400c5728dd359272be` on fork branch
+`dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08` on fork branch
 `codex/responder-handshake-reclaim`; it has no designated durable tag. It
-descends from `338251b285a2447beb10d390d3e7f53694a1a916`,
+descends through `ba73ee426a3211951f5abb400c5728dd359272be`,
+`354b8757bea63b9d1e27dec14f109fe6c7e03c5a`,
+`338251b285a2447beb10d390d3e7f53694a1a916`,
 `a443173b0829c2637ce23531a8cde15fdfec185e`, and
 `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on
 `codex/link-data-receipts`, which descends from
@@ -38,11 +40,13 @@ receipts and honors the receiving destination's `PROVE_NONE`, `PROVE_ALL`, or
 application-selected proof policy instead of proving all context-`NONE` Link
 DATA unconditionally. The `a443173` descendant additionally reclaims a
 responder that remains in `Handshake` through its Python-compatible
-establishment deadline. The current descendant adds bounded canonical
-MessagePack request values, including anonymous `nil`, plus an unforgeable
-prepared-request authority that becomes confirmed timeout ownership only at
-exact first dispatch. It also preserves validated inbound non-binary/string
-MessagePack values and their wire timestamp as lossless application events.
+establishment deadline. The direct-request sequence is `338251b` for bounded
+canonical MessagePack values including anonymous `nil`, `354b875` for an
+unforgeable prepared-request authority that becomes confirmed timeout ownership
+only at exact first dispatch, `ba73ee4` for lossless inbound encoded values and
+their original wire timestamp, and `dfcaa36` for phase-agnostic exact
+request-dispatch reclaim keyed by request and Link IDs that reports whether the
+removed native residue was prepared or confirmed.
 These are direct single-packet request primitives, not full NomadNet or
 Resource support. Arbitrary remote H1 LINKREQUEST and the
 guarded H1 DATA compatibility seam remain gated on explicit interface roles.

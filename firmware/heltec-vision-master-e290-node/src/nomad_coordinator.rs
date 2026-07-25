@@ -230,6 +230,18 @@ pub enum InvariantFault {
         /// Retained native authority phase.
         actual: NativeRequestPhase,
     },
+    /// Native reconciliation did not reclaim the phase required by product
+    /// ownership evidence.
+    NativeRequestReconciliation {
+        /// Transition whose required native phase was not reclaimed exactly.
+        operation: CoordinatorOperation,
+    },
+    /// Native Link state could not be reconciled with product dispatch or
+    /// timeout evidence.
+    NativeLinkReconciliation {
+        /// Transition whose native Link ownership evidence disagreed.
+        operation: CoordinatorOperation,
+    },
     /// An exact timeout or cancellation candidate no longer matched retained
     /// product state.
     CandidateMismatch {
@@ -424,6 +436,16 @@ impl<Token: Copy + Eq> NomadCoordinator<Token> {
     /// Return a retained terminal fetch failure without releasing the slot.
     pub const fn failure(&self) -> Option<FetchFailure> {
         self.client.failure()
+    }
+
+    /// Whether healthy protocol state is waiting for one fresh native action.
+    ///
+    /// This excludes timeout and invariant cleanup commands. The product
+    /// scheduler uses it only to reserve a bounded future ordinary-owner turn;
+    /// exact packets already retained outside this coordinator remain a
+    /// separate duplicate-preparation gate.
+    pub fn fresh_command_pending(&self) -> bool {
+        self.fault.is_none() && self.client.action().is_some()
     }
 
     /// Seed one already authenticated active Link while idle.
@@ -786,6 +808,41 @@ impl<Token: Copy + Eq> NomadCoordinator<Token> {
         self.expect_observation(CoordinatorOperation::LinkFailed, disposition)
     }
 
+    /// Release matching product Link cleanup authority and latch native skew.
+    ///
+    /// This is used when phase-specific native abort reports that the Link is
+    /// no longer unestablished even though no drainable terminal event can
+    /// explain the transition. No retry or timeout outcome is fabricated.
+    pub fn link_native_reconciliation_failed(
+        &mut self,
+        destination: DestinationHash,
+        link: LinkId,
+        operation: CoordinatorOperation,
+    ) -> InvariantFault {
+        if let Some(fault) = self.fault {
+            if matches!(
+                self.establishment_deadline,
+                Some(EstablishmentDeadline::Link(candidate))
+                    if candidate.destination == destination && candidate.link == link
+            ) {
+                self.establishment_deadline = None;
+            }
+            return fault;
+        }
+        match self.establishment_deadline {
+            Some(EstablishmentDeadline::Link(candidate))
+                if candidate.destination == destination && candidate.link == link =>
+            {
+                self.establishment_deadline = None;
+            }
+            None => {}
+            Some(_) => {
+                return self.latch(InvariantFault::CandidateMismatch { operation });
+            }
+        }
+        self.latch(InvariantFault::NativeLinkReconciliation { operation })
+    }
+
     /// Report that an established or establishing Link closed.
     ///
     /// RNS has already reclaimed any request authority tied to this Link before
@@ -804,12 +861,19 @@ impl<Token: Copy + Eq> NomadCoordinator<Token> {
             self.establishment_deadline,
             Some(EstablishmentDeadline::Link(candidate)) if candidate.link == link
         );
+        let cached_link = self
+            .client
+            .cached_link()
+            .is_some_and(|cached| cached.link() == link);
         if let Some(fault) = self.fault {
             if owned_request {
                 self.native_request = None;
             }
             if owned_link {
                 self.establishment_deadline = None;
+            }
+            if cached_link {
+                let _ = self.client.link_closed(link, code);
             }
             return Err(fault);
         }
@@ -906,11 +970,13 @@ impl<Token: Copy + Eq> NomadCoordinator<Token> {
         self.control(CoordinatorOperation::CancelRequestDispatch, result)
     }
 
-    /// Report terminal dispatch failure after exact native request cancellation.
+    /// Report terminal dispatch failure after definitive exact native reclamation.
     ///
-    /// An exact callback still releases retained cleanup authority after a
-    /// sticky fault, while returning that original fault.
-    pub fn request_dispatch_failed_after_native_cancel(
+    /// Reclamation may have canceled a consistently prepared request or
+    /// removed a phase-inconsistent residual owner. An exact callback still
+    /// releases retained cleanup authority after a sticky fault while
+    /// returning that original fault.
+    pub fn request_dispatch_failed_after_native_reclaim(
         &mut self,
         token: Token,
         failure: RequestFailure,
@@ -1042,6 +1108,28 @@ impl<Token: Copy + Eq> NomadCoordinator<Token> {
         self.control(CoordinatorOperation::ConfirmRequestTimeout, result)
     }
 
+    /// Reclaim product-side request authority and latch a native phase mismatch.
+    ///
+    /// Callers use this only after a phase-agnostic native reconciliation
+    /// returned something other than the phase required by their exact product
+    /// evidence. The request token is still removed locally, but no ordinary
+    /// retry or timeout outcome is fabricated from inconsistent native state.
+    pub fn request_native_reconciliation_failed(
+        &mut self,
+        token: Token,
+        expected_phase: NativeRequestPhase,
+        operation: CoordinatorOperation,
+    ) -> InvariantFault {
+        if let Some(fault) = self.reconcile_faulted_request_cancellation(token) {
+            return fault;
+        }
+        if let Err(fault) = self.take_request_after_native_cancel(token, expected_phase, operation)
+        {
+            return fault;
+        }
+        self.latch(InvariantFault::NativeRequestReconciliation { operation })
+    }
+
     /// Acknowledge exact Link abort emitted solely to clean up after a sticky
     /// fault.
     ///
@@ -1077,6 +1165,31 @@ impl<Token: Copy + Eq> NomadCoordinator<Token> {
         }
         self.native_request = None;
         Ok(())
+    }
+
+    /// Whether one Link-established event names the exact retained
+    /// establishment authority.
+    pub fn correlates_link_establishment(&self, link: LinkId) -> bool {
+        self.establishing_destination(link).is_some()
+    }
+
+    /// Whether one response or request-failure event names the exact retained
+    /// native request.
+    pub fn correlates_request(&self, link: LinkId, request: RequestId) -> bool {
+        self.request_is_exact(link, request)
+    }
+
+    /// Whether one Link-close event names retained establishment, request, or
+    /// reusable established-Link state.
+    pub fn correlates_link(&self, link: LinkId) -> bool {
+        self.establishing_destination(link).is_some()
+            || self
+                .native_request
+                .is_some_and(|tracked| tracked.link == link)
+            || self
+                .client
+                .cached_link()
+                .is_some_and(|cached| cached.link() == link)
     }
 
     /// Take one terminal result and release its timestamp slot.
@@ -1478,6 +1591,35 @@ mod tests {
     }
 
     #[test]
+    fn native_link_reconciliation_fault_releases_deadline_without_timeout_outcome() {
+        let mut coordinator = coordinator();
+        coordinator
+            .start(DESTINATION, PagePath::index(), TIMESTAMP_MS)
+            .unwrap();
+        coordinator.path_already_available(DESTINATION).unwrap();
+        coordinator
+            .link_request_dispatched(DESTINATION, LINK, MonotonicMillis::new(20))
+            .unwrap();
+        let fault = coordinator.link_native_reconciliation_failed(
+            DESTINATION,
+            LINK,
+            CoordinatorOperation::LinkFailed,
+        );
+        assert_eq!(
+            fault,
+            InvariantFault::NativeLinkReconciliation {
+                operation: CoordinatorOperation::LinkFailed
+            }
+        );
+        assert_eq!(coordinator.fault(), Some(fault));
+        assert_eq!(
+            coordinator.next_command(MonotonicMillis::new(u64::MAX)),
+            None
+        );
+        assert_eq!(coordinator.failure(), None);
+    }
+
+    #[test]
     fn request_timeout_is_a_two_owner_transaction() {
         let mut coordinator = coordinator();
         advance_to_prepared(&mut coordinator);
@@ -1510,6 +1652,32 @@ mod tests {
     }
 
     #[test]
+    fn native_request_reconciliation_fault_releases_token_without_timeout_outcome() {
+        let mut coordinator = coordinator();
+        advance_to_prepared(&mut coordinator);
+        coordinator
+            .request_dispatch_confirmed(TOKEN, MonotonicMillis::new(100))
+            .unwrap();
+        let fault = coordinator.request_native_reconciliation_failed(
+            TOKEN,
+            NativeRequestPhase::Confirmed,
+            CoordinatorOperation::ConfirmRequestTimeout,
+        );
+        assert_eq!(
+            fault,
+            InvariantFault::NativeRequestReconciliation {
+                operation: CoordinatorOperation::ConfirmRequestTimeout
+            }
+        );
+        assert_eq!(coordinator.fault(), Some(fault));
+        assert_eq!(
+            coordinator.next_command(MonotonicMillis::new(u64::MAX)),
+            None
+        );
+        assert_eq!(coordinator.failure(), None);
+    }
+
+    #[test]
     fn undispatched_request_can_retry_or_fail_only_after_native_cancel() {
         let mut retry = coordinator();
         advance_to_prepared(&mut retry);
@@ -1527,7 +1695,7 @@ mod tests {
 
         retry.request_prepared(LINK, REQUEST, TOKEN).unwrap();
         retry
-            .request_dispatch_failed_after_native_cancel(
+            .request_dispatch_failed_after_native_reclaim(
                 TOKEN,
                 RequestFailure::new(RequestFailureStage::Dispatch, 8),
             )
@@ -1799,9 +1967,13 @@ mod tests {
     }
 
     #[test]
-    fn fault_then_link_close_reclaims_only_exact_native_authority() {
+    fn fault_then_link_close_reclaims_exact_native_authority_and_cached_link() {
         let mut coordinator = coordinator();
         advance_to_prepared(&mut coordinator);
+        assert_eq!(
+            coordinator.cached_link(),
+            Some(CachedLink::new(DESTINATION, LINK))
+        );
         let fault = coordinator
             .request_preparation_failed(
                 LINK,
@@ -1810,6 +1982,10 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(coordinator.link_closed(OTHER_LINK, 7), Err(fault));
+        assert_eq!(
+            coordinator.cached_link(),
+            Some(CachedLink::new(DESTINATION, LINK))
+        );
         assert!(matches!(
             coordinator.next_command(MonotonicMillis::new(100)),
             Some(CoordinatorCommand::CancelRequestForInvariant {
@@ -1821,10 +1997,35 @@ mod tests {
 
         assert_eq!(coordinator.link_closed(LINK, 8), Err(fault));
         assert_eq!(coordinator.next_command(MonotonicMillis::new(101)), None);
+        assert_eq!(coordinator.cached_link(), None);
+        assert_eq!(coordinator.phase(), FetchPhase::Failed);
+        assert_eq!(coordinator.fault(), Some(fault));
+    }
+
+    #[test]
+    fn fault_then_idle_cached_link_close_invalidates_only_the_exact_cache_entry() {
+        let mut coordinator = coordinator();
+        coordinator
+            .seed_cached_link(CachedLink::new(DESTINATION, LINK))
+            .unwrap();
+        let fault = coordinator
+            .request_preparation_failed(
+                LINK,
+                RequestFailure::new(RequestFailureStage::Preparation, 43),
+            )
+            .unwrap_err();
+
+        assert_eq!(coordinator.link_closed(OTHER_LINK, 7), Err(fault));
         assert_eq!(
-            coordinator.phase(),
-            FetchPhase::AwaitingDispatchConfirmation
+            coordinator.cached_link(),
+            Some(CachedLink::new(DESTINATION, LINK))
         );
+        assert_eq!(coordinator.phase(), FetchPhase::Idle);
+
+        assert_eq!(coordinator.link_closed(LINK, 8), Err(fault));
+        assert_eq!(coordinator.cached_link(), None);
+        assert_eq!(coordinator.phase(), FetchPhase::Idle);
+        assert!(!coordinator.correlates_link(LINK));
         assert_eq!(coordinator.fault(), Some(fault));
     }
 
@@ -1927,7 +2128,7 @@ mod tests {
             .request_preparation_failed(LINK, request_failure)
             .unwrap_err();
         assert_eq!(
-            dispatch_failed.request_dispatch_failed_after_native_cancel(
+            dispatch_failed.request_dispatch_failed_after_native_reclaim(
                 TOKEN,
                 RequestFailure::new(RequestFailureStage::Dispatch, 46),
             ),
