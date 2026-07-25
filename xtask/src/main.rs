@@ -573,6 +573,34 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let appliance_display_model_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-appliance-display-model",
+            "--edges",
+            "normal",
+            "--target",
+            "riscv32imac-unknown-none-elf",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!(
+                "error: could not inspect appliance display model generic bare-metal closure: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
     let comparison = match capture(
         "cargo",
         [
@@ -932,6 +960,14 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("permanent E290 node composition boundary: {error}"))?;
         validate_e290_ble_startup_diagnostic_metadata_boundary(&json, &root)
             .map_err(|error| format!("E290 BLE startup-diagnostic metadata boundary: {error}"))?;
+        validate_appliance_display_model_dependency_boundary(&json, &root)
+            .map_err(|error| format!("appliance display model dependency boundary: {error}"))?;
+        validate_appliance_display_model_resolved_closure(
+            &json,
+            &appliance_display_model_closure,
+            &root,
+        )
+        .map_err(|error| format!("appliance display model generic bare-metal closure: {error}"))?;
         validate_radio_tx_dispatch_dependency_boundary(&json, &root)
             .map_err(|error| format!("real radio TX dispatcher dependency boundary: {error}"))?;
         validate_radio_tx_dispatch_resolved_closure(&json, &radio_tx_dispatch_closure, &root)
@@ -995,7 +1031,7 @@ fn graph_policy() -> ExitCode {
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
              the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; the Wi-Fi and BLE API proof profiles retain the complete permanent node graph and add only their exact locked transport closures and shared feature transitions; the BLE startup diagnostic matches the production BLE profile except for its package root and exact ESP Serial/JTAG logging path, so it cannot acquire Wi-Fi or another transport closure; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the permanent E290 node reaches the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack, bounded feature-free Nomad protocol state and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding deferred full onboard client/service stacks and foreign Tracker/HIL packages; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the allocation-free appliance display model has only its exact feature-disabled zeroization edge and generic bare-metal closure, with no std, alloc, platform or firmware acquisition; the permanent E290 node and its BLE startup diagnostic compose that exact local feature-disabled display model path while reaching the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack, bounded feature-free Nomad protocol state and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding deferred full onboard client/service stacks and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -2238,12 +2274,13 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 47] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 48] = [
     "allocator-api2",
     "embedded-storage",
     "esp-alloc",
     "esp-storage",
     "reticulum-announce-clock",
+    "reticulum-appliance-display-model",
     "reticulum-board-heltec-vision-master-e290",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-device-api",
@@ -2797,6 +2834,7 @@ fn validate_e290_firmware_graph_for_root_features(
     }
     for package in [
         "reticulum-rns-inbox-store ",
+        "reticulum-appliance-display-model ",
         "reticulum-lxmf-durable-ingress ",
         "reticulum-lxmf-ingress ",
         "reticulum-lxmf-model ",
@@ -2819,7 +2857,7 @@ fn validate_e290_firmware_graph_for_root_features(
             .ok_or_else(|| format!("{profile} graph has no {package}line"))?;
         if !line.ends_with("features=[]") {
             return Err(format!(
-                "{profile} must keep the durable inbox, LXMF, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
+                "{profile} must keep the display model, durable inbox, LXMF, credential, authentication, and pre-authentication control packages feature-free; observed {line}"
             ));
         }
     }
@@ -2929,6 +2967,13 @@ fn validate_e290_node_feature_boundary(
             false,
         )?;
     }
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-appliance-display-model",
+        &workspace.join("crates/appliance-display-model"),
+        false,
+    )?;
     validate_exact_local_dependency(
         dependencies,
         package_name,
@@ -3192,6 +3237,13 @@ fn validate_e290_ble_startup_diagnostic_metadata_boundary(
     let diagnostic_dependencies = diagnostic["dependencies"].as_array().ok_or_else(|| {
         format!("{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} package has no dependency array")
     })?;
+    validate_exact_local_dependency(
+        diagnostic_dependencies,
+        E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        "reticulum-appliance-display-model",
+        &workspace.join("crates/appliance-display-model"),
+        false,
+    )?;
     validate_exact_target_registry_dependency(
         diagnostic_dependencies,
         E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
@@ -3231,6 +3283,52 @@ fn canonical_dependency_metadata(dependencies: &[serde_json::Value]) -> Vec<Stri
         .collect::<Vec<_>>();
     inventory.sort();
     inventory
+}
+
+fn validate_appliance_display_model_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const PACKAGE_NAME: &str = "reticulum-appliance-display-model";
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package = exact_local_package(
+        packages,
+        workspace,
+        PACKAGE_NAME,
+        "crates/appliance-display-model/Cargo.toml",
+    )?;
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no feature map"))?;
+    if !features.is_empty() {
+        return Err(format!(
+            "{PACKAGE_NAME} must expose no Cargo feature surface"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no dependency array"))?;
+    if dependencies.len() != 1 {
+        return Err(format!(
+            "{PACKAGE_NAME} must have only its single reviewed zeroize dependency"
+        ));
+    }
+    validate_exact_registry_dependency(
+        dependencies,
+        PACKAGE_NAME,
+        "zeroize",
+        "=1.9.0",
+        None,
+        false,
+        &[],
+    )
 }
 
 fn validate_storage_hil_graph_boundary(tree: &str) -> Result<(), String> {
@@ -6226,6 +6324,15 @@ const fn closure_local(
     }
 }
 
+const APPLIANCE_DISPLAY_MODEL_REVIEWED_CLOSURE: [ReviewedClosurePackage; 2] = [
+    closure_local(
+        "reticulum-appliance-display-model",
+        "crates/appliance-display-model/Cargo.toml",
+        &[],
+    ),
+    closure_registry("zeroize", "1.9.0", &[]),
+];
+
 const LXMF_WIRE_REVIEWED_CLOSURE: [ReviewedClosurePackage; 15] = [
     closure_registry("block-buffer", "0.10.4", &[]),
     closure_registry("cfg-if", "1.0.4", &[]),
@@ -6629,6 +6736,21 @@ fn validate_radio_tx_dispatch_resolved_closure(
         &RADIO_TX_DISPATCH_REVIEWED_CLOSURE,
         "radio TX dispatcher",
         Some(forbidden_radio_tx_dispatch_closure_category),
+    )
+}
+
+fn validate_appliance_display_model_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &APPLIANCE_DISPLAY_MODEL_REVIEWED_CLOSURE,
+        "appliance display model",
+        None,
     )
 }
 
@@ -10610,6 +10732,12 @@ mod tests {
                 },
                 "dependencies": [
                     handoff_path_dependency_fixture(
+                        "reticulum-appliance-display-model",
+                        "*",
+                        &root.join("crates/appliance-display-model"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
                         "reticulum-device-api-ble",
                         "*",
                         &root.join("crates/device-api-ble"),
@@ -10853,6 +10981,77 @@ mod tests {
             .is_err()
         );
 
+        let mut missing_display = baseline.clone();
+        fixture_package_mut(
+            &mut missing_display,
+            E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|dependency| {
+                dependency["name"].as_str() != Some("reticulum-appliance-display-model")
+            });
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &missing_display.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let display_dependency = baseline["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"].as_str() == Some(E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE))
+            .unwrap()["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|dependency| {
+                dependency["name"].as_str() == Some("reticulum-appliance-display-model")
+            })
+            .unwrap()
+            .clone();
+        let mut duplicate_display = baseline.clone();
+        fixture_package_mut(
+            &mut duplicate_display,
+            E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(display_dependency);
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &duplicate_display.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        for (field, value) in [
+            (
+                "path",
+                serde_json::json!(root.join("crates/lookalike-appliance-display-model")),
+            ),
+            ("uses_default_features", serde_json::json!(true)),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE),
+                "reticulum-appliance-display-model",
+                None,
+            )[field] = value;
+            assert!(
+                validate_e290_ble_startup_diagnostic_metadata_boundary(
+                    &drifted.to_string(),
+                    &root,
+                )
+                .is_err(),
+                "diagnostic accepted display-model {field} drift"
+            );
+        }
+
         let mut extra_dependency = baseline;
         fixture_package_mut(
             &mut extra_dependency,
@@ -10887,6 +11086,7 @@ mod tests {
                      ├── esp-storage v0.9.0 features=[critical-section,esp32s3]\n\
                      ├── futures-util v0.3.33 features=[]\n\
                      ├── reticulum-announce-clock v0.1.0 features=[]\n\
+                     ├── reticulum-appliance-display-model v0.1.0 features=[]\n\
                      ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
                      │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
                      │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
@@ -11541,6 +11741,11 @@ fn sample(layout: Layout) {
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
 
         for (dependency_name, wrong_path, rename) in [
+            (
+                "reticulum-appliance-display-model",
+                "crates/not-the-appliance-display-model",
+                "appliance-display-model",
+            ),
             (
                 "reticulum-lxmf-durable-ingress",
                 "crates/not-the-lxmf-durable-ingress",
@@ -13918,6 +14123,179 @@ fn sample(layout: Layout) {
     }
 
     #[test]
+    fn appliance_display_model_boundary_locks_the_single_zeroize_edge() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_appliance_display_model_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(&mut wrong_manifest, "reticulum-appliance-display-model")["manifest_path"] =
+            serde_json::json!(root.join("crates/lookalike-appliance-display-model/Cargo.toml"));
+        assert!(
+            validate_appliance_display_model_dependency_boundary(
+                &wrong_manifest.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut duplicate_package = baseline.clone();
+        duplicate_package["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(appliance_display_model_package_fixture(&root));
+        assert!(
+            validate_appliance_display_model_dependency_boundary(
+                &duplicate_package.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut missing = baseline.clone();
+        fixture_package_mut(&mut missing, "reticulum-appliance-display-model")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .clear();
+        assert!(
+            validate_appliance_display_model_dependency_boundary(&missing.to_string(), &root)
+                .is_err()
+        );
+
+        let zeroize = baseline["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"].as_str() == Some("reticulum-appliance-display-model"))
+            .unwrap()["dependencies"][0]
+            .clone();
+        let mut duplicate = baseline.clone();
+        fixture_package_mut(&mut duplicate, "reticulum-appliance-display-model")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(zeroize);
+        assert!(
+            validate_appliance_display_model_dependency_boundary(&duplicate.to_string(), &root)
+                .is_err()
+        );
+
+        for (field, value) in [
+            (
+                "path",
+                serde_json::json!(root.join("crates/lookalike-zeroize")),
+            ),
+            ("uses_default_features", serde_json::json!(true)),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, "reticulum-appliance-display-model"),
+                "zeroize",
+                None,
+            )[field] = value;
+            assert!(
+                validate_appliance_display_model_dependency_boundary(&drifted.to_string(), &root,)
+                    .is_err(),
+                "display model accepted zeroize {field} drift"
+            );
+        }
+
+        let mut extra = baseline.clone();
+        fixture_package_mut(&mut extra, "reticulum-appliance-display-model")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("heapless", "=0.9.1", None));
+        assert!(
+            validate_appliance_display_model_dependency_boundary(&extra.to_string(), &root)
+                .is_err()
+        );
+
+        let mut feature = baseline;
+        fixture_package_mut(&mut feature, "reticulum-appliance-display-model")["features"]["std"] =
+            serde_json::json!([]);
+        assert!(
+            validate_appliance_display_model_dependency_boundary(&feature.to_string(), &root)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn appliance_display_model_closure_is_exact_bare_metal_and_allocation_free() {
+        let root = workspace_root();
+        let (baseline_metadata, baseline_tree) =
+            appliance_display_model_reviewed_closure_fixture(&root);
+        validate_appliance_display_model_resolved_closure(
+            &baseline_metadata.to_string(),
+            &baseline_tree,
+            &root,
+        )
+        .unwrap();
+
+        for feature in ["alloc", "std"] {
+            let drifted = baseline_tree.replace(
+                "zeroize v1.9.0\t\n",
+                &format!("zeroize v1.9.0\t{feature}\n"),
+            );
+            assert!(
+                validate_appliance_display_model_resolved_closure(
+                    &baseline_metadata.to_string(),
+                    &drifted,
+                    &root,
+                )
+                .is_err(),
+                "display model closure accepted zeroize feature {feature}"
+            );
+        }
+
+        for (name, version) in [
+            ("alloc-wrapper", "1.0.0"),
+            ("std-wrapper", "1.0.0"),
+            ("esp-hal", "1.1.1"),
+        ] {
+            let mut metadata = baseline_metadata.clone();
+            let mut tree = baseline_tree.clone();
+            add_registry_closure_fixture_package(&mut metadata, &mut tree, &root, name, version);
+            assert!(
+                validate_appliance_display_model_resolved_closure(
+                    &metadata.to_string(),
+                    &tree,
+                    &root,
+                )
+                .is_err(),
+                "display model closure accepted {name}"
+            );
+        }
+
+        let mut firmware_metadata = baseline_metadata.clone();
+        let mut firmware_tree = baseline_tree.clone();
+        add_local_closure_fixture_package(
+            &mut firmware_metadata,
+            &mut firmware_tree,
+            &root,
+            E290_NODE_PACKAGE,
+            "0.1.0",
+            "firmware/heltec-vision-master-e290-node/Cargo.toml",
+        );
+        assert!(
+            validate_appliance_display_model_resolved_closure(
+                &firmware_metadata.to_string(),
+                &firmware_tree,
+                &root,
+            )
+            .is_err()
+        );
+
+        let missing = baseline_tree.replace("zeroize v1.9.0\t\n", "");
+        assert!(
+            validate_appliance_display_model_resolved_closure(
+                &baseline_metadata.to_string(),
+                &missing,
+                &root,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn durable_lxmf_model_and_store_closures_are_exact_and_exclude_foreign_owners() {
         let root = workspace_root();
         let (model_metadata, model_tree) = lxmf_model_reviewed_closure_fixture(&root);
@@ -15884,7 +16262,20 @@ fn sample(layout: Layout) {
                 nor_flash_region_package_fixture(root),
                 submission_runtime_package_fixture(root),
                 rns_inbox_store_package_fixture(root),
+                appliance_display_model_package_fixture(root),
             ]
+        })
+    }
+
+    fn appliance_display_model_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-appliance-display-model",
+            "source": null,
+            "manifest_path": root.join("crates/appliance-display-model/Cargo.toml"),
+            "features": {},
+            "dependencies": [
+                handoff_dependency_fixture("zeroize", "=1.9.0", None),
+            ],
         })
     }
 
@@ -16352,6 +16743,12 @@ fn sample(layout: Layout) {
 
     fn radio_tx_dispatch_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
         reviewed_closure_fixture(root, &RADIO_TX_DISPATCH_REVIEWED_CLOSURE)
+    }
+
+    fn appliance_display_model_reviewed_closure_fixture(
+        root: &Path,
+    ) -> (serde_json::Value, String) {
+        reviewed_closure_fixture(root, &APPLIANCE_DISPLAY_MODEL_REVIEWED_CLOSURE)
     }
 
     fn lxmf_wire_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {

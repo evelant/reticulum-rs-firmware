@@ -3,11 +3,13 @@ import { describe, expect, test } from "bun:test";
 import type { NativeApplianceLike, NativeBlePlatformCommand } from "@reticulum/appliance-native";
 
 import type {
+  BleCandidate,
   BleCentral,
   BleConnection,
   BleConnectionObserver,
   BleConnectOptions,
   BleGattProfile,
+  BleScanOptions,
 } from "./ble-central-types.ts";
 import {
   type DecodedNativeBlePlatformCommand,
@@ -97,6 +99,19 @@ class FakeBleCentral implements BleCentral {
   disposeCount = 0;
   profiles: BleGattProfile[] = [];
   results: Array<(options?: BleConnectOptions) => Promise<BleConnection>> = [];
+  scanOptions: BleScanOptions[] = [];
+  scanResults: Array<
+    (serviceUuid: string, options?: BleScanOptions) => Promise<readonly BleCandidate[]>
+  > = [];
+  scannedServiceUuids: string[] = [];
+
+  async scan(serviceUuid: string, options?: BleScanOptions): Promise<readonly BleCandidate[]> {
+    this.scannedServiceUuids.push(serviceUuid);
+    this.scanOptions.push(options ?? {});
+    const result = this.scanResults.shift();
+    if (result === undefined) throw new Error("fake BLE central has no scan result");
+    return result(serviceUuid, options);
+  }
 
   async connect(profile: BleGattProfile, options?: BleConnectOptions): Promise<BleConnection> {
     this.connectCount += 1;
@@ -232,6 +247,43 @@ function transport(
 }
 
 describe("native BLE transport orchestration", () => {
+  test("forwards credential-free scans without starting a link or invoking the native actor", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const candidates = [
+      { peripheralId: "board-a", peripheralName: "Reticulum A", rssi: -54 },
+    ] as const;
+    central.scanResults.push(() => Promise.resolve(candidates));
+    const owner = transport(appliance, central);
+    const abort = new AbortController();
+
+    await expect(owner.scan({ scanTimeoutMs: 25, signal: abort.signal })).resolves.toEqual(
+      candidates,
+    );
+
+    expect(central.scannedServiceUuids).toEqual([PROFILE.serviceUuid]);
+    expect(central.scanOptions).toEqual([{ scanTimeoutMs: 25, signal: abort.signal }]);
+    expect(central.connectCount).toBe(0);
+    expect(appliance.events).toEqual([]);
+    await owner.dispose();
+  });
+
+  test("does not permit discovery after the authenticated transport has started", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    central.results.push(() => Promise.reject(new Error("offline")));
+    const owner = transport(appliance, central);
+
+    owner.start();
+    await waitFor(() => central.connectCount === 1, "initial BLE attempt");
+
+    await expect(owner.scan({ scanTimeoutMs: 1 })).rejects.toThrow(
+      "unavailable after the authenticated transport starts",
+    );
+    expect(central.scannedServiceUuids).toEqual([]);
+    await owner.dispose();
+  });
+
   test("keeps initial failure offline and explicit reconnect retries the whole BLE link", async () => {
     const appliance = new FakeNativeBleAppliance();
     const central = new FakeBleCentral();

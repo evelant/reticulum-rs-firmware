@@ -15,9 +15,15 @@ self-contained iOS Release has also completed the
 system-file credential import, credential-derived exact-E290 authenticated BLE,
 and one sequential LXMF message in each direction over LoRa. A follow-up cold
 launch automatically reconnected in the foreground, and the keyboard-aware
-composer passed physical use. Wi-Fi remains build/host-qualified. The full
-mobile lifecycle matrix, background restoration, Android hardware, BLE
-pressure/soak, and cross-instance `BleManager` ownership remain open. Those
+composer passed physical use. A fresh native install can now scan the generated
+service and explicitly select one nearby appliance without connecting or
+transferring credentials; that discovery-only foundation does not yet pair the
+phone. The board-neutral display model separately owns a zeroizing six-digit
+passkey and coalesced expiry/terminal states, but no E290 panel actor is wired
+yet. [ADR 0019](docs/adr/0019-secure-ble-appliance-onboarding.md) fixes the
+remaining secure-onboarding sequence. Wi-Fi remains build/host-qualified. The
+full mobile lifecycle matrix, background restoration, Android hardware, BLE
+pairing, pressure/soak, and cross-instance `BleManager` ownership remain open. Those
 bearers become Reticulum packet interfaces only through
 optional actors added after the LoRa slice. The already-qualified Heltec
 Wireless Tracker V2.3 pair remains a constrained LoRa regression target.

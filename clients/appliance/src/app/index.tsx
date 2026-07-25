@@ -31,6 +31,7 @@ import {
   MAX_LXMF_BASIC_TITLE_BYTES,
 } from "../generated/api.ts";
 import { ApplianceApi } from "../lib/api";
+import type { BleCandidate, BleScanOptions } from "../lib/ble-central-types.ts";
 import { type DraftIdentity, ensureDraftIdentity } from "../lib/draft.ts";
 import { ForegroundReconnect } from "../lib/foreground-reconnect.ts";
 import { keyboardLayoutPolicy } from "../lib/keyboard-layout.ts";
@@ -54,10 +55,17 @@ import {
   nomadFetchInputError,
   nomadRequestProvenance,
 } from "../lib/nomad-browser.ts";
-import { onboardingPresentation } from "../lib/onboarding.ts";
+import {
+  bleCandidateDetails,
+  bleCandidateName,
+  bleDiscoveryPresentation,
+  onboardingPresentation,
+  selectedBleCandidate,
+} from "../lib/onboarding.ts";
 import { randomHex } from "../lib/random.ts";
 
 const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
+const ONBOARDING_BLE_SCAN_TIMEOUT_MS = 5_000;
 const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
 const KEYBOARD_LAYOUT = keyboardLayoutPolicy(Platform.OS);
 type Workspace = "lxmf" | "nomad";
@@ -419,57 +427,197 @@ interface OnboardingPanelProps {
   readonly busy: boolean;
   readonly onboarding: OnboardingView;
   readonly onMutation: (path: "start" | "refresh" | RecoveryRequest["action"]) => void;
+  readonly onScanBleCandidates:
+    | ((options?: BleScanOptions) => Promise<readonly BleCandidate[]>)
+    | null;
 }
 
-function OnboardingPanel({ busy, onboarding, onMutation }: OnboardingPanelProps) {
+function OnboardingPanel({
+  busy,
+  onboarding,
+  onMutation,
+  onScanBleCandidates,
+}: OnboardingPanelProps) {
+  const [bleCandidates, setBleCandidates] = useState<readonly BleCandidate[]>([]);
+  const [bleScanError, setBleScanError] = useState<string | null>(null);
+  const [bleScanFinished, setBleScanFinished] = useState(false);
+  const [bleScanning, setBleScanning] = useState(false);
+  const [selectedPeripheralId, setSelectedPeripheralId] = useState<string | null>(null);
+  const scanAbort = useRef<AbortController | null>(null);
   const presentation = onboardingPresentation(onboarding);
+  const discovery = bleDiscoveryPresentation(onboarding, onScanBleCandidates !== null);
+  const selectedCandidate = selectedBleCandidate(bleCandidates, selectedPeripheralId);
+
+  useEffect(
+    () => () => {
+      scanAbort.current?.abort(new Error("BLE discovery screen closed"));
+      scanAbort.current = null;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (discovery.available) return;
+    scanAbort.current?.abort(new Error("BLE discovery is no longer available"));
+    scanAbort.current = null;
+    setBleCandidates([]);
+    setBleScanError(null);
+    setBleScanFinished(false);
+    setBleScanning(false);
+    setSelectedPeripheralId(null);
+  }, [discovery.available]);
+
+  const scanBleCandidates = async () => {
+    if (onScanBleCandidates === null || bleScanning || scanAbort.current !== null) return;
+    const abort = new AbortController();
+    scanAbort.current = abort;
+    setBleScanning(true);
+    setBleCandidates([]);
+    setBleScanError(null);
+    setBleScanFinished(false);
+    setSelectedPeripheralId(null);
+    try {
+      const candidates = await onScanBleCandidates({
+        scanTimeoutMs: ONBOARDING_BLE_SCAN_TIMEOUT_MS,
+        signal: abort.signal,
+      });
+      if (scanAbort.current !== abort) return;
+      setBleCandidates(candidates);
+      setSelectedPeripheralId(
+        (current) => selectedBleCandidate(candidates, current)?.peripheralId ?? null,
+      );
+      setBleScanFinished(true);
+    } catch (scanError) {
+      if (scanAbort.current !== abort || abort.signal.aborted) return;
+      setBleScanError(errorText(scanError));
+    } finally {
+      if (scanAbort.current === abort) {
+        scanAbort.current = null;
+        setBleScanning(false);
+      }
+    }
+  };
+
   if (presentation.ready) return null;
   return (
-    <View accessibilityLiveRegion="polite" style={styles.onboarding}>
-      <Text style={styles.eyebrow}>FIRST-RUN SETUP</Text>
-      <Text style={styles.onboardingTitle}>{presentation.title}</Text>
-      <Text style={styles.secondaryText}>{presentation.instruction}</Text>
-      {presentation.identifierLabel === null ? null : (
-        <View style={styles.serialRow}>
-          <Text style={styles.metaLabel}>{presentation.identifierLabel}</Text>
-          <Text selectable style={styles.monospace}>
-            {onboarding.snapshot?.usb_serial ?? "—"}
-          </Text>
+    <ScrollView
+      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      contentContainerStyle={styles.onboardingScrollContent}
+      keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+      keyboardShouldPersistTaps="handled"
+      nestedScrollEnabled
+      style={styles.onboardingScroller}
+    >
+      <View accessibilityLiveRegion="polite" style={styles.onboarding}>
+        <Text style={styles.eyebrow}>FIRST-RUN SETUP</Text>
+        <Text style={styles.onboardingTitle}>{presentation.title}</Text>
+        <Text style={styles.secondaryText}>{presentation.instruction}</Text>
+        {presentation.identifierLabel === null ? null : (
+          <View style={styles.serialRow}>
+            <Text style={styles.metaLabel}>{presentation.identifierLabel}</Text>
+            <Text selectable style={styles.monospace}>
+              {onboarding.snapshot?.usb_serial ?? "—"}
+            </Text>
+          </View>
+        )}
+        {discovery.available ? (
+          <View style={styles.bleDiscovery}>
+            <Text style={styles.bleDiscoveryTitle}>{discovery.title}</Text>
+            <Text style={styles.secondaryText}>{discovery.instruction}</Text>
+            <View style={styles.actionRow}>
+              <ActionButton
+                disabled={busy || bleScanning}
+                label={bleScanning ? "Finding nearby boards…" : "Find nearby boards"}
+                onPress={() => void scanBleCandidates()}
+              />
+            </View>
+            {bleScanError === null ? null : (
+              <Text accessibilityLiveRegion="assertive" style={styles.inlineError}>
+                {bleScanError}
+              </Text>
+            )}
+            {bleScanFinished && bleCandidates.length === 0 ? (
+              <Text style={styles.secondaryText}>No nearby appliances were found.</Text>
+            ) : null}
+            {bleCandidates.length === 0 ? null : (
+              <ScrollView
+                contentContainerStyle={styles.bleCandidateList}
+                nestedScrollEnabled
+                style={styles.bleCandidateScroller}
+              >
+                {bleCandidates.map((candidate) => {
+                  const selected = selectedCandidate?.peripheralId === candidate.peripheralId;
+                  return (
+                    <Pressable
+                      accessibilityLabel={`Select ${bleCandidateName(candidate)}`}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      key={candidate.peripheralId}
+                      onPress={() => setSelectedPeripheralId(candidate.peripheralId)}
+                      style={({ pressed }) => [
+                        styles.bleCandidate,
+                        selected && styles.bleCandidateSelected,
+                        pressed && styles.buttonPressed,
+                      ]}
+                    >
+                      <View style={styles.bleCandidateHeading}>
+                        <Text numberOfLines={1} style={styles.bleCandidateName}>
+                          {bleCandidateName(candidate)}
+                        </Text>
+                        <Text style={styles.bleCandidateChoice}>
+                          {selected ? "Selected" : "Select"}
+                        </Text>
+                      </View>
+                      <Text selectable style={styles.monospace}>
+                        {bleCandidateDetails(candidate)}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            )}
+            {selectedCandidate === null ? null : (
+              <Text accessibilityLiveRegion="polite" style={styles.bleSelectionStatus}>
+                Selected for the upcoming secure pairing step. No connection has been made.
+              </Text>
+            )}
+          </View>
+        ) : null}
+        <View style={styles.actionRow}>
+          {presentation.canStart ? (
+            <ActionButton
+              disabled={busy || bleScanning}
+              label={presentation.startLabel}
+              onPress={() => onMutation("start")}
+              secondary={discovery.available}
+            />
+          ) : null}
+          {presentation.canResume ? (
+            <ActionButton
+              disabled={busy || bleScanning}
+              label="Resume pairing"
+              onPress={() => onMutation("resume_known_pending")}
+            />
+          ) : null}
+          {presentation.canAbort ? (
+            <ActionButton
+              disabled={busy || bleScanning}
+              label="Abort pending state"
+              onPress={() => onMutation("abort_orphan")}
+              secondary
+            />
+          ) : null}
+          {presentation.canRefresh ? (
+            <ActionButton
+              disabled={busy || bleScanning}
+              label="Recheck local state"
+              onPress={() => onMutation("refresh")}
+              secondary
+            />
+          ) : null}
         </View>
-      )}
-      <View style={styles.actionRow}>
-        {presentation.canStart ? (
-          <ActionButton
-            disabled={busy}
-            label={presentation.startLabel}
-            onPress={() => onMutation("start")}
-          />
-        ) : null}
-        {presentation.canResume ? (
-          <ActionButton
-            disabled={busy}
-            label="Resume pairing"
-            onPress={() => onMutation("resume_known_pending")}
-          />
-        ) : null}
-        {presentation.canAbort ? (
-          <ActionButton
-            disabled={busy}
-            label="Abort pending state"
-            onPress={() => onMutation("abort_orphan")}
-            secondary
-          />
-        ) : null}
-        {presentation.canRefresh ? (
-          <ActionButton
-            disabled={busy}
-            label="Recheck local state"
-            onPress={() => onMutation("refresh")}
-            secondary
-          />
-        ) : null}
       </View>
-    </View>
+    </ScrollView>
   );
 }
 
@@ -1088,6 +1236,14 @@ export default function ApplianceScreen() {
     const read = api.nearbyPeers;
     return read === undefined ? null : () => read.call(api);
   }, [api]);
+  const bleCandidateScanner = useMemo(() => {
+    if (!bootstrapped) return null;
+    const scan = api.scanBleCandidates;
+    const supported = api.supportsBleCandidateDiscovery?.() ?? scan !== undefined;
+    return scan === undefined || !supported
+      ? null
+      : (options?: BleScanOptions) => scan.call(api, options);
+  }, [api, bootstrapped]);
 
   useEffect(() => {
     let active = true;
@@ -1434,14 +1590,19 @@ export default function ApplianceScreen() {
         </View>
       )}
       {busy ? <ActivityIndicator color="#91e6a7" style={styles.activity} /> : null}
-      <OnboardingPanel busy={busy} onboarding={onboarding} onMutation={onboardingMutation} />
-      <KeyboardAvoidingView
-        behavior={KEYBOARD_LAYOUT.avoidingBehavior}
-        enabled={KEYBOARD_LAYOUT.avoidingEnabled}
-        style={styles.keyboardAvoiding}
-      >
-        {ready ? (
-          workspace === "nomad" ? (
+      <OnboardingPanel
+        busy={busy}
+        onboarding={onboarding}
+        onMutation={onboardingMutation}
+        onScanBleCandidates={bleCandidateScanner}
+      />
+      {ready ? (
+        <KeyboardAvoidingView
+          behavior={KEYBOARD_LAYOUT.avoidingBehavior}
+          enabled={KEYBOARD_LAYOUT.avoidingEnabled}
+          style={styles.keyboardAvoiding}
+        >
+          {workspace === "nomad" ? (
             nomadShell
           ) : compact ? (
             <ScrollView
@@ -1456,25 +1617,25 @@ export default function ApplianceScreen() {
             </ScrollView>
           ) : (
             applianceShell
-          )
-        ) : null}
-        {compact && ready ? (
-          <View style={styles.mobileActions}>
-            <ActionButton
-              disabled={busy}
-              label="Sync"
-              onPress={() => void run(() => api.sync())}
-              secondary
-            />
-            <ActionButton
-              disabled={busy}
-              label="Reconnect"
-              onPress={() => void run(() => api.reconnect())}
-              secondary
-            />
-          </View>
-        ) : null}
-      </KeyboardAvoidingView>
+          )}
+          {compact ? (
+            <View style={styles.mobileActions}>
+              <ActionButton
+                disabled={busy}
+                label="Sync"
+                onPress={() => void run(() => api.sync())}
+                secondary
+              />
+              <ActionButton
+                disabled={busy}
+                label="Reconnect"
+                onPress={() => void run(() => api.reconnect())}
+                secondary
+              />
+            </View>
+          ) : null}
+        </KeyboardAvoidingView>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -1571,6 +1732,8 @@ const styles = StyleSheet.create({
   errorText: { color: colors.red },
   inlineError: { color: colors.red, fontSize: 12 },
   activity: { position: "absolute", top: 92, right: 16, zIndex: 2 },
+  onboardingScroller: { flex: 1, minHeight: 0 },
+  onboardingScrollContent: { paddingBottom: 32 },
   onboarding: {
     width: "92%",
     maxWidth: 620,
@@ -1584,6 +1747,36 @@ const styles = StyleSheet.create({
   },
   onboardingTitle: { marginBottom: 12, color: colors.text, fontSize: 22, fontWeight: "700" },
   secondaryText: { color: colors.muted, lineHeight: 22 },
+  bleDiscovery: {
+    marginVertical: 20,
+    paddingVertical: 16,
+    gap: 10,
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+  },
+  bleDiscoveryTitle: { color: colors.text, fontSize: 16, fontWeight: "700" },
+  bleCandidateScroller: { maxHeight: 220 },
+  bleCandidateList: { gap: 7 },
+  bleCandidate: {
+    gap: 4,
+    padding: 10,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.panel2,
+  },
+  bleCandidateSelected: { borderColor: "#5b9c69", backgroundColor: colors.greenDark },
+  bleCandidateHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  bleCandidateName: { flex: 1, color: "#dfe8df", fontWeight: "700" },
+  bleCandidateChoice: { color: colors.green, fontSize: 11, fontWeight: "700" },
+  bleSelectionStatus: { color: colors.green, fontSize: 11, lineHeight: 16 },
   serialRow: {
     marginVertical: 20,
     paddingVertical: 13,

@@ -20,7 +20,12 @@ import {
   MAX_NOMAD_PAGE_PATH_BYTES,
   MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 } from "../generated/api.ts";
-import type { BleCentral, BleConnectOptions } from "./ble-central-types.ts";
+import type {
+  BleCandidate,
+  BleCentral,
+  BleConnectOptions,
+  BleScanOptions,
+} from "./ble-central-types.ts";
 import {
   bleGattProfileFromNative,
   cleanupPickerOwnedCredential,
@@ -59,6 +64,10 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
     if (performance.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
     await Bun.sleep(1);
   }
+}
+
+function emptyBleScan(): Promise<readonly BleCandidate[]> {
+  return Promise.resolve([]);
 }
 
 function offlineBleAppliance(): NativeApplianceLike {
@@ -412,6 +421,7 @@ describe("native appliance adapter loading", () => {
     let destroyed = false;
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(): Promise<never> {
         connectCount += 1;
         throw new Error("no nearby appliance");
@@ -521,12 +531,89 @@ describe("native appliance adapter loading", () => {
 });
 
 describe("native credential import onboarding", () => {
+  test("forwards advertisement-only discovery while credentials are missing without starting BLE", async () => {
+    const candidates = [
+      { peripheralId: "board-a", peripheralName: "Reticulum A", rssi: -48 },
+    ] as const;
+    const scans: Array<{ readonly options?: BleScanOptions; readonly serviceUuid: string }> = [];
+    let connectCalls = 0;
+    const central: BleCentral = {
+      supported: true,
+      async scan(serviceUuid, options): Promise<readonly BleCandidate[]> {
+        scans.push({ serviceUuid, options });
+        return candidates;
+      },
+      async connect(): Promise<never> {
+        connectCalls += 1;
+        throw new Error("unexpected BLE connection");
+      },
+      async dispose(): Promise<void> {},
+    };
+    const runtime = credentialRuntime({
+      central,
+      importCredential: () => E290_CREDENTIAL,
+      status: () => ({ state: "missing" }),
+    });
+    const client = new NativeApplianceClient(async () => runtime);
+    const abort = new AbortController();
+
+    expect(client.supportsBleCandidateDiscovery()).toBeFalse();
+    await client.bootstrapSession();
+    expect(client.supportsBleCandidateDiscovery()).toBeTrue();
+    await expect(
+      client.scanBleCandidates({ scanTimeoutMs: 25, signal: abort.signal }),
+    ).resolves.toEqual(candidates);
+
+    expect(scans).toEqual([
+      {
+        serviceUuid: "generated-service",
+        options: { scanTimeoutMs: 25, signal: abort.signal },
+      },
+    ]);
+    expect(connectCalls).toBe(0);
+    client.dispose();
+  });
+
+  test("refuses credential-free discovery for active and invalid credential states", async () => {
+    for (const state of [
+      { state: "active", summary: E290_CREDENTIAL },
+      { state: "invalid", reason: "bad credential" },
+    ] satisfies NativeCredentialState[]) {
+      let scanCalls = 0;
+      const central: BleCentral = {
+        supported: true,
+        async scan(): Promise<readonly BleCandidate[]> {
+          scanCalls += 1;
+          return [];
+        },
+        async connect(): Promise<never> {
+          throw new Error("offline active credential");
+        },
+        async dispose(): Promise<void> {},
+      };
+      const runtime = credentialRuntime({
+        central,
+        importCredential: () => E290_CREDENTIAL,
+        status: () => state,
+      });
+      const client = new NativeApplianceClient(async () => runtime);
+
+      await client.bootstrapSession();
+      await expect(client.scanBleCandidates({ scanTimeoutMs: 1 })).rejects.toThrow(
+        "available only before credential setup",
+      );
+      expect(scanCalls).toBe(0);
+      client.dispose();
+    }
+  });
+
   test("keeps BLE stopped for a missing credential and treats picker cancel as a no-op", async () => {
     const connections: BleConnectOptions[] = [];
     let pickerCalls = 0;
     let importCalls = 0;
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(_profile, options): Promise<never> {
         connections.push(options ?? {});
         throw new Error("unexpected BLE scan");
@@ -578,6 +665,7 @@ describe("native credential import onboarding", () => {
     };
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(): Promise<never> {
         connectCalls += 1;
         throw new Error("unexpected untargeted scan");
@@ -611,6 +699,7 @@ describe("native credential import onboarding", () => {
     let state: NativeCredentialState = { state: "missing" };
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(_profile, options): Promise<never> {
         connections.push(options ?? {});
         throw new Error("offline test");
@@ -642,6 +731,7 @@ describe("native credential import onboarding", () => {
     let cleaned = 0;
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(_profile, options): Promise<never> {
         connections.push(options ?? {});
         throw new Error("offline test");
@@ -685,6 +775,7 @@ describe("native credential import onboarding", () => {
     let connectCalls = 0;
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(): Promise<never> {
         connectCalls += 1;
         throw new Error("unexpected BLE scan");
@@ -724,6 +815,7 @@ describe("native credential import onboarding", () => {
     } as unknown as NativeApplianceError;
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(_profile, options): Promise<never> {
         connections.push(options ?? {});
         throw new Error("offline test");
@@ -768,6 +860,7 @@ describe("native credential import onboarding", () => {
     } as unknown as NativeApplianceError;
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(): Promise<never> {
         connectCalls += 1;
         throw new Error("unexpected BLE scan");
@@ -808,6 +901,7 @@ describe("native credential import onboarding", () => {
     let state: NativeCredentialState = { state: "missing" };
     const central: BleCentral = {
       supported: true,
+      scan: emptyBleScan,
       async connect(_profile, options): Promise<never> {
         connections.push(options ?? {});
         throw new Error("offline test");
@@ -880,7 +974,9 @@ describe("native credential import onboarding", () => {
     };
     const client = new NativeApplianceClient(async () => runtime);
 
+    expect(client.supportsBleCandidateDiscovery()).toBeFalse();
     await client.bootstrapSession();
+    expect(client.supportsBleCandidateDiscovery()).toBeFalse();
     await client.startOnboarding();
 
     expect(reconnects).toBe(1);

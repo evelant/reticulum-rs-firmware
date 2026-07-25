@@ -14,12 +14,28 @@ import type {
   SendResponse,
   TimelineView,
 } from "../generated/api.ts";
+import type { BleCandidate, BleScanOptions } from "./ble-central-types.ts";
 import type { NearbyPeerView } from "./nearby-peers.ts";
 
 export interface ApplianceClient {
   bootstrapSession(): Promise<void>;
   snapshot(): Promise<ApplianceSnapshot>;
   onboarding(): Promise<OnboardingView>;
+  /**
+   * Credential-free, advertisement-only discovery for native first-run UI.
+   *
+   * Implementations must not connect or exchange appliance protocol bytes.
+   */
+  scanBleCandidates?(options?: BleScanOptions): Promise<readonly BleCandidate[]>;
+  /**
+   * Report whether the bootstrapped runtime owns a BLE central capable of
+   * credential-free discovery.
+   *
+   * This check must be synchronous and side-effect free. It lets transports
+   * such as native Wi-Fi omit an otherwise nonfunctional BLE action even when
+   * they share the same client implementation.
+   */
+  supportsBleCandidateDiscovery?(): boolean;
   contacts(): Promise<ContactView[]>;
   /**
    * Rust-owned authenticated peer discovery, when compiled into this client.

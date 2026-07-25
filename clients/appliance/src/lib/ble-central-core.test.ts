@@ -79,6 +79,11 @@ class FakeBleDriver implements BleCentralDriver {
   maximumWriteGate: Promise<void> = Promise.resolve();
   maximumWriteBytes = 64;
   notificationGate: Promise<void> = Promise.resolve();
+  scanAllowDuplicates: boolean[] = [];
+  scanStartError: Error | null = null;
+  scanStartGate: Promise<void> = Promise.resolve();
+  scanStopError: Error | null = null;
+  scanStopGate: Promise<void> = Promise.resolve();
   stopNotificationGate: Promise<void> = Promise.resolve();
 
   private readonly discoveredListeners = new Set<(peripheral: BleDiscoveredPeripheral) => void>();
@@ -105,19 +110,22 @@ class FakeBleDriver implements BleCentralDriver {
     return () => this.indicationListeners.delete(listener);
   }
 
-  startScan(serviceUuid: string): Promise<void> {
+  async startScan(serviceUuid: string, allowDuplicates: boolean): Promise<void> {
     this.events.push(`scan ${serviceUuid}`);
+    this.scanAllowDuplicates.push(allowDuplicates);
+    if (this.scanStartError !== null) throw this.scanStartError;
+    await this.scanStartGate;
     if (this.autoDiscover) {
       queueMicrotask(() => {
         this.emitDiscovered(this.discoveredPeripheral);
       });
     }
-    return Promise.resolve();
   }
 
-  stopScan(): Promise<void> {
+  async stopScan(): Promise<void> {
     this.events.push("stop scan");
-    return Promise.resolve();
+    if (this.scanStopError !== null) throw this.scanStopError;
+    await this.scanStopGate;
   }
 
   async connect(peripheralId: string): Promise<void> {
@@ -184,6 +192,10 @@ class FakeBleDriver implements BleCentralDriver {
     for (const listener of this.discoveredListeners) listener(peripheral);
   }
 
+  discoveredListenerCount(): number {
+    return this.discoveredListeners.size;
+  }
+
   emitIndication(bytes: Uint8Array, overrides: Partial<BleDriverIndicationEvent> = {}): void {
     const event: BleDriverIndicationEvent = {
       peripheralId: PERIPHERAL.id,
@@ -217,6 +229,141 @@ describe("BLE advertisement identity", () => {
   });
 });
 
+describe("foreground BLE appliance discovery", () => {
+  test("deduplicates observations, retains the strongest signal and useful name, and sorts deterministically", async () => {
+    const driver = new FakeBleDriver();
+    driver.autoDiscover = false;
+    const central = new ForegroundBleCentral(driver);
+    const pending = central.scan(PROFILE.serviceUuid, { scanTimeoutMs: 10 });
+    await waitFor(() => driver.events.some((event) => event.startsWith("scan ")), "BLE scan");
+
+    driver.emitDiscovered({ id: "board-b", name: "Bravo", rssi: -75 });
+    driver.emitDiscovered({ id: "BOARD-A", name: "   ", rssi: -85 });
+    driver.emitDiscovered({ id: "board-a", name: "Alpha", rssi: -65 });
+    driver.emitDiscovered({ id: "BOARD-A", rssi: -40 });
+    driver.emitDiscovered({ id: "board-c", name: "Charlie", rssi: -75 });
+    driver.emitDiscovered({ id: "board-e", name: "Echo" });
+    driver.emitDiscovered({ id: "board-d", name: "Delta" });
+
+    expect(await pending).toEqual([
+      { peripheralId: "BOARD-A", peripheralName: "Alpha", rssi: -40 },
+      { peripheralId: "board-b", peripheralName: "Bravo", rssi: -75 },
+      { peripheralId: "board-c", peripheralName: "Charlie", rssi: -75 },
+      { peripheralId: "board-d", peripheralName: "Delta", rssi: undefined },
+      { peripheralId: "board-e", peripheralName: "Echo", rssi: undefined },
+    ]);
+    expect(driver.events).toEqual(["prepare", `scan ${PROFILE.serviceUuid}`, "stop scan"]);
+    expect(driver.events.some((event) => event.startsWith("connect "))).toBeFalse();
+    expect(driver.scanAllowDuplicates).toEqual([true]);
+    expect(driver.discoveredListenerCount()).toBe(0);
+  });
+
+  test("excludes connection setup during a scan and always stops after cancellation", async () => {
+    const driver = new FakeBleDriver();
+    driver.autoDiscover = false;
+    const central = new ForegroundBleCentral(driver);
+    const abort = new AbortController();
+    const scanning = central.scan(PROFILE.serviceUuid, {
+      scanTimeoutMs: 1_000,
+      signal: abort.signal,
+    });
+    await waitFor(() => driver.events.some((event) => event.startsWith("scan ")), "BLE scan");
+
+    await expect(central.connect(PROFILE)).rejects.toThrow("already owns a connection");
+    abort.abort(new Error("test cancellation"));
+    await expect(scanning).rejects.toThrow("test cancellation");
+    expect(driver.events).toEqual(["prepare", `scan ${PROFILE.serviceUuid}`, "stop scan"]);
+    expect(driver.discoveredListenerCount()).toBe(0);
+
+    driver.autoDiscover = true;
+    const connection = await central.connect(PROFILE);
+    await expect(central.scan(PROFILE.serviceUuid, { scanTimeoutMs: 1 })).rejects.toThrow(
+      "already owns a scan or connection",
+    );
+    await connection.close();
+  });
+
+  test("bounds distinct candidate retention during a duplicate-enabled scan", async () => {
+    const driver = new FakeBleDriver();
+    driver.autoDiscover = false;
+    const central = new ForegroundBleCentral(driver);
+    const pending = central.scan(PROFILE.serviceUuid, { scanTimeoutMs: 10 });
+    await waitFor(() => driver.events.some((event) => event.startsWith("scan ")), "BLE scan");
+
+    for (let index = 0; index < 70; index += 1) {
+      driver.emitDiscovered({
+        id: `board-${index.toString().padStart(2, "0")}`,
+        rssi: -40 - index,
+      });
+    }
+
+    const candidates = await pending;
+    expect(candidates).toHaveLength(64);
+    expect(candidates[0]?.peripheralId).toBe("board-00");
+    expect(candidates.at(-1)?.peripheralId).toBe("board-63");
+  });
+
+  test("disposal cancels a scan and waits for foreground teardown", async () => {
+    const driver = new FakeBleDriver();
+    driver.autoDiscover = false;
+    const central = new ForegroundBleCentral(driver);
+    const scanning = central.scan(PROFILE.serviceUuid, { scanTimeoutMs: 1_000 });
+    await waitFor(() => driver.events.some((event) => event.startsWith("scan ")), "BLE scan");
+
+    await central.dispose();
+
+    await expect(scanning).rejects.toThrow("disposed during scanning");
+    expect(driver.events.at(-1)).toBe("stop scan");
+    expect(driver.discoveredListenerCount()).toBe(0);
+  });
+
+  test("retains scan ownership after a start timeout until the late scan is stopped", async () => {
+    const driver = new FakeBleDriver();
+    driver.autoDiscover = false;
+    const start = deferred();
+    driver.scanStartGate = start.promise;
+    const central = new ForegroundBleCentral(driver);
+    const scanning = central.scan(PROFILE.serviceUuid, {
+      operationTimeoutMs: 5,
+      scanTimeoutMs: 1_000,
+    });
+
+    await expect(scanning).rejects.toThrow("BLE scan start timed out");
+    expect(driver.discoveredListenerCount()).toBe(0);
+    await expect(central.connect(PROFILE)).rejects.toThrow("already owns a connection");
+
+    start.resolve();
+    await waitFor(
+      () => driver.events.filter((event) => event === "stop scan").length === 1,
+      "late BLE scan cleanup",
+    );
+    driver.autoDiscover = true;
+    const connection = await central.connect(PROFILE);
+    await connection.close();
+  });
+
+  test("surfaces native scan start and stop failures and removes discovery listeners", async () => {
+    const startDriver = new FakeBleDriver();
+    startDriver.scanStartError = new Error("native scan start failed");
+    await expect(
+      new ForegroundBleCentral(startDriver).scan(PROFILE.serviceUuid, { scanTimeoutMs: 1 }),
+    ).rejects.toThrow("native scan start failed");
+    expect(startDriver.events).toEqual(["prepare", `scan ${PROFILE.serviceUuid}`]);
+    expect(startDriver.discoveredListenerCount()).toBe(0);
+
+    const stopDriver = new FakeBleDriver();
+    stopDriver.autoDiscover = false;
+    stopDriver.scanStopError = new Error("native scan stop failed");
+    const stopCentral = new ForegroundBleCentral(stopDriver);
+    await expect(stopCentral.scan(PROFILE.serviceUuid, { scanTimeoutMs: 1 })).rejects.toThrow(
+      "native scan stop failed",
+    );
+    expect(stopDriver.events).toEqual(["prepare", `scan ${PROFILE.serviceUuid}`, "stop scan"]);
+    expect(stopDriver.discoveredListenerCount()).toBe(0);
+    await expect(stopCentral.connect(PROFILE)).rejects.toThrow("already owns a connection");
+  });
+});
+
 describe("foreground BLE central", () => {
   test("declares the connection ready only after discovery and indication subscription", async () => {
     const driver = new FakeBleDriver();
@@ -239,6 +386,7 @@ describe("foreground BLE central", () => {
     expect(connection.peripheralId).toBe(PERIPHERAL.id);
     expect(connection.name).toBe(PERIPHERAL.name);
     expect(connection.maxWriteWithResponseBytes).toBe(20);
+    expect(driver.scanAllowDuplicates).toEqual([false]);
     expect(driver.events.map((event) => event.split(" ")[0])).toEqual([
       "prepare",
       "scan",
@@ -896,6 +1044,9 @@ describe("web BLE boundary", () => {
     const central = createWebBleCentral();
 
     expect(central.supported).toBe(false);
+    await expect(central.scan(PROFILE.serviceUuid, { scanTimeoutMs: 1 })).rejects.toThrow(
+      "available only in iOS and Android development builds",
+    );
     await expect(central.connect(PROFILE)).rejects.toThrow(
       "available only in iOS and Android development builds",
     );

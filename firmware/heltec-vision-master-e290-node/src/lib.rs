@@ -13,6 +13,7 @@ pub mod credential_boot;
 pub mod credential_pairing;
 pub mod credential_runtime;
 pub mod cross_store_gate;
+pub mod display_handoff;
 pub mod durability_boot;
 pub mod durability_policy;
 #[cfg(all(

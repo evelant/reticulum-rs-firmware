@@ -296,6 +296,19 @@ proof unless a failing test promotes one into a release blocker.
   LED identify action exists, an operator may have to press the middle button
   labelled `21` on every candidate board. Only the selected serial owns the
   pairing session, but this is not acceptable final multi-device UX.
+- Native first-run BLE discovery now lists bounded service advertisements and
+  requires explicit selection without connecting. Advertisements do not reveal
+  whether an appliance is provisioned and are not authenticated identity. The
+  selected row cannot yet begin pairing. The allocation-free display model and
+  coalescing handoff own a zeroizing six-digit passkey plus explicit
+  timeout/success/failure/reboot clearing, but the E290 e-paper driver, Trouble
+  Secure Connections events, GPIO21-bound BLE pairing bearer, durable bond
+  store, and Rust-owned phone credential install remain unimplemented. See
+  [ADR 0019](adr/0019-secure-ble-appliance-onboarding.md). Trouble `0.6.0`
+  also has no public pre-SMP admission hook, so the first alpha design accepts
+  transient non-bonding SMP work and immediate disconnect as a bounded
+  connection/UX denial-of-service risk; only a presence-bound epoch with an
+  authenticated, durably stored bond may reach device authorization.
 - The current session authenticates records but does not encrypt the USB
   transcript. The diagnostic and chat-alpha CLIs accept title/content bytes in
   process arguments, where shell history or same-host process inspection can

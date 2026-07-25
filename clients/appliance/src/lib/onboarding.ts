@@ -1,4 +1,5 @@
 import type { OnboardingStage, OnboardingView } from "../generated/api.ts";
+import type { BleCandidate } from "./ble-central-types.ts";
 
 export interface OnboardingPresentation {
   readonly ready: boolean;
@@ -10,6 +11,50 @@ export interface OnboardingPresentation {
   readonly canResume: boolean;
   readonly canAbort: boolean;
   readonly canRefresh: boolean;
+}
+
+export interface BleDiscoveryPresentation {
+  readonly available: boolean;
+  readonly instruction: string;
+  readonly title: string;
+}
+
+export function bleDiscoveryPresentation(
+  view: OnboardingView,
+  scannerAvailable: boolean,
+): BleDiscoveryPresentation {
+  const available =
+    scannerAvailable &&
+    view.method === "credential_import" &&
+    view.snapshot?.lifecycle.state === "needs_pairing";
+  return {
+    available,
+    title: "Nearby appliances",
+    instruction:
+      "Find nearby boards without connecting. Select the physical board you intend to pair; discovery does not send credentials or replace credential-derived targeting.",
+  };
+}
+
+export function bleCandidateName(candidate: BleCandidate): string {
+  return candidate.peripheralName?.trim() || "Unnamed appliance";
+}
+
+export function bleCandidateDetails(candidate: BleCandidate): string {
+  const signal = candidate.rssi === undefined ? null : `${candidate.rssi} dBm`;
+  return [signal, candidate.peripheralId]
+    .filter((value): value is string => value !== null)
+    .join(" · ");
+}
+
+export function selectedBleCandidate(
+  candidates: readonly BleCandidate[],
+  selectedPeripheralId: string | null,
+): BleCandidate | null {
+  if (selectedPeripheralId === null) return null;
+  const normalized = selectedPeripheralId.toLowerCase();
+  return (
+    candidates.find((candidate) => candidate.peripheralId.toLowerCase() === normalized) ?? null
+  );
 }
 
 const PRESENCE_INSTRUCTION =

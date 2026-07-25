@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import type { OnboardingState, OnboardingView } from "../generated/api.ts";
-import { onboardingPresentation } from "./onboarding.ts";
+import {
+  bleCandidateDetails,
+  bleCandidateName,
+  bleDiscoveryPresentation,
+  onboardingPresentation,
+  selectedBleCandidate,
+} from "./onboarding.ts";
 
 function view(lifecycle: OnboardingState): OnboardingView {
   return {
@@ -122,5 +128,61 @@ describe("native credential import presentation", () => {
     expect(presentation.title).toContain("BLE profile");
     expect(presentation.instruction).toContain("canonical");
     expect(presentation.instruction).toContain("No untargeted scan");
+  });
+});
+
+describe("credential-free BLE discovery presentation", () => {
+  const missingCredential: OnboardingView = {
+    available: true,
+    method: "credential_import",
+    snapshot: {
+      revision: 0,
+      usb_serial: "",
+      lifecycle: { state: "needs_pairing" },
+    },
+  };
+
+  test("offers nearby appliance discovery only in the missing-credential native state", () => {
+    const discovery = bleDiscoveryPresentation(missingCredential, true);
+    expect(discovery).toMatchObject({
+      available: true,
+      title: "Nearby appliances",
+    });
+    expect(discovery.instruction).toContain("without connecting");
+    expect(discovery.instruction).toContain("does not send credentials");
+
+    expect(bleDiscoveryPresentation(missingCredential, false).available).toBeFalse();
+    expect(
+      bleDiscoveryPresentation(
+        {
+          ...missingCredential,
+          snapshot: {
+            revision: 0,
+            usb_serial: "",
+            lifecycle: { state: "credential_ready" },
+          },
+        },
+        true,
+      ).available,
+    ).toBeFalse();
+  });
+
+  test("never selects a board merely because discovery returned one", () => {
+    const candidates = [
+      { peripheralId: "board-a", peripheralName: "Reticulum A", rssi: -61 },
+    ] as const;
+
+    expect(selectedBleCandidate(candidates, null)).toBeNull();
+    expect(selectedBleCandidate(candidates, "board-b")).toBeNull();
+    expect(selectedBleCandidate(candidates, "BOARD-A")).toEqual(candidates[0]);
+  });
+
+  test("presents a stable identity and optional signal without inventing a name", () => {
+    expect(bleCandidateName({ peripheralId: "board-a", peripheralName: "  Ridge node  " })).toBe(
+      "Ridge node",
+    );
+    expect(bleCandidateName({ peripheralId: "board-b" })).toBe("Unnamed appliance");
+    expect(bleCandidateDetails({ peripheralId: "board-a", rssi: -72 })).toBe("-72 dBm · board-a");
+    expect(bleCandidateDetails({ peripheralId: "board-b" })).toBe("board-b");
   });
 });

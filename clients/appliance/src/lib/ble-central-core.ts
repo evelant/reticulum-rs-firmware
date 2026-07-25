@@ -1,10 +1,12 @@
 import type {
+  BleCandidate,
   BleCentral,
   BleConnection,
   BleConnectionObserver,
   BleConnectOptions,
   BleDisconnectEvent,
   BleGattProfile,
+  BleScanOptions,
 } from "./ble-central-types.ts";
 
 export const MINIMUM_WRITE_WITH_RESPONSE_BYTES = 20;
@@ -31,6 +33,7 @@ export const MAX_PENDING_INDICATION_CHUNKS = 256;
 export interface BleDiscoveredPeripheral {
   readonly id: string;
   readonly name?: string;
+  readonly rssi?: number;
 }
 
 export interface BleDriverDisconnectEvent {
@@ -64,7 +67,7 @@ export interface BleCentralDriver {
   onDiscovered(listener: (peripheral: BleDiscoveredPeripheral) => void): () => void;
   onDisconnected(listener: (event: BleDriverDisconnectEvent) => void): () => void;
   onIndication(listener: (event: BleDriverIndicationEvent) => void): () => void;
-  startScan(serviceUuid: string): Promise<void>;
+  startScan(serviceUuid: string, allowDuplicates: boolean): Promise<void>;
   stopScan(): Promise<void>;
   connect(peripheralId: string): Promise<void>;
   discover(peripheralId: string, serviceUuid: string): Promise<BleGattDiscovery>;
@@ -238,6 +241,45 @@ function validateTimeout(value: number, label: string): number {
   }
   return value;
 }
+
+function waitForObservationWindow(timeoutMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const finish = (callback: () => void) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(cancellationError(signal)));
+    const timer = setTimeout(() => finish(resolve), timeoutMs);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function candidateSignal(candidate: BleCandidate): number {
+  return candidate.rssi ?? Number.NEGATIVE_INFINITY;
+}
+
+function compareCandidateText(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function compareCandidates(left: BleCandidate, right: BleCandidate): number {
+  const leftSignal = candidateSignal(left);
+  const rightSignal = candidateSignal(right);
+  if (leftSignal !== rightSignal) return leftSignal > rightSignal ? -1 : 1;
+  const name = compareCandidateText(left.peripheralName ?? "", right.peripheralName ?? "");
+  if (name !== 0) return name;
+  return compareCandidateText(left.peripheralId, right.peripheralId);
+}
+
+interface CandidateObservation {
+  candidate: BleCandidate;
+  nameSignal: number;
+}
+
+const MAX_BLE_SCAN_CANDIDATES = 64;
 
 class ManagedBleConnection implements BleConnection {
   readonly name?: string;
@@ -445,17 +487,184 @@ export class ForegroundBleCentral implements BleCentral {
   private active: ManagedBleConnection | undefined;
   private connecting: AbortController | undefined;
   private disposed = false;
+  private retiringScan: object | undefined;
+  private scanning: AbortController | undefined;
+  private scanningCompletion: Promise<readonly BleCandidate[]> | undefined;
   // A failed setup still owns its peripheral until native teardown is no
   // longer ambiguous, even though its public connect promise has settled.
   private retiringSetup: object | undefined;
 
   constructor(private readonly driver: BleCentralDriver) {}
 
+  scan(serviceUuid: string, options: BleScanOptions = {}): Promise<readonly BleCandidate[]> {
+    if (this.disposed) return Promise.reject(new Error("BLE central is disposed"));
+    if (
+      this.scanning !== undefined ||
+      this.connecting !== undefined ||
+      this.active !== undefined ||
+      this.retiringScan !== undefined ||
+      this.retiringSetup !== undefined
+    ) {
+      return Promise.reject(new Error("BLE central already owns a scan or connection"));
+    }
+    if (normalizeUuid(serviceUuid).length === 0) {
+      return Promise.reject(new Error("BLE service UUID must not be empty"));
+    }
+
+    const scanTimeoutMs = validateTimeout(
+      options.scanTimeoutMs ?? DEFAULT_BLE_SCAN_TIMEOUT_MS,
+      "BLE scan timeout",
+    );
+    const operationTimeoutMs = validateTimeout(
+      options.operationTimeoutMs ?? DEFAULT_BLE_OPERATION_TIMEOUT_MS,
+      "BLE operation timeout",
+    );
+    const abort = new AbortController();
+    const forwardCancellation = () => {
+      abort.abort(options.signal?.reason ?? new Error("BLE scan was cancelled"));
+    };
+    if (options.signal?.aborted) forwardCancellation();
+    else options.signal?.addEventListener("abort", forwardCancellation, { once: true });
+    this.scanning = abort;
+
+    const scanning = this.runScan(serviceUuid, scanTimeoutMs, operationTimeoutMs, abort).finally(
+      () => {
+        options.signal?.removeEventListener("abort", forwardCancellation);
+        if (this.scanning === abort) this.scanning = undefined;
+        if (this.scanningCompletion === scanning) this.scanningCompletion = undefined;
+      },
+    );
+    this.scanningCompletion = scanning;
+    return scanning;
+  }
+
+  private async runScan(
+    serviceUuid: string,
+    scanTimeoutMs: number,
+    operationTimeoutMs: number,
+    abort: AbortController,
+  ): Promise<readonly BleCandidate[]> {
+    const scanOwnership = {};
+    const observations = new Map<string, CandidateObservation>();
+    const removeDiscovered = this.driver.onDiscovered((peripheral) => {
+      const key = peripheral.id.toLowerCase();
+      const name = peripheral.name?.trim() || undefined;
+      const rssi =
+        peripheral.rssi === undefined || !Number.isFinite(peripheral.rssi)
+          ? undefined
+          : Math.round(peripheral.rssi);
+      const existing = observations.get(key);
+      if (existing === undefined) {
+        if (observations.size >= MAX_BLE_SCAN_CANDIDATES) return;
+        observations.set(key, {
+          candidate: {
+            peripheralId: peripheral.id,
+            peripheralName: name,
+            rssi,
+          },
+          nameSignal:
+            name === undefined ? Number.NEGATIVE_INFINITY : (rssi ?? Number.NEGATIVE_INFINITY),
+        });
+        return;
+      }
+
+      const strongestRssi =
+        rssi === undefined
+          ? existing.candidate.rssi
+          : Math.max(existing.candidate.rssi ?? Number.NEGATIVE_INFINITY, rssi);
+      const nameSignal =
+        name === undefined ? Number.NEGATIVE_INFINITY : (rssi ?? Number.NEGATIVE_INFINITY);
+      const retainNewName =
+        name !== undefined &&
+        (existing.candidate.peripheralName === undefined || nameSignal > existing.nameSignal);
+      observations.set(key, {
+        candidate: {
+          peripheralId: existing.candidate.peripheralId,
+          peripheralName: retainNewName ? name : existing.candidate.peripheralName,
+          rssi: strongestRssi === Number.NEGATIVE_INFINITY ? undefined : strongestRssi,
+        },
+        nameSignal: retainNewName ? nameSignal : existing.nameSignal,
+      });
+    });
+
+    let scanStarted = false;
+    let stopRequested = false;
+    const retainCleanup = (cleanup: Promise<boolean>) => {
+      this.retiringScan = scanOwnership;
+      void cleanup.then((safeToRelease) => {
+        if (safeToRelease && this.retiringScan === scanOwnership) {
+          this.retiringScan = undefined;
+        }
+      });
+    };
+    try {
+      if (abort.signal.aborted) throw cancellationError(abort.signal);
+      await boundedDriverOperation(
+        () => this.driver.prepare(),
+        operationTimeoutMs,
+        "BLE platform preparation timed out",
+        abort.signal,
+      );
+      const scanStart = driverOperation(() => this.driver.startScan(serviceUuid, true));
+      try {
+        await withDeadline(scanStart, operationTimeoutMs, "BLE scan start timed out", abort.signal);
+      } catch (error) {
+        retainCleanup(
+          scanStart.then(
+            () =>
+              driverOperation(() => this.driver.stopScan()).then(
+                () => true,
+                () => false,
+              ),
+            () => true,
+          ),
+        );
+        throw error;
+      }
+      scanStarted = true;
+      await waitForObservationWindow(scanTimeoutMs, abort.signal);
+      const scanStop = driverOperation(() => this.driver.stopScan());
+      stopRequested = true;
+      try {
+        await withDeadline(scanStop, operationTimeoutMs, "BLE scan stop timed out", abort.signal);
+      } catch (error) {
+        retainCleanup(
+          scanStop.then(
+            () => true,
+            () => false,
+          ),
+        );
+        throw error;
+      }
+      scanStarted = false;
+      return [...observations.values()]
+        .map((observation) => observation.candidate)
+        .sort(compareCandidates);
+    } finally {
+      removeDiscovered();
+      if (scanStarted && !stopRequested) {
+        const teardown = driverOperation(() => this.driver.stopScan());
+        try {
+          await withDeadline(teardown, operationTimeoutMs, "BLE scan teardown timed out");
+        } catch {
+          retainCleanup(
+            teardown.then(
+              () => true,
+              () => false,
+            ),
+          );
+        }
+      }
+    }
+  }
+
   async connect(profile: BleGattProfile, options: BleConnectOptions = {}): Promise<BleConnection> {
     if (this.disposed) throw new Error("BLE central is disposed");
     if (
       this.connecting !== undefined ||
+      this.scanning !== undefined ||
       this.active !== undefined ||
+      this.retiringScan !== undefined ||
       this.retiringSetup !== undefined
     ) {
       throw new Error("BLE central already owns a connection");
@@ -595,7 +804,7 @@ export class ForegroundBleCentral implements BleCentral {
       );
 
       await run(() => this.driver.prepare(), "BLE platform preparation timed out");
-      const scanStart = driverOperation(() => this.driver.startScan(profile.serviceUuid));
+      const scanStart = driverOperation(() => this.driver.startScan(profile.serviceUuid, false));
       try {
         await withDeadline(scanStart, operationTimeoutMs, "BLE scan start timed out", abort.signal);
       } catch (error) {
@@ -727,7 +936,9 @@ export class ForegroundBleCentral implements BleCentral {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.scanning?.abort(new Error("BLE central was disposed during scanning"));
     this.connecting?.abort(new Error("BLE central was disposed during connection setup"));
+    await this.scanningCompletion?.catch(() => undefined);
     await this.active?.close();
   }
 }

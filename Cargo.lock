@@ -2609,6 +2609,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-appliance-display-model"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "reticulum-appliance-native"
 version = "0.1.0"
 dependencies = [
@@ -2948,6 +2955,7 @@ dependencies = [
  "log",
  "rand_core 0.6.4",
  "reticulum-announce-clock",
+ "reticulum-appliance-display-model",
  "reticulum-board-heltec-vision-master-e290-radio",
  "reticulum-device-api",
  "reticulum-device-api-adapter",
@@ -3017,6 +3025,7 @@ dependencies = [
  "log",
  "rand_core 0.6.4",
  "reticulum-announce-clock",
+ "reticulum-appliance-display-model",
  "reticulum-board-heltec-vision-master-e290-radio",
  "reticulum-device-api",
  "reticulum-device-api-adapter",

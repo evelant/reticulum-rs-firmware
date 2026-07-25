@@ -108,18 +108,26 @@ and taps on visible actions remain enabled while the keyboard is open. The
 entry, composer scrolling, and Send-button reachability; it did not qualify rotation,
 accessibility text scaling, external keyboards, or Android keyboard variants.
 
-On a fresh native install, the first-run screen offers the alpha **credential import** path. Pair
-the intended board through the qualified USB managed-profile workflow, make a temporary copy of
-its exact 96-byte Active `credential.rdpkey`, name the transfer copy with that board's normalized
-USB serial, transfer it to the phone, and choose it in the system file picker. Verify the filename:
-the current create-only alpha imports the first canonical credential immediately and has no
-secret-free board-identity confirmation screen. Selecting the other board's valid file requires
-clearing this app's local data before trying again. The Expo layer copies the selection to an
-app-owned cache path without reading its bytes, Rust validates and create-only publishes a
-mode-`0600` canonical credential, and the Expo layer removes its cache copy in a `finally` path. On
-iOS it also deletes the picker-created temporary copy after staging. Cancelled, malformed, and
-failed imports do not start BLE or replace an existing credential. The original transfer file
-remains outside the app's control and must be deleted by the user after a successful import.
+On a fresh native install, the first-run screen can scan for the generated BLE service and list
+nearby appliances by advertised name, platform identifier, and RSSI. The user must select a row
+explicitly; the app never auto-selects the first advertisement. This bounded scan does not connect,
+subscribe, call the Rust authenticated actor, send credentials, or treat the advertised name as
+identity or provisioning state. The selected row is currently only preparation for the secure
+pairing step described by
+[ADR 0019](../../docs/adr/0019-secure-ble-appliance-onboarding.md).
+
+The alpha **credential import** path remains a secondary development fallback. Pair the intended
+board through the qualified USB managed-profile workflow, make a temporary copy of its exact
+96-byte Active `credential.rdpkey`, name the transfer copy with that board's normalized USB serial,
+transfer it to the phone, and choose it in the system file picker. Verify the filename: the current
+create-only alpha imports the first canonical credential immediately and has no secret-free
+board-identity confirmation screen. Selecting the other board's valid file requires clearing this
+app's local data before trying again. The Expo layer copies the selection to an app-owned cache
+path without reading its bytes, Rust validates and create-only publishes a mode-`0600` canonical
+credential, and the Expo layer removes its cache copy in a `finally` path. On iOS it also deletes
+the picker-created temporary copy after staging. Cancelled, malformed, and failed imports do not
+start BLE or replace an existing credential. The original transfer file remains outside the app's
+control and must be deleted by the user after a successful import.
 
 This import deliberately makes another usable copy of an authentication secret. The canonical
 file currently lives in the app's private Documents directory rather than Keychain/Keystore and

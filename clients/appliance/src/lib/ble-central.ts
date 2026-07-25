@@ -20,12 +20,14 @@ import {
 import type { BleCentral } from "./ble-central-types.ts";
 
 export type {
+  BleCandidate,
   BleCentral,
   BleConnection,
   BleConnectionObserver,
   BleConnectOptions,
   BleDisconnectEvent,
   BleGattProfile,
+  BleScanOptions,
 } from "./ble-central-types.ts";
 
 const PREFERRED_ANDROID_ATT_MTU = 247;
@@ -114,6 +116,7 @@ class ReactNativeBleManagerDriver implements BleCentralDriver {
       listener({
         id: peripheral.id,
         name: advertisedPeripheralName(peripheral.advertising.localName, peripheral.name),
+        rssi: peripheral.rssi,
       });
     });
     return () => subscription.remove();
@@ -147,11 +150,11 @@ class ReactNativeBleManagerDriver implements BleCentralDriver {
     return () => subscription.remove();
   }
 
-  async startScan(serviceUuid: string): Promise<void> {
+  async startScan(serviceUuid: string, allowDuplicates: boolean): Promise<void> {
     await BleManager.scan({
       serviceUUIDs: [serviceUuid],
       seconds: 0,
-      allowDuplicates: false,
+      allowDuplicates,
     });
   }
 

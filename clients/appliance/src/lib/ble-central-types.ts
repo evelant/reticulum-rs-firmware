@@ -33,6 +33,25 @@ export interface BleConnectOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface BleCandidate {
+  readonly peripheralId: string;
+  readonly peripheralName?: string;
+  readonly rssi?: number;
+}
+
+export interface BleScanOptions {
+  /**
+   * Bounds each native BLE setup or teardown operation independently.
+   */
+  readonly operationTimeoutMs?: number;
+  /**
+   * Bounds the foreground observation window. Candidates are returned only
+   * after the full window closes so the caller can require an explicit choice.
+   */
+  readonly scanTimeoutMs?: number;
+  readonly signal?: AbortSignal;
+}
+
 export interface BleDisconnectEvent {
   readonly peripheralId: string;
   readonly reason: string;
@@ -74,6 +93,12 @@ export interface BleCentral {
    * no background restoration, scanning, or Android foreground service.
    */
   readonly supported: boolean;
+
+  /**
+   * Observes advertisements for the caller-owned service without connecting,
+   * discovering characteristics, subscribing, or exchanging protocol bytes.
+   */
+  scan(serviceUuid: string, options?: BleScanOptions): Promise<readonly BleCandidate[]>;
 
   /**
    * Scans for the caller-owned service UUID and returns only after the service

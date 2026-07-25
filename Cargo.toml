@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "comparisons/rns-leviculum",
     "crates/announce-clock",
+    "crates/appliance-display-model",
     "crates/appliance-native",
     "crates/board-heltec-tracker-v2",
     "crates/board-heltec-tracker-v2-radio",
@@ -71,6 +72,7 @@ members = [
 exclude = ["vendor/esp-rtos-0.3.0", "vendor/lora-phy-3.0.1"]
 default-members = [
     "crates/announce-clock",
+    "crates/appliance-display-model",
     "crates/appliance-native",
     "crates/board-heltec-tracker-v2",
     "crates/board-heltec-tracker-v2-radio",

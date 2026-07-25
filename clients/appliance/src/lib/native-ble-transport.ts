@@ -1,10 +1,12 @@
 import type { NativeApplianceLike, NativeBlePlatformCommand } from "@reticulum/appliance-native";
 
 import type {
+  BleCandidate,
   BleCentral,
   BleConnection,
   BleDisconnectEvent,
   BleGattProfile,
+  BleScanOptions,
 } from "./ble-central-types.ts";
 
 type NativeBleAppliance = Pick<
@@ -297,6 +299,26 @@ export class NativeBleTransport {
 
   get hasPeripheralName(): boolean {
     return this.#peripheralName !== undefined;
+  }
+
+  /**
+   * Observes nearby appliances while this transport is dormant.
+   *
+   * This path deliberately does not register a BLE generation, invoke the
+   * native actor, connect GATT, or alter credential-derived targeting.
+   */
+  scan(options?: BleScanOptions): Promise<readonly BleCandidate[]> {
+    if (this.#disposed) {
+      return Promise.reject(new Error("native BLE transport has been disposed"));
+    }
+    if (this.#started || this.#reconnecting !== null || this.#active !== null) {
+      return Promise.reject(
+        new Error(
+          "BLE appliance discovery is unavailable after the authenticated transport starts",
+        ),
+      );
+    }
+    return this.#central.scan(this.#profile.serviceUuid, options);
   }
 
   /**

@@ -23,7 +23,7 @@ import type {
   TimelineView,
 } from "../generated/api.ts";
 import type { ApplianceClient } from "./appliance-client.ts";
-import type { BleGattProfile } from "./ble-central-types.ts";
+import type { BleCandidate, BleGattProfile, BleScanOptions } from "./ble-central-types.ts";
 import { acquireExclusiveResource, type ExclusiveResource } from "./exclusive-resource.ts";
 import { nativePathFromFileUri } from "./file-uri.ts";
 import { NativeBleTransport, type NativeBleTransportConfig } from "./native-ble-transport.ts";
@@ -340,6 +340,22 @@ export class NativeApplianceClient implements ApplianceClient {
       ble?.hasPeripheralName ?? false,
       ble !== null,
     );
+  }
+
+  supportsBleCandidateDiscovery(): boolean {
+    return !this.#disposed && (this.#ownership?.value.ble ?? null) !== null;
+  }
+
+  async scanBleCandidates(options?: BleScanOptions): Promise<readonly BleCandidate[]> {
+    const { ble } = this.#active();
+    const credential = this.#credentialState();
+    if (credential.state !== "missing") {
+      throw new Error("Nearby BLE appliance discovery is available only before credential setup.");
+    }
+    if (ble === null) {
+      throw new Error("Nearby BLE appliance discovery is unavailable for this transport.");
+    }
+    return ble.scan(options);
   }
 
   async contacts(): Promise<ContactView[]> {
