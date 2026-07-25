@@ -22,6 +22,33 @@ pub const DOCUMENTED_SCHEMATIC_REVISION: &str = "V0.3.1";
 /// Fitted high-frequency radio-module variant required for NA915 operation.
 pub const FITTED_RADIO_MODULE: &str = "HT-RA62-HF";
 
+/// Fitted monochrome e-paper panel named by the supplied board datasheet.
+pub const FITTED_EINK_PANEL: &str = "DEPG0290BNS800F6 V2.1";
+
+/// Controller identified by the supplied panel module mechanical drawing.
+pub const FITTED_EINK_CONTROLLER: &str = "SSD1680Z8";
+
+/// Landscape pixel width exposed to the appliance display renderer.
+pub const EINK_WIDTH_PIXELS: usize = 296;
+
+/// Landscape pixel height exposed to the appliance display renderer.
+pub const EINK_HEIGHT_PIXELS: usize = 128;
+
+/// Exact bytes in one fitted-panel monochrome frame.
+pub const EINK_MONOCHROME_FRAME_BYTES: usize = EINK_WIDTH_PIXELS * EINK_HEIGHT_PIXELS / 8;
+
+/// Conservative SPI clock used by Heltec's V0.3.1 E290 display example.
+pub const EINK_SPI_FREQUENCY_HZ: u32 = 6_000_000;
+
+/// The SSD1680 BUSY output forbids commands while driven high.
+pub const EINK_BUSY_ACTIVE_LEVEL: SafeLevel = SafeLevel::High;
+
+/// The fitted panel reset input is asserted low.
+pub const EINK_RESET_ACTIVE_LEVEL: SafeLevel = SafeLevel::Low;
+
+/// The board's switched `Ve_3V3` display supply is enabled high.
+pub const EINK_POWER_ENABLE_LEVEL: SafeLevel = SafeLevel::High;
+
 /// Conservative PSRAM floor implied by the schematic's ESP32-S3R8 part.
 ///
 /// This is design evidence only. Firmware must qualify the mapped capacity on
@@ -114,6 +141,8 @@ pub enum BoardSignal {
     RadioBusy = 13,
     /// HT-RA62 DIO1 interrupt.
     RadioDio1 = 14,
+    /// Active-high enable for the switched E-Ink `Ve_3V3` rail.
+    EinkPowerEnable = 18,
     /// Native USB D- routed through the Type-C connector.
     UsbDataMinus = 19,
     /// Native USB D+ routed through the Type-C connector.
@@ -144,7 +173,8 @@ impl BoardSignal {
             | Self::EinkChipSelect
             | Self::EinkDataCommand
             | Self::EinkReset
-            | Self::EinkBusy => GpioOwner::Display,
+            | Self::EinkBusy
+            | Self::EinkPowerEnable => GpioOwner::Display,
             Self::BatteryAdc => GpioOwner::BatteryMonitor,
             Self::RadioNss
             | Self::RadioSck
@@ -162,7 +192,7 @@ impl BoardSignal {
 }
 
 /// Exhaustive set of internal GPIO assignments described by this crate.
-pub const BOARD_SIGNALS: [BoardSignal; 21] = [
+pub const BOARD_SIGNALS: [BoardSignal; 22] = [
     BoardSignal::EinkSdi,
     BoardSignal::EinkClock,
     BoardSignal::EinkChipSelect,
@@ -177,6 +207,7 @@ pub const BOARD_SIGNALS: [BoardSignal; 21] = [
     BoardSignal::RadioReset,
     BoardSignal::RadioBusy,
     BoardSignal::RadioDio1,
+    BoardSignal::EinkPowerEnable,
     BoardSignal::UsbDataMinus,
     BoardSignal::UsbDataPlus,
     BoardSignal::UserKey,
@@ -202,6 +233,8 @@ pub mod pins {
     pub const EINK_RESET: u8 = BoardSignal::EinkReset.gpio();
     /// E-Ink busy indication.
     pub const EINK_BUSY: u8 = BoardSignal::EinkBusy.gpio();
+    /// Active-high enable for the switched E-Ink `Ve_3V3` rail.
+    pub const EINK_POWER_ENABLE: u8 = BoardSignal::EinkPowerEnable.gpio();
     /// Battery-voltage ADC input.
     pub const BATTERY_ADC: u8 = BoardSignal::BatteryAdc.gpio();
     /// HT-RA62 SPI chip select.
@@ -262,8 +295,8 @@ pub const INERT_RADIO_STATE: RadioSafeState = RadioSafeState {
 mod tests {
     use super::*;
 
-    const EXPECTED_GPIOS: [u8; 21] = [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 19, 20, 21, 38, 39, 43, 44,
+    const EXPECTED_GPIOS: [u8; 22] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 19, 20, 21, 38, 39, 43, 44,
     ];
 
     fn valid_profile(frequency_hz: u32) -> LabRxProfileConfig {
@@ -295,10 +328,11 @@ mod tests {
         assert_eq!(actual[..6], [GpioOwner::Display; 6]);
         assert_eq!(actual[6], GpioOwner::BatteryMonitor);
         assert_eq!(actual[7..14], [GpioOwner::Radio; 7]);
-        assert_eq!(actual[14..16], [GpioOwner::Usb; 2]);
-        assert_eq!(actual[16], GpioOwner::UserInput);
-        assert_eq!(actual[17..19], [GpioOwner::QuickLink; 2]);
-        assert_eq!(actual[19..], [GpioOwner::Uart; 2]);
+        assert_eq!(actual[14], GpioOwner::Display);
+        assert_eq!(actual[15..17], [GpioOwner::Usb; 2]);
+        assert_eq!(actual[17], GpioOwner::UserInput);
+        assert_eq!(actual[18..20], [GpioOwner::QuickLink; 2]);
+        assert_eq!(actual[20..], [GpioOwner::Uart; 2]);
     }
 
     #[test]
@@ -331,6 +365,7 @@ mod tests {
             pins::RADIO_RESET,
             pins::RADIO_BUSY,
             pins::RADIO_DIO1,
+            pins::EINK_POWER_ENABLE,
             pins::USB_DATA_MINUS,
             pins::USB_DATA_PLUS,
             pins::USER_KEY,
@@ -357,6 +392,18 @@ mod tests {
         assert_eq!(LAB_RX_FREQUENCY_RANGE.minimum_hz(), 863_000_000);
         assert_eq!(LAB_RX_FREQUENCY_RANGE.maximum_hz(), 928_000_000);
         assert_eq!(DESIGN_PSRAM_FLOOR_BYTES, 8_388_608);
+    }
+
+    #[test]
+    fn fitted_display_contract_matches_supplied_board_and_panel_documents() {
+        assert_eq!(FITTED_EINK_PANEL, "DEPG0290BNS800F6 V2.1");
+        assert_eq!(FITTED_EINK_CONTROLLER, "SSD1680Z8");
+        assert_eq!((EINK_WIDTH_PIXELS, EINK_HEIGHT_PIXELS), (296, 128));
+        assert_eq!(EINK_MONOCHROME_FRAME_BYTES, 4_736);
+        assert_eq!(EINK_SPI_FREQUENCY_HZ, 6_000_000);
+        assert_eq!(EINK_BUSY_ACTIVE_LEVEL, SafeLevel::High);
+        assert_eq!(EINK_RESET_ACTIVE_LEVEL, SafeLevel::Low);
+        assert_eq!(EINK_POWER_ENABLE_LEVEL, SafeLevel::High);
     }
 
     #[test]

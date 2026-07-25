@@ -1,0 +1,16 @@
+[package]
+name = "reticulum-eink-ssd1680"
+description = "Allocation-free async SSD1680 driver for the E290 e-paper panel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+embedded-graphics-core.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+
+[lib]
+path = "src/lib.rs"

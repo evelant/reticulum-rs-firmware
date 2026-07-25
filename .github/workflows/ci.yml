@@ -299,6 +299,7 @@ jobs:
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           -p reticulum-device-identity-store
+          -p reticulum-eink-ssd1680
           -p reticulum-announce-clock
           -p reticulum-interface-router
           -p reticulum-lxmf-durable-ingress
@@ -471,6 +472,7 @@ jobs:
           -p reticulum-device-api-handoff
           -p reticulum-device-api-session
           -p reticulum-device-identity-store
+          -p reticulum-eink-ssd1680
           -p reticulum-announce-clock
           -p reticulum-lxmf-durable-ingress
           -p reticulum-lxmf-ingress
@@ -519,6 +521,20 @@ jobs:
         run: >-
           cargo +esp clippy --locked --release
           -p reticulum-heltec-vision-master-e290-qualification
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Link RF-inert Vision Master E290 display HIL
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-display-hil
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for RF-inert Vision Master E290 display HIL
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-display-hil
+          --bin reticulum-heltec-vision-master-e290-display-hil
           --target xtensa-esp32s3-none-elf
           -- -D warnings
 

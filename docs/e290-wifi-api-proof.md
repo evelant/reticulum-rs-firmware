@@ -3,10 +3,13 @@
 **Status:** opt-in, build-qualified, and safely flashed to one credentialed
 E290. The exact post-format image was written without erasing product data and
 the complete durable control range compared byte-for-byte before and after.
-USB disappeared after the deliberate reset, as the profile requires, but that
-observation alone does not prove that Wi-Fi initialized. SoftAP association,
-DHCP, authenticated TCP exchange, reconnect behavior, and powered memory
-headroom remain open for a manually operated client.
+The historical 2026-07-23 image made USB disappear after the deliberate reset;
+that observation alone did not prove that Wi-Fi initialized. Current source
+instead retains native USB Serial/JTAG electrically and at runtime as a
+diagnostics-only sink, while the ordinary production `esp-println` backend
+remains no-op and emits nothing. SoftAP association, DHCP, authenticated TCP
+exchange, reconnect behavior, and powered memory headroom remain open for a
+manually operated client.
 
 ## Purpose and boundary
 
@@ -18,15 +21,17 @@ radio tasks are unchanged.
 The proof image deliberately chooses exactly one local API bearer:
 
 - the ordinary image runs the existing USB Serial/JTAG bearer;
-- the proof image leaves USB in its earliest boot quarantine and runs Wi-Fi
-  instead; and
+- the Wi-Fi profile runs the local API over Wi-Fi while retaining native USB
+  as an electrically/runtime-available, silent diagnostics-only sink; and
 - the separately enabled BLE proof profile follows the same one-bearer
   replacement rule, while other local API carriers remain future work.
 
 This replacement rule avoids two independent session-epoch allocators sharing
 the current reply-routing namespace. It also keeps a Wi-Fi initialization
 failure local to the detached API owner: LoRa and the autonomous node have
-already been spawned and remain resident.
+already been spawned and remain resident. Every ordinary production profile
+keeps `esp-println` on its no-op backend. Only a separately named diagnostic
+image may emit USB Serial/JTAG diagnostics.
 
 ## Fixed proof profile
 
@@ -120,9 +125,11 @@ announce-clock, API-credential, and configuration partitions. Secure boot and
 flash encryption were disabled on this development board.
 
 After a deliberate hard reset, the target's USB Serial/JTAG port disappeared
-while the peer E290 remained enumerated. That is consistent with the profile's
-USB quarantine, but it is not evidence that the SoftAP, DHCP server, TCP
-listener, or LoRa/Wi-Fi coexistence reached a healthy steady state.
+while the peer E290 remained enumerated. That was consistent with this
+historical image's USB quarantine, but it was not evidence that the SoftAP,
+DHCP server, TCP listener, or LoRa/Wi-Fi coexistence reached a healthy steady
+state. It does not describe current source, which retains the USB peripheral
+but keeps the ordinary production logger silent.
 
 The development Mac's sole internet uplink is its Wi-Fi interface. Joining the
 E290 would sever the active development session, so the powered network

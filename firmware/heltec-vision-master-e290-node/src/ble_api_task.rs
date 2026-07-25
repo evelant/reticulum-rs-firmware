@@ -23,7 +23,7 @@ use embassy_futures::{
 use embassy_sync_07 as embassy_sync;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::{peripherals::BT, rng::Trng};
-use esp_radio::ble::controller::BleConnector;
+use esp_radio::ble::controller::{BleConnector, BleInitError};
 use log::{error, info, warn};
 use reticulum_device_api_ble as gatt_profile;
 use reticulum_device_api_framing::{DecodeEvent, StreamDecoder};
@@ -168,24 +168,14 @@ impl BleHandoffs {
     }
 }
 
-/// Initialize and retain the complete opt-in BLE bearer.
+/// Initialize the BLE controller before optional peripheral actors start.
 ///
-/// Initialization occurs after the autonomous LoRa and node tasks have been
-/// constructed. Returned configuration errors and handled host/GATT failures
-/// therefore close this API bearer without stopping Reticulum routing. The
-/// pinned esp-radio controller still asserts on some scheduler, allocation and
-/// controller-init failures; making that boundary fallible is tracked as a
-/// known defect and must not be described as isolated yet.
-#[embassy_executor::task]
-pub async fn run(
+/// The ESP32-S3 PHY calibration is order-sensitive in the powered product
+/// graph. Keeping construction outside the task makes the modem/PHY ownership
+/// boundary explicit and lets startup establish it before SPI3 display work.
+pub(crate) fn initialize_controller(
     bluetooth: BT<'static>,
-    base_mac: [u8; 6],
-    handoffs: BleHandoffs,
-    session_parameters: ServerParameters,
-    session_rng: Trng,
-    #[cfg(reticulum_e290_ble_startup_diagnostic)]
-    diagnostic_usb_serial_jtag_owner: crate::DiagnosticUsbSerialJtagOwner,
-) {
+) -> Result<BleConnector<'static>, BleInitError> {
     let controller_config = esp_radio::ble::Config::default()
         // esp-radio 0.18 writes this value directly to Espressif's
         // `ble_max_act`: it counts the advertiser and ACL link as distinct
@@ -200,25 +190,40 @@ pub async fn run(
             "e290-ble-startup-diagnostic stage=ble-controller-init ENTER internal_heap_configured_bytes=73728 controller_activity_max=2 application_connection_max=1"
         );
     }
-    let connector = match BleConnector::new(bluetooth, controller_config) {
-        Ok(connector) => {
-            #[cfg(reticulum_e290_ble_startup_diagnostic)]
+    let connector = BleConnector::new(bluetooth, controller_config);
+    #[cfg(reticulum_e290_ble_startup_diagnostic)]
+    match &connector {
+        Ok(_) => {
             esp_println::println!(
                 "e290-ble-startup-diagnostic stage=ble-controller-init RETURNED OK"
             );
-            #[cfg(reticulum_e290_ble_startup_diagnostic)]
             diagnostic_heap_marker("after-ble-controller-init");
-            connector
         }
         Err(reason) => {
-            #[cfg(reticulum_e290_ble_startup_diagnostic)]
             esp_println::println!(
                 "e290-ble-startup-diagnostic stage=ble-controller-init RETURNED ERR reason={reason:?}"
             );
-            error!("e290-node stage=ble-api status=DISABLED reason=controller-init-{reason:?}");
-            core::future::pending().await
         }
-    };
+    }
+    connector
+}
+
+/// Retain the complete opt-in BLE bearer after controller initialization.
+///
+/// Returned controller configuration errors are handled by the caller before
+/// spawning this task. Host/GATT failures close only this API bearer without
+/// stopping Reticulum routing. The pinned esp-radio controller still asserts
+/// on some scheduler, allocation and vendor-init failures; making that boundary
+/// fallible is tracked as a known defect and must not be described as isolated.
+#[embassy_executor::task]
+pub async fn run(
+    connector: BleConnector<'static>,
+    base_mac: [u8; 6],
+    handoffs: BleHandoffs,
+    session_parameters: ServerParameters,
+    session_rng: Trng,
+    alpha_usb_serial_jtag_owner: crate::AlphaUsbSerialJtagOwner,
+) {
     let controller: ExternalController<_, 1> = ExternalController::new(connector);
     let host_result = run_host(
         controller,
@@ -228,12 +233,11 @@ pub async fn run(
         session_rng,
     )
     .await;
-    #[cfg(reticulum_e290_ble_startup_diagnostic)]
     #[allow(
         clippy::drop_non_drop,
-        reason = "the peripheral token is intentionally retained across the complete async host lifetime"
+        reason = "the alpha diagnostics peripheral token is retained across the complete async host lifetime"
     )]
-    core::mem::drop(diagnostic_usb_serial_jtag_owner);
+    core::mem::drop(alpha_usb_serial_jtag_owner);
     host_result
 }
 

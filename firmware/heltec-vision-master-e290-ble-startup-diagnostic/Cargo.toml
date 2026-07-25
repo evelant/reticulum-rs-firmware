@@ -22,6 +22,11 @@ ble-api-proof = [
 journal-schema3-dev-reprovision = []
 rns-inbox-commit-fault-hil = []
 runtime-measurement-hil = ["esp-alloc/alloc-hooks"]
+display = [
+    "dep:embedded-graphics",
+    "dep:reticulum-board-heltec-vision-master-e290",
+    "dep:reticulum-eink-ssd1680",
+]
 wifi-api-proof = [
     "dep:edge-dhcp",
     "dep:edge-nal",
@@ -35,6 +40,7 @@ wifi-api-proof = [
 [dependencies]
 reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
 reticulum-appliance-display-model = { path = "../../crates/appliance-display-model", default-features = false }
+reticulum-board-heltec-vision-master-e290 = { path = "../../crates/board-heltec-vision-master-e290", default-features = false, optional = true }
 reticulum-board-heltec-vision-master-e290-radio = { path = "../../crates/board-heltec-vision-master-e290-radio" }
 reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf", "experimental-nomad"] }
 reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["experimental-rns-data", "experimental-rns-inbox", "experimental-lxmf", "experimental-nomad"] }
@@ -48,6 +54,7 @@ reticulum-device-api-pairing-control = { path = "../../crates/device-api-pairing
 reticulum-device-api-pairing-policy = { path = "../../crates/device-api-pairing-policy", default-features = false }
 reticulum-device-api-session = { path = "../../crates/device-api-session", default-features = false }
 reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
+reticulum-eink-ssd1680 = { path = "../../crates/eink-ssd1680", default-features = false, optional = true }
 reticulum-interface-router = { path = "../../crates/interface-router", default-features = false }
 reticulum-lxmf-durable-ingress = { path = "../../crates/lxmf-durable-ingress", default-features = false }
 reticulum-lxmf-ingress = { path = "../../crates/lxmf-ingress", default-features = false }
@@ -66,6 +73,7 @@ reticulum-storage-model = { path = "../../crates/storage-model", default-feature
 reticulum-submission-runtime = { path = "../../crates/submission-runtime", default-features = false }
 reticulum-tx-supervisor = { path = "../../crates/tx-supervisor", default-features = false }
 embassy-sync.workspace = true
+embedded-graphics = { workspace = true, optional = true }
 rand_core.workspace = true
 zeroize.workspace = true
 
@@ -96,7 +104,7 @@ esp-hal = { workspace = true, features = [
     "rt",
     "unstable",
 ] }
-esp-println = { workspace = true, features = ["esp32s3", "jtag-serial", "log-04"] }
+esp-println = { workspace = true, features = ["esp32s3", "jtag-serial"] }
 esp-rtos = { workspace = true, features = [
     "embassy",
     "esp-alloc",

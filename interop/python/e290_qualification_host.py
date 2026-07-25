@@ -1787,7 +1787,14 @@ def flash_merged_image(
     command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     path_is_character_device: Callable[[str], bool] = is_character_device,
 ) -> tuple[UsbDevice, BoardInfo, str]:
-    """Identity-qualify, flash, and read back one complete merged image."""
+    """Identity-qualify, flash, and read back one complete merged image.
+
+    This intentionally uses ``espflash write-bin`` rather than accepting a
+    separate partition-table argument: the caller supplies bytes already
+    merged at address zero. Before hardware access, validation requires 16 MiB
+    bootloader/application headers and the exact canonical E290 product
+    partition table embedded at offset 0x8000.
+    """
 
     if confirmed_radio_module != CONFIRMED_HF_MODULE:
         raise QualificationError(
@@ -2629,7 +2636,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     flash.add_argument("--partition-table", required=True, type=Path)
     merged = actions.add_parser(
         "flash-merged",
-        help="identity-qualify, flash, and read back an RF-capable merged image",
+        help=(
+            "identity-qualify, validate the embedded canonical 16 MiB product "
+            "partition table, flash, and read back an RF-capable merged image"
+        ),
     )
     _add_identity_arguments(merged)
     merged.add_argument("--image", required=True, type=Path)

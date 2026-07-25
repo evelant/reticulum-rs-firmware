@@ -6,7 +6,13 @@ strict review, graph, image-size, and same-image readback gates. Its third task
 owns a USB Serial/JTAG pre-authentication initialization and live-pairing bearer,
 one shared exact-next sequence space, debounced GPIO21 physical presence, an
 interrupt-linearized reset-epoch guard, and an application-entry USB boot
-quarantine. Powered work has completed the first outbound API 1.1 path, the
+quarantine. The opt-in `display` profile adds a fourth task that solely owns
+SPI3/GPIO1--6/GPIO18, a validated-external-PSRAM framebuffer, boot-clear and
+latest-value completion handoffs, full refresh, controller deep sleep, and
+rail shutdown. That composition target-links and, in addition to the isolated
+display-only HIL, now has a bounded one-boot powered integrated startup proof
+under the BLE profile. Powered work has completed the first outbound API 1.1
+path, the
 bounded API 1.2 raw-RNS inbox qualification path, and a separate opt-in
 runtime-measurement slice on the two E290s. API 1.4 additionally
 implements authenticated committed-LXMF list/read and source-free basic LXMF
@@ -552,6 +558,15 @@ pre-authentication USB/GPIO task
     no resumption, retries, close records, encryption, rate/attempt policy,
       or concurrency in this first profile
   no Reticulum interface capability
+
+optional display task (`display` feature)
+  sole SPI3/GPIO1--6/GPIO18 owner
+  one 4,736-byte framebuffer in validated external PSRAM
+  boot-clear acknowledgement before semantic requests
+  latest-value request/completion handoff with monotonic IDs
+  asynchronous full refresh + timeout-bounded BUSY
+  controller deep sleep + display rail low after every refresh
+  permanent display-fault isolation; LoRa/node tasks continue
 ```
 
 LoRa remains deliberately the primary and only concrete transport actor in
@@ -1480,6 +1495,15 @@ preceding direction:
      --confirmed-radio-module HT-RA62-HF
    ```
 
+   This HIL `flash-merged` action is an intentional exception to passing a CSV
+   directly to the hardware-write subcommand. The helper uses
+   `espflash write-bin` at address zero only after requiring the merged
+   bootloader and application headers to encode 16 MiB and verifying that the
+   image's embedded partition table exactly matches
+   `partitions/heltec-vision-master-e290-node.csv`. Build every new diagnostic
+   or HIL merged image with that product CSV; a smaller HIL-only table is
+   rejected before hardware access.
+
    Set `ESPFLASH_BIN_DIR` to the directory containing the working `espflash`
    binary and bind its version in the trial manifest. Never erase below
    `0x630000`; identity, announce clock, credentials, and device configuration
@@ -1991,6 +2015,11 @@ cargo +stable test --locked \
 cargo +stable clippy --locked \
   -p reticulum-heltec-vision-master-e290-node --lib -- -D warnings
 cargo +stable test --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib --features display
+cargo +stable clippy --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib \
+  --features display -- -D warnings
+cargo +stable test --locked \
   -p reticulum-heltec-vision-master-e290-node --lib \
   --features rns-inbox-commit-fault-hil
 cargo +stable clippy --locked \
@@ -2018,6 +2047,20 @@ CARGO_TARGET_DIR=target/e290-default \
 RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
+  --target xtensa-esp32s3-none-elf
+CARGO_TARGET_DIR=target/e290-display \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp clippy --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features display \
+  --target xtensa-esp32s3-none-elf -- -D warnings
+CARGO_TARGET_DIR=target/e290-display \
+RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features display \
   --target xtensa-esp32s3-none-elf
 CARGO_TARGET_DIR=target/e290-ble \
 RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
@@ -2124,8 +2167,9 @@ Low, so release evidence retained for an older connection epoch cannot arm the
 new epoch; the replacement epoch must observe a complete fresh High debounce.
 
 The generic 128-entry fake runtime exceeds Rust's default host test-thread
-stack because that fixture owns the aggregate by value. The qualified 176-test
-host run is:
+stack because that fixture owns the aggregate by value. The current headless
+suite passes 232 tests; enabling `display` adds four renderer tests for a
+236-test run. The serialized headless command is:
 
 ```sh
 RUST_MIN_STACK=16777216 \
@@ -3145,6 +3189,32 @@ path. That proof remains bounded; it does not qualify a complete exact-readback
 flash campaign, concurrent BLE/LoRa/cache-disabled interaction, pressure, or
 soak.
 
+### Powered BLE plus display startup order
+
+On 2026-07-25, the first integrated BLE-plus-display image consistently
+retained the panel's `STARTING` view. A staged diagnostic localized the stall
+to the first ESP32-S3 radio/PHY initialization after SPI3 and the e-paper
+peripherals had already been initialized: `esp_phy::enable_phy` entered PHY
+registration/calibration but did not return. The shared Embassy executor was
+therefore blocked before the display actor could consume the queued `Ready`
+request. This was not a framebuffer, PSRAM-capacity, or internal-heap ceiling.
+
+The powered A/B changed only startup ownership order. Current source constructs
+and retains the real esp-radio `BleConnector` immediately after RTOS startup,
+before creating SPI3 or powering/initializing the display. The same Board A
+boot then passed BLE controller construction, display boot clear, BLE
+advertising, the exact `Ready` rendered-completion gate, the visually retained
+`READY` view, and final composition readiness. The connector is subsequently
+moved into the BLE task, so the early call establishes durable controller/PHY
+ownership rather than performing a disposable warm-up.
+
+This is an ESP32-S3 peripheral-startup ownership/order invariant, not a reason
+to reduce the product feature set or require more RAM. Do not move first
+esp-radio/PHY initialization below display SPI construction. The bounded proof
+qualifies one integrated startup on Board A; it does not yet qualify repeated
+reset/sleep/wake cycles, live display-mediated pairing, concurrent load,
+pressure, or soak.
+
 The subsequent
 [physical Expo iOS BLE-to-LoRa proof](e290-expo-ios-ble-lora-proof.md)
 installed a signed, self-contained Release, imported one activated credential
@@ -3224,9 +3294,13 @@ contact.
 ROM download mode uses the dedicated `BOOT_KEY` on ESP32-S3 GPIO0: hold the
 board button silk-screened `BOOT`, tap `RST`, wait one second, then release
 `BOOT`. GPIO21 is the separate application user/pairing key and cannot select
-the ROM loader. An application profile that quarantines native USB will
-therefore remain absent after an ordinary `RST` until this GPIO0 sequence is
-used.
+the ROM loader. Current alpha profiles keep native USB Serial/JTAG available:
+the default profile owns it as the framed device API, while BLE/Wi-Fi profiles
+retain the peripheral electrically and at runtime as a diagnostics-only sink.
+Every ordinary production profile keeps `esp-println` on its no-op backend and
+emits no log text there. Only the separately named BLE startup-diagnostic image
+enables USB Serial/JTAG diagnostic output. An ordinary `RST` reboots the
+application; use the GPIO0 sequence only when ROM download mode is needed.
 
 The read-only 2026-07-17 discovery snapshot was:
 
@@ -3326,6 +3400,13 @@ from the current callout-device name.
      --image e290-node.bin --expected-image-sha256 "$IMAGE_SHA256" \
      --confirmed-radio-module HT-RA62-HF
    ```
+
+   `flash-merged` intentionally does not accept a separate
+   `--partition-table`: it writes the already-merged bytes at address zero with
+   `espflash write-bin`. Before hardware access, it requires 16 MiB
+   bootloader/application headers and verifies the embedded table byte-for-byte
+   against `partitions/heltec-vision-master-e290-node.csv`. This prevents an
+   implicit or stale HIL layout from reaching a product board.
 
    The helper flashes a retained descriptor for the digest-qualified input,
    validates the `write-bin` action's own chip/flash/MAC output, captures the
@@ -3458,13 +3539,17 @@ range.
      --offset 0x630000 --length 0x100000
    ```
 
-4. Flash the one-shot feature image and boot it once. The permanent image now
-   uses no-op logging to reserve USB Serial/JTAG for framed control, so the old
-   serial-log proof (`journal-reprovision-policy`, `node-journal-provision`, and
-   schema-2 mount lines) is no longer available. Do not count this migration as
-   verified without an independent exact raw-journal readback/parser or a
-   separately reviewed diagnostic build/sink. The firmware still scans the
-   complete partition before provisioning and rejects any schema-1,
+4. Flash the one-shot feature image and boot it once. The default USB-API
+   profile uses no-op logging because it owns USB Serial/JTAG for framed
+   control, so the old serial-log proof (`journal-reprovision-policy`,
+   `node-journal-provision`, and schema-2 mount lines) is unavailable in that
+   profile. Ordinary BLE/Wi-Fi production profiles also retain the no-op
+   logger even though native USB remains electrically/runtime available.
+   Only a separately named diagnostic image enables USB Serial/JTAG output, and
+   its log stream is not authoritative migration evidence. Do not count this
+   migration as verified without an independent exact raw-journal
+   readback/parser or a separately reviewed diagnostic build/sink. The firmware
+   still scans the complete partition before provisioning and rejects any schema-1,
    schema-2/physical-1, corrupt, torn, or otherwise programmed byte without a
    write or erase. If this one-
    shot boot is interrupted during provision, repeat the all-`0xff` operation
@@ -3474,7 +3559,10 @@ range.
    application-data range. Prove with the same independent readback/parser or
    separately reviewed diagnostic sink that it strictly mounts the existing
    schema-3/physical-2 journal with migration disabled and zero provisioning mutation;
-   the ordinary no-op-logging image emits no native USB log for this proof.
+   the default USB-API image emits no native USB log for this proof. The
+   ordinary BLE/Wi-Fi profiles likewise use the no-op logger, so their retained
+   native USB diagnostic sink is not a substitute for the independent
+   readback.
 
 No firmware path erases the journal automatically, and the feature never
 authorizes writes outside `node_journal`.

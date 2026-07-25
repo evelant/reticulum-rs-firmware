@@ -150,9 +150,15 @@ gate also requires the current Semtech Rev. 2.2 optimal +14 dBm trace:
    espflash save-image --chip esp32s3 --merge --skip-padding \
      --flash-mode dio --flash-freq 80mhz --flash-size 16mb \
      --xtal-freq 40mhz \
-     --partition-table partitions/heltec-vision-master-e290-semantic-hil.csv \
+     --partition-table partitions/heltec-vision-master-e290-node.csv \
      --target-app-partition factory "$ELF" e290-semantic-hil.bin
    ```
+
+   The HIL uses the product CSV because it is installed on a product board;
+   its isolated behavior comes from the firmware graph, not a smaller implicit
+   flash layout. Historical artifacts built with the earlier HIL-only CSV
+   remain evidence for those exact bytes, but that table is not used for a new
+   manual flash.
 
 5. Use the single-process helper action below for each board. It rediscovers
    the callout by USB serial, revalidates the exact MAC and security state,
@@ -161,6 +167,13 @@ gate also requires the current Semtech Rev. 2.2 optimal +14 dBm trace:
    confirmed `HT-RA62-HF` module acknowledgement and leaves the board in the
    loader for the capture's counted reset. Never infer a role from enumeration
    order.
+
+   `flash-merged` is an intentional exception to spelling
+   `--partition-table` on the hardware-write command itself: it uses
+   `espflash write-bin` at address zero for bytes already merged above. Before
+   any write, the helper requires a 16 MiB ESP image header and verifies that
+   the embedded partition table exactly matches
+   `partitions/heltec-vision-master-e290-node.csv`.
 
    ```sh
    IMAGE=e290-semantic-hil.bin

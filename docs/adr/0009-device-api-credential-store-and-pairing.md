@@ -422,14 +422,16 @@ durable, publishable result to the policy closes an otherwise-open window as
 successfully activated. Thus both `Pending` before secret offer and `Active`
 before completion are durable facts.
 
-The permanent E290 image selects `esp-println`'s `no-op` backend and does not
-initialize its logger, so application, panic, and framework log text cannot
-share the USB Serial/JTAG FIFO. Binary COBS control records are the sole
-firmware-owned bytes on that stream. Boot-ROM output can still precede the
-application; the streaming decoder deliberately ignores bytes until a leading
-zero delimiter. The minimal authenticated bearer preserves this ownership, and
-any later bearer must do likewise or move diagnostics to a different sink. No raw log byte may appear between
-binary COBS records.
+Every ordinary production E290 profile selects `esp-println`'s `no-op` backend
+and does not initialize its logger. In the default profile, application, panic,
+and framework log text therefore cannot share the USB Serial/JTAG FIFO; binary
+COBS control records are the sole firmware-owned bytes on that stream. The
+BLE/Wi-Fi profiles retain native USB electrically and at runtime as a
+diagnostics-only sink, but emit nothing there. Only a separately named
+diagnostic image enables USB Serial/JTAG output. Boot-ROM output can still
+precede the application; the streaming decoder deliberately ignores bytes
+until a leading zero delimiter. No raw log byte may appear between binary COBS
+records.
 
 The USB response owner is released only after every byte enters the endpoint
 FIFO and firmware requests hardware `WR_DONE`. Waiting for a later completion

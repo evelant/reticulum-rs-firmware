@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ import e290_qualification_host as host
 
 MAC_A = "aa:bb:cc:dd:ee:01"
 MAC_B = "aa:bb:cc:dd:ee:02"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def ioreg_device(serial: str, port: str, *, vendor: int = 12346) -> str:
@@ -77,11 +79,7 @@ def merged_image_bytes(payload: bytes = b"test-application") -> bytes:
 
 
 def checked_in_e290_partitions() -> tuple[tuple[str, int, int, int, int, int], ...]:
-    table = (
-        Path(__file__).resolve().parents[2]
-        / "partitions"
-        / "heltec-vision-master-e290-node.csv"
-    )
+    table = ROOT / "partitions" / "heltec-vision-master-e290-node.csv"
     partition_types = {"app": 0x00, "data": 0x01}
     partition_subtypes = {
         ("app", "factory"): 0x00,
@@ -109,6 +107,92 @@ def checked_in_e290_partitions() -> tuple[tuple[str, int, int, int, int, int], .
                 )
             )
     return tuple(rows)
+
+
+class E290FlashRunbookPolicyTests(unittest.TestCase):
+    @staticmethod
+    def e290_runbooks() -> tuple[Path, ...]:
+        docs = ROOT / "docs"
+        return (
+            ROOT / "README.md",
+            docs / "heltec-vision-master-e290.md",
+            *sorted(docs.glob("e290-*.md")),
+        )
+
+    @staticmethod
+    def shell_blocks(source: str) -> tuple[str, ...]:
+        return tuple(
+            match.group(1)
+            for match in re.finditer(r"```(?:sh|bash)\n(.*?)```", source, re.DOTALL)
+        )
+
+    def test_direct_e290_espflash_flash_commands_pin_product_geometry(self) -> None:
+        direct_flash = re.compile(r"\bespflash\s+(?:\\\s*)?flash\b")
+        commands: list[tuple[Path, str]] = []
+        for runbook in self.e290_runbooks():
+            source = runbook.read_text(encoding="utf-8")
+            commands.extend(
+                (runbook, block)
+                for block in self.shell_blocks(source)
+                if direct_flash.search(block)
+            )
+
+        self.assertTrue(commands, "expected at least one direct E290 flash runbook")
+        for runbook, command in commands:
+            with self.subTest(runbook=runbook):
+                self.assertIn("--flash-size 16mb", command)
+                self.assertIn(
+                    "--partition-table partitions/heltec-vision-master-e290-node.csv",
+                    command,
+                )
+
+    def test_merged_image_runbooks_pin_capacity_and_explain_the_exception(
+        self,
+    ) -> None:
+        runbooks_with_merged_flash = 0
+        for runbook in self.e290_runbooks():
+            source = runbook.read_text(encoding="utf-8")
+            blocks = [
+                block
+                for block in self.shell_blocks(source)
+                if "e290_qualification_host.py flash-merged" in block
+            ]
+            if not blocks:
+                continue
+            runbooks_with_merged_flash += 1
+            with self.subTest(runbook=runbook):
+                self.assertIn("intentional exception", source)
+                for block in blocks:
+                    self.assertIn("--expected-flash-bytes 16777216", block)
+
+        self.assertGreaterEqual(runbooks_with_merged_flash, 2)
+
+    def test_only_memory_qualification_documents_an_alternate_csv(self) -> None:
+        display = (ROOT / "docs" / "e290-display-hil.md").read_text(encoding="utf-8")
+        semantic = (ROOT / "docs" / "e290-semantic-hil.md").read_text(
+            encoding="utf-8"
+        )
+        dossier = (ROOT / "docs" / "heltec-vision-master-e290.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "--partition-table partitions/heltec-vision-master-e290-node.csv",
+            display,
+        )
+        self.assertIn(
+            "--partition-table partitions/heltec-vision-master-e290-node.csv",
+            semantic,
+        )
+        self.assertNotIn(
+            "--partition-table partitions/heltec-vision-master-e290-semantic-hil.csv",
+            semantic,
+        )
+        self.assertIn("intentional exception to the\nproduct CSV rule", dossier)
+        self.assertIn(
+            "--partition-table partitions/heltec-vision-master-e290-qualification.csv",
+            dossier,
+        )
 
 
 class IoregParserTests(unittest.TestCase):

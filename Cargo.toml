@@ -24,6 +24,7 @@ members = [
     "crates/device-client",
     "crates/device-pairing-client",
     "crates/device-identity-store",
+    "crates/eink-ssd1680",
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
     "crates/lxmf-chat-cli",
@@ -61,6 +62,7 @@ members = [
     "firmware/heltec-tracker-v2-tx-hil",
     "firmware/heltec-vision-master-e290-qualification",
     "firmware/heltec-vision-master-e290-ble-startup-diagnostic",
+    "firmware/heltec-vision-master-e290-display-hil",
     "firmware/heltec-vision-master-e290-node",
     "firmware/heltec-vision-master-e290-semantic-hil",
     "tools/conformance-rete",
@@ -93,6 +95,7 @@ default-members = [
     "crates/device-client",
     "crates/device-pairing-client",
     "crates/device-identity-store",
+    "crates/eink-ssd1680",
     "crates/interface-router",
     "crates/lab-rx-returned-fault-hil",
     "crates/lxmf-chat-cli",
@@ -152,6 +155,8 @@ ed25519-dalek = { version = "=2.2.0", default-features = false }
 embedded-hal = "=1.0.0"
 embedded-hal-async = "=1.0.0"
 embedded-hal-bus = { version = "=0.3.0", default-features = false, features = ["async"] }
+embedded-graphics = { version = "=0.8.2", default-features = false }
+embedded-graphics-core = { version = "=0.4.1", default-features = false }
 embedded-storage = { version = "=0.3.1", default-features = false }
 esp-alloc = "=0.10.0"
 esp-backtrace = { version = "=0.19.0", default-features = false }

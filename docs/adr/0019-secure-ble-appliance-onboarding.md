@@ -1,9 +1,11 @@
 # ADR 0019: Secure BLE appliance onboarding
 
-- **Status:** accepted; credential-free candidate discovery and the
-  board-neutral display model plus E290 coalescing handoff are implemented,
-  while secure link pairing, bond durability, BLE live-pairing transport, and
-  native credential installation remain pending
+- **Status:** accepted; credential-free candidate discovery, the board-neutral
+  display model, portable SSD1680 driver, powered display-only HIL, and opt-in
+  E290 production display actor are implemented. A bounded integrated
+  BLE-plus-display startup passed with esp-radio/PHY ownership established
+  before display initialization. Secure link pairing, bond durability, BLE
+  live-pairing transport, and native credential installation remain pending
 - **Date:** 2026-07-25
 - **Extends:** [ADR 0009](0009-device-api-credential-store-and-pairing.md),
   [ADR 0010](0010-device-api-live-pairing-protocol.md), and
@@ -118,13 +120,36 @@ implements neither `Copy`, `Clone`, nor `Debug`, and zeroizes on replacement
 or drop. Pairing views carry a nonzero expiry window. Success, failure, timeout,
 ordinary view replacement, and reboot all transition to a non-secret view.
 
-The E290 firmware exposes a latest-value `Signal` handoff. A future display
-actor consumes only the newest complete view so stale intermediate refreshes
-cannot queue behind a multi-second panel operation. The model contains no SPI,
-GPIO, font, framebuffer, or controller knowledge. The initial actor may own one
-4,736-byte 296-by-128 one-bit framebuffer, but it must use asynchronous
-SPI/BUSY handling or an explicitly isolated executor. A synchronous refresh on
-the shared node executor is forbidden.
+The E290 firmware exposes a bounded latest-value `Signal` handoff. Each request
+owns a strictly increasing ID and each completion reports that same ID plus
+`Rendered` or `Faulted`; boot clear has a separate readiness acknowledgement.
+The display actor consumes only the newest complete view so stale intermediate
+refreshes cannot queue behind a multi-second panel operation. The model
+contains no SPI, GPIO, font, framebuffer, or controller knowledge.
+
+The implemented optional actor is the sole SPI3/GPIO1--6/GPIO18 owner. It keeps
+one 4,736-byte 296-by-128 one-bit framebuffer in validated external PSRAM, uses
+asynchronous SPI and timeout-bounded BUSY handling, clears the panel before
+accepting semantic views, coalesces again before transferring pixels, and
+enters deep sleep before switching the display rail off after every refresh.
+An initialization or refresh fault disables display-dependent fresh pairing
+for that boot while the LoRa/node owners continue. A synchronous refresh on
+the shared node executor remains forbidden.
+
+The separate display-only HIL powered the panel on Board A, initialized and
+cleared the SSD1680, rendered a fixed non-secret demo, entered deep sleep, and
+switched GPIO18 low. The retained output passed visual inspection for text,
+layout, polarity, and landscape orientation. This validates the panel driver
+and full-frame lifecycle, not the optional actor inside the permanent image,
+production pairing content, partial refresh, or repeated sleep/wake behavior.
+See [the powered display HIL record](../e290-display-hil.md).
+
+A later powered integrated A/B found that ESP32-S3 esp-radio/PHY ownership must
+be established before SPI3/e-paper initialization. The display-first order
+stalled in `esp_phy::enable_phy` registration/calibration; constructing and
+retaining the real `BleConnector` first passed display boot clear, advertising,
+the exact `Ready` rendered-completion gate, visual `READY`, and composition
+readiness. This is a startup ownership/order invariant, not a memory ceiling.
 
 ### Bonds and appliance credentials are separate durable authorities
 
@@ -168,9 +193,12 @@ platform callback payloads, and generated serialized DTOs.
 
 ## Implementation order
 
-1. Credential-free candidate discovery and explicit selection.
-2. Semantic display model and coalescing firmware handoff.
-3. Asynchronous E290 e-paper smoke test and bounded display actor.
+1. **Complete:** credential-free candidate discovery and explicit selection.
+2. **Complete:** semantic display model and coalescing firmware handoff.
+3. **Implemented with bounded evidence:** the asynchronous E290 e-paper HIL
+   passed on Board A, and one integrated BLE-plus-display boot passed after
+   establishing esp-radio/PHY ownership before display initialization.
+   Repeated boots and live pairing remain open.
 4. GPIO21 binding of the selected GATT epoch, followed by Trouble authenticated
    pairing, passkey display, nonempty-bond enforcement, and downgrade rejection
    for device authorization on only that epoch.
@@ -199,9 +227,10 @@ selection of the other nearby appliance.
 
 - Candidate discovery can ship before credential creation because it transfers
   no authority and makes no identity claim.
-- E-paper is useful for secure confirmation, but the fixed Trouble timeout and
-  slow full refresh create a real human-factors constraint that must be tested
-  on hardware.
+- E-paper is useful for secure confirmation. The isolated full refresh
+  completed in about 1.56 seconds, but the complete production
+  passkey-to-system-prompt interaction still must be tested inside Trouble's
+  fixed timeout.
 - Bluetooth and device-API key recovery are coupled in UX but remain separate
   storage and revocation domains.
 - Trouble's lack of pre-SMP admission permits transient non-bonding work from

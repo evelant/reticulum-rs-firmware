@@ -142,6 +142,7 @@ pub async fn run(
     handoffs: WifiHandoffs,
     session_parameters: ServerParameters,
     session_rng: Trng,
+    alpha_usb_serial_jtag_owner: crate::AlphaUsbSerialJtagOwner,
 ) {
     let composition = match compose(wifi, base_mac, random_seed) {
         Ok(composition) => composition,
@@ -167,7 +168,12 @@ pub async fn run(
     };
     spawner.spawn(network_task);
     spawner.spawn(dhcp_task);
-    serve_api(controller, stack, handoffs, session_parameters, session_rng).await
+    serve_api(controller, stack, handoffs, session_parameters, session_rng).await;
+    #[allow(
+        clippy::drop_non_drop,
+        reason = "the alpha diagnostics peripheral token is retained across the complete async service lifetime"
+    )]
+    core::mem::drop(alpha_usb_serial_jtag_owner);
 }
 
 /// Drive the Embassy network stack forever.

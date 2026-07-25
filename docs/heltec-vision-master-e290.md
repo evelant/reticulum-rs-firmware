@@ -8,8 +8,13 @@ semantic HIL has now passed on both physically confirmed `HT-RA62-HF` boards;
 see [`e290-semantic-hil.md`](e290-semantic-hil.md). The first permanent
 LoRa-only E290 node graph is composed/build-verified and now has bounded powered
 boot/erased-credential/ordinary-TX smoke on both boards; full qualification
-remains open. See [`e290-node.md`](e290-node.md). The Tracker V2
-pair remains the second known-good Reticulum/RNode radio regression fixture.
+remains open. The separate display-only image has completed a powered and
+visually confirmed full-refresh lifecycle on Board A. The optional
+permanent-node display actor additionally has a bounded powered integrated
+BLE-startup proof with the real controller retained before display
+initialization. See [`e290-node.md`](e290-node.md) and
+[`e290-display-hil.md`](e290-display-hil.md). The Tracker V2 pair remains the
+second known-good Reticulum/RNode radio regression fixture.
 
 ## Cutover decision
 
@@ -18,10 +23,11 @@ boards' flash and PSRAM have been qualified. Portable ordinary-action ownership
 and logical-packet dispatch remain board-independent. The E290 uses its own
 HT-RA62 owner rather than inheriting the Tracker's external-FEM policy.
 
-This is an early hardware cutover, before storage-task, USB/BLE/Wi-Fi, LXMF,
-NomadNet, or display integration. It avoids shaping the full runtime around the
-Tracker V2's lack of PSRAM while preserving the already-qualified Tracker pair
-for regression testing.
+The cutover deliberately happened before storage, USB/BLE/Wi-Fi, LXMF,
+NomadNet, and display integration so those layers would not be shaped around
+the Tracker V2's lack of PSRAM. Those product slices now exist at different
+qualification levels on E290; the already-qualified Tracker pair remains a
+reduced-profile regression fixture.
 
 ## LoRa-first, multi-interface boundary
 
@@ -61,6 +67,7 @@ follows:
 | HT-RA62 / SX1262 reset | 12 |
 | HT-RA62 / SX1262 busy | 13 |
 | HT-RA62 / SX1262 DIO1 | 14 |
+| E-Ink switched `Ve_3V3` enable | 18 |
 | Native USB D- | 19 |
 | Native USB D+ | 20 |
 | Active-low user key | 21 |
@@ -69,13 +76,21 @@ follows:
 | UART TX | 43 |
 | UART RX | 44 |
 
+The supplied panel specification identifies the fitted module as
+`DEPG0290BNS800F6 V2.1`, its controller as `SSD1680Z8`, its active area as
+296-by-128 monochrome pixels, reset as active-low, and BUSY as active-high.
+Heltec's V0.3.1 display example enables the switched display rail with GPIO18
+high and drives the panel at 6 MHz over four-wire SPI. The panel specification
+permits a 20 MHz write clock, but the first Rust image retains the exercised
+6 MHz board value.
+
 The radio's seven MCU signals match the Tracker V2 numerically, but the RF
 topology does not. The HT-RA62 contains its own switch and oscillator control.
 Its TXEN, RXEN, DIO2, and DIO3 module pads are not routed to ESP32 GPIOs on the
 E290.
 
 The hardware-independent
-`reticulum-board-heltec-vision-master-e290` crate now makes those 21 internal
+`reticulum-board-heltec-vision-master-e290` crate now makes those 22 internal
 assignments one exhaustive, collision-tested ownership table. It also binds
 explicit lab-profile validation to the complete fitted HT-RA62-HF 863--928 MHz
 channel range and fixes the pre-initialization radio state at reset low/NSS
@@ -338,6 +353,15 @@ and partition table, flashes those exact copies, and rechecks their hashes after
 the write. A post-write evidence failure is reported distinctly and never
 creates the action's verified JSON:
 
+This RF-inert memory-qualification image is the intentional exception to the
+product CSV rule. It runs before the permanent 16 MiB product layout is
+admitted and therefore passes
+`partitions/heltec-vision-master-e290-qualification.csv` explicitly. The helper
+still derives and passes `--flash-size 16mb` from the qualified board. Every
+later product, diagnostic, or HIL image uses
+`partitions/heltec-vision-master-e290-node.csv`, either directly or embedded in
+a helper-validated merged image.
+
 ```sh
 python3.13 interop/python/e290_qualification_host.py flash-qualification \
   --usb-serial "$EXPECTED_USB_SERIAL" --expected-mac "$EXPECTED_MAC" \
@@ -364,16 +388,34 @@ placement.
 
 ## E-Ink integration boundary
 
-The fitted DEPG0290BNS800F6 panel is a 128 by 296 monochrome display with full
-and partial refresh support. Display integration is deliberately later than
-the permanent radio/node/storage graph.
+The fitted DEPG0290BNS800F6 panel is physically 128 by 296 monochrome pixels and
+is rendered as a 296-by-128 landscape view. Its SSD1680Z8 controller supports
+full and partial refresh; the current Rust path deliberately implements and
+qualifies full refresh only.
 
-One low-priority display actor should own GPIO1--6, coalesce model updates, and
-render from an application snapshot. Its multi-second full refresh must never
-run inside the sole radio owner, protocol owner, storage actor, or a deadline
-critical callback. The display can continue showing its last image without
-power, so routine status changes should prefer partial/coalesced refresh rather
-than continuous redraw.
+The optional permanent-node display actor is the sole owner of SPI3 on
+GPIO1--6 and the switched GPIO18 rail. It renders a board-neutral semantic
+snapshot into one 4,736-byte framebuffer allocated in validated external
+PSRAM, coalesces latest-value requests before and during each update, and uses
+asynchronous SPI plus a timeout-bounded BUSY input. Boot clear has its own
+readiness acknowledgement; later requests and `Rendered`/`Faulted`
+completions carry matching monotonic IDs. After every full refresh the actor
+enters controller deep sleep and drives GPIO18 low. It never runs display work
+inside the sole radio owner, protocol owner, or storage actor. A display fault
+blocks fresh display-dependent pairing for that boot but leaves LoRa/node
+service alive.
+
+The isolated [display HIL powered record](e290-display-hil.md) now qualifies
+full-frame controller initialization, clear/demo writes, deep sleep, and
+display-rail shutdown on Board A. Its fixed non-secret demo also passed visual
+inspection for text, layout, polarity, and landscape orientation. A later
+one-boot integrated diagnostic also qualified the permanent actor's boot clear
+and `Ready` completion alongside BLE controller construction and advertising.
+That A/B established a startup-order invariant: construct and retain the real
+esp-radio `BleConnector` before SPI3/e-paper initialization. Reversing that
+order stalled in `esp_phy::enable_phy` registration/calibration; it was not a
+memory ceiling. This bounded result does not qualify partial refresh, repeated
+sleep/wake cycles, production pairing views, pressure, or soak.
 
 ## Bring-up and migration sequence
 
@@ -403,11 +445,17 @@ than continuous redraw.
    interface, authenticated durable submission, controlled peer RX/DATA/proof,
    and post-re-enumeration terminal-status checks. Fault, cut, high-water,
    application-inbox, and full powered product-graph qualification remain.
-7. Integrate the powered storage actor and authenticated USB device API first,
-   then add an optional second Reticulum interface (with a distinct USB stream
-   actor the leading candidate) to prove heterogeneous routing. Wi-Fi, BLE,
-   E-Ink, GNSS/location, and richer clients follow as independent
-   feature/profile slices.
+7. **Complete through the display foundation:** integrate the storage owner,
+   authenticated USB/local BLE device API, LXMF/Nomad slices, board-neutral
+   display model, portable SSD1680 driver, powered display-only HIL, and
+   opt-in permanent display actor. Wi-Fi and BLE remain local API bearers, not
+   Reticulum packet interfaces.
+8. **Next:** extend the bounded integrated display startup proof to repeated
+   boots and live pairing, connect its semantic pairing views to authenticated
+   BLE Secure Connections, and then
+   add a second Reticulum packet interface to prove heterogeneous routing.
+   Partial display refresh, GNSS/location, and richer clients remain
+   independent later slices.
 
 ## Sources
 
@@ -422,6 +470,8 @@ Primary online references:
 
 - [Semtech SX1262 product page and current datasheet](https://www.semtech.com/products/wireless-rf/lora-connect/sx1262)
 - [Semtech SX1261/2 Data Sheet Rev. 2.2 mirror](https://resource.heltec.cn/download/WiFi_LoRa_32_V4/datasheet/SX1261_2%20V2-2.pdf)
+- [Heltec DEPG0290BxS800FxX display driver](https://github.com/HelTecAutomation/Heltec_ESP32/blob/master/src/HT_DEPG0290BxS800FxX_BW.h)
+- [Heltec Vision Master E290 display example](https://github.com/HelTecAutomation/Heltec_ESP32/tree/master/examples/VME290/DEPG0290BxS800FxX_BW)
 - [Heltec Vision Master E290 documentation](https://docs.heltec.org/en/node/esp32/ht_vme290/index.html)
 - [Heltec HT-RA62 documentation](https://docs.heltec.org/en/node/ht-ra62/index.html)
 - [Heltec HT-RA62 Rev. 1.1 datasheet](https://resource.heltec.cn/download/HT-RA62/HT-RA62%28Rev1.1%29.pdf)

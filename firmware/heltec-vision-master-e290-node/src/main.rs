@@ -10,8 +10,9 @@
 //! plus GPIO21 physical presence without becoming a Reticulum packet
 //! interface. The mutually exclusive `wifi-api-proof` and `ble-api-proof`
 //! profiles replace that task with one authenticated wireless RDA1 bearer.
-//! Neither profile composes USB concurrently. The node retains
-//! transport-neutral admission and authenticated dispatch lanes. Inbound
+//! During alpha development those wireless profiles retain USB Serial/JTAG as
+//! a diagnostics-only sink; they do not expose a second RDA1 bearer. The node
+//! retains transport-neutral admission and authenticated dispatch lanes. Inbound
 //! durable LXMF delivery is composed without becoming an interface; NomadNet
 //! and UI actors remain independent later capabilities.
 
@@ -31,6 +32,8 @@ compile_error!("the E290 BLE startup diagnostic requires ble-api-proof");
 
 #[cfg(feature = "ble-api-proof")]
 mod ble_api_task;
+#[cfg(feature = "display")]
+mod display_task;
 mod node_task;
 mod platform_storage;
 mod radio_task;
@@ -41,7 +44,7 @@ mod runtime_measurement_stack_hil;
     allow(
         dead_code,
         unused_imports,
-        reason = "wireless profiles retain only the earliest USB quarantine boundary"
+        reason = "wireless profiles retain USB only as an alpha diagnostic sink"
     )
 )]
 mod usb_pairing_task;
@@ -81,6 +84,10 @@ use esp_hal::{
 use esp_storage::FlashStorage;
 use log::{error, info, warn};
 use rand_core::RngCore;
+#[cfg(feature = "display")]
+use reticulum_appliance_display_model::{DisplayCommand, DisplayLabel, DisplayViewKind};
+#[cfg(feature = "display")]
+use reticulum_board_heltec_vision_master_e290::EINK_SPI_FREQUENCY_HZ;
 use reticulum_board_heltec_vision_master_e290_radio::{
     E290_NA915_DEV_CONFIGURATION, E290_NA915_DEV_CONFIGURATION_FINGERPRINT, E290_NA915_DEV_PROFILE,
     E290Radio,
@@ -95,6 +102,12 @@ use reticulum_device_api_session::{
     ServerParameters,
 };
 use reticulum_device_identity_store::IdentityMirrorCoverage;
+#[cfg(feature = "display")]
+use reticulum_eink_ssd1680::{E290FrameBuffer, Ssd1680};
+#[cfg(feature = "display")]
+use reticulum_heltec_vision_master_e290_node::display_handoff::{
+    DisplayBootClearOutcome, DisplayCompletionGateError, DisplayHandoff,
+};
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
     BootPhase as RuntimeBootPhase, HeapSnapshot as RuntimeHeapSnapshot,
@@ -138,10 +151,34 @@ use crate::platform_storage::{
     ProductStorageCoordinator, ProductSubmissionRuntime,
 };
 
+#[cfg(reticulum_e290_ble_startup_diagnostic)]
+macro_rules! startup_diagnostic {
+    ($stage:literal) => {
+        esp_println::println!("e290-ble-display-startup stage={} status=PASS", $stage)
+    };
+    ($stage:literal, failure = $reason:literal) => {
+        esp_println::println!(
+            "e290-ble-display-startup stage={} status=FAIL reason={}",
+            $stage,
+            $reason
+        )
+    };
+}
+
+#[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+macro_rules! startup_diagnostic {
+    ($stage:literal) => {};
+    ($stage:literal, failure = $reason:literal) => {};
+}
+
 #[cfg(debug_assertions)]
 compile_error!("the permanent E290 node must be built with --release");
 
 const LORA_INTERFACE: PacketInterfaceId = PacketInterfaceId::new(1);
+#[cfg(feature = "display")]
+const DISPLAY_BOOT_CLEAR_DEADLINE_MS: u64 = 15_000;
+#[cfg(feature = "display")]
+const DISPLAY_READY_DEADLINE_MS: u64 = 15_000;
 
 type E290SpiDevice = ExclusiveDevice<Spi<'static, Async>, Output<'static>, Delay>;
 type ProductRadio =
@@ -166,6 +203,13 @@ pub(crate) type ProductSupervisor = NodeInterfaceSupervisor<
     { config::INTERFACE_SLOTS },
     { config::INTERFACE_QUEUE_DEPTH },
 >;
+
+#[cfg(feature = "display")]
+#[inline(never)]
+fn allocate_display_frame()
+-> Result<Box<E290FrameBuffer, ExternalMemory>, allocator_api2::alloc::AllocError> {
+    Box::try_new_in(E290FrameBuffer::new_white(), ExternalMemory)
+}
 
 static IRQ_TIMESTAMPS: IrqTimestampCapture = IrqTimestampCapture::new_monotonic_us(monotonic_us);
 static INTERFACE_FABRIC: StaticCell<
@@ -197,33 +241,31 @@ static SESSION_ADMISSION: StaticCell<SessionAdmissionHandoff<CriticalSectionRawM
 static AUTHENTICATED_API: StaticCell<
     DeviceApiHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
 > = StaticCell::new();
+#[cfg(feature = "display")]
+static DISPLAY_HANDOFF: StaticCell<DisplayHandoff<CriticalSectionRawMutex>> = StaticCell::new();
 const _: () = assert!(
     mem::size_of::<DeviceApiHandoff<CriticalSectionRawMutex, AuthenticatedGrant>>()
         <= config::MAXIMUM_AUTHENTICATED_API_HANDOFF_BYTES
 );
 static EXECUTOR: StaticCell<esp_rtos::embassy::Executor> = StaticCell::new();
 
-#[cfg(reticulum_e290_ble_startup_diagnostic)]
-pub(crate) struct DiagnosticUsbSerialJtagOwner {
-    _usb_device: Option<esp_hal::peripherals::USB_DEVICE<'static>>,
+#[cfg(any(feature = "ble-api-proof", feature = "wifi-api-proof"))]
+pub(crate) struct AlphaUsbSerialJtagOwner {
+    _usb_device: esp_hal::peripherals::USB_DEVICE<'static>,
 }
 
-#[cfg(reticulum_e290_ble_startup_diagnostic)]
-impl DiagnosticUsbSerialJtagOwner {
-    const fn before_hal_initialization() -> Self {
-        Self { _usb_device: None }
-    }
-
-    fn retain_native_usb(mut self, usb_device: esp_hal::peripherals::USB_DEVICE<'static>) -> Self {
-        debug_assert!(self._usb_device.is_none());
-        self._usb_device = Some(usb_device);
-        self
+#[cfg(any(feature = "ble-api-proof", feature = "wifi-api-proof"))]
+impl AlphaUsbSerialJtagOwner {
+    const fn new(usb_device: esp_hal::peripherals::USB_DEVICE<'static>) -> Self {
+        Self {
+            _usb_device: usb_device,
+        }
     }
 }
 
-#[cfg(reticulum_e290_ble_startup_diagnostic)]
-type ProductUsbBootBoundary = DiagnosticUsbSerialJtagOwner;
-#[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+#[cfg(any(feature = "ble-api-proof", feature = "wifi-api-proof"))]
+type ProductUsbBootBoundary = ();
+#[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
 type ProductUsbBootBoundary = usb_pairing_task::BootUsbQuarantine;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -301,9 +343,9 @@ where
 
 #[esp_hal::main]
 fn main() -> ! {
-    #[cfg(reticulum_e290_ble_startup_diagnostic)]
-    let usb_boot_boundary = DiagnosticUsbSerialJtagOwner::before_hal_initialization();
-    #[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+    #[cfg(any(feature = "ble-api-proof", feature = "wifi-api-proof"))]
+    let usb_boot_boundary = ();
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     let usb_boot_boundary = usb_pairing_task::quarantine_usb_at_boot();
     let executor = EXECUTOR.init(esp_rtos::embassy::Executor::new());
     executor.run(|spawner| {
@@ -322,16 +364,19 @@ fn main() -> ! {
 async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundary) -> ! {
     let hal = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(hal);
-    #[cfg(reticulum_e290_ble_startup_diagnostic)]
-    let diagnostic_usb_serial_jtag_owner =
-        usb_boot_boundary.retain_native_usb(peripherals.USB_DEVICE);
-    #[cfg(not(reticulum_e290_ble_startup_diagnostic))]
+    #[cfg(any(feature = "ble-api-proof", feature = "wifi-api-proof"))]
+    let alpha_usb_serial_jtag_owner = {
+        let () = usb_boot_boundary;
+        AlphaUsbSerialJtagOwner::new(peripherals.USB_DEVICE)
+    };
+    #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     let usb_boot_quarantine: usb_pairing_task::BootUsbQuarantine = usb_boot_boundary;
 
     // Establish the complete E290 RF interlock at the composition task's first
     // poll, before logging, entropy, PSRAM initialization or radio construction.
     let radio_reset = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
     let radio_nss = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
+    startup_diagnostic!("rf-interlock");
     #[cfg(feature = "runtime-measurement-hil")]
     let mut runtime_stack = match runtime_measurement_stack_hil::StackWatermarkMonitor::initialize()
     {
@@ -416,11 +461,170 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         "e290-node stage=psram status=PASS bytes={psram_bytes} mode=auto minimum_qualified_bytes={} ownership_state=external-allocator-ready",
         config::MINIMUM_PSRAM_BYTES,
     );
+    startup_diagnostic!("psram");
 
     let timers = TimerGroup::new(peripherals.TIMG0);
     let software_interrupts =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timers.timer0, software_interrupts.software_interrupt0);
+    startup_diagnostic!("rtos");
+
+    #[cfg(feature = "ble-api-proof")]
+    let ble_connector = match ble_api_task::initialize_controller(peripherals.BT) {
+        Ok(connector) => {
+            startup_diagnostic!("ble-controller-pre-display");
+            Some(connector)
+        }
+        Err(reason) => {
+            startup_diagnostic!(
+                "ble-controller-pre-display",
+                failure = "configuration-error"
+            );
+            error!(
+                "e290-node stage=ble-api status=DISABLED reason=controller-init-{reason:?} lora_routing=continue"
+            );
+            None
+        }
+    };
+
+    #[cfg(feature = "display")]
+    let (display_publisher, display_task_spawned) = {
+        let (mut publisher, receiver) = DISPLAY_HANDOFF.init(DisplayHandoff::new()).split();
+        let display_task = 'display: {
+            let frame = match allocate_display_frame() {
+                Ok(frame) => frame,
+                Err(_) => {
+                    error!(
+                        "e290-node stage=display-placement status=FAIL reason=external-allocation expected_bytes={}",
+                        mem::size_of::<E290FrameBuffer>(),
+                    );
+                    break 'display None;
+                }
+            };
+            let frame_bytes = mem::size_of_val(&*frame);
+            let frame_start = (&*frame as *const E290FrameBuffer) as usize;
+            let frame_end = match frame_start.checked_add(frame_bytes) {
+                Some(end) => end,
+                None => {
+                    error!(
+                        "e290-node stage=display-placement status=FAIL reason=allocation-range-overflow"
+                    );
+                    break 'display None;
+                }
+            };
+            if frame_bytes != mem::size_of::<E290FrameBuffer>()
+                || !frame_start.is_multiple_of(mem::align_of::<E290FrameBuffer>())
+                || frame_start < psram_start_address
+                || frame_end > psram_end_address
+            {
+                error!(
+                    "e290-node stage=display-placement status=FAIL reason=external-address allocation_start=0x{frame_start:08x} allocation_end=0x{frame_end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={} actual_bytes={frame_bytes} alignment={}",
+                    mem::size_of::<E290FrameBuffer>(),
+                    mem::align_of::<E290FrameBuffer>(),
+                );
+                break 'display None;
+            }
+            info!(
+                "e290-node stage=display-placement status=PASS ownership=boot-lifetime-external bytes={frame_bytes} start=0x{frame_start:08x} end=0x{frame_end:08x}"
+            );
+
+            let display_power =
+                Output::new(peripherals.GPIO18, Level::Low, OutputConfig::default());
+            let chip_select = Output::new(peripherals.GPIO3, Level::High, OutputConfig::default());
+            let data_command = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
+            let reset = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
+            let busy = display_task::DisplayBusy::new(Input::new(
+                peripherals.GPIO6,
+                InputConfig::default(),
+            ));
+            let spi = match Spi::new(
+                peripherals.SPI3,
+                SpiConfig::default()
+                    .with_frequency(Rate::from_hz(EINK_SPI_FREQUENCY_HZ))
+                    .with_mode(SpiMode::_0),
+            ) {
+                Ok(spi) => spi,
+                Err(_) => {
+                    error!("e290-node stage=display-spi status=FAIL lora_routing=continue");
+                    break 'display None;
+                }
+            }
+            .with_sck(peripherals.GPIO2)
+            .with_mosi(peripherals.GPIO1)
+            .into_async();
+            let spi_device = match ExclusiveDevice::new(spi, chip_select, Delay) {
+                Ok(device) => device,
+                Err(_) => {
+                    error!("e290-node stage=display-spi-device status=FAIL lora_routing=continue");
+                    break 'display None;
+                }
+            };
+            let display = Ssd1680::new(spi_device, data_command, reset, busy, Delay);
+            let task = match display_task::run(display, display_power, frame, receiver) {
+                Ok(task) => task,
+                Err(_) => {
+                    error!(
+                        "e290-node stage=display-spawn status=FAIL reason=task-pool lora_routing=continue"
+                    );
+                    break 'display None;
+                }
+            };
+            Some(task)
+        };
+
+        let display_task_spawned = display_task.is_some();
+        let display_publisher = match display_task {
+            Some(task) => {
+                let booting = DisplayCommand::ShowBooting {
+                    label: DisplayLabel::new("Reticulum E290")
+                        .expect("the fixed product label fits"),
+                };
+                if publisher.publish_latest(booting).is_err() {
+                    error!(
+                        "e290-node stage=display-request status=FAIL reason=request-id-exhausted lora_routing=continue"
+                    );
+                    None
+                } else {
+                    spawner.spawn(task);
+                    match with_timeout(
+                        Duration::from_millis(DISPLAY_BOOT_CLEAR_DEADLINE_MS),
+                        publisher.wait_for_boot_clear(),
+                    )
+                    .await
+                    {
+                        Ok(DisplayBootClearOutcome::Ready) => {
+                            startup_diagnostic!("display-boot-clear");
+                            Some(publisher)
+                        }
+                        Ok(DisplayBootClearOutcome::Faulted) => {
+                            #[cfg(reticulum_e290_ble_startup_diagnostic)]
+                            esp_println::println!(
+                                "e290-ble-display-startup stage=display-boot-clear status=FAIL reason=actor-fault"
+                            );
+                            error!(
+                                "e290-node stage=display-readiness status=DISABLED reason=boot-clear-fault fresh_pairing=false lora_routing=continue"
+                            );
+                            None
+                        }
+                        Err(_) => {
+                            #[cfg(reticulum_e290_ble_startup_diagnostic)]
+                            esp_println::println!(
+                                "e290-ble-display-startup stage=display-boot-clear status=FAIL reason=deadline"
+                            );
+                            error!(
+                                "e290-node stage=display-readiness status=DISABLED reason=boot-clear-deadline fresh_pairing=false lora_routing=continue"
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+            None => None,
+        };
+        (display_publisher, display_task_spawned)
+    };
+    #[cfg(not(feature = "display"))]
+    let display_task_spawned = false;
 
     let application_volatile = match Box::try_new_in(
         node_task::ApplicationVolatileState::new(),
@@ -465,6 +669,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     info!(
         "e290-node stage=application-volatile status=PASS ownership=boot-lifetime-external bytes={application_volatile_bytes} start=0x{application_volatile_start:08x} end=0x{application_volatile_end:08x} nomad=resident"
     );
+    startup_diagnostic!("application-volatile");
     let application_volatile: &'static mut node_task::ApplicationVolatileState =
         Box::leak(application_volatile);
 
@@ -540,6 +745,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         config::LXMF_DELAYED_PROOF_SLOTS,
         delayed_proof_storage.capacity(),
     );
+    startup_diagnostic!("lxmf-delayed-proofs");
     let delayed_proof_storage: &'static mut [DelayedProofSlot] = delayed_proof_storage.leak();
 
     let mut lxmf_index = Vec::new_in(ExternalMemory);
@@ -610,6 +816,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         config::LXMF_INDEX_SLOTS,
         lxmf_index.capacity(),
     );
+    startup_diagnostic!("lxmf-index");
     let lxmf_index: &'static mut [LxmfStoreIndexSlot] = lxmf_index.leak();
     #[cfg(feature = "runtime-measurement-hil")]
     let runtime_measurement_started_us = monotonic_us();
@@ -631,6 +838,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
             inert_forever().await
         }
     };
+    startup_diagnostic!("entropy");
     #[cfg(feature = "runtime-measurement-hil")]
     let credential_boot_started_us = monotonic_us();
     let flash = FLASH_STORAGE.init(FlashStorage::new(peripherals.FLASH));
@@ -644,6 +852,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     info!(
         "e290-node stage=flash-owner status=PASS partition_contract=validated api_credentials=0x614000..0x616000 credential_store=bound credential_media=plaintext"
     );
+    startup_diagnostic!("flash-owner");
     let credential_boot = flash_owner.boot_credentials();
     log_credential_boot(&credential_boot);
     #[cfg(feature = "runtime-measurement-hil")]
@@ -683,6 +892,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     info!(
         "e290-node stage=identity-preflight status=PASS state={identity_preflight:?} announce_clock_policy={fresh_clock_policy:?} journal_reprovision_policy={journal_reprovision_policy:?} journal_policy={journal_policy:?} writes=0 erases=0"
     );
+    startup_diagnostic!("identity-preflight");
     #[cfg(feature = "runtime-measurement-hil")]
     let journal_provision_started_us = monotonic_us();
     let journal_provision = flash_owner.provision_node_journal(journal_policy);
@@ -711,6 +921,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
             inert_forever().await
         }
     }
+    startup_diagnostic!("node-journal-provision");
     #[cfg(feature = "runtime-measurement-hil")]
     let announce_epoch_started_us = monotonic_us();
     let boot_epoch_result = flash_owner.reserve_announce_epoch(fresh_clock_policy);
@@ -737,6 +948,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         boot_epoch.raw_write_calls,
         boot_epoch.raw_erase_calls,
     );
+    startup_diagnostic!("announce-clock");
     #[cfg(feature = "runtime-measurement-hil")]
     let identity_boot_started_us = monotonic_us();
     let boot_identity_result = flash_owner.boot_identity(&mut bootstrap_rng);
@@ -778,6 +990,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         boot_identity.raw_write_calls,
         boot_identity.raw_erase_calls,
     );
+    startup_diagnostic!("identity-store");
     drop(boot_identity);
 
     let submission_runtime_storage = match Box::<ProductSubmissionRuntime, _>::try_new_uninit_in(
@@ -1162,6 +1375,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     info!(
         "e290-node stage=supervisor-placement status=PASS ownership=boot-lifetime-external bytes={supervisor_bytes} start=0x{supervisor_start:08x} end=0x{supervisor_end:08x}"
     );
+    startup_diagnostic!("node-composition");
     let supervisor: &'static mut ProductSupervisor = Box::leak(supervisor);
 
     #[cfg(feature = "runtime-measurement-hil")]
@@ -1211,6 +1425,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
             inert_forever().await
         }
     };
+    startup_diagnostic!("radio-init");
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE.record_boot_phase(
         RuntimeBootPhase::RadioInit,
@@ -1299,11 +1514,9 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     };
     #[cfg(feature = "wifi-api-proof")]
     let wifi_api_task = {
-        // The earliest entrypoint deliberately leaves USB quarantined for the
-        // complete Wi-Fi proof boot. Moving the opaque token here makes that
-        // one-bearer choice explicit even though the Wi-Fi task has no USB
-        // capability.
-        let _usb_boot_quarantine = usb_boot_quarantine;
+        // Alpha wireless profiles retain native USB solely for diagnostics.
+        // The token moves into the detached bearer task so the hardware owner
+        // outlives product composition without creating a second API bearer.
         match wifi_api_task::run(
             spawner,
             peripherals.WIFI,
@@ -1317,6 +1530,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
             ),
             local_api_session_parameters,
             local_api_session_rng,
+            alpha_usb_serial_jtag_owner,
         ) {
             Ok(task) => task,
             Err(_) => {
@@ -1327,35 +1541,41 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     };
     #[cfg(feature = "ble-api-proof")]
     let ble_api_task = {
-        // The earliest entrypoint deliberately leaves USB quarantined for the
-        // complete BLE proof boot. Moving the opaque token here makes the
-        // one-bearer choice explicit even though the BLE task has no USB
-        // capability or pairing surface.
-        #[cfg(not(reticulum_e290_ble_startup_diagnostic))]
-        let _usb_boot_quarantine = usb_boot_quarantine;
-        match ble_api_task::run(
-            peripherals.BT,
-            base_mac_eui48,
-            ble_api_task::BleHandoffs::new(
-                usb_pairing_handoff,
-                usb_live_pairing_handoff,
-                usb_session_admission,
-                usb_authenticated_api,
-            ),
-            local_api_session_parameters,
-            local_api_session_rng,
-            #[cfg(reticulum_e290_ble_startup_diagnostic)]
-            diagnostic_usb_serial_jtag_owner,
-        ) {
-            Ok(task) => Some(task),
-            Err(_) => {
-                error!("e290-node stage=spawn status=DISABLED task=ble-api lora_routing=continue");
+        // Alpha wireless profiles retain native USB solely for diagnostics.
+        // The BLE task has no USB API or pairing surface.
+        match ble_connector {
+            Some(connector) => match ble_api_task::run(
+                connector,
+                base_mac_eui48,
+                ble_api_task::BleHandoffs::new(
+                    usb_pairing_handoff,
+                    usb_live_pairing_handoff,
+                    usb_session_admission,
+                    usb_authenticated_api,
+                ),
+                local_api_session_parameters,
+                local_api_session_rng,
+                alpha_usb_serial_jtag_owner,
+            ) {
+                Ok(task) => Some(task),
+                Err(_) => {
+                    error!(
+                        "e290-node stage=spawn status=DISABLED task=ble-api lora_routing=continue"
+                    );
+                    None
+                }
+            },
+            None => {
+                error!(
+                    "e290-node stage=spawn status=DISABLED task=ble-api reason=controller-unavailable lora_routing=continue"
+                );
                 None
             }
         }
     };
     #[cfg(feature = "ble-api-proof")]
     let ble_api_task_available = ble_api_task.is_some();
+    startup_diagnostic!("task-construction");
     // This Embassy version reports pool exhaustion while constructing each
     // SpawnToken above; `Spawner::spawn` is infallible and returns unit.
     spawner.spawn(radio_task);
@@ -1368,12 +1588,93 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     if let Some(ble_api_task) = ble_api_task {
         spawner.spawn(ble_api_task);
     }
+    startup_diagnostic!("tasks-spawned");
+    #[cfg(feature = "display")]
+    let display_publisher = match display_publisher {
+        Some(mut publisher) => {
+            let ready_request = publisher.publish_latest(DisplayCommand::ShowReady {
+                label: DisplayLabel::new("Reticulum E290").expect("the fixed product label fits"),
+            });
+            match ready_request {
+                Ok(request_id) => {
+                    info!(
+                        "e290-node stage=display-request status=QUEUED request={} view=Ready",
+                        request_id.sequence(),
+                    );
+                    startup_diagnostic!("ready-request");
+                    match with_timeout(
+                        Duration::from_millis(DISPLAY_READY_DEADLINE_MS),
+                        publisher.wait_for_rendered_completion(request_id, DisplayViewKind::Ready),
+                    )
+                    .await
+                    {
+                        Ok(Ok(completion)) => {
+                            info!(
+                                "e290-node stage=display-ready status=PASS request={} view={:?} outcome={:?}",
+                                completion.request_id().sequence(),
+                                completion.view(),
+                                completion.outcome(),
+                            );
+                            startup_diagnostic!("ready-completion");
+                            Some(publisher)
+                        }
+                        Ok(Err(error)) => {
+                            match error {
+                                DisplayCompletionGateError::Superseded { .. } => {
+                                    startup_diagnostic!("ready-completion", failure = "superseded");
+                                }
+                                DisplayCompletionGateError::ViewMismatch { .. } => {
+                                    startup_diagnostic!(
+                                        "ready-completion",
+                                        failure = "view-mismatch"
+                                    );
+                                }
+                                DisplayCompletionGateError::Faulted { .. } => {
+                                    startup_diagnostic!(
+                                        "ready-completion",
+                                        failure = "render-fault"
+                                    );
+                                }
+                            }
+                            error!(
+                                "e290-node stage=display-ready status=DISABLED reason=completion-gate error={error:?} fresh_pairing=false lora_routing=continue"
+                            );
+                            None
+                        }
+                        Err(_) => {
+                            startup_diagnostic!("ready-completion", failure = "timeout");
+                            error!(
+                                "e290-node stage=display-ready status=DISABLED reason=completion-timeout request={} deadline_ms={} fresh_pairing=false lora_routing=continue",
+                                request_id.sequence(),
+                                DISPLAY_READY_DEADLINE_MS,
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(_) => {
+                    startup_diagnostic!("ready-request", failure = "request-id-exhausted");
+                    error!(
+                        "e290-node stage=display-request status=FAIL reason=request-id-exhausted fresh_pairing=false lora_routing=continue"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    #[cfg(feature = "display")]
+    let display_available = display_publisher.is_some();
+    #[cfg(not(feature = "display"))]
+    let display_available = false;
     #[cfg(feature = "runtime-measurement-hil")]
     RETICULUM_RUNTIME_MEASUREMENT_EVIDENCE
         .record_composition_ready(monotonic_us().saturating_sub(runtime_measurement_started_us));
+    startup_diagnostic!("composition-ready");
     #[cfg(not(any(feature = "ble-api-proof", feature = "wifi-api-proof")))]
     info!(
-        "e290-node stage=composition status=PASS tasks=3 interfaces=1 primary_transport=lora future_transport_actors=deferred node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission={lxmf_delivery_admission} application_volatile_placement=external-psram application_volatile_bytes={application_volatile_bytes} nomad=resident lxmf_delayed_proof_placement=external-psram lxmf_delayed_proof_slots={} lxmf_delayed_proof_bytes={delayed_proof_storage_bytes} application_event_placement=internal-static credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
+        "e290-node stage=composition status=PASS tasks={} interfaces=1 primary_transport=lora future_transport_actors=deferred display_task_spawned={display_task_spawned} display_available={display_available} node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} rns_inbox_capacity=1 lxmf_store_available={lxmf_service_available} lxmf_index_slots={} lxmf_delivery_admission={lxmf_delivery_admission} application_volatile_placement=external-psram application_volatile_bytes={application_volatile_bytes} nomad=resident lxmf_delayed_proof_placement=external-psram lxmf_delayed_proof_slots={} lxmf_delayed_proof_bytes={delayed_proof_storage_bytes} application_event_placement=internal-static credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} preauth_initialization_bearer=usb-serial-jtag preauth_live_pairing_bearer=usb-serial-jtag pairing_button_gpio=21 authenticated_local_api=node-dispatch bearer_session=usb-authenticated-single-flight credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} admission=session-selected runtime_patch={} flash_assumption_bytes=16777216",
+        3 + if display_task_spawned { 1 } else { 0 },
         config::LXMF_INDEX_SLOTS,
         config::LXMF_DELAYED_PROOF_SLOTS,
         credential_binding.absolute_offset(),
@@ -1383,8 +1684,8 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     );
     #[cfg(feature = "ble-api-proof")]
     info!(
-        "e290-node stage=composition status=PASS tasks={} interfaces=1 primary_transport=lora local_api_profile=ble-api-proof ble_api_task_available={ble_api_task_available} usb=boot-quarantined ble_max_centrals=1 ble_pairing=disabled ble_tx=indicate ble_rx=write-with-response authenticated_local_api=node-dispatch bearer_session=ble-authenticated-single-flight session_suite=ble-gatt-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
-        if ble_api_task_available { 3 } else { 2 },
+        "e290-node stage=composition status=PASS tasks={} interfaces=1 primary_transport=lora local_api_profile=ble-api-proof ble_api_task_available={ble_api_task_available} usb=alpha-diagnostics-only display_task_spawned={display_task_spawned} display_available={display_available} ble_max_centrals=1 ble_pairing=disabled ble_tx=indicate ble_rx=write-with-response authenticated_local_api=node-dispatch bearer_session=ble-authenticated-single-flight session_suite=ble-gatt-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
+        (if ble_api_task_available { 3 } else { 2 }) + if display_task_spawned { 1 } else { 0 },
         credential_binding.absolute_offset(),
         credential_binding.length(),
         config::DURABLE_RUNTIME_BYTES,
@@ -1392,7 +1693,8 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     );
     #[cfg(feature = "wifi-api-proof")]
     info!(
-        "e290-node stage=composition status=PASS tasks=5 interfaces=1 primary_transport=lora local_api_profile=wifi-api-proof usb=boot-quarantined wifi_softap_ssid={:?} wifi_gateway={}.{}.{}.{} wifi_prefix={} wifi_tcp_port={} wifi_dhcp=enabled wifi_max_clients=1 wifi_pairing=disabled authenticated_local_api=node-dispatch bearer_session=wifi-authenticated-single-flight session_suite=wifi-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
+        "e290-node stage=composition status=PASS tasks={} interfaces=1 primary_transport=lora local_api_profile=wifi-api-proof usb=alpha-diagnostics-only display_task_spawned={display_task_spawned} display_available={display_available} wifi_softap_ssid={:?} wifi_gateway={}.{}.{}.{} wifi_prefix={} wifi_tcp_port={} wifi_dhcp=enabled wifi_max_clients=1 wifi_pairing=disabled authenticated_local_api=node-dispatch bearer_session=wifi-authenticated-single-flight session_suite=wifi-qualification node_journal=mounted resident_storage_available={storage_service_available} durable_rns_inbox_available={inbox_service_available} lxmf_store_available={lxmf_service_available} lxmf_delivery_admission={lxmf_delivery_admission} credential_state={credential_boot_state:?} credential_revision={credential_revision:?} credential_authority_publishable={credential_authority_publishable} credential_mutation_eligible={credential_mutation_eligible} credential_pairing_policy_resident={credential_pairing_policy_available} credential_initialization={credential_initialization_status:?} credential_offset=0x{:x} credential_len=0x{:x} durable_runtime_bytes={} runtime_patch={}",
+        5 + if display_task_spawned { 1 } else { 0 },
         wifi_api_profile::softap_ssid(base_mac_eui48),
         wifi_api_profile::GATEWAY_IPV4[0],
         wifi_api_profile::GATEWAY_IPV4[1],
@@ -1549,13 +1851,23 @@ fn monotonic_us() -> u64 {
 
 fn inert_before_rtos() -> ! {
     // Embassy timers are unavailable until `esp_rtos::start`. These early
-    // fail-stop paths run with RF held in reset and USB still quarantined.
+    // fail-stop paths run with RF held in reset. Wireless alpha profiles retain
+    // native USB electrically and at runtime, but only the separately named
+    // startup diagnostic emits there; the USB-API profile remains quarantined.
+    #[cfg(reticulum_e290_ble_startup_diagnostic)]
+    esp_println::println!(
+        "e290-ble-display-startup stage=inert-before-rtos status=FAIL action=inspect-last-pass"
+    );
     loop {
         core::hint::spin_loop();
     }
 }
 
 async fn inert_forever() -> ! {
+    #[cfg(reticulum_e290_ble_startup_diagnostic)]
+    esp_println::println!(
+        "e290-ble-display-startup stage=inert-forever status=FAIL action=inspect-last-pass"
+    );
     loop {
         Timer::after(Duration::from_secs(30)).await;
     }

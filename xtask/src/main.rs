@@ -255,6 +255,10 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: credential-store integration source boundary: {error}");
         return ExitCode::FAILURE;
     }
+    if let Err(error) = validate_e290_ble_display_startup_order_workspace(&root) {
+        eprintln!("error: E290 BLE/display startup-order source boundary: {error}");
+        return ExitCode::FAILURE;
+    }
     if let Err(error) = validate_e290_inbox_commit_fault_hil_workspace(&root) {
         eprintln!("error: E290 inbox commit-fault HIL source boundary: {error}");
         return ExitCode::FAILURE;
@@ -415,6 +419,26 @@ fn graph_policy() -> ExitCode {
         }
     };
 
+    let e290_display_hil = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-display-hil",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect E290 display HIL graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let e290_node = match capture(
         "cargo",
         [
@@ -431,6 +455,29 @@ fn graph_policy() -> ExitCode {
         Ok(tree) => tree,
         Err(error) => {
             eprintln!("error: could not inspect permanent E290 node graph: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let e290_display = match capture(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-heltec-vision-master-e290-node",
+            "--no-default-features",
+            "--features",
+            "display",
+            "--target",
+            "all",
+            "--format",
+            "{p} features=[{f}]",
+        ],
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect permanent E290 display graph: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -597,6 +644,32 @@ fn graph_policy() -> ExitCode {
             eprintln!(
                 "error: could not inspect appliance display model generic bare-metal closure: {error}"
             );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let eink_ssd1680_closure = match capture_stdout_at(
+        "cargo",
+        [
+            "tree",
+            "--locked",
+            "-p",
+            "reticulum-eink-ssd1680",
+            "--edges",
+            "normal",
+            "--target",
+            "riscv32imac-unknown-none-elf",
+            "--prefix",
+            "none",
+            "--no-dedupe",
+            "--format",
+            "{p}\t{f}",
+        ],
+        &root,
+    ) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("error: could not inspect SSD1680 generic bare-metal closure: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -858,7 +931,15 @@ fn graph_policy() -> ExitCode {
         eprintln!("error: {error}");
         failed = true;
     }
+    if let Err(error) = validate_e290_display_hil_graph_boundary(&e290_display_hil) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
     if let Err(error) = validate_e290_node_graph_boundary(&e290_node) {
+        eprintln!("error: {error}");
+        failed = true;
+    }
+    if let Err(error) = validate_e290_display_graph_boundary(&e290_node, &e290_display) {
         eprintln!("error: {error}");
         failed = true;
     }
@@ -968,6 +1049,10 @@ fn graph_policy() -> ExitCode {
             &root,
         )
         .map_err(|error| format!("appliance display model generic bare-metal closure: {error}"))?;
+        validate_eink_ssd1680_dependency_boundary(&json, &root)
+            .map_err(|error| format!("SSD1680 driver dependency boundary: {error}"))?;
+        validate_eink_ssd1680_resolved_closure(&json, &eink_ssd1680_closure, &root)
+            .map_err(|error| format!("SSD1680 generic bare-metal closure: {error}"))?;
         validate_radio_tx_dispatch_dependency_boundary(&json, &root)
             .map_err(|error| format!("real radio TX dispatcher dependency boundary: {error}"))?;
         validate_radio_tx_dispatch_resolved_closure(&json, &radio_tx_dispatch_closure, &root)
@@ -1018,7 +1103,7 @@ fn graph_policy() -> ExitCode {
         ExitCode::FAILURE
     } else {
         println!(
-            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage HIL graph, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent, journal-reprovision, inbox commit-fault, runtime-measurement, Wi-Fi API proof and BLE API proof E290 node graphs, the E290 BLE startup-diagnostic graph and the Leviculum \
+            "ok: all safe, RX, HIL and all-features all-target product graphs, the RF-inert physical-storage and E290 display HIL graphs, the separately hazardous default-sentinel, Tracker semantic-announce/semantic-round-trip and E290 semantic-round-trip TX HIL graphs, the permanent, display, journal-reprovision, inbox commit-fault, runtime-measurement, Wi-Fi API proof and BLE API proof E290 node graphs, the E290 BLE startup-diagnostic graph and the Leviculum \
              comparison graph are isolated; every firmware and HIL graph excludes the host-only device and pairing clients, chat application/service crates, SQLite/serial access and Axum/Hyper/Tokio/Tower OS runtime; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
              legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
@@ -1030,8 +1115,8 @@ fn graph_policy() -> ExitCode {
              credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to their exact reviewed definition and call sites in the two trusted owner files, and every workspace member target remains beneath a scanned source root; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge, is composed feature-free only into the permanent E290 node, and remains absent from every legacy product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
-             the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; the Wi-Fi and BLE API proof profiles retain the complete permanent node graph and add only their exact locked transport closures and shared feature transitions; the BLE startup diagnostic matches the production BLE profile except for its package root and exact ESP Serial/JTAG logging path, so it cannot acquire Wi-Fi or another transport closure; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the allocation-free appliance display model has only its exact feature-disabled zeroization edge and generic bare-metal closure, with no std, alloc, platform or firmware acquisition; the permanent E290 node and its BLE startup diagnostic compose that exact local feature-disabled display model path while reaching the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack, bounded feature-free Nomad protocol state and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding deferred full onboard client/service stacks and foreign Tracker/HIL packages; \
+             the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; the display, Wi-Fi and BLE API proof profiles retain the complete permanent node graph and add only their exact locked component or transport closures and shared feature transitions; the BLE startup diagnostic retains the same optional display surface and matches the production BLE profile except for its package root and exact ESP Serial/JTAG trace path in place of the production silent logger, so it cannot acquire Wi-Fi or another transport closure; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the allocation-free appliance display model has only its exact feature-disabled zeroization edge and generic bare-metal closure, with no std, alloc, platform or firmware acquisition; the featureless SSD1680 driver has exactly its three embedded graphics/HAL trait edges and an exact six-package generic bare-metal closure, while the RF-inert display HIL and opt-in permanent display profile reach only their reviewed display and ESP platform surfaces; the permanent E290 node and its BLE startup diagnostic compose the exact local feature-disabled display model path while reaching the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack, bounded feature-free Nomad protocol state and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding deferred full onboard client/service stacks and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
@@ -1320,7 +1405,7 @@ fn validate_host_appliance_graph_boundary(profile: &str, tree: &str) -> Result<(
     Ok(())
 }
 
-const PRODUCT_GRAPH_FORBIDDEN: [&str; 33] = [
+const PRODUCT_GRAPH_FORBIDDEN: [&str; 35] = [
     "leviculum-core",
     "rete-lxmf",
     "lxmf-rs",
@@ -1337,6 +1422,8 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 33] = [
     "reticulum-device-api-handoff",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
+    "reticulum-eink-ssd1680",
+    "reticulum-heltec-vision-master-e290-display-hil",
     "reticulum-lxmf-durable-ingress",
     "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
@@ -1368,7 +1455,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 38] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 40] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -1391,6 +1478,8 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 38] = [
     "reticulum-device-api-handoff",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
+    "reticulum-eink-ssd1680",
+    "reticulum-heltec-vision-master-e290-display-hil",
     "reticulum-lxmf-durable-ingress",
     "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
@@ -1417,7 +1506,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 33] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 35] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -1434,6 +1523,8 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 33] = [
     "reticulum-device-api-handoff",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
+    "reticulum-eink-ssd1680",
+    "reticulum-heltec-vision-master-e290-display-hil",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-lxmf-durable-ingress",
     "reticulum-lxmf-ingress",
@@ -1484,7 +1575,7 @@ const SEMANTIC_TX_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 29] = [
+const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1498,6 +1589,8 @@ const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 29] = [
     "reticulum-device-api-handoff",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
+    "reticulum-eink-ssd1680",
+    "reticulum-heltec-vision-master-e290-display-hil",
     "reticulum-board-heltec-vision-master-e290-radio",
     "reticulum-lxmf-durable-ingress",
     "reticulum-lxmf-ingress",
@@ -1632,7 +1725,7 @@ const E290_SEMANTIC_HIL_GRAPH_REQUIRED: [&str; 9] = [
     "rete-transport",
 ];
 
-const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
+const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 34] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
@@ -1650,6 +1743,8 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 32] = [
     "reticulum-device-api-handoff",
     "reticulum-device-api-pairing-policy",
     "reticulum-device-api-session",
+    "reticulum-eink-ssd1680",
+    "reticulum-heltec-vision-master-e290-display-hil",
     "reticulum-interface-router",
     "reticulum-lxmf-durable-ingress",
     "reticulum-lxmf-ingress",
@@ -1696,8 +1791,355 @@ fn validate_e290_semantic_hil_graph_boundary(tree: &str) -> Result<(), String> {
     Ok(())
 }
 
+const E290_DISPLAY_HIL_PACKAGE: &str = "reticulum-heltec-vision-master-e290-display-hil";
+
+const E290_DISPLAY_HIL_GRAPH_REQUIRED: [&str; 16] = [
+    "embassy-executor",
+    "embassy-time",
+    "embedded-graphics",
+    "embedded-graphics-core",
+    "embedded-hal",
+    "embedded-hal-async",
+    "embedded-hal-bus",
+    "esp-alloc",
+    "esp-backtrace",
+    "esp-bootloader-esp-idf",
+    "esp-hal",
+    "esp-println",
+    "esp-rtos",
+    "log",
+    "reticulum-board-heltec-vision-master-e290",
+    "reticulum-eink-ssd1680",
+];
+
+const E290_DISPLAY_HIL_GRAPH_FORBIDDEN: [&str; 64] = [
+    "edge-dhcp",
+    "edge-nal",
+    "edge-nal-embassy",
+    "embassy-net",
+    "esp-radio",
+    "leviculum-core",
+    "lora-phy",
+    "lxmf-rs",
+    "rete-core",
+    "rete-lxmf",
+    "rete-lxmf-core",
+    "rete-stack",
+    "rete-transport",
+    "reticulum-announce-clock",
+    "reticulum-appliance-display-model",
+    "reticulum-board-heltec-tracker-v2",
+    "reticulum-board-heltec-tracker-v2-radio",
+    "reticulum-board-heltec-tracker-v2-tx-hil",
+    "reticulum-board-heltec-vision-master-e290-radio",
+    "reticulum-device-api",
+    "reticulum-device-api-adapter",
+    "reticulum-device-api-ble",
+    "reticulum-device-api-credential-store",
+    "reticulum-device-api-credentials",
+    "reticulum-device-api-framing",
+    "reticulum-device-api-handoff",
+    "reticulum-device-api-pairing",
+    "reticulum-device-api-pairing-control",
+    "reticulum-device-api-pairing-policy",
+    "reticulum-device-api-session",
+    "reticulum-device-identity-store",
+    "reticulum-heltec-tracker-v2",
+    "reticulum-heltec-tracker-v2-storage-hil",
+    "reticulum-heltec-tracker-v2-tx-hil",
+    "reticulum-heltec-vision-master-e290-ble-startup-diagnostic",
+    "reticulum-heltec-vision-master-e290-node",
+    "reticulum-heltec-vision-master-e290-qualification",
+    "reticulum-heltec-vision-master-e290-semantic-hil",
+    "reticulum-interface-router",
+    "reticulum-lab-rx-returned-fault-hil",
+    "reticulum-lxmf-durable-ingress",
+    "reticulum-lxmf-ingress",
+    "reticulum-lxmf-model",
+    "reticulum-lxmf-store",
+    "reticulum-lxmf-wire",
+    "reticulum-node-core",
+    "reticulum-nomad-protocol",
+    "reticulum-nor-flash-region",
+    "reticulum-peer-discovery",
+    "reticulum-radio-lora-phy",
+    "reticulum-radio-tx-dispatch",
+    "reticulum-rns-inbox-store",
+    "reticulum-rns-leviculum",
+    "reticulum-rns-rete",
+    "reticulum-rns-rete-rx",
+    "reticulum-semantic-roundtrip-hil",
+    "reticulum-storage-actor",
+    "reticulum-storage-journal",
+    "reticulum-storage-model",
+    "reticulum-submission-projector",
+    "reticulum-submission-runtime",
+    "reticulum-tx-dispatch",
+    "reticulum-tx-handoff",
+    "reticulum-tx-supervisor",
+];
+
+fn validate_e290_display_hil_graph_boundary(tree: &str) -> Result<(), String> {
+    validate_host_appliance_graph_boundary("E290 display HIL", tree)?;
+    for required in E290_DISPLAY_HIL_GRAPH_REQUIRED {
+        if !cargo_tree_contains_package(tree, required) {
+            return Err(format!(
+                "E290 display HIL graph is missing required {required}"
+            ));
+        }
+    }
+    for forbidden in E290_DISPLAY_HIL_GRAPH_FORBIDDEN {
+        if cargo_tree_contains_package(tree, forbidden) {
+            return Err(format!(
+                "E290 display HIL graph contains forbidden {forbidden}"
+            ));
+        }
+    }
+
+    let root_line = tree
+        .lines()
+        .find(|line| line.starts_with(&format!("{E290_DISPLAY_HIL_PACKAGE} ")))
+        .ok_or_else(|| "E290 display HIL graph has no package root".to_owned())?;
+    if !root_line.ends_with("features=[]") {
+        return Err(format!(
+            "E290 display HIL must expose no feature surface, observed {root_line}"
+        ));
+    }
+    for package in [
+        "reticulum-board-heltec-vision-master-e290 ",
+        "reticulum-eink-ssd1680 ",
+    ] {
+        let line = tree
+            .lines()
+            .find(|line| line.contains(package))
+            .ok_or_else(|| format!("E290 display HIL graph has no {package}line"))?;
+        if !line.ends_with("features=[]") && !line.ends_with("features=[] (*)") {
+            return Err(format!(
+                "E290 display HIL must keep {package}feature-free, observed {line}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 const E290_INBOX_COMMIT_FAULT_HIL_FEATURE: &str = "rns-inbox-commit-fault-hil";
 const E290_RUNTIME_MEASUREMENT_HIL_FEATURE: &str = "runtime-measurement-hil";
+
+const E290_NODE_MAIN_SOURCE: &str = "firmware/heltec-vision-master-e290-node/src/main.rs";
+const E290_NODE_BLE_API_TASK_SOURCE: &str =
+    "firmware/heltec-vision-master-e290-node/src/ble_api_task.rs";
+
+fn validate_e290_ble_display_startup_order_workspace(workspace: &Path) -> Result<(), String> {
+    let main = fs::read_to_string(workspace.join(E290_NODE_MAIN_SOURCE))
+        .map_err(|error| format!("could not read {E290_NODE_MAIN_SOURCE}: {error}"))?;
+    let ble_api_task = fs::read_to_string(workspace.join(E290_NODE_BLE_API_TASK_SOURCE))
+        .map_err(|error| format!("could not read {E290_NODE_BLE_API_TASK_SOURCE}: {error}"))?;
+    validate_e290_ble_display_startup_order_sources(&main, &ble_api_task)
+}
+
+fn validate_e290_ble_display_startup_order_sources(
+    main_source: &str,
+    ble_api_task_source: &str,
+) -> Result<(), String> {
+    const BLE_INITIALIZER_CALL: &str = "ble_api_task::initialize_controller(peripherals.BT)";
+    const DISPLAY_SPI_OWNER: &str = "peripherals.SPI3";
+    const DISPLAY_TASK_CONSTRUCTION: &str = "display_task::run(";
+    const BLE_TASK_CONSTRUCTION: &str = "ble_api_task::run(connector,";
+    const CONNECTOR_CONSTRUCTION: &str = "BleConnector::new(";
+    const EXTERNAL_CONTROLLER_CONSTRUCTION: &str = "ExternalController::new(connector)";
+
+    let main_file = syn::parse_file(main_source)
+        .map_err(|error| format!("could not parse {E290_NODE_MAIN_SOURCE}: {error}"))?;
+    let ble_api_task_file = syn::parse_file(ble_api_task_source)
+        .map_err(|error| format!("could not parse {E290_NODE_BLE_API_TASK_SOURCE}: {error}"))?;
+    let product_main = required_source_function(&main_file, "product_main", E290_NODE_MAIN_SOURCE)?;
+    let initialize_controller = required_source_function(
+        &ble_api_task_file,
+        "initialize_controller",
+        E290_NODE_BLE_API_TASK_SOURCE,
+    )?;
+    let run = required_source_function(&ble_api_task_file, "run", E290_NODE_BLE_API_TASK_SOURCE)?;
+
+    let main_tokens = compact_source_tokens(product_main);
+    for (marker, label) in [
+        (BLE_INITIALIZER_CALL, "BLE controller initializer"),
+        (DISPLAY_SPI_OWNER, "SPI3 display owner"),
+        (DISPLAY_TASK_CONSTRUCTION, "display task construction"),
+        (BLE_TASK_CONSTRUCTION, "BLE task construction"),
+    ] {
+        let occurrences = main_tokens.matches(marker).count();
+        if occurrences != 1 {
+            return Err(format!(
+                "{E290_NODE_MAIN_SOURCE} must contain exactly one {label}, found {occurrences}"
+            ));
+        }
+    }
+    if main_tokens.contains(CONNECTOR_CONSTRUCTION) {
+        return Err(format!(
+            "{E290_NODE_MAIN_SOURCE} must delegate BleConnector construction to the reviewed pre-display initializer"
+        ));
+    }
+
+    let ble_initializer_index = required_source_statement_index(
+        product_main,
+        BLE_INITIALIZER_CALL,
+        "BLE controller initializer",
+    )?;
+    let display_spi_index =
+        required_source_statement_index(product_main, DISPLAY_SPI_OWNER, "SPI3 display owner")?;
+    let display_task_index = required_source_statement_index(
+        product_main,
+        DISPLAY_TASK_CONSTRUCTION,
+        "display task construction",
+    )?;
+    let ble_task_index = required_source_statement_index(
+        product_main,
+        BLE_TASK_CONSTRUCTION,
+        "BLE task construction",
+    )?;
+    if display_spi_index != display_task_index {
+        return Err(
+            "the SPI3 display owner and display task must remain in one optional startup statement"
+                .to_owned(),
+        );
+    }
+    if !(ble_initializer_index < display_spi_index && ble_initializer_index < ble_task_index) {
+        return Err(
+            "the BLE controller/PHY initializer must run before optional SPI3/display initialization and BLE task construction"
+                .to_owned(),
+        );
+    }
+    require_source_statement_feature_gate(
+        &product_main.block.stmts[ble_initializer_index],
+        "ble-api-proof",
+        "BLE controller initializer",
+    )?;
+    require_source_statement_feature_gate(
+        &product_main.block.stmts[display_spi_index],
+        "display",
+        "SPI3 display owner",
+    )?;
+    require_source_statement_feature_gate(
+        &product_main.block.stmts[ble_task_index],
+        "ble-api-proof",
+        "BLE task construction",
+    )?;
+
+    let ble_api_task_tokens = compact_source_tokens(&ble_api_task_file);
+    let connector_constructions = ble_api_task_tokens.matches(CONNECTOR_CONSTRUCTION).count();
+    if connector_constructions != 1 {
+        return Err(format!(
+            "{E290_NODE_BLE_API_TASK_SOURCE} must contain exactly one BleConnector construction, found {connector_constructions}"
+        ));
+    }
+    let initializer_tokens = compact_source_tokens(initialize_controller);
+    let initializer_input = initialize_controller.sig.inputs.first();
+    if initialize_controller.sig.inputs.len() != 1
+        || initializer_input.map(compact_source_tokens).as_deref() != Some("bluetooth:BT<'static>")
+        || compact_source_tokens(&initialize_controller.sig.output)
+            != "->Result<BleConnector<'static>,BleInitError>"
+        || !initializer_tokens.contains("BleConnector::new(bluetooth,controller_config)")
+    {
+        return Err(
+            "initialize_controller must exclusively construct and return the boot-lifetime BleConnector from BT"
+                .to_owned(),
+        );
+    }
+
+    let run_tokens = compact_source_tokens(run);
+    let first_run_input = run
+        .sig
+        .inputs
+        .first()
+        .ok_or_else(|| "the BLE task run function has no connector input".to_owned())?;
+    if compact_source_tokens(first_run_input) != "connector:BleConnector<'static>" {
+        return Err(
+            "the BLE task run function must receive the initialized BleConnector as its first input"
+                .to_owned(),
+        );
+    }
+    if run_tokens.contains(CONNECTOR_CONSTRUCTION)
+        || run_tokens.matches(EXTERNAL_CONTROLLER_CONSTRUCTION).count() != 1
+    {
+        return Err(
+            "the BLE task must consume its passed connector exactly once and must not construct a replacement"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+fn required_source_function<'a>(
+    file: &'a syn::File,
+    name: &str,
+    path: &str,
+) -> Result<&'a syn::ItemFn, String> {
+    let matching = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(function) if function.sig.ident == name => Some(function),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "{path} must contain exactly one {name} function, found {}",
+            matching.len()
+        ));
+    }
+    Ok(matching[0])
+}
+
+fn required_source_statement_index(
+    function: &syn::ItemFn,
+    marker: &str,
+    label: &str,
+) -> Result<usize, String> {
+    let matching = function
+        .block
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            compact_source_tokens(statement)
+                .contains(marker)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(format!(
+            "{} must contain {label} in exactly one top-level startup statement, found {}",
+            function.sig.ident,
+            matching.len()
+        ));
+    }
+    Ok(matching[0])
+}
+
+fn require_source_statement_feature_gate(
+    statement: &syn::Stmt,
+    feature: &str,
+    label: &str,
+) -> Result<(), String> {
+    let required = format!("#[cfg(feature=\"{feature}\")]");
+    if !compact_source_tokens(statement).starts_with(&required) {
+        return Err(format!(
+            "the {label} must remain directly gated by feature {feature:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn compact_source_tokens(tokens: &impl ToTokens) -> String {
+    tokens
+        .to_token_stream()
+        .to_string()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
 
 fn validate_e290_inbox_commit_fault_hil_workspace(workspace: &Path) -> Result<(), String> {
     let product = workspace.join("firmware/heltec-vision-master-e290-node");
@@ -2325,12 +2767,13 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 48] = [
     "static_cell",
 ];
 
-const E290_NODE_GRAPH_FORBIDDEN: [&str; 11] = [
+const E290_NODE_GRAPH_FORBIDDEN: [&str; 12] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-lxmf",
     "reticulum-board-heltec-tracker-v2",
     "reticulum-heltec-tracker-v2",
+    "reticulum-heltec-vision-master-e290-display-hil",
     "reticulum-heltec-vision-master-e290-qualification",
     "reticulum-heltec-vision-master-e290-semantic-hil",
     "reticulum-lab-rx-returned-fault-hil",
@@ -2340,7 +2783,15 @@ const E290_NODE_GRAPH_FORBIDDEN: [&str; 11] = [
 ];
 
 fn validate_e290_node_graph_boundary(tree: &str) -> Result<(), String> {
-    validate_e290_node_graph_for_root_features(tree, "default", "permanent E290 node")
+    validate_e290_node_graph_for_root_features(tree, "default", "permanent E290 node")?;
+    for display_only in ["embedded-graphics", "reticulum-eink-ssd1680"] {
+        if cargo_tree_contains_package(tree, display_only) {
+            return Err(format!(
+                "permanent E290 node default graph contains display-only package {display_only}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_e290_journal_reprovision_graph_boundary(
@@ -2545,6 +2996,46 @@ const E290_BLE_API_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 5] = [
     ),
 ];
 
+const E290_DISPLAY_ADDED_PACKAGE_FEATURES: [(&str, &str); 6] = [
+    ("az v1.2.1", ""),
+    ("embedded-graphics v0.8.2", ""),
+    ("embedded-graphics-core v0.4.1", "default"),
+    ("float-cmp v0.9.0", "default,num-traits,ratio"),
+    ("micromath v2.1.0", ""),
+    ("reticulum-eink-ssd1680 v0.1.0", ""),
+];
+
+const E290_DISPLAY_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 1] = [(
+    "reticulum-heltec-vision-master-e290-node v0.1.0",
+    "default",
+    "display",
+)];
+
+fn validate_e290_display_graph_boundary(permanent: &str, display: &str) -> Result<(), String> {
+    validate_e290_node_graph_for_root_features(display, "display", "permanent E290 display")?;
+    for package in [
+        "reticulum-board-heltec-vision-master-e290 ",
+        "reticulum-eink-ssd1680 ",
+    ] {
+        let line = display
+            .lines()
+            .find(|line| line.contains(package))
+            .ok_or_else(|| format!("permanent E290 display graph has no {package}line"))?;
+        if !line.ends_with("features=[]") && !line.ends_with("features=[] (*)") {
+            return Err(format!(
+                "permanent E290 display must keep {package}feature-free, observed {line}"
+            ));
+        }
+    }
+    validate_e290_wireless_profile_delta(
+        permanent,
+        display,
+        "permanent E290 display",
+        &E290_DISPLAY_ADDED_PACKAGE_FEATURES,
+        &E290_DISPLAY_SHARED_FEATURE_CHANGES,
+    )
+}
+
 fn validate_e290_wifi_api_proof_graph_boundary(permanent: &str, wifi: &str) -> Result<(), String> {
     validate_e290_node_graph_for_root_features(wifi, "wifi-api-proof", "E290 Wi-Fi API proof")?;
     validate_e290_wireless_profile_delta(
@@ -2573,9 +3064,8 @@ const E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE: &str =
 const E290_NODE_PACKAGE_IDENTITY: &str = "reticulum-heltec-vision-master-e290-node v0.1.0";
 const E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE_IDENTITY: &str =
     "reticulum-heltec-vision-master-e290-ble-startup-diagnostic v0.1.0";
-const E290_ESP_PRINTLN_IDENTITY: &str = "esp-println v0.17.0";
 const E290_PRODUCTION_ESP_PRINTLN_FEATURES: &str = "esp32s3,log-04,no-op";
-const E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES: &str = "esp32s3,jtag-serial,log-04";
+const E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES: &str = "esp32s3,jtag-serial";
 
 fn validate_e290_ble_startup_diagnostic_graph_boundary(
     production_ble: &str,
@@ -2615,13 +3105,14 @@ fn validate_e290_ble_startup_diagnostic_graph_boundary(
     }
 
     let production_println = BTreeSet::from([E290_PRODUCTION_ESP_PRINTLN_FEATURES.to_owned()]);
-    if production_inventory.remove(E290_ESP_PRINTLN_IDENTITY) != Some(production_println) {
+    if production_inventory.remove("esp-println v0.17.0") != Some(production_println) {
         return Err(
-            "production E290 BLE API proof must retain the exact no-op esp-println path".to_owned(),
+            "production E290 BLE API proof must retain the exact silent esp-println path"
+                .to_owned(),
         );
     }
     let diagnostic_println = BTreeSet::from([E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES.to_owned()]);
-    if diagnostic_inventory.remove(E290_ESP_PRINTLN_IDENTITY) != Some(diagnostic_println) {
+    if diagnostic_inventory.remove("esp-println v0.17.0") != Some(diagnostic_println) {
         return Err(
             "E290 BLE startup diagnostic must retain the exact ESP Serial/JTAG esp-println path"
                 .to_owned(),
@@ -2928,6 +3419,11 @@ fn validate_e290_node_feature_boundary(
             "esp-rtos/esp-radio"
         ],
         "default": [],
+        "display": [
+            "dep:embedded-graphics",
+            "dep:reticulum-board-heltec-vision-master-e290",
+            "dep:reticulum-eink-ssd1680"
+        ],
         "journal-schema3-dev-reprovision": [],
         "rns-inbox-commit-fault-hil": [],
         "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
@@ -2943,7 +3439,7 @@ fn validate_e290_node_feature_boundary(
     });
     if serde_json::Value::Object(features.clone()) != expected_features {
         return Err(format!(
-            "{package_name} feature map must retain the exact opt-in development, Wi-Fi API proof and BLE API proof closures"
+            "{package_name} feature map must retain the exact opt-in development, display, Wi-Fi API proof and BLE API proof closures"
         ));
     }
     let dependencies = package["dependencies"]
@@ -2973,6 +3469,28 @@ fn validate_e290_node_feature_boundary(
         "reticulum-appliance-display-model",
         &workspace.join("crates/appliance-display-model"),
         false,
+    )?;
+    validate_exact_optional_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-board-heltec-vision-master-e290",
+        &workspace.join("crates/board-heltec-vision-master-e290"),
+        false,
+    )?;
+    validate_exact_optional_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-eink-ssd1680",
+        &workspace.join("crates/eink-ssd1680"),
+        false,
+    )?;
+    validate_exact_optional_registry_dependency(
+        dependencies,
+        package_name,
+        "embedded-graphics",
+        "=0.8.2",
+        false,
+        &[],
     )?;
     validate_exact_local_dependency(
         dependencies,
@@ -3114,7 +3632,10 @@ fn validate_e290_node_feature_boundary(
         ("edge-nal-embassy", None),
         ("embassy-net", None),
         ("embassy-sync", Some("embassy-sync-07")),
+        ("embedded-graphics", None),
         ("esp-radio", None),
+        ("reticulum-board-heltec-vision-master-e290", None),
+        ("reticulum-eink-ssd1680", None),
         ("trouble-host", None),
     ]);
     let optional_dependencies = dependencies
@@ -3212,6 +3733,11 @@ fn validate_e290_ble_startup_diagnostic_metadata_boundary(
             "esp-rtos/esp-radio"
         ],
         "default": ["ble-api-proof"],
+        "display": [
+            "dep:embedded-graphics",
+            "dep:reticulum-board-heltec-vision-master-e290",
+            "dep:reticulum-eink-ssd1680"
+        ],
         "journal-schema3-dev-reprovision": [],
         "rns-inbox-commit-fault-hil": [],
         "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
@@ -3251,7 +3777,7 @@ fn validate_e290_ble_startup_diagnostic_metadata_boundary(
         "=0.17.0",
         "cfg(target_arch = \"xtensa\")",
         false,
-        &["esp32s3", "jtag-serial", "log-04"],
+        &["esp32s3", "jtag-serial"],
     )?;
 
     let production_inventory = canonical_dependency_metadata(production_dependencies);
@@ -3329,6 +3855,59 @@ fn validate_appliance_display_model_dependency_boundary(
         false,
         &[],
     )
+}
+
+fn validate_eink_ssd1680_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    const PACKAGE_NAME: &str = "reticulum-eink-ssd1680";
+
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package = exact_local_package(
+        packages,
+        workspace,
+        PACKAGE_NAME,
+        "crates/eink-ssd1680/Cargo.toml",
+    )?;
+
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no feature map"))?;
+    if !features.is_empty() {
+        return Err(format!(
+            "{PACKAGE_NAME} must expose no Cargo feature surface"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{PACKAGE_NAME} package has no dependency array"))?;
+    if dependencies.len() != 3 {
+        return Err(format!(
+            "{PACKAGE_NAME} must have exactly its three reviewed embedded trait dependencies"
+        ));
+    }
+    for (dependency, requirement, uses_default_features) in [
+        ("embedded-graphics-core", "=0.4.1", false),
+        ("embedded-hal", "=1.0.0", true),
+        ("embedded-hal-async", "=1.0.0", true),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            PACKAGE_NAME,
+            dependency,
+            requirement,
+            None,
+            uses_default_features,
+            &[],
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_storage_hil_graph_boundary(tree: &str) -> Result<(), String> {
@@ -5061,6 +5640,38 @@ fn validate_exact_optional_target_registry_dependency(
     Ok(())
 }
 
+fn validate_exact_optional_registry_dependency(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    requirement: &str,
+    uses_default_features: bool,
+    expected_features: &[&str],
+) -> Result<(), String> {
+    let dependency = exact_dependency(dependencies, package_name, dependency_name, None)?;
+    let features = dependency["features"].as_array().ok_or_else(|| {
+        format!("{package_name} {dependency_name} dependency has no feature list")
+    })?;
+    let actual_features = features
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    if dependency["req"].as_str() != Some(requirement)
+        || dependency["source"].as_str() != Some(CRATES_IO_SOURCE)
+        || !dependency["path"].is_null()
+        || dependency["optional"].as_bool() != Some(true)
+        || !dependency["rename"].is_null()
+        || !dependency["target"].is_null()
+        || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
+        || actual_features != expected_features
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed optional registry {dependency_name} dependency shape"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_exact_local_dependency(
     dependencies: &[serde_json::Value],
     package_name: &str,
@@ -5077,6 +5688,33 @@ fn validate_exact_local_dependency(
         uses_default_features,
         &[],
     )
+}
+
+fn validate_exact_optional_local_dependency(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    expected_path: &Path,
+    uses_default_features: bool,
+) -> Result<(), String> {
+    let dependency = exact_dependency(dependencies, package_name, dependency_name, None)?;
+    let features = dependency["features"].as_array().ok_or_else(|| {
+        format!("{package_name} {dependency_name} dependency has no feature list")
+    })?;
+    if dependency["req"].as_str() != Some("*")
+        || !dependency["source"].is_null()
+        || dependency["path"].as_str().map(Path::new) != Some(expected_path)
+        || dependency["optional"].as_bool() != Some(true)
+        || !dependency["rename"].is_null()
+        || !dependency["target"].is_null()
+        || dependency["uses_default_features"].as_bool() != Some(uses_default_features)
+        || !features.is_empty()
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed optional local {dependency_name} dependency shape"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_exact_local_dependency_with_kind(
@@ -6333,6 +6971,19 @@ const APPLIANCE_DISPLAY_MODEL_REVIEWED_CLOSURE: [ReviewedClosurePackage; 2] = [
     closure_registry("zeroize", "1.9.0", &[]),
 ];
 
+const EINK_SSD1680_REVIEWED_CLOSURE: [ReviewedClosurePackage; 6] = [
+    closure_registry("az", "1.2.1", &[]),
+    closure_registry("byteorder", "1.5.0", &[]),
+    closure_registry("embedded-graphics-core", "0.4.1", &[]),
+    closure_registry("embedded-hal", "1.0.0", &[]),
+    closure_registry("embedded-hal-async", "1.0.0", &[]),
+    closure_local(
+        "reticulum-eink-ssd1680",
+        "crates/eink-ssd1680/Cargo.toml",
+        &[],
+    ),
+];
+
 const LXMF_WIRE_REVIEWED_CLOSURE: [ReviewedClosurePackage; 15] = [
     closure_registry("block-buffer", "0.10.4", &[]),
     closure_registry("cfg-if", "1.0.4", &[]),
@@ -6750,6 +7401,21 @@ fn validate_appliance_display_model_resolved_closure(
         workspace,
         &APPLIANCE_DISPLAY_MODEL_REVIEWED_CLOSURE,
         "appliance display model",
+        None,
+    )
+}
+
+fn validate_eink_ssd1680_resolved_closure(
+    metadata_json: &str,
+    cargo_tree: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    validate_reviewed_resolved_closure(
+        metadata_json,
+        cargo_tree,
+        workspace,
+        &EINK_SSD1680_REVIEWED_CLOSURE,
+        "SSD1680 driver",
         None,
     )
 }
@@ -9899,6 +10565,110 @@ mod tests {
         assert!(workspace_root().join("Cargo.toml").is_file());
     }
 
+    fn e290_startup_order_main_fixture(initializer_first: bool) -> String {
+        let initializer = r#"
+            #[cfg(feature = "ble-api-proof")]
+            let ble_connector =
+                ble_api_task::initialize_controller(peripherals.BT);
+        "#;
+        let display = r#"
+            #[cfg(feature = "display")]
+            let display = {
+                let spi = Spi::new(peripherals.SPI3);
+                display_task::run(spi)
+            };
+        "#;
+        let (first, second) = if initializer_first {
+            (initializer, display)
+        } else {
+            (display, initializer)
+        };
+        format!(
+            r#"
+                #[embassy_executor::task]
+                async fn product_main() {{
+                    {first}
+                    {second}
+                    #[cfg(feature = "ble-api-proof")]
+                    let ble_api_task = match ble_connector {{
+                        Some(connector) => ble_api_task::run(
+                            connector,
+                            base_mac_eui48,
+                            handoffs,
+                            parameters,
+                            rng,
+                            usb,
+                        ),
+                        None => unreachable!(),
+                    }};
+                }}
+            "#
+        )
+    }
+
+    fn e290_startup_order_ble_task_fixture() -> &'static str {
+        r#"
+            pub(crate) fn initialize_controller(
+                bluetooth: BT<'static>,
+            ) -> Result<BleConnector<'static>, BleInitError> {
+                let controller_config = Config::default();
+                BleConnector::new(bluetooth, controller_config)
+            }
+
+            #[embassy_executor::task]
+            pub async fn run(
+                connector: BleConnector<'static>,
+                base_mac: [u8; 6],
+            ) {
+                let controller: ExternalController<_, 1> =
+                    ExternalController::new(connector);
+                run_host(controller, base_mac).await;
+            }
+        "#
+    }
+
+    #[test]
+    fn e290_ble_controller_startup_precedes_optional_display_and_moves_into_task() {
+        let main = e290_startup_order_main_fixture(true);
+        let ble_api_task = e290_startup_order_ble_task_fixture();
+        validate_e290_ble_display_startup_order_sources(&main, ble_api_task).unwrap();
+
+        let reordered = e290_startup_order_main_fixture(false);
+        let error = validate_e290_ble_display_startup_order_sources(&reordered, ble_api_task)
+            .expect_err("display-before-PHY startup order was accepted");
+        assert!(
+            error.contains("must run before optional SPI3/display"),
+            "{error}"
+        );
+
+        let task_constructs_connector = ble_api_task.replace(
+            "ExternalController::new(connector)",
+            "ExternalController::new(BleConnector::new(bluetooth, controller_config).unwrap())",
+        );
+        let error =
+            validate_e290_ble_display_startup_order_sources(&main, &task_constructs_connector)
+                .expect_err("task-local BleConnector construction was accepted");
+        assert!(
+            error.contains("exactly one BleConnector construction"),
+            "{error}"
+        );
+
+        let task_loses_connector_input =
+            ble_api_task.replace("connector: BleConnector<'static>", "bluetooth: BT<'static>");
+        let error =
+            validate_e290_ble_display_startup_order_sources(&main, &task_loses_connector_input)
+                .expect_err("BLE task without a passed connector was accepted");
+        assert!(
+            error.contains("must receive the initialized BleConnector"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn e290_ble_display_startup_order_matches_the_workspace_sources() {
+        validate_e290_ble_display_startup_order_workspace(&workspace_root()).unwrap();
+    }
+
     fn expected_pairing_publication_owner_sources() -> Vec<(String, String)> {
         CREDENTIAL_STORE_INTEGRATION_ALLOWED_SOURCES
             .iter()
@@ -10601,6 +11371,35 @@ mod tests {
         assert!(validate_e290_semantic_hil_graph_boundary(&wrong_policy_feature).is_err());
     }
 
+    #[test]
+    fn e290_display_hil_is_featureless_and_excludes_radio_and_product_stacks() {
+        let mut valid = format!("{E290_DISPLAY_HIL_PACKAGE} v0.1.0 features=[]");
+        for package in E290_DISPLAY_HIL_GRAPH_REQUIRED {
+            valid.push_str(&format!("\n├── {package} v0.1.0 features=[]"));
+        }
+        validate_e290_display_hil_graph_boundary(&valid).unwrap();
+        assert_host_appliance_packages_rejected(&valid, validate_e290_display_hil_graph_boundary);
+
+        for missing in E290_DISPLAY_HIL_GRAPH_REQUIRED {
+            let tree = valid.replace(missing, "missing-required-package");
+            let error = validate_e290_display_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(missing), "{error}");
+        }
+        for forbidden in E290_DISPLAY_HIL_GRAPH_FORBIDDEN {
+            let tree = format!("{valid}\n└── {forbidden} v0.1.0 features=[]");
+            let error = validate_e290_display_hil_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(forbidden), "{error}");
+        }
+
+        let root_feature = valid.replacen("features=[]", "features=[future-mode]", 1);
+        assert!(validate_e290_display_hil_graph_boundary(&root_feature).is_err());
+        let driver_feature = valid.replace(
+            "reticulum-eink-ssd1680 v0.1.0 features=[]",
+            "reticulum-eink-ssd1680 v0.1.0 features=[alloc]",
+        );
+        assert!(validate_e290_display_hil_graph_boundary(&driver_feature).is_err());
+    }
+
     fn e290_ble_profile_graph_fixture() -> String {
         let mut tree = format!("{E290_NODE_PACKAGE_IDENTITY} features=[ble-api-proof]");
         for package in E290_NODE_GRAPH_REQUIRED {
@@ -10645,12 +11444,8 @@ mod tests {
                 1,
             )
             .replacen(
-                &format!(
-                    "{E290_ESP_PRINTLN_IDENTITY} features=[{E290_PRODUCTION_ESP_PRINTLN_FEATURES}]"
-                ),
-                &format!(
-                    "{E290_ESP_PRINTLN_IDENTITY} features=[{E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES}]"
-                ),
+                &format!("esp-println v0.17.0 features=[{E290_PRODUCTION_ESP_PRINTLN_FEATURES}]"),
+                &format!("esp-println v0.17.0 features=[{E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES}]"),
                 1,
             );
         validate_e290_ble_startup_diagnostic_graph_boundary(&production, &diagnostic).unwrap();
@@ -10702,6 +11497,17 @@ mod tests {
                 dependency["features"] = serde_json::json!(features);
                 dependency
             };
+        let optional_registry = |name: &str, requirement: &str| {
+            let mut dependency = handoff_dependency_fixture(name, requirement, None);
+            dependency["optional"] = serde_json::Value::Bool(true);
+            dependency
+        };
+        let optional_local = |name: &str, relative_path: &str| {
+            let mut dependency =
+                handoff_path_dependency_fixture(name, "*", &root.join(relative_path), None);
+            dependency["optional"] = serde_json::Value::Bool(true);
+            dependency
+        };
         serde_json::json!({
             "packages": [{
                 "name": "reticulum-heltec-vision-master-e290-node",
@@ -10717,6 +11523,11 @@ mod tests {
                         "esp-rtos/esp-radio"
                     ],
                     "default": [],
+                    "display": [
+                        "dep:embedded-graphics",
+                        "dep:reticulum-board-heltec-vision-master-e290",
+                        "dep:reticulum-eink-ssd1680"
+                    ],
                     "journal-schema3-dev-reprovision": [],
                     "rns-inbox-commit-fault-hil": [],
                     "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
@@ -10736,6 +11547,14 @@ mod tests {
                         "*",
                         &root.join("crates/appliance-display-model"),
                         None,
+                    ),
+                    optional_local(
+                        "reticulum-board-heltec-vision-master-e290",
+                        "crates/board-heltec-vision-master-e290",
+                    ),
+                    optional_local(
+                        "reticulum-eink-ssd1680",
+                        "crates/eink-ssd1680",
                     ),
                     handoff_path_dependency_fixture(
                         "reticulum-device-api-ble",
@@ -10831,6 +11650,7 @@ mod tests {
                     embedded_storage_dev,
                     handoff_dependency_fixture("rand_core", "=0.6.4", None),
                     handoff_dependency_fixture("zeroize", "=1.9.0", None),
+                    optional_registry("embedded-graphics", "=0.8.2"),
                     allocator_api,
                     esp_alloc,
                     esp_println,
@@ -10890,7 +11710,7 @@ mod tests {
             .iter_mut()
             .find(|dependency| dependency["name"].as_str() == Some("esp-println"))
             .unwrap();
-        println["features"] = serde_json::json!(["esp32s3", "jtag-serial", "log-04"]);
+        println["features"] = serde_json::json!(["esp32s3", "jtag-serial"]);
         metadata["packages"]
             .as_array_mut()
             .unwrap()
@@ -11186,6 +12006,36 @@ mod tests {
             &E290_BLE_API_SHARED_FEATURE_CHANGES,
         );
         validate_e290_ble_api_proof_graph_boundary(valid, &ble).unwrap();
+        let display = wireless_profile(
+            "display",
+            &E290_DISPLAY_ADDED_PACKAGE_FEATURES,
+            &E290_DISPLAY_SHARED_FEATURE_CHANGES,
+        );
+        validate_e290_display_graph_boundary(valid, &display).unwrap();
+        assert!(
+            validate_e290_display_graph_boundary(
+                valid,
+                &format!("{display}\n└── unreviewed-display v1.0.0 features=[]"),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_e290_display_graph_boundary(
+                valid,
+                &display.replace("embedded-graphics v0.8.2", "missing-embedded-graphics"),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_e290_display_graph_boundary(
+                valid,
+                &display.replace(
+                    "reticulum-eink-ssd1680 v0.1.0 features=[]",
+                    "reticulum-eink-ssd1680 v0.1.0 features=[alloc]",
+                ),
+            )
+            .is_err()
+        );
 
         for (profile, validate) in [
             (
@@ -11239,6 +12089,11 @@ mod tests {
             let tree = format!("{valid}\n└── {forbidden} v0.1.0 features=[]");
             let error = validate_e290_node_graph_boundary(&tree).unwrap_err();
             assert!(error.contains(forbidden), "{error}");
+        }
+        for display_only in ["embedded-graphics", "reticulum-eink-ssd1680"] {
+            let tree = format!("{valid}\n└── {display_only} v0.1.0 features=[]");
+            let error = validate_e290_node_graph_boundary(&tree).unwrap_err();
+            assert!(error.contains(display_only), "{error}");
         }
 
         for hidden in [
@@ -11368,6 +12223,7 @@ mod tests {
             "runtime-measurement-hil",
             "wifi-api-proof",
             "ble-api-proof",
+            "display",
         ] {
             let mut drifted = baseline.clone();
             drifted["packages"][0]["features"]["default"] = serde_json::json!([feature]);
@@ -11400,6 +12256,15 @@ mod tests {
             (
                 "runtime-measurement-hil",
                 serde_json::json!(["esp-alloc/alloc-hooks", "dep:unreviewed"]),
+            ),
+            (
+                "display",
+                serde_json::json!([
+                    "dep:embedded-graphics",
+                    "dep:reticulum-board-heltec-vision-master-e290",
+                    "dep:reticulum-eink-ssd1680",
+                    "dep:unreviewed"
+                ]),
             ),
             (
                 "wifi-api-proof",
@@ -14296,6 +15161,119 @@ fn sample(layout: Layout) {
     }
 
     #[test]
+    fn eink_ssd1680_boundary_is_featureless_with_only_embedded_trait_edges() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_eink_ssd1680_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut feature = baseline.clone();
+        fixture_package_mut(&mut feature, "reticulum-eink-ssd1680")["features"]["alloc"] =
+            serde_json::json!([]);
+        assert!(validate_eink_ssd1680_dependency_boundary(&feature.to_string(), &root).is_err());
+
+        for dependency in [
+            "embedded-graphics-core",
+            "embedded-hal",
+            "embedded-hal-async",
+        ] {
+            let mut missing = baseline.clone();
+            fixture_package_mut(&mut missing, "reticulum-eink-ssd1680")["dependencies"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|candidate| candidate["name"].as_str() != Some(dependency));
+            let error =
+                validate_eink_ssd1680_dependency_boundary(&missing.to_string(), &root).unwrap_err();
+            assert!(
+                error.contains(dependency) || error.contains("three reviewed"),
+                "{error}"
+            );
+        }
+
+        for (dependency, field, value) in [
+            (
+                "embedded-graphics-core",
+                "uses_default_features",
+                serde_json::json!(true),
+            ),
+            ("embedded-hal", "req", serde_json::json!("=0.2.7")),
+            ("embedded-hal-async", "features", serde_json::json!(["std"])),
+        ] {
+            let mut drifted = baseline.clone();
+            fixture_dependency_mut(
+                fixture_package_mut(&mut drifted, "reticulum-eink-ssd1680"),
+                dependency,
+                None,
+            )[field] = value;
+            assert!(
+                validate_eink_ssd1680_dependency_boundary(&drifted.to_string(), &root).is_err(),
+                "SSD1680 driver accepted {dependency} {field} drift"
+            );
+        }
+
+        let mut platform_edge = baseline;
+        fixture_package_mut(&mut platform_edge, "reticulum-eink-ssd1680")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("esp-hal", "=1.1.1", None));
+        assert!(
+            validate_eink_ssd1680_dependency_boundary(&platform_edge.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
+    fn eink_ssd1680_closure_is_exact_generic_bare_metal() {
+        let root = workspace_root();
+        let (baseline_metadata, baseline_tree) = eink_ssd1680_reviewed_closure_fixture(&root);
+        validate_eink_ssd1680_resolved_closure(
+            &baseline_metadata.to_string(),
+            &baseline_tree,
+            &root,
+        )
+        .unwrap();
+
+        for feature in ["alloc", "std"] {
+            let drifted = baseline_tree.replace(
+                "embedded-hal-async v1.0.0\t\n",
+                &format!("embedded-hal-async v1.0.0\t{feature}\n"),
+            );
+            assert!(
+                validate_eink_ssd1680_resolved_closure(
+                    &baseline_metadata.to_string(),
+                    &drifted,
+                    &root,
+                )
+                .is_err(),
+                "SSD1680 closure accepted feature {feature}"
+            );
+        }
+
+        for (name, version) in [
+            ("esp-hal", "1.1.1"),
+            ("heapless", "0.9.1"),
+            ("std-wrapper", "1.0.0"),
+        ] {
+            let mut metadata = baseline_metadata.clone();
+            let mut tree = baseline_tree.clone();
+            add_registry_closure_fixture_package(&mut metadata, &mut tree, &root, name, version);
+            assert!(
+                validate_eink_ssd1680_resolved_closure(&metadata.to_string(), &tree, &root)
+                    .is_err(),
+                "SSD1680 closure accepted {name}"
+            );
+        }
+
+        let missing = baseline_tree.replace("embedded-graphics-core v0.4.1\t\n", "");
+        assert!(
+            validate_eink_ssd1680_resolved_closure(
+                &baseline_metadata.to_string(),
+                &missing,
+                &root,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn durable_lxmf_model_and_store_closures_are_exact_and_exclude_foreign_owners() {
         let root = workspace_root();
         let (model_metadata, model_tree) = lxmf_model_reviewed_closure_fixture(&root);
@@ -16263,6 +17241,7 @@ fn sample(layout: Layout) {
                 submission_runtime_package_fixture(root),
                 rns_inbox_store_package_fixture(root),
                 appliance_display_model_package_fixture(root),
+                eink_ssd1680_package_fixture(root),
             ]
         })
     }
@@ -16276,6 +17255,23 @@ fn sample(layout: Layout) {
             "dependencies": [
                 handoff_dependency_fixture("zeroize", "=1.9.0", None),
             ],
+        })
+    }
+
+    fn eink_ssd1680_package_fixture(root: &Path) -> serde_json::Value {
+        let graphics = handoff_dependency_fixture("embedded-graphics-core", "=0.4.1", None);
+        let mut embedded_hal = handoff_dependency_fixture("embedded-hal", "=1.0.0", None);
+        embedded_hal["uses_default_features"] = serde_json::Value::Bool(true);
+        let mut embedded_hal_async =
+            handoff_dependency_fixture("embedded-hal-async", "=1.0.0", None);
+        embedded_hal_async["uses_default_features"] = serde_json::Value::Bool(true);
+        serde_json::json!({
+            "name": "reticulum-eink-ssd1680",
+            "version": "0.1.0",
+            "source": null,
+            "manifest_path": root.join("crates/eink-ssd1680/Cargo.toml"),
+            "features": {},
+            "dependencies": [graphics, embedded_hal, embedded_hal_async],
         })
     }
 
@@ -16749,6 +17745,10 @@ fn sample(layout: Layout) {
         root: &Path,
     ) -> (serde_json::Value, String) {
         reviewed_closure_fixture(root, &APPLIANCE_DISPLAY_MODEL_REVIEWED_CLOSURE)
+    }
+
+    fn eink_ssd1680_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {
+        reviewed_closure_fixture(root, &EINK_SSD1680_REVIEWED_CLOSURE)
     }
 
     fn lxmf_wire_reviewed_closure_fixture(root: &Path) -> (serde_json::Value, String) {

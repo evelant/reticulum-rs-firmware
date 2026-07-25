@@ -19,9 +19,13 @@ composer passed physical use. A fresh native install can now scan the generated
 service and explicitly select one nearby appliance without connecting or
 transferring credentials; that discovery-only foundation does not yet pair the
 phone. The board-neutral display model separately owns a zeroizing six-digit
-passkey and coalesced expiry/terminal states, but no E290 panel actor is wired
-yet. [ADR 0019](docs/adr/0019-secure-ble-appliance-onboarding.md) fixes the
-remaining secure-onboarding sequence. Wi-Fi remains build/host-qualified. The
+passkey and coalesced expiry/terminal states. A portable async SSD1680 driver
+and isolated display-only image have now completed a visually confirmed
+full-refresh/deep-sleep/power-off HIL on Board A. The permanent node's opt-in
+display actor and semantic renderer are implemented and target-linked, but
+that combined image has not yet been powered-qualified or connected to live
+BLE pairing. [ADR 0019](docs/adr/0019-secure-ble-appliance-onboarding.md) fixes
+the remaining secure-onboarding sequence. Wi-Fi remains build/host-qualified. The
 full mobile lifecycle matrix, background restoration, Android hardware, BLE
 pairing, pressure/soak, and cross-instance `BleManager` ownership remain open. Those
 bearers become Reticulum packet interfaces only through
@@ -1167,6 +1171,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Architecture](docs/firmware-architecture.md)
 - [Vision Master E290 primary target](docs/heltec-vision-master-e290.md)
 - [Permanent LoRa-first E290 node](docs/e290-node.md)
+- [E290 display HIL powered qualification](docs/e290-display-hil.md)
 - [LXMF chat alpha CLI](crates/lxmf-chat-cli/README.md)
 - [LXMF host appliance alpha](crates/lxmf-chat-service/README.md)
 - [Expo universal appliance client](clients/appliance/README.md)
@@ -1194,6 +1199,7 @@ second transport is required to qualify the first LoRa vertical slice.
 - [Bounded LXMF wire and service ownership boundary](docs/adr/0013-bounded-lxmf-wire-boundary.md)
 - [Durable LXMF message ownership](docs/adr/0014-durable-lxmf-message-ownership.md)
 - [Universal Expo client and generated TypeScript boundary](docs/adr/0015-universal-expo-client-and-generated-bindings.md)
+- [Secure BLE appliance onboarding](docs/adr/0019-secure-ble-appliance-onboarding.md)
 - [Transport-neutral interface registry and router](docs/interface-router.md)
 - [Phase-0 validation contract](docs/phase-0-acceptance.md)
 - [Phase-1 receive-only slice](docs/phase-1-rx-slice.md)
@@ -1233,6 +1239,10 @@ cargo run -p xtask -- doctor
 ```sh
 cargo test --locked
 cargo run --locked -p xtask -- graph-policy
+cargo test --locked -p reticulum-eink-ssd1680
+cargo clippy --locked -p reticulum-eink-ssd1680 --all-targets -- -D warnings
+cargo test --locked \
+  -p reticulum-heltec-vision-master-e290-node --lib --features display
 cargo test --locked -p reticulum-lxmf-model
 cargo test --locked -p reticulum-lxmf-store
 cargo test --locked -p reticulum-lxmf-durable-ingress
@@ -1272,6 +1282,7 @@ cargo check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-eink-ssd1680 \
   -p reticulum-lxmf-durable-ingress \
   -p reticulum-lxmf-ingress \
   -p reticulum-lxmf-model \
@@ -1303,6 +1314,7 @@ cargo +esp check --locked \
   -p reticulum-device-api-pairing \
   -p reticulum-device-api-handoff \
   -p reticulum-device-api-session \
+  -p reticulum-eink-ssd1680 \
   -p reticulum-lxmf-durable-ingress \
   -p reticulum-lxmf-ingress \
   -p reticulum-lxmf-model \
@@ -1329,10 +1341,21 @@ cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-qualification \
   --target xtensa-esp32s3-none-elf
 cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-display-hil \
+  --target xtensa-esp32s3-none-elf
+cargo +esp clippy --locked --release \
+  -p reticulum-heltec-vision-master-e290-display-hil \
+  --bin reticulum-heltec-vision-master-e290-display-hil \
+  --target xtensa-esp32s3-none-elf -- -D warnings
+cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-semantic-hil \
   --target xtensa-esp32s3-none-elf
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
+  --target xtensa-esp32s3-none-elf
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features display \
   --target xtensa-esp32s3-none-elf
 ```
 
@@ -1351,9 +1374,18 @@ accepted the E290-specific MAC/role, CAD, packet-hash, semantic-ingress,
 receipt, terminal, and shutdown trace instead of reusing the older Tracker log
 schema.
 
+The separate [E290 display HIL record](docs/e290-display-hil.md) describes the
+RF-inert Board A run that initialized the SSD1680, cleared the retained frame,
+rendered a fixed non-secret demo, deep-slept the controller, and switched the
+display rail off. The final output passed visual inspection for text, layout,
+polarity, and landscape orientation. That result qualifies the isolated
+full-frame driver lifecycle, not the optional actor in the permanent node,
+partial refresh, or live passkey rendering.
+
 The [permanent E290 node runbook](docs/e290-node.md) describes the first
-LoRa-first three-task node/LoRa/USB product composition, its fixed capacities, 16 MiB partition
-layout, durable identity/announce ordering, build gates, API 1.1 outbound proof,
+LoRa-first headless three-task node/LoRa/USB product composition and its
+optional fourth display actor, fixed capacities, 16 MiB partition layout,
+durable identity/announce ordering, build gates, API 1.1 outbound proof,
 API 1.2 raw-RNS inbox evidence, the implemented API 1.4 LXMF client slice, and
 remaining storage/client blockers. The
 powered record now includes controlled permanent-image peer DATA/proof, bounded

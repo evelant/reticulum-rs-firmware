@@ -14,6 +14,8 @@ pub mod credential_pairing;
 pub mod credential_runtime;
 pub mod cross_store_gate;
 pub mod display_handoff;
+#[cfg(feature = "display")]
+pub mod display_render;
 pub mod durability_boot;
 pub mod durability_policy;
 #[cfg(all(
@@ -292,7 +294,9 @@ mod tests {
 
         let main = include_str!("main.rs");
         assert_eq!(main.matches("Vec::new_in(ExternalMemory)").count(), 2);
-        assert_eq!(main.matches("Box::try_new_in(").count(), 2);
+        assert_eq!(main.matches("Box::try_new_in(").count(), 3);
+        assert!(main.contains("Box::try_new_in(E290FrameBuffer::new_white(), ExternalMemory)"));
+        assert!(main.contains("stage=display-placement status=PASS"));
         assert!(main.contains("Box::<ProductSubmissionRuntime, _>::try_new_uninit_in("));
         assert_eq!(main.matches("try_new_uninit_in(").count(), 1);
         assert!(main.contains("Box::leak(runtime)"));
@@ -539,7 +543,10 @@ mod tests {
         assert!(main.contains("InputConfig::default().with_pull(Pull::Up)"));
         assert!(main.contains("peripherals.USB_DEVICE"));
         assert!(main.contains("spawner.spawn(usb_pairing_task);"));
-        assert!(main.contains("tasks=3 interfaces=1 primary_transport=lora"));
+        assert!(main.contains("3 + if display_task_spawned { 1 } else { 0 }"));
+        assert!(
+            main.contains("interfaces=1 primary_transport=lora future_transport_actors=deferred")
+        );
         assert!(!main.contains("esp_println::logger::init_logger_from_env"));
 
         let usb = include_str!("usb_pairing_task.rs");
@@ -705,10 +712,11 @@ mod tests {
         assert!(main.contains("SessionBearerBinding::Wifi"));
         assert!(main.contains("SessionSuite::WifiQualification"));
         assert!(main.contains("peripherals.WIFI"));
-        assert!(main.contains("let _usb_boot_quarantine = usb_boot_quarantine;"));
+        assert!(main.contains("AlphaUsbSerialJtagOwner::new(peripherals.USB_DEVICE)"));
+        assert!(main.contains("alpha_usb_serial_jtag_owner,"));
         assert!(main.contains("spawner.spawn(usb_pairing_task);"));
         assert!(main.contains("spawner.spawn(wifi_api_task);"));
-        assert!(main.contains("local_api_profile=wifi-api-proof usb=boot-quarantined"));
+        assert!(main.contains("local_api_profile=wifi-api-proof usb=alpha-diagnostics-only"));
 
         let wifi = include_str!("wifi_api_task.rs");
         assert!(wifi.contains("AccessPointConfig::default()"));
@@ -763,7 +771,7 @@ mod tests {
         assert!(main.contains("peripherals.BT"));
         assert!(main.contains("spawner.spawn(ble_api_task);"));
         assert!(main.contains("local_api_profile=ble-api-proof"));
-        assert!(main.contains("usb=boot-quarantined"));
+        assert!(main.contains("usb=alpha-diagnostics-only"));
         assert!(main.contains("task=ble-api lora_routing=continue"));
 
         let ble = include_str!("ble_api_task.rs");

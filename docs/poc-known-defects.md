@@ -293,17 +293,25 @@ proof unless a failing test promotes one into a release blocker.
   claiming polished launch or background behavior.
 - With several identical attached boards, the app shows the selected USB serial
   but the physical E290 has no corresponding identify cue. Until a display or
-  LED identify action exists, an operator may have to press the middle button
-  labelled `21` on every candidate board. Only the selected serial owns the
-  pairing session, but this is not acceptable final multi-device UX.
+  LED identify action is connected to the permanent image, an operator may have
+  to press the middle button labelled `21` on every candidate board. The
+  isolated display HIL has visually qualified the panel, but it does not yet
+  identify a selected production appliance. Only the selected serial owns the
+  pairing session, so this remains unacceptable final multi-device UX.
 - Native first-run BLE discovery now lists bounded service advertisements and
   requires explicit selection without connecting. Advertisements do not reveal
   whether an appliance is provisioned and are not authenticated identity. The
   selected row cannot yet begin pairing. The allocation-free display model and
   coalescing handoff own a zeroizing six-digit passkey plus explicit
-  timeout/success/failure/reboot clearing, but the E290 e-paper driver, Trouble
-  Secure Connections events, GPIO21-bound BLE pairing bearer, durable bond
-  store, and Rust-owned phone credential install remain unimplemented. See
+  timeout/success/failure/reboot clearing. The portable SSD1680 driver and
+  isolated E290 display HIL now pass powered full-refresh/deep-sleep and visual
+  demo checks. A bounded integrated BLE-plus-display startup also passed boot
+  clear, BLE advertising, the exact `Ready` rendered-completion gate, visual
+  `READY`, and composition readiness on Board A. The opt-in permanent display
+  actor and production semantic renderer are not yet connected to live
+  pairing. Trouble Secure
+  Connections events, GPIO21-bound BLE pairing bearer, durable bond store, and
+  Rust-owned phone credential install remain unimplemented. See
   [ADR 0019](adr/0019-secure-ble-appliance-onboarding.md). Trouble `0.6.0`
   also has no public pre-SMP admission hook, so the first alpha design accepts
   transient non-bonding SMP work and immediate disconnect as a bounded
@@ -445,16 +453,28 @@ proof unless a failing test promotes one into a release blocker.
   with the unchanged two-activity/one-link budgets. Pressure, soak, and the
   powered mobile Expo lifecycle matrix beyond the bounded iOS foreground proof
   remain open.
+- ESP32-S3 radio/display startup has a powered ordering invariant. Initializing
+  SPI3/e-paper before the first esp-radio/PHY calibration stalled inside
+  `esp_phy::enable_phy` registration/calibration and left the retained
+  `STARTING` view. Current source constructs and retains the real
+  `BleConnector` immediately after RTOS startup, before any display peripheral
+  initialization, then moves that owner into the BLE task. The controlled A/B
+  passed without increasing the 72 KiB internal heap, so this is not a memory
+  ceiling. Keep this order covered when adding Wi-Fi, another radio owner, or
+  new display startup work. Repeated boot, pressure, and soak qualification
+  remain open.
 - BLE controller initialization is still not fully isolated from the autonomous
   LoRa node. `BleConnector::new` returns a recoverable error only for
   configuration validation; pinned esp-radio controller and esp-rtos paths can
   still panic/assert on scheduler, strict-internal allocation, or controller
-  initialization faults. The production logger is intentionally a no-op while
-  USB is quarantined, so such a panic is silent. The powered activity-budget
-  diagnosis closed its historical controller-budget blocker, and the later
-  USB-visible stack diagnostic separately found and closed the observed
-  `NodeCore::new` construction overflow described under the hardware profile.
-  Neither bounded diagnosis closes this general hardening residual.
+  initialization faults. Every ordinary production profile keeps the logger as
+  a no-op, including BLE/Wi-Fi profiles that retain native USB electrically and
+  at runtime as a diagnostics-only sink, so such a panic is silent. The
+  separately named diagnostic image enables USB Serial/JTAG output. Its powered
+  activity-budget diagnosis closed the historical controller-budget blocker,
+  and the later USB-visible stack diagnostic separately found and closed the
+  observed `NodeCore::new` construction overflow described under the hardware
+  profile. Neither bounded diagnosis closes this general hardening residual.
 - The host service has no operating-system single-instance lock, notification
   service, account migration, database encryption, activation-ambiguous repair,
   or cross-platform disconnect/host-suspend matrix. Managed profiles currently
