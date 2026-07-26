@@ -115,6 +115,7 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeprofilestore_open(rootDirectory: Uint8Array, legacyDatabasePath: Uint8Array, legacyCredentialPath: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_activate_profile(uniffiSelf: bigint, deviceId: Uint8Array, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_credential_status(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
+    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_reconcile_onboarding_publication(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_snapshot(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_ffi_reticulum_appliance_native_uniffi_contract_version(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_profile(): number;
@@ -159,6 +160,7 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status(): number;
+    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_snapshot(): number;
     ubrn_uniffi_internal_fn_method_nativeappliance_ffi__bless_pointer(pointer: bigint, uniffi_out_err: UniffiRustCallStatus): UniffiGcObject;
     ubrn_uniffi_internal_fn_method_nativebleonboarding_ffi__bless_pointer(pointer: bigint, uniffi_out_err: UniffiRustCallStatus): UniffiGcObject;

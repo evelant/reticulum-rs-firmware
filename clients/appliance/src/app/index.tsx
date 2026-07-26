@@ -1,8 +1,10 @@
+import type { NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -29,6 +31,11 @@ import {
   MAX_LXMF_BASIC_TITLE_BYTES,
 } from "../generated/api.ts";
 import { ApplianceApi } from "../lib/api";
+import {
+  type ApplianceProfilePresentation,
+  applianceProfilesPresentation,
+  knownProfileForAdvertisedName,
+} from "../lib/appliance-profiles.ts";
 import {
   applianceStatusPresentation,
   connectionStateLabel,
@@ -73,10 +80,15 @@ import {
 import { randomHex } from "../lib/random.ts";
 
 const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
-const ONBOARDING_BLE_SCAN_TIMEOUT_MS = 5_000;
+const ONBOARDING_BLE_SCAN_TIMEOUT_MS = 15_000;
 const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
 const KEYBOARD_LAYOUT = keyboardLayoutPolicy(Platform.OS);
 type Workspace = "lxmf" | "nomad";
+type ProfileOperation =
+  | { readonly state: "idle" }
+  | { readonly message: string; readonly state: "switching" }
+  | { readonly message: string; readonly state: "success" }
+  | { readonly message: string; readonly state: "error" };
 
 function bytesText(field: BytesView): string {
   return field.encoding === "utf8" ? field.value : `hex:${field.value}`;
@@ -111,14 +123,221 @@ function ActionButton({ disabled = false, label, onPress, secondary = false }: A
   );
 }
 
+interface ApplianceProfileManagerProps {
+  readonly busy: boolean;
+  readonly canAdd: boolean;
+  readonly catalog: NativeProfileStoreSnapshot;
+  readonly exactBleTargetRequired: boolean;
+  readonly onActivate: (profileKey: string) => Promise<boolean>;
+  readonly onAdd: () => void;
+  readonly onClearOperation: () => void;
+  readonly onClose: () => void;
+  readonly operation: ProfileOperation;
+  readonly visible: boolean;
+}
+
+function ApplianceProfileManager({
+  busy,
+  canAdd,
+  catalog,
+  exactBleTargetRequired,
+  onActivate,
+  onAdd,
+  onClearOperation,
+  onClose,
+  operation,
+  visible,
+}: ApplianceProfileManagerProps) {
+  const [confirmation, setConfirmation] = useState<ApplianceProfilePresentation | null>(null);
+  const presentation = applianceProfilesPresentation(catalog);
+  const switching = operation.state === "switching";
+
+  useEffect(() => {
+    if (!visible) setConfirmation(null);
+  }, [visible]);
+
+  const activate = async () => {
+    if (confirmation === null) return;
+    if (await onActivate(confirmation.profileKey)) setConfirmation(null);
+  };
+
+  return (
+    <Modal
+      animationType="slide"
+      onRequestClose={() => {
+        if (!switching) onClose();
+      }}
+      presentationStyle="pageSheet"
+      transparent={false}
+      visible={visible}
+    >
+      <SafeAreaView style={styles.profileManagerSafeArea}>
+        <View style={styles.profileManagerHeading}>
+          <View style={styles.profileManagerHeadingCopy}>
+            <Text style={styles.eyebrow}>APPLIANCES</Text>
+            <Text style={styles.profileManagerTitle}>Choose a Reticulum node</Text>
+          </View>
+          <ActionButton disabled={switching} label="Done" onPress={onClose} secondary />
+        </View>
+        <ScrollView
+          contentContainerStyle={styles.profileManagerContent}
+          style={styles.profileManagerScroller}
+        >
+          <Text style={styles.secondaryText}>
+            Each board keeps its own credential, contacts, conversations, and durable outbox.
+          </Text>
+          {operation.state === "idle" ? null : (
+            <View
+              accessibilityLiveRegion={operation.state === "error" ? "assertive" : "polite"}
+              style={[
+                styles.profileOperation,
+                operation.state === "error" && styles.profileOperationError,
+                operation.state === "success" && styles.profileOperationSuccess,
+              ]}
+            >
+              {switching ? <ActivityIndicator color="#91e6a7" /> : null}
+              <Text
+                style={[
+                  styles.profileOperationText,
+                  operation.state === "error" && styles.profileOperationErrorText,
+                ]}
+              >
+                {operation.message}
+              </Text>
+            </View>
+          )}
+          <View style={styles.profileList}>
+            {presentation.profiles.map((profile) => {
+              const incompatible =
+                exactBleTargetRequired && !profile.active && profile.advertisedName === null;
+              const disabled = busy || switching || profile.active || incompatible;
+              const accessibilityLabel = profile.active
+                ? `Active appliance ${profile.boardLabel}`
+                : incompatible
+                  ? `${profile.boardLabel} cannot be selected because its exact Bluetooth name is unavailable`
+                  : `Switch to ${profile.boardLabel}`;
+              return (
+                <Pressable
+                  accessibilityLabel={accessibilityLabel}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled, selected: profile.active }}
+                  disabled={disabled}
+                  key={profile.profileKey}
+                  onPress={() => {
+                    onClearOperation();
+                    setConfirmation(profile);
+                  }}
+                  style={({ pressed }) => [
+                    styles.profileRow,
+                    profile.active && styles.profileRowActive,
+                    incompatible && styles.profileRowUnavailable,
+                    pressed && !disabled && styles.buttonPressed,
+                  ]}
+                >
+                  <View style={styles.profileRowHeading}>
+                    <Text selectable style={styles.profileBoardLabel}>
+                      {profile.boardLabel}
+                    </Text>
+                    <Text
+                      style={[styles.profileBadge, profile.active && styles.profileBadgeActive]}
+                    >
+                      {profile.active ? "ACTIVE" : incompatible ? "NO BLE NAME" : "SWITCH"}
+                    </Text>
+                  </View>
+                  <Text selectable style={styles.monospace}>
+                    {profile.bleLabel}
+                  </Text>
+                  <Text style={styles.profileGeneration}>{profile.generationLabel}</Text>
+                  {incompatible ? (
+                    <Text style={styles.profileGeneration}>
+                      Re-import or repair this profile before selecting it over Bluetooth.
+                    </Text>
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </View>
+          {confirmation === null ? null : (
+            <View accessibilityLiveRegion="polite" style={styles.profileConfirmation}>
+              <Text style={styles.profileConfirmationTitle}>
+                Switch to {confirmation.boardLabel}?
+              </Text>
+              <Text style={styles.secondaryText}>
+                The current connection will close. Profile-local messages and contacts stay
+                isolated, and any unsent composer text will be discarded.
+              </Text>
+              <View style={styles.actionRow}>
+                <ActionButton
+                  disabled={busy || switching}
+                  label={switching ? "Switching…" : "Switch appliance"}
+                  onPress={() => void activate()}
+                />
+                <ActionButton
+                  disabled={switching}
+                  label="Keep current"
+                  onPress={() => setConfirmation(null)}
+                  secondary
+                />
+              </View>
+            </View>
+          )}
+          <View style={styles.profileAddSection}>
+            <Text style={styles.profileConfirmationTitle}>Another physical node</Text>
+            <Text style={styles.secondaryText}>
+              Find a nearby unpaired appliance and use the existing secure Bluetooth ceremony.
+            </Text>
+            <View style={styles.actionRow}>
+              <ActionButton
+                disabled={busy || switching || !canAdd}
+                label="Add appliance"
+                onPress={() => {
+                  onClearOperation();
+                  onClose();
+                  onAdd();
+                }}
+              />
+            </View>
+            {canAdd ? null : (
+              <Text style={styles.profileGeneration}>
+                Adding is unavailable on this transport; saved profiles can still be switched.
+              </Text>
+            )}
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 interface ApplianceStatusCardProps {
+  readonly busy: boolean;
+  readonly canAddAppliance: boolean;
   readonly compact: boolean;
+  readonly exactBleTargetRequired: boolean;
   readonly nativeCore: NativeCoreStatus | null;
+  readonly onActivateProfile: (profileKey: string) => Promise<boolean>;
+  readonly onAddAppliance: () => void;
+  readonly onClearProfileOperation: () => void;
+  readonly profileOperation: ProfileOperation;
+  readonly profiles: NativeProfileStoreSnapshot | null;
   readonly snapshot: ApplianceSnapshot | null;
 }
 
-function ApplianceStatusCard({ compact, nativeCore, snapshot }: ApplianceStatusCardProps) {
+function ApplianceStatusCard({
+  busy,
+  canAddAppliance,
+  compact,
+  exactBleTargetRequired,
+  nativeCore,
+  onActivateProfile,
+  onAddAppliance,
+  onClearProfileOperation,
+  profileOperation,
+  profiles,
+  snapshot,
+}: ApplianceStatusCardProps) {
   const [showDetails, setShowDetails] = useState(false);
+  const [showProfiles, setShowProfiles] = useState(false);
   const presentation = applianceStatusPresentation(snapshot);
   const nativeApiLabel =
     nativeCore?.label ?? (Platform.OS === "web" ? "Web client" : "Checking native bridge");
@@ -142,18 +361,40 @@ function ApplianceStatusCard({ compact, nativeCore, snapshot }: ApplianceStatusC
             {presentation.connectionLabel}
           </Text>
         </View>
-        <Pressable
-          accessibilityLabel={`${showDetails ? "Hide" : "Show"} appliance diagnostics`}
-          accessibilityRole="button"
-          accessibilityState={{ expanded: showDetails }}
-          hitSlop={7}
-          onPress={() => setShowDetails((visible) => !visible)}
-          style={({ pressed }) => [styles.statusDetailsButton, pressed && styles.buttonPressed]}
-        >
-          <Text style={styles.statusDetailsButtonText}>
-            {showDetails ? "Hide details" : "Details"}
-          </Text>
-        </Pressable>
+        <View style={styles.applianceStatusActions}>
+          {profiles === null ? null : (
+            <Pressable
+              accessibilityLabel="Manage saved appliances"
+              accessibilityRole="button"
+              accessibilityState={{ disabled: busy }}
+              disabled={busy}
+              hitSlop={7}
+              onPress={() => {
+                onClearProfileOperation();
+                setShowProfiles(true);
+              }}
+              style={({ pressed }) => [
+                styles.statusDetailsButton,
+                busy && styles.buttonDisabled,
+                pressed && !busy && styles.buttonPressed,
+              ]}
+            >
+              <Text style={styles.statusDetailsButtonText}>Appliances</Text>
+            </Pressable>
+          )}
+          <Pressable
+            accessibilityLabel={`${showDetails ? "Hide" : "Show"} appliance diagnostics`}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: showDetails }}
+            hitSlop={7}
+            onPress={() => setShowDetails((visible) => !visible)}
+            style={({ pressed }) => [styles.statusDetailsButton, pressed && styles.buttonPressed]}
+          >
+            <Text style={styles.statusDetailsButtonText}>
+              {showDetails ? "Hide details" : "Details"}
+            </Text>
+          </Pressable>
+        </View>
       </View>
       <View style={styles.applianceActivity}>
         <Text style={styles.applianceActivityItem}>{presentation.pendingOutboxLabel}</Text>
@@ -176,6 +417,23 @@ function ApplianceStatusCard({ compact, nativeCore, snapshot }: ApplianceStatusC
           <MetaRow label="API" value={nativeApiLabel} />
         </View>
       ) : null}
+      {profiles === null ? null : (
+        <ApplianceProfileManager
+          busy={busy}
+          canAdd={canAddAppliance}
+          catalog={profiles}
+          exactBleTargetRequired={exactBleTargetRequired}
+          onActivate={onActivateProfile}
+          onAdd={onAddAppliance}
+          onClearOperation={onClearProfileOperation}
+          onClose={() => {
+            setShowProfiles(false);
+            onClearProfileOperation();
+          }}
+          operation={profileOperation}
+          visible={showProfiles}
+        />
+      )}
     </View>
   );
 }
@@ -491,7 +749,9 @@ function NomadPanel({
 }
 
 interface OnboardingPanelProps {
+  readonly addingAppliance: boolean;
   readonly busy: boolean;
+  readonly knownProfiles: NativeProfileStoreSnapshot | null;
   readonly onboarding: OnboardingView;
   readonly onCancel: (() => Promise<void>) | null;
   readonly onMutation: (
@@ -501,14 +761,18 @@ interface OnboardingPanelProps {
   readonly onScanBleCandidates:
     | ((options?: BleScanOptions) => Promise<readonly BleCandidate[]>)
     | null;
+  readonly onSwitchKnownProfile: (profileKey: string) => void;
 }
 
 function OnboardingPanel({
+  addingAppliance,
   busy,
+  knownProfiles,
   onboarding,
   onCancel,
   onMutation,
   onScanBleCandidates,
+  onSwitchKnownProfile,
 }: OnboardingPanelProps) {
   const [bleCandidates, setBleCandidates] = useState<readonly BleCandidate[]>([]);
   const [bleScanError, setBleScanError] = useState<string | null>(null);
@@ -536,8 +800,8 @@ function OnboardingPanel({
   const canCancelBle =
     onCancel !== null &&
     onboarding.method === "managed_pairing" &&
-    lifecycle?.state === "working" &&
-    lifecycle.stage !== "activating";
+    ((addingAppliance && !(lifecycle?.state === "working" && lifecycle.stage === "activating")) ||
+      (lifecycle?.state === "working" && lifecycle.stage !== "activating"));
 
   useEffect(
     () => () => {
@@ -615,7 +879,7 @@ function OnboardingPanel({
       style={styles.onboardingScroller}
     >
       <View accessibilityLiveRegion="polite" style={styles.onboarding}>
-        <Text style={styles.eyebrow}>FIRST-RUN SETUP</Text>
+        <Text style={styles.eyebrow}>{addingAppliance ? "ADD APPLIANCE" : "FIRST-RUN SETUP"}</Text>
         <Text style={styles.onboardingTitle}>{presentation.title}</Text>
         <Text style={styles.secondaryText}>{presentation.instruction}</Text>
         {discovery.available || presentation.identifierLabel === null ? null : (
@@ -658,14 +922,31 @@ function OnboardingPanel({
               >
                 {bleCandidates.map((candidate) => {
                   const selected = selectedCandidate?.peripheralId === candidate.peripheralId;
+                  const knownProfile =
+                    knownProfiles === null
+                      ? null
+                      : knownProfileForAdvertisedName(knownProfiles, candidate.peripheralName);
                   return (
                     <Pressable
-                      accessibilityLabel={`Select ${bleCandidateName(candidate)}`}
+                      accessibilityLabel={
+                        knownProfile === null
+                          ? `Select ${bleCandidateName(candidate)}`
+                          : `Switch to saved appliance ${knownProfile.boardLabel}`
+                      }
                       accessibilityRole="button"
-                      accessibilityState={{ selected }}
+                      accessibilityState={{
+                        disabled: busy || lifecycle?.state === "working",
+                        selected,
+                      }}
                       disabled={busy || lifecycle?.state === "working"}
                       key={candidate.peripheralId}
-                      onPress={() => setSelectedPeripheralId(candidate.peripheralId)}
+                      onPress={() => {
+                        if (knownProfile === null) {
+                          setSelectedPeripheralId(candidate.peripheralId);
+                        } else {
+                          onSwitchKnownProfile(knownProfile.profileKey);
+                        }
+                      }}
                       style={({ pressed }) => [
                         styles.bleCandidate,
                         selected && styles.bleCandidateSelected,
@@ -677,7 +958,7 @@ function OnboardingPanel({
                           {bleCandidateName(candidate)}
                         </Text>
                         <Text style={styles.bleCandidateChoice}>
-                          {selected ? "Selected" : "Select"}
+                          {knownProfile === null ? (selected ? "Selected" : "Select") : "Switch"}
                         </Text>
                       </View>
                       <Text selectable style={styles.monospace}>
@@ -746,7 +1027,13 @@ function OnboardingPanel({
           {canCancelBle ? (
             <ActionButton
               disabled={cancelling}
-              label={cancelling ? "Cancelling…" : "Cancel secure pairing"}
+              label={
+                cancelling
+                  ? "Cancelling…"
+                  : addingAppliance
+                    ? "Cancel adding appliance"
+                    : "Cancel secure pairing"
+              }
               onPress={() => void cancelBleOnboarding()}
               secondary
             />
@@ -1325,6 +1612,8 @@ export default function ApplianceScreen() {
   const [nativeCore, setNativeCore] = useState<NativeCoreStatus | null>(null);
   const [snapshot, setSnapshot] = useState<ApplianceSnapshot | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingView>(EMPTY_ONBOARDING);
+  const [profiles, setProfiles] = useState<NativeProfileStoreSnapshot | null>(null);
+  const [addingAppliance, setAddingAppliance] = useState(false);
   const [contacts, setContacts] = useState<ContactView[]>([]);
   const [foreground, setForeground] = useState(
     AppState.currentState === null || AppState.currentState === "active",
@@ -1340,6 +1629,8 @@ export default function ApplianceScreen() {
   const [nomadState, setNomadState] = useState<NomadBrowserState>(nomadBrowser.state);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [profileOperation, setProfileOperation] = useState<ProfileOperation>({ state: "idle" });
+  const addingApplianceRef = useRef(false);
   const draft = useRef<DraftIdentity | null>(null);
   const mutationInFlight = useRef(false);
   const refreshRequests = useRef(new LatestRequest());
@@ -1363,6 +1654,10 @@ export default function ApplianceScreen() {
       ? snapshot?.last_error
       : null);
   const selectedContact = contacts.find((contact) => contact.destination === selected);
+  const canManageProfiles = api.profiles !== undefined && api.activateProfile !== undefined;
+  const canAddAppliance =
+    api.beginAddAppliance !== undefined && (api.supportsAdditionalBleOnboarding?.() ?? true);
+  const exactBleTargetRequired = api.supportsBleCandidateDiscovery?.() ?? false;
   const nearbyReader = useMemo(() => {
     const read = api.nearbyPeers;
     return read === undefined ? null : () => read.call(api);
@@ -1408,11 +1703,34 @@ export default function ApplianceScreen() {
   const refresh = useCallback(async () => {
     const refreshRequest = refreshRequests.current.begin();
     try {
-      const [nextSnapshot, nextOnboarding] = await Promise.all([api.snapshot(), api.onboarding()]);
+      const [nextOnboarding, nextProfiles] = await Promise.all([
+        api.onboarding(),
+        api.profiles?.() ?? Promise.resolve(null),
+      ]);
+      if (!refreshRequests.current.accepts(refreshRequest)) return;
+      setOnboarding(nextOnboarding);
+      setProfiles(nextProfiles);
+      const nextReady = onboardingPresentation(nextOnboarding).ready;
+      const completingAdditionalAppliance = addingApplianceRef.current && nextReady;
+      if (addingApplianceRef.current && !nextReady) {
+        timelineRequests.current.invalidate();
+        return;
+      }
+      if (completingAdditionalAppliance) {
+        addingApplianceRef.current = false;
+        setAddingAppliance(false);
+        timelineRequests.current.invalidate();
+        selectedRef.current = null;
+        draft.current = null;
+        setSelected(null);
+        setTimeline([]);
+        setContacts([]);
+        nomadBrowser.reset();
+      }
+
+      const nextSnapshot = await api.snapshot();
       if (!refreshRequests.current.accepts(refreshRequest)) return;
       setSnapshot(nextSnapshot);
-      setOnboarding(nextOnboarding);
-      const nextReady = onboardingPresentation(nextOnboarding).ready;
       if (!nextReady) {
         timelineRequests.current.invalidate();
         return;
@@ -1456,7 +1774,7 @@ export default function ApplianceScreen() {
     } catch (nextError) {
       if (refreshRequests.current.accepts(refreshRequest)) throw nextError;
     }
-  }, [api]);
+  }, [api, nomadBrowser]);
 
   useEffect(() => {
     let active = true;
@@ -1476,7 +1794,7 @@ export default function ApplianceScreen() {
   }, [api, refresh]);
 
   useEffect(() => {
-    if (!bootstrapped) return;
+    if (!bootstrapped || profileOperation.state === "switching") return;
     const unsubscribe = api.subscribeInvalidations(
       () => void refresh().catch((nextError) => setError(errorText(nextError))),
       () => setError("Event stream reconnecting"),
@@ -1492,10 +1810,17 @@ export default function ApplianceScreen() {
       unsubscribe?.();
       if (interval !== null) clearInterval(interval);
     };
-  }, [api, bootstrapped, ready, refresh]);
+  }, [api, bootstrapped, profileOperation.state, ready, refresh]);
 
   useEffect(() => {
-    if (!foreground || !onboarding.available || !ready || snapshot?.connection.state === "ready") {
+    if (
+      addingAppliance ||
+      busy ||
+      !foreground ||
+      !onboarding.available ||
+      !ready ||
+      snapshot?.connection.state === "ready"
+    ) {
       automaticReconnect.suspend();
       setReconnectProgress(null);
       return;
@@ -1524,7 +1849,9 @@ export default function ApplianceScreen() {
     };
   }, [
     api,
+    addingAppliance,
     automaticReconnect,
+    busy,
     foreground,
     onboarding.available,
     ready,
@@ -1557,6 +1884,181 @@ export default function ApplianceScreen() {
     }
   };
 
+  const activateProfileWithAuthority = async (profileKey: string): Promise<boolean> => {
+    const activate = api.activateProfile;
+    if (activate === undefined) return false;
+    const normalizedProfileKey = profileKey.trim().toLowerCase();
+    const targetLabel =
+      (profiles === null
+        ? null
+        : applianceProfilesPresentation(profiles).profiles.find(
+            (profile) => profile.profileKey.toLowerCase() === normalizedProfileKey,
+          )?.boardLabel) ?? profileKey;
+
+    automaticReconnect.suspend();
+    setReconnectProgress(null);
+    refreshRequests.current.invalidate();
+    timelineRequests.current.invalidate();
+    selectedRef.current = null;
+    draft.current = null;
+    setSelected(null);
+    setTimeline([]);
+    setContacts([]);
+    nomadBrowser.reset();
+    setError(null);
+    setProfileOperation({ message: `Switching to ${targetLabel}…`, state: "switching" });
+
+    let activationFailure: unknown;
+    try {
+      await activate.call(api, profileKey);
+    } catch (nextError) {
+      activationFailure = nextError;
+    }
+
+    let authoritativeProfiles: NativeProfileStoreSnapshot | null = null;
+    let authorityFailure: unknown;
+    try {
+      authoritativeProfiles = (await api.profiles?.()) ?? null;
+      if (authoritativeProfiles !== null) setProfiles(authoritativeProfiles);
+    } catch (nextError) {
+      authorityFailure = nextError;
+    }
+
+    let refreshFailure: unknown;
+    try {
+      await refresh();
+    } catch (nextError) {
+      refreshFailure = nextError;
+    }
+
+    if (authoritativeProfiles === null && api.profiles !== undefined) {
+      try {
+        authoritativeProfiles = await api.profiles();
+        setProfiles(authoritativeProfiles);
+        authorityFailure = undefined;
+      } catch (nextError) {
+        authorityFailure = nextError;
+      }
+    }
+
+    const activeProfileKey = authoritativeProfiles?.activeProfileKey?.toLowerCase();
+    const targetIsActive = activeProfileKey === normalizedProfileKey;
+    if (targetIsActive) {
+      if (
+        activationFailure !== undefined ||
+        authorityFailure !== undefined ||
+        refreshFailure !== undefined
+      ) {
+        const failure = activationFailure ?? authorityFailure ?? refreshFailure;
+        const message =
+          `${targetLabel} is now active, but the switch needs attention: ` +
+          `${errorText(failure)}. Close Appliances and use Reconnect if needed.`;
+        setProfileOperation({
+          message,
+          state: "error",
+        });
+      } else {
+        setProfileOperation({ message: `Switched to ${targetLabel}.`, state: "success" });
+      }
+      return true;
+    }
+
+    const failure = activationFailure ?? authorityFailure ?? refreshFailure;
+    const authority =
+      activeProfileKey === undefined
+        ? "The authoritative active profile could not be confirmed."
+        : "A different appliance profile remains active.";
+    const message =
+      `Could not switch to ${targetLabel}. ${authority}` +
+      (failure === undefined ? "" : ` ${errorText(failure)}`);
+    setProfileOperation({
+      message,
+      state: "error",
+    });
+    return false;
+  };
+
+  const activateApplianceProfile = async (profileKey: string): Promise<boolean> => {
+    if (mutationInFlight.current) return false;
+    mutationInFlight.current = true;
+    setBusy(true);
+    try {
+      return await activateProfileWithAuthority(profileKey);
+    } finally {
+      mutationInFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  const beginAddAppliance = () => {
+    const begin = api.beginAddAppliance;
+    if (begin === undefined || addingApplianceRef.current) return;
+    automaticReconnect.suspend();
+    setReconnectProgress(null);
+    refreshRequests.current.invalidate();
+    timelineRequests.current.invalidate();
+    nomadBrowser.reset();
+    addingApplianceRef.current = true;
+    setAddingAppliance(true);
+    void run(async () => {
+      try {
+        await begin.call(api);
+      } catch (nextError) {
+        addingApplianceRef.current = false;
+        setAddingAppliance(false);
+        throw nextError;
+      }
+    });
+  };
+
+  const switchToKnownProfile = (profileKey: string) => {
+    if (
+      mutationInFlight.current ||
+      api.cancelOnboarding === undefined ||
+      api.activateProfile === undefined
+    ) {
+      return;
+    }
+    const targetLabel =
+      (profiles === null
+        ? null
+        : applianceProfilesPresentation(profiles).profiles.find(
+            (profile) => profile.profileKey === profileKey,
+          )?.boardLabel) ?? profileKey;
+    mutationInFlight.current = true;
+    setBusy(true);
+    setError(null);
+    setProfileOperation({
+      message: `Closing discovery and switching to saved appliance ${targetLabel}…`,
+      state: "switching",
+    });
+    void (async () => {
+      try {
+        try {
+          await api.cancelOnboarding?.();
+        } catch (nextError) {
+          try {
+            await refresh();
+          } catch {
+            // The cancellation failure remains the useful recovery message.
+          }
+          const message = `Could not leave Add appliance safely: ${errorText(nextError)}`;
+          setProfileOperation({
+            message,
+            state: "error",
+          });
+          return;
+        }
+        addingApplianceRef.current = false;
+        setAddingAppliance(false);
+        await activateProfileWithAuthority(profileKey);
+      } finally {
+        mutationInFlight.current = false;
+        setBusy(false);
+      }
+    })();
+  };
+
   const onboardingMutation = (
     action: "start" | "continue" | "refresh" | RecoveryRequest["action"],
     candidate: BleCandidate | null,
@@ -1579,6 +2081,7 @@ export default function ApplianceScreen() {
       ? null
       : async (): Promise<void> => {
           await api.cancelOnboarding?.();
+          await refresh();
         };
 
   const upsertContact = (destination: string, name: string): Promise<boolean> =>
@@ -1737,11 +2240,39 @@ export default function ApplianceScreen() {
         </View>
       </View>
       {ready ? (
-        <ApplianceStatusCard compact={compact} nativeCore={nativeCore} snapshot={snapshot} />
+        <ApplianceStatusCard
+          busy={busy}
+          canAddAppliance={canAddAppliance}
+          compact={compact}
+          exactBleTargetRequired={exactBleTargetRequired}
+          nativeCore={nativeCore}
+          onActivateProfile={activateApplianceProfile}
+          onAddAppliance={beginAddAppliance}
+          onClearProfileOperation={() => setProfileOperation({ state: "idle" })}
+          profileOperation={profileOperation}
+          profiles={canManageProfiles ? profiles : null}
+          snapshot={snapshot}
+        />
       ) : null}
       {displayedError === null || displayedError === undefined ? null : (
         <View accessibilityLiveRegion="assertive" style={styles.errorBanner}>
           <Text style={styles.errorText}>{displayedError}</Text>
+        </View>
+      )}
+      {profileOperation.state === "idle" ? null : (
+        <View
+          accessibilityLiveRegion={profileOperation.state === "error" ? "assertive" : "polite"}
+          style={[
+            styles.profileOperationBanner,
+            profileOperation.state === "error" && styles.errorBanner,
+            profileOperation.state === "success" && styles.reconnectBanner,
+          ]}
+        >
+          <Text
+            style={[styles.reconnectText, profileOperation.state === "error" && styles.errorText]}
+          >
+            {profileOperation.message}
+          </Text>
         </View>
       )}
       {reconnectProgress === null ? null : (
@@ -1751,11 +2282,14 @@ export default function ApplianceScreen() {
       )}
       {busy ? <ActivityIndicator color="#91e6a7" style={styles.activity} /> : null}
       <OnboardingPanel
+        addingAppliance={addingAppliance}
         busy={busy}
+        knownProfiles={profiles}
         onboarding={onboarding}
         onCancel={cancelOnboarding}
         onMutation={onboardingMutation}
         onScanBleCandidates={bleCandidateScanner}
+        onSwitchKnownProfile={switchToKnownProfile}
       />
       {ready ? (
         <KeyboardAvoidingView
@@ -1886,6 +2420,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     justifyContent: "space-between",
+    flexWrap: "wrap",
     gap: 12,
   },
   applianceStatusIdentity: { flex: 1, minWidth: 0 },
@@ -1899,6 +2434,14 @@ const styles = StyleSheet.create({
   applianceStatusConnection: { marginTop: 4, color: colors.muted, fontSize: 12 },
   applianceStatusConnectionReady: { color: colors.green },
   applianceStatusConnectionFaulted: { color: colors.red },
+  applianceStatusActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    flexShrink: 1,
+    justifyContent: "flex-end",
+    gap: 7,
+  },
   statusDetailsButton: {
     minHeight: 44,
     justifyContent: "center",
@@ -1937,6 +2480,98 @@ const styles = StyleSheet.create({
     borderTopColor: colors.line,
     borderTopWidth: 1,
   },
+  profileManagerSafeArea: { flex: 1, backgroundColor: colors.background },
+  profileManagerHeading: {
+    minHeight: 76,
+    paddingHorizontal: 22,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+  },
+  profileManagerHeadingCopy: { flex: 1, minWidth: 0 },
+  profileManagerTitle: { color: colors.text, fontSize: 21, fontWeight: "800" },
+  profileManagerScroller: { flex: 1, minHeight: 0 },
+  profileManagerContent: {
+    width: "100%",
+    maxWidth: 720,
+    alignSelf: "center",
+    padding: 20,
+    paddingBottom: 44,
+    gap: 16,
+  },
+  profileOperation: {
+    minHeight: 48,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 9,
+    backgroundColor: colors.panel2,
+  },
+  profileOperationError: { borderColor: "#70413d", backgroundColor: "#321d1b" },
+  profileOperationSuccess: { borderColor: "#356344", backgroundColor: colors.greenDark },
+  profileOperationText: { flex: 1, color: colors.muted, lineHeight: 19 },
+  profileOperationErrorText: { color: colors.red },
+  profileList: { gap: 10 },
+  profileRow: {
+    minHeight: 92,
+    padding: 14,
+    gap: 5,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 11,
+    backgroundColor: colors.panel,
+  },
+  profileRowActive: { borderColor: "#4c8d5b", backgroundColor: colors.greenDark },
+  profileRowUnavailable: { opacity: 0.62 },
+  profileRowHeading: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  profileBoardLabel: {
+    flexShrink: 1,
+    color: colors.text,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  profileBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    overflow: "hidden",
+    color: colors.muted,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 999,
+  },
+  profileBadgeActive: { color: colors.green, borderColor: "#4c8d5b" },
+  profileGeneration: { color: colors.muted, fontSize: 11 },
+  profileConfirmation: {
+    padding: 16,
+    gap: 10,
+    borderColor: "#4c8d5b",
+    borderWidth: 1,
+    borderRadius: 11,
+    backgroundColor: colors.panel2,
+  },
+  profileConfirmationTitle: { color: colors.text, fontSize: 15, fontWeight: "700" },
+  profileAddSection: {
+    paddingTop: 16,
+    gap: 9,
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+  },
   button: {
     minHeight: 36,
     justifyContent: "center",
@@ -1962,6 +2597,15 @@ const styles = StyleSheet.create({
     backgroundColor: "#321d1b",
   },
   errorText: { color: colors.red },
+  profileOperationBanner: {
+    marginHorizontal: 28,
+    marginTop: 14,
+    padding: 12,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.panel2,
+  },
   reconnectBanner: {
     marginHorizontal: 28,
     marginTop: 14,

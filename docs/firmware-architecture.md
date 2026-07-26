@@ -2389,6 +2389,13 @@ connection. A later larger-MTU/bulk profile needs explicit sequencing and
 credits, and reconnect/resume remains first-class. Do not expose an
 unauthenticated serial pipe.
 
+Its static-random BLE local address is derived from the durable Reticulum node
+identity hash, independently of the eFuse-MAC-suffixed human discovery name.
+Normal reboot preserves both the node identity and BLE address. A factory or
+full-chip erase provisions a new identity and rotates the address, preventing
+stale platform bond/peripheral caches from following a logically fresh
+appliance merely because it is running on the same physical board.
+
 In pinned esp-radio 0.18, `Config::with_max_connections` writes Espressif's
 total `ble_max_act` controller-activity count, not just the application link
 limit. The official ESP32-S3

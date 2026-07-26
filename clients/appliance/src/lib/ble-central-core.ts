@@ -25,8 +25,9 @@ export function advertisedPeripheralName(
 ): string | undefined {
   return advertisedLocalName ?? platformName;
 }
-export const DEFAULT_BLE_SCAN_TIMEOUT_MS = 10_000;
-export const DEFAULT_BLE_OPERATION_TIMEOUT_MS = 10_000;
+export const DEFAULT_BLE_SCAN_TIMEOUT_MS = 20_000;
+export const DEFAULT_BLE_OPERATION_TIMEOUT_MS = 30_000;
+export const DEFAULT_BLE_CONNECTION_TIMEOUT_MS = 90_000;
 export const MAX_PENDING_INDICATION_BYTES = 64 * 1024;
 export const MAX_PENDING_INDICATION_CHUNKS = 256;
 
@@ -38,6 +39,7 @@ export interface BleDiscoveredPeripheral {
 
 export interface BleDriverDisconnectEvent {
   readonly code?: number;
+  readonly description?: string;
   readonly domain?: string;
   readonly peripheralId: string;
   readonly status?: number;
@@ -191,6 +193,7 @@ function safeMaximumWriteBytes(reported: number): number {
 
 function disconnectReason(event: BleDriverDisconnectEvent): string {
   const details = [
+    event.description === undefined ? null : event.description,
     event.status === undefined ? null : `status ${event.status}`,
     event.domain === undefined ? null : event.domain,
     event.code === undefined ? null : `code ${event.code}`,
@@ -709,6 +712,10 @@ export class ForegroundBleCentral implements BleCentral {
       throw new Error("BLE central already owns a connection");
     }
     validateProfile(profile);
+    const selectedPeripheralId = options.peripheralId?.trim();
+    if (options.peripheralId !== undefined && selectedPeripheralId === "") {
+      throw new Error("BLE peripheral identifier must not be empty");
+    }
 
     const scanTimeoutMs = validateTimeout(
       options.scanTimeoutMs ?? DEFAULT_BLE_SCAN_TIMEOUT_MS,
@@ -717,6 +724,10 @@ export class ForegroundBleCentral implements BleCentral {
     const operationTimeoutMs = validateTimeout(
       options.operationTimeoutMs ?? DEFAULT_BLE_OPERATION_TIMEOUT_MS,
       "BLE operation timeout",
+    );
+    const connectionTimeoutMs = validateTimeout(
+      options.connectionTimeoutMs ?? DEFAULT_BLE_CONNECTION_TIMEOUT_MS,
+      "BLE connection timeout",
     );
     const abort = new AbortController();
     const forwardCancellation = () => {
@@ -843,23 +854,37 @@ export class ForegroundBleCentral implements BleCentral {
       );
 
       await run(() => this.driver.prepare(), "BLE platform preparation timed out");
-      const scanStart = driverOperation(() => this.driver.startScan(profile.serviceUuid, false));
-      try {
-        await withDeadline(scanStart, operationTimeoutMs, "BLE scan start timed out", abort.signal);
-      } catch (error) {
-        void scanStart.then(cleanUpLateScan, () => undefined);
-        throw error;
+      let peripheral: BleDiscoveredPeripheral;
+      if (selectedPeripheralId !== undefined) {
+        peripheral = {
+          id: selectedPeripheralId,
+          name: options.peripheralName,
+        };
+        selected = peripheral;
+      } else {
+        const scanStart = driverOperation(() => this.driver.startScan(profile.serviceUuid, false));
+        try {
+          await withDeadline(
+            scanStart,
+            operationTimeoutMs,
+            "BLE scan start timed out",
+            abort.signal,
+          );
+        } catch (error) {
+          void scanStart.then(cleanUpLateScan, () => undefined);
+          throw error;
+        }
+        scanStarted = true;
+        peripheral = await withDeadline(
+          peripheralFound,
+          scanTimeoutMs,
+          `No BLE appliance advertising ${profile.serviceUuid} was found within ${scanTimeoutMs} ms`,
+          abort.signal,
+        );
+        selected = peripheral;
+        await run(() => this.driver.stopScan(), `BLE scan stop for ${peripheral.id} timed out`);
+        scanStarted = false;
       }
-      scanStarted = true;
-      selected = await withDeadline(
-        peripheralFound,
-        scanTimeoutMs,
-        `No BLE appliance advertising ${profile.serviceUuid} was found within ${scanTimeoutMs} ms`,
-        abort.signal,
-      );
-      const peripheral = selected;
-      await run(() => this.driver.stopScan(), `BLE scan stop for ${peripheral.id} timed out`);
-      scanStarted = false;
 
       connectionAttemptStarted = true;
       const platformConnection = driverOperation(() => this.driver.connect(peripheral.id));
@@ -872,8 +897,8 @@ export class ForegroundBleCentral implements BleCentral {
       );
       await withDeadline(
         platformConnection,
-        operationTimeoutMs,
-        `BLE connection to ${peripheral.id} timed out`,
+        connectionTimeoutMs,
+        `BLE connection to ${peripheral.id} timed out after ${connectionTimeoutMs} ms`,
         abort.signal,
       );
       connected = true;

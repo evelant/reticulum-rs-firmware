@@ -43,6 +43,15 @@ pub struct NativeProfileStoreSnapshot {
     pub profiles: Vec<NativeProfileSummary>,
 }
 
+/// Authoritative result of reconciling app-private BLE onboarding publication.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct NativeOnboardingPublicationReconciliation {
+    /// Validated profile selected by the store after reconciliation, if any.
+    pub active_profile: Option<NativeProfileSummary>,
+    /// Whether this call finalized and removed one canonical Active onboarding artifact.
+    pub finalized_active_artifact: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct NativeProfileRuntimePaths {
     pub(crate) database: PathBuf,
@@ -171,10 +180,9 @@ impl NativeProfileStore {
 
     /// Select one existing validated profile for the next native appliance.
     ///
-    /// The current Expo UI remains single-profile and does not call this yet;
-    /// exposing the native operation establishes the future board-switching
-    /// boundary without putting credential bytes or filesystem paths in
-    /// TypeScript.
+    /// The Expo client calls this only after closing the current native owner,
+    /// then opens a fresh appliance against the selected profile. Credential
+    /// bytes and filesystem paths remain inside Rust.
     pub fn activate_profile(
         &self,
         device_id: String,
@@ -185,6 +193,91 @@ impl NativeProfileStore {
         write_active_profile(&self.root, &profile_key)
             .map_err(ProfileMetadataError::into_native)?;
         Ok(profile)
+    }
+
+    /// Reconcile a post-activation BLE onboarding artifact with the profile store.
+    ///
+    /// A canonical Active artifact is installed and selected idempotently,
+    /// exact-read back, and then removed. A different credential can never
+    /// replace an existing device profile. When the artifact is already absent,
+    /// the current validated active profile is returned without mutation so a
+    /// caller can reconcile a failure reported after artifact removal.
+    ///
+    /// Pending, ambiguous, or malformed artifacts fail closed and remain
+    /// untouched.
+    pub fn reconcile_onboarding_publication(
+        &self,
+    ) -> Result<NativeOnboardingPublicationReconciliation, NativeApplianceError> {
+        let _guard = self.lock_gate()?;
+        let onboarding_path = self.onboarding_credential_path();
+        match inspect_credential(&onboarding_path) {
+            NativeCredentialStatus::Missing => Ok(NativeOnboardingPublicationReconciliation {
+                active_profile: self.active_profile_summary_locked()?,
+                finalized_active_artifact: false,
+            }),
+            NativeCredentialStatus::Invalid { reason } => Err(NativeApplianceError::Storage {
+                reason: format!(
+                    "BLE onboarding publication cannot be reconciled from a non-Active artifact: {reason}"
+                ),
+            }),
+            NativeCredentialStatus::Active { summary } => {
+                let bytes = read_credential_bytes(&onboarding_path)
+                    .map_err(|reason| NativeApplianceError::Storage { reason })?;
+                let decoded = credential_summary_from_bytes(
+                    bytes.as_slice(),
+                    CredentialImportPolicy::AnyDevice,
+                )
+                .map_err(NativeApplianceError::from)?;
+                if decoded != summary {
+                    return Err(NativeApplianceError::Storage {
+                        reason:
+                            "BLE onboarding credential changed while publication was being reconciled"
+                                .to_owned(),
+                    });
+                }
+
+                let profile = match self.install_and_activate_profile_locked(
+                    bytes.as_slice(),
+                    &summary,
+                    CredentialImportPolicy::AnyDevice,
+                ) {
+                    Ok(profile) => profile,
+                    Err(CredentialImportError::PublicationUncertain { reason }) => self
+                        .reconcile_exact_profile_publication_locked(
+                            bytes.as_slice(),
+                            &summary,
+                            reason,
+                        )?,
+                    Err(error) => return Err(NativeApplianceError::from(error)),
+                };
+
+                fs::remove_file(&onboarding_path)
+                    .map_err(storage_error("remove reconciled onboarding credential"))?;
+                sync_directory(
+                    onboarding_path
+                        .parent()
+                        .expect("onboarding credential has a directory"),
+                    "unconfigured profile directory",
+                )?;
+
+                let active_profile = self.active_profile_summary_locked()?.ok_or_else(|| {
+                    NativeApplianceError::Storage {
+                        reason: "reconciled BLE onboarding profile is not active".to_owned(),
+                    }
+                })?;
+                if active_profile != profile {
+                    return Err(NativeApplianceError::Storage {
+                        reason:
+                            "reconciled BLE onboarding profile does not match the active profile"
+                                .to_owned(),
+                    });
+                }
+                Ok(NativeOnboardingPublicationReconciliation {
+                    active_profile: Some(active_profile),
+                    finalized_active_artifact: true,
+                })
+            }
+        }
     }
 }
 
@@ -333,6 +426,59 @@ impl NativeProfileStore {
             profile_key,
             credential: summary.clone(),
         })
+    }
+
+    fn reconcile_exact_profile_publication_locked(
+        &self,
+        expected_bytes: &[u8],
+        expected_summary: &NativeCredentialSummary,
+        publication_reason: String,
+    ) -> Result<NativeProfileSummary, NativeApplianceError> {
+        let profile_key = validate_profile_key(&expected_summary.device_id)?;
+        let active_profile = read_active_profile(&self.root)?;
+        if active_profile.as_deref() != Some(profile_key.as_str()) {
+            return Err(NativeApplianceError::CredentialPublicationUncertain {
+                reason: publication_reason,
+            });
+        }
+        let paths = self.profile_paths(&profile_key);
+        let active_bytes = read_credential_bytes(&paths.credential).map_err(|reason| {
+            NativeApplianceError::CredentialPublicationUncertain {
+                reason: format!(
+                    "{publication_reason}; exact profile credential readback failed: {reason}"
+                ),
+            }
+        })?;
+        if active_bytes.as_slice() != expected_bytes {
+            return Err(NativeApplianceError::CredentialPublicationUncertain {
+                reason: format!(
+                    "{publication_reason}; active profile credential differs from the onboarding artifact"
+                ),
+            });
+        }
+        let profile = self.profile_summary_locked(&profile_key).map_err(|error| {
+            NativeApplianceError::CredentialPublicationUncertain {
+                reason: format!(
+                    "{publication_reason}; active profile summary readback failed: {error}"
+                ),
+            }
+        })?;
+        if profile.credential != *expected_summary {
+            return Err(NativeApplianceError::CredentialPublicationUncertain {
+                reason: format!(
+                    "{publication_reason}; active profile summary differs from the onboarding artifact"
+                ),
+            });
+        }
+        Ok(profile)
+    }
+
+    fn active_profile_summary_locked(
+        &self,
+    ) -> Result<Option<NativeProfileSummary>, NativeApplianceError> {
+        read_active_profile(&self.root)?
+            .map(|profile_key| self.profile_summary_locked(&profile_key))
+            .transpose()
     }
 
     fn lock_gate(&self) -> Result<MutexGuard<'_, ()>, NativeApplianceError> {
@@ -871,6 +1017,13 @@ mod tests {
         NativeProfileStore::open(directory.path_string(), None, None).unwrap()
     }
 
+    fn write_onboarding_credential(store: &NativeProfileStore, bytes: &[u8]) {
+        let path = store.onboarding_credential_path();
+        let mut file = secure_create_new(&path).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
     #[test]
     fn only_post_publication_metadata_failures_are_reconcilable() {
         assert!(matches!(
@@ -939,6 +1092,97 @@ mod tests {
 
         fs::remove_file(first_path).unwrap();
         fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn active_onboarding_artifact_is_idempotently_published_and_finalized() {
+        let directory = TestDirectory::new("onboarding-reconcile");
+        let store = open_store(&directory);
+        let bytes = activated_credential_bytes(*b"reconcile-dev-01", 0x51);
+        write_onboarding_credential(&store, &bytes);
+
+        let reconciled = store.reconcile_onboarding_publication().unwrap();
+        let profile = reconciled
+            .active_profile
+            .expect("Active artifact publishes one profile");
+        assert!(reconciled.finalized_active_artifact);
+        assert_eq!(profile.profile_key, hex::encode(*b"reconcile-dev-01"));
+        assert!(!store.onboarding_credential_path().exists());
+        assert_eq!(
+            store.snapshot().unwrap().active_profile_key,
+            Some(profile.profile_key.clone())
+        );
+        assert_eq!(
+            fs::read(store.runtime_paths().unwrap().credential).unwrap(),
+            bytes
+        );
+
+        let already_finalized = store.reconcile_onboarding_publication().unwrap();
+        assert_eq!(already_finalized.active_profile, Some(profile));
+        assert!(!already_finalized.finalized_active_artifact);
+    }
+
+    #[test]
+    fn active_onboarding_artifact_matching_an_existing_profile_only_finalizes_scratch_state() {
+        let directory = TestDirectory::new("onboarding-existing");
+        let store = open_store(&directory);
+        let bytes = activated_credential_bytes(*b"existing-dev-001", 0x61);
+        let staging = directory.0.join("existing-import.rdpkey");
+        fs::write(&staging, bytes).unwrap();
+        let imported = store
+            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+        write_onboarding_credential(&store, &bytes);
+
+        let reconciled = store.reconcile_onboarding_publication().unwrap();
+        assert!(reconciled.finalized_active_artifact);
+        assert_eq!(
+            reconciled
+                .active_profile
+                .as_ref()
+                .map(|profile| &profile.credential),
+            Some(&imported)
+        );
+        assert_eq!(
+            fs::read(store.runtime_paths().unwrap().credential).unwrap(),
+            bytes
+        );
+        assert!(!store.onboarding_credential_path().exists());
+        fs::remove_file(staging).unwrap();
+    }
+
+    #[test]
+    fn reconciliation_never_replaces_a_different_same_device_credential() {
+        let directory = TestDirectory::new("onboarding-conflict");
+        let store = open_store(&directory);
+        let device_id = *b"conflict-dev-001";
+        let original = activated_credential_bytes(device_id, 0x71);
+        let conflicting = activated_credential_bytes(device_id, 0x72);
+        let staging = directory.0.join("original-import.rdpkey");
+        fs::write(&staging, original).unwrap();
+        let original_summary = store
+            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+        write_onboarding_credential(&store, &conflicting);
+
+        assert!(matches!(
+            store.reconcile_onboarding_publication(),
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("different credential")
+        ));
+        assert_eq!(
+            fs::read(store.runtime_paths().unwrap().credential).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read(store.onboarding_credential_path()).unwrap(),
+            conflicting
+        );
+        assert_eq!(
+            store.snapshot().unwrap().active_profile_key,
+            Some(original_summary.device_id)
+        );
+        fs::remove_file(staging).unwrap();
     }
 
     #[test]

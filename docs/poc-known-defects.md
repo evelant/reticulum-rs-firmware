@@ -246,14 +246,17 @@ proof unless a failing test promotes one into a release blocker.
 - USB Serial/JTAG remains the provisioning/recovery bearer and was the first
   physically qualified authenticated bearer. The session and logical API are
   bearer-neutral, and the opt-in BLE profile now has bounded powered
-  qualification carrying the same ordered RDA1 stream under suite 3. The Wi-Fi
-  profile remains implemented but not powered-qualified. Both wireless
-  profiles still require a credential established by the USB profile. The
-  native client now has an alpha system-file import path: TypeScript copies an
+  qualification carrying the same ordered RDA1 stream under suite 3. BLE now
+  supports GPIO21/passkey-bound, fileless phone onboarding with Rust-owned
+  app-private credential publication; both E290s completed that flow, remained
+  available as device-keyed profiles, and passed explicit switching in both
+  directions. The Wi-Fi profile remains implemented but not powered-qualified
+  and still requires a pre-established credential. The native client also
+  retains an alpha system-file import fallback: TypeScript copies an
   operator-selected artifact into app-owned staging without decoding its
   bytes, Rust validates and create-only publishes the canonical credential,
-  and the E290 device ID supplies the exact BLE advertised-name selector.
-  This implements and host-tests fresh-install sandbox seeding and removes
+  and the E290 device ID supplies the exact BLE advertised-name selector. This
+  implements and host-tests fresh-install sandbox seeding and removes
   first-match selection from the app source. The
   [bounded physical iOS proof](e290-expo-ios-ble-lora-proof.md) additionally
   covers one system-picker import into a signed Release, exact-E290 foreground
@@ -275,10 +278,11 @@ proof unless a failing test promotes one into a release blocker.
   authentication and integrity but no application-layer confidentiality.
   Expo SDK 57 also retains Android's content-provider read grant without
   exposing a release operation; iOS's picker-created temporary copy is deleted
-  after app-owned staging. Phone-native pairing, per-client revocation, an
-  Android grant-release owner, identity-bound preview/install, Keychain/
-  Keystore storage, backup exclusion, stronger post-alpha wireless
-  authentication policy, and full recovery UX remain deferred. Managed host
+  after app-owned staging. Per-client revocation, an Android grant-release
+  owner, identity-bound import preview/install, Keychain/Keystore storage,
+  backup exclusion, stronger post-alpha wireless authentication policy,
+  independently revocable multi-phone authority, factory-reset/recovery UX,
+  and the full mobile lifecycle matrix remain deferred. Managed host
   profiles expose secret-free initialization, pairing, Pending resume/abort,
   and reset progress through the Expo client. Powered evidence covers one
   managed first run, real reset,
@@ -397,21 +401,56 @@ proof unless a failing test promotes one into a release blocker.
   plus the direct macOS qualifier path. The later signed-iOS run qualifies one
   Expo native-module foreground path and automatic cold-launch foreground
   reconnect, not a foreground/background/restoration lifecycle matrix. A sole
-  BLE central must
-  enable indications within 15 seconds, then reach its first authenticated
-  `Established` session within one absolute, non-refreshing 30-second deadline;
+  BLE central must enable indications within four minutes and reach its first
+  authenticated `Established` session within one absolute, non-refreshing
+  five-minute deadline measured from authoritative Bluetooth authentication.
+  These deadlines deliberately overlap on a restored bond: time spent waiting
+  for CCCD subscription also consumes the application-authentication window;
   partial framing and stalled handshake flights do not extend ownership.
   Same-link authenticated idle replacement and attempt-rate policy remain
-  deferred. Setup and teardown operations are
-  deadline-bound, and a late timed-out operation cannot tear down a replacement
-  owned by the same `ForegroundBleCentral`. The React Native driver still wraps
+  deferred. Individual setup and teardown operations retain thirty-second
+  bounds, while the CoreBluetooth connection attempt has a separate 90-second
+  deadline because iOS supplies no native connection timeout and a board reboot
+  may delay both success and failure callbacks past ten seconds. A late
+  timed-out operation cannot tear down a replacement owned by the same
+  `ForegroundBleCentral`. The React Native driver still wraps
   one process-global `BleManager`, however: after disposing one central, a
   stale native promise from that instance could later disconnect a new
   instance's connection to the same peripheral. The current app keeps one
   exclusive foreground owner, but Fast Refresh/restoration and any overlapping
   owner require the tracked module-wide/cross-instance ownership epoch (P2)
-  before qualification. The opt-in
-  Wi-Fi constructor loads a fixed app-private activated credential, opens a
+  before qualification. The app-private profile store can retain multiple
+  device-keyed credentials and SQLite databases, but the alpha profile manager
+  still opens only one board at a time. A nearby candidate whose advertised name
+  matches a stored credential's expected BLE name must be presented as already
+  known and route to **Switch**, not a new pairing ceremony. That name is only an
+  unauthenticated discovery hint; same-device re-pairing when the name is absent
+  or misleading is not qualified. The board can activate a fresh credential
+  before the create-only mobile profile rejects replacing a different
+  credential for the same device ID, leaving explicit reconciliation work
+  rather than a safe implicit rotation. Canonical Active scratch artifacts from
+  a late profile-publication failure are now exact-readback reconciled and
+  finalized automatically; pending, ambiguous, malformed, and different
+  same-device artifacts remain untouched and fail closed. Multi-phone use of
+  one board is a separate limit: the device credential authority can retain
+  independent application credentials, while the current E290 BLE profile
+  retains one durable phone bond and a newly admitted phone replaces it. The
+  profile manager has no delete, credential revocation, or
+  credential-replacement action yet; switching back recovers the prior local
+  database after choosing the wrong board but does not revoke the authority
+  created on that board. The profile flow also has no factory-reprovision
+  recovery yet. A full board erase rotates the identity-derived BLE address but
+  retains the MAC-derived advertised name and device-API ID; the saved-name
+  guard correctly refuses to start a second pairing ceremony, while create-only
+  storage cannot replace the old credential. Until an explicit
+  remove/revoke/reprovision action exists, clearing this alpha app's complete
+  private data is the only local recovery. This must be fixed before a
+  user-facing factory-reset operation ships. A bond command that times out after
+  crossing to the flash owner correctly disables BLE until reboot, but the
+  e-paper terminal still says `PAIR FAILED / PRESS 21 TO TRY AGAIN`; that rare
+  ambiguity needs a neutral restart-required view before recovery UX is
+  complete. The opt-in Wi-Fi constructor loads a fixed app-private activated
+  credential, opens a
   finite-timeout raw TCP stream, and authenticates with the separately bound
   suite-2 profile. Its localhost partial-I/O handshake passes, but endpoint
   selection and SoftAP joining are still development-build/manual operations;

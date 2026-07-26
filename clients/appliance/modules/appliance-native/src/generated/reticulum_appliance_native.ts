@@ -6,7 +6,7 @@
 import nativeModule from "./reticulum_appliance_native-ffi";
 import { type UniffiRustFutureContinuationCallback, type UniffiForeignFutureDroppedCallback, type UniffiForeignFutureDroppedCallbackStruct,
 } from "./reticulum_appliance_native-ffi";
-import { type FfiConverter, type UniffiByteArray, type UniffiGcObject, type UniffiHandle, type UniffiObjectFactory, AbstractFfiConverterByteArray, FfiConverterArray, FfiConverterArrayBuffer, FfiConverterInt32, FfiConverterObject, FfiConverterOptional, FfiConverterUInt16, FfiConverterUInt32, FfiConverterUInt64, FfiConverterUInt8, RustBuffer, UniffiAbstractObject, UniffiEnum, UniffiError, UniffiInternalError, UniffiRustCaller, destructorGuardSymbol, pointerLiteralSymbol, uniffiCreateFfiConverterString, uniffiCreateRecord, uniffiRustCallAsync, uniffiTypeNameSymbol, variantOrdinalSymbol,
+import { type FfiConverter, type UniffiByteArray, type UniffiGcObject, type UniffiHandle, type UniffiObjectFactory, AbstractFfiConverterByteArray, FfiConverterArray, FfiConverterArrayBuffer, FfiConverterBool, FfiConverterInt32, FfiConverterObject, FfiConverterOptional, FfiConverterUInt16, FfiConverterUInt32, FfiConverterUInt64, FfiConverterUInt8, RustBuffer, UniffiAbstractObject, UniffiEnum, UniffiError, UniffiInternalError, UniffiRustCaller, destructorGuardSymbol, pointerLiteralSymbol, uniffiCreateFfiConverterString, uniffiCreateRecord, uniffiRustCallAsync, uniffiTypeNameSymbol, variantOrdinalSymbol,
 } from "@ubjs/core";
 const uniffiCaller = new UniffiRustCaller(() => ({ code: 0 }));
 
@@ -138,7 +138,7 @@ export type NativeBleGattProfile = {
      */
     txUuid: string,
     /**
-     * Authenticated-read confirmation characteristic UUID.
+     * Public retained-link readiness characteristic UUID.
      */
     securityConfirmationUuid: string,
     /**
@@ -781,6 +781,58 @@ const FfiConverterTypeNativeBridgeContract = (() => {
              FfiConverterUInt32.allocationSize(value.maxNomadPagePathBytes) +
              FfiConverterUInt32.allocationSize(value.maxNomadPageBytes) +
              FfiConverterUInt64.allocationSize(value.maxNomadRequestTimestampUnixMs);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
+/**
+ * Authoritative result of reconciling app-private BLE onboarding publication.
+ */
+export type NativeOnboardingPublicationReconciliation = {
+    /**
+     * Validated profile selected by the store after reconciliation, if any.
+     */
+    activeProfile?: NativeProfileSummary,
+    /**
+     * Whether this call finalized and removed one canonical Active onboarding artifact.
+     */
+    finalizedActiveArtifact: boolean
+}
+
+/**
+ * Generated factory for {@link NativeOnboardingPublicationReconciliation} record objects.
+ */
+export const NativeOnboardingPublicationReconciliation = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<NativeOnboardingPublicationReconciliation, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<NativeOnboardingPublicationReconciliation>,
+    });
+})();
+
+const FfiConverterTypeNativeOnboardingPublicationReconciliation = (() => {
+    type TypeName = NativeOnboardingPublicationReconciliation;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                activeProfile: FfiConverterOptionalTypeNativeProfileSummary.read(from),
+                finalizedActiveArtifact: FfiConverterBool.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterOptionalTypeNativeProfileSummary.write(value.activeProfile, into);
+            FfiConverterBool.write(value.finalizedActiveArtifact, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterOptionalTypeNativeProfileSummary.allocationSize(value.activeProfile) +
+             FfiConverterBool.allocationSize(value.finalizedActiveArtifact);
 
         }
     };
@@ -4012,10 +4064,9 @@ export interface NativeProfileStoreLike {
 /**
  * Select one existing validated profile for the next native appliance.
  *
- * The current Expo UI remains single-profile and does not call this yet;
- * exposing the native operation establishes the future board-switching
- * boundary without putting credential bytes or filesystem paths in
- * TypeScript.
+ * The Expo client calls this only after closing the current native owner,
+ * then opens a fresh appliance against the selected profile. Credential
+ * bytes and filesystem paths remain inside Rust.
  */
     activateProfile(deviceId: string) /*throws*/: NativeProfileSummary;
 /**
@@ -4026,6 +4077,19 @@ export interface NativeProfileStoreLike {
  * preserved.
  */
     credentialStatus() /*throws*/: NativeCredentialStatus;
+/**
+ * Reconcile a post-activation BLE onboarding artifact with the profile store.
+ *
+ * A canonical Active artifact is installed and selected idempotently,
+ * exact-read back, and then removed. A different credential can never
+ * replace an existing device profile. When the artifact is already absent,
+ * the current validated active profile is returned without mutation so a
+ * caller can reconcile a failure reported after artifact removal.
+ *
+ * Pending, ambiguous, or malformed artifacts fail closed and remain
+ * untouched.
+ */
+    reconcileOnboardingPublication() /*throws*/: NativeOnboardingPublicationReconciliation;
 /**
  * Return all validated profiles and the currently active profile key.
  */
@@ -4084,10 +4148,9 @@ private constructor(pointer: UniffiHandle) {
 /**
  * Select one existing validated profile for the next native appliance.
  *
- * The current Expo UI remains single-profile and does not call this yet;
- * exposing the native operation establishes the future board-switching
- * boundary without putting credential bytes or filesystem paths in
- * TypeScript.
+ * The Expo client calls this only after closing the current native owner,
+ * then opens a fresh appliance against the selected profile. Credential
+ * bytes and filesystem paths remain inside Rust.
  */
     activateProfile(deviceId: string): NativeProfileSummary /*throws*/ {
     return ((__rb: Uint8Array) => {
@@ -4126,6 +4189,36 @@ private constructor(pointer: UniffiHandle) {
             /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
             /*caller:*/ (callStatus) => {
                 return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_credential_status(
+                uniffiTypeNativeProfileStoreObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Reconcile a post-activation BLE onboarding artifact with the profile store.
+ *
+ * A canonical Active artifact is installed and selected idempotently,
+ * exact-read back, and then removed. A different credential can never
+ * replace an existing device profile. When the artifact is already absent,
+ * the current validated active profile is returned without mutation so a
+ * caller can reconcile a failure reported after artifact removal.
+ *
+ * Pending, ambiguous, or malformed artifacts fail closed and remain
+ * untouched.
+ */
+    reconcileOnboardingPublication(): NativeOnboardingPublicationReconciliation /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeOnboardingPublicationReconciliation.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_reconcile_onboarding_publication(
                 uniffiTypeNativeProfileStoreObjectFactory.clonePointer(this),
                 callStatus);
             },
@@ -4384,11 +4477,14 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open() !== 47732) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile() !== 60459) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile() !== 43056) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status() !== 48667) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication() !== 44581) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_snapshot() !== 10974) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_snapshot");
@@ -4413,6 +4509,7 @@ export default Object.freeze({
     FfiConverterTypeNativeBridgeContract,
     FfiConverterTypeNativeCredentialStatus,
     FfiConverterTypeNativeCredentialSummary,
+    FfiConverterTypeNativeOnboardingPublicationReconciliation,
     FfiConverterTypeNativeProfileStore,
     FfiConverterTypeNativeProfileStoreSnapshot,
     FfiConverterTypeNativeProfileSummary,

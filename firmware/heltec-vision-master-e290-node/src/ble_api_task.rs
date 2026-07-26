@@ -1,10 +1,10 @@
 //! E290 secure BLE onboarding and authenticated RDA1 device-API owner.
 //!
 //! This proof exposes one write-with-response RX characteristic, one
-//! indication-only TX characteristic, and one public authenticated-read
-//! security confirmation. RX and TX characteristic values are fragments of the
-//! existing ordered RDA1 byte stream, not a second framing layer. The GPIO21
-//! physical presence opens a connection-bound DisplayOnly SMP window; only an
+//! indication-only TX characteristic, and one public retained-link readiness
+//! marker. RX and TX characteristic values are fragments of the existing
+//! ordered RDA1 byte stream, not a second framing layer. The GPIO21 physical
+//! presence opens a connection-bound DisplayOnly SMP window; only an
 //! authenticated, durable bond may then carry the BLE-bound live pairing
 //! protocol. A restored authenticated bond enters the ordinary RDA1 session
 //! path without reopening physical pairing.
@@ -48,8 +48,8 @@ use reticulum_device_api_session::{
 use reticulum_heltec_vision_master_e290_node::config as product_config;
 use reticulum_heltec_vision_master_e290_node::{
     ble_api_profile::{
-        self as profile, ApplicationPairingIdleDeadline, IndicationGate, PreAuthenticationDeadline,
-        PreAuthenticationDeadlineStatus,
+        self as profile, ApplicationPairingIdleDeadline, BleBondExchangeResult, IndicationGate,
+        PreAuthenticationDeadline, PreAuthenticationDeadlineStatus,
     },
     ble_bond_handoff::{BearerBleBondHandoff, BleBondCommitCommand, BleBondCommitOutcome},
     display_handoff::{DisplayPublisher, DisplayRenderOutcome, DisplayRequestId},
@@ -213,12 +213,14 @@ struct ApiService {
     /// Ordered device-to-phone RDA1 bytes.
     #[characteristic(uuid = gatt_profile::TX_UUID_U128, indicate)]
     tx: GattFragment,
-    /// Public value readable only after the GATT link is authenticated.
+    /// Public readiness marker changed only after authenticated bond durability.
+    ///
+    /// The read itself is intentionally public: polling `WAIT` must not start
+    /// platform security before firmware observes GPIO21 and requests SMP.
     #[characteristic(
         uuid = gatt_profile::SECURITY_CONFIRMATION_UUID_U128,
         read,
-        value = gatt_profile::SECURITY_CONFIRMATION_PENDING_VALUE,
-        permissions(read = authenticated)
+        value = gatt_profile::SECURITY_CONFIRMATION_PENDING_VALUE
     )]
     security_confirmation: [u8; 4],
 }
@@ -333,7 +335,7 @@ pub(crate) fn initialize_controller(
 #[embassy_executor::task]
 pub async fn run(
     connector: BleConnector<'static>,
-    base_mac: [u8; 6],
+    advertising: profile::BleAdvertisingParameters,
     handoffs: BleHandoffs,
     session_parameters: ServerParameters,
     session_rng: Trng,
@@ -343,7 +345,7 @@ pub async fn run(
     let controller: ExternalController<_, 1> = ExternalController::new(connector);
     let host_result = run_host(
         controller,
-        base_mac,
+        advertising,
         handoffs,
         session_parameters,
         session_rng,
@@ -360,7 +362,7 @@ pub async fn run(
 
 async fn run_host<C>(
     controller: C,
-    base_mac: [u8; 6],
+    advertising: profile::BleAdvertisingParameters,
     handoffs: BleHandoffs,
     session_parameters: ServerParameters,
     mut session_rng: Trng,
@@ -369,7 +371,7 @@ async fn run_host<C>(
     C: Controller,
 {
     let resources = BLE_RESOURCES.init(HostResources::new());
-    let address = Address::random(profile::static_random_address(base_mac));
+    let address = Address::random(advertising.static_random_address());
     let BlePhysicalOwners {
         pairing_button,
         display_publisher,
@@ -390,6 +392,10 @@ async fn run_host<C>(
     let authoritative_bond_identity = restored_bond
         .as_ref()
         .map(|bond| trouble_bond(bond).identity);
+    pairing_diagnostic!(
+        "e290-ble-pairing-diagnostic event=boot-bond restored={}",
+        restored_bond.is_some()
+    );
     if let Some(bond) = restored_bond.as_ref()
         && stack.add_bond_information(trouble_bond(bond)).is_err()
     {
@@ -409,7 +415,8 @@ async fn run_host<C>(
     #[cfg(reticulum_e290_ble_startup_diagnostic)]
     esp_println::println!("e290-ble-startup-diagnostic stage=trouble-host-build RETURNED OK");
 
-    let local_name_bytes = BLE_LOCAL_NAME.init(gatt_profile::local_name(base_mac));
+    let local_name_bytes =
+        BLE_LOCAL_NAME.init(gatt_profile::local_name(advertising.local_name_mac()));
     let local_name = match str::from_utf8(local_name_bytes) {
         Ok(name) => name,
         Err(_) => {
@@ -596,6 +603,7 @@ async fn serve_advertising<C: Controller>(
             lifecycle_started,
             disconnected_event_observed,
             remove_volatile_bond,
+            purge_non_authoritative_bonds,
             retain_only_bond,
             disable_bearer_until_reboot,
         } = connection_outcome;
@@ -616,6 +624,23 @@ async fn serve_advertising<C: Controller>(
                 connection.get()
             );
             core::future::pending::<()>().await;
+        }
+        if purge_non_authoritative_bonds {
+            for candidate in stack.get_bond_information() {
+                let authoritative = authoritative_bond_identity
+                    .is_some_and(|identity| identity.match_identity(&candidate.identity));
+                if !authoritative && stack.remove_bond_information(candidate.identity).is_err() {
+                    error!(
+                        "e290-node stage=ble-api status=DISABLED reason=volatile-bond-scrub-fault connection={}",
+                        connection.get()
+                    );
+                    core::future::pending::<()>().await;
+                }
+            }
+            info!(
+                "e290-node stage=ble-api status=PAIRING-RETRY-READY connection={} action=non-authoritative-bonds-scrubbed",
+                connection.get()
+            );
         }
         if let Some(identity) = retain_only_bond {
             for candidate in stack.get_bond_information() {
@@ -666,11 +691,11 @@ async fn serve_advertising<C: Controller>(
         }
         if disable_bearer_until_reboot {
             pairing_diagnostic!(
-                "e290-ble-pairing-diagnostic event=fail-stop reason=fresh-security-not-durable connection={}",
+                "e290-ble-pairing-diagnostic event=fail-stop reason=bond-commit-not-durable connection={}",
                 connection.get()
             );
             error!(
-                "e290-node stage=ble-api status=DISABLED reason=fresh-security-not-durable connection={} recovery=reboot-from-authoritative-bond",
+                "e290-node stage=ble-api status=DISABLED reason=bond-commit-not-durable connection={} recovery=reboot-from-authoritative-bond",
                 connection.get()
             );
             core::future::pending::<()>().await;
@@ -839,6 +864,7 @@ struct ServeConnectionOutcome {
     lifecycle_started: bool,
     disconnected_event_observed: bool,
     remove_volatile_bond: Option<Identity>,
+    purge_non_authoritative_bonds: bool,
     retain_only_bond: Option<Identity>,
     disable_bearer_until_reboot: bool,
 }
@@ -879,6 +905,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
             lifecycle_started: false,
             disconnected_event_observed: false,
             remove_volatile_bond: None,
+            purge_non_authoritative_bonds: false,
             retain_only_bond: None,
             disable_bearer_until_reboot: false,
         };
@@ -902,6 +929,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
             lifecycle_started: false,
             disconnected_event_observed: false,
             remove_volatile_bond: None,
+            purge_non_authoritative_bonds: false,
             retain_only_bond: None,
             disable_bearer_until_reboot: false,
         };
@@ -915,6 +943,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
             lifecycle_started: true,
             disconnected_event_observed: false,
             remove_volatile_bond: None,
+            purge_non_authoritative_bonds: false,
             retain_only_bond: None,
             disable_bearer_until_reboot: false,
         };
@@ -940,6 +969,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
     let mut remove_volatile_bond: Option<Identity> = None;
     let mut retain_only_bond: Option<Identity> = None;
     let mut fresh_security_pending_durability = false;
+    let mut bond_reboot_required = false;
     let mut mode = BleLinkMode::AwaitingPresence;
     let mut pending_pairing_exclusive = false;
     let mut security_requested_at: Option<Instant> = None;
@@ -998,8 +1028,14 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         }
         if button_observation.started_at().is_some_and(|started_at| {
             pairing_time().get().saturating_sub(started_at.get())
-                >= profile::HANDOFF_EXCHANGE_TIMEOUT_MS
+                >= profile::BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS
         }) {
+            pairing_diagnostic!(
+                "e290-ble-pairing-diagnostic event=button-handoff-timeout mode={:?} pending_exclusive={} connection={}",
+                mode,
+                pending_pairing_exclusive,
+                connection_id.get()
+            );
             warn!(
                 "e290-node stage=ble-api status=LINK-RESET reason=button-handoff-timeout connection={}",
                 connection_id.get()
@@ -1129,8 +1165,10 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                         connection_id.get()
                     );
                     // From this point Trouble may install or replace volatile
-                    // key material. Only an exact Durable reply clears the
-                    // boot-scoped fail-stop owner.
+                    // key material. A failure before the durable-store handoff
+                    // can scrub all non-authoritative host bonds and advertise
+                    // again; an attempted store commit remains reboot-only
+                    // because its late outcome may be ambiguous.
                     fresh_security_pending_durability = true;
                     if raw.request_security().is_err() {
                         warn!(
@@ -1797,7 +1835,10 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                 };
                 if poll_pairing_display(display_publisher, &mut display_state).is_err()
                     || !security_level.authenticated()
-                    || display_state != PairingDisplayState::Rendered
+                    || !matches!(
+                        display_state,
+                        PairingDisplayState::Pending(_) | PairingDisplayState::Rendered
+                    )
                     || !fresh_bond.identity.match_identity(&raw.peer_identity())
                 {
                     warn!(
@@ -1824,7 +1865,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                 )
                 .await;
                 match outcome {
-                    Some(BleBondCommitOutcome::Durable) => {
+                    BleBondExchangeResult::Durable => {
                         retain_only_bond = Some(identity);
                         authoritative_bond_identity = Some(identity);
                         fresh_security_pending_durability = false;
@@ -1854,7 +1895,10 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                             connection_id.get()
                         );
                     }
-                    Some(BleBondCommitOutcome::Failed) | None => {
+                    BleBondExchangeResult::ExplicitFailure
+                    | BleBondExchangeResult::TimedOutBeforeSend
+                    | BleBondExchangeResult::TimedOutAfterSend => {
+                        bond_reboot_required = outcome.bond_reboot_required();
                         warn!(
                             "e290-node stage=ble-api status=LINK-RESET reason=ble-bond-not-durable connection={}",
                             connection_id.get()
@@ -1896,10 +1940,11 @@ async fn serve_connection<C: Controller, P: PacketPool>(
 
     indication.reset();
     pairing_diagnostic!(
-        "e290-ble-pairing-diagnostic event=connection-outcome mode={:?} display={:?} fresh_security_pending={} remove_volatile_bond={} retain_only_bond={} connection={}",
+        "e290-ble-pairing-diagnostic event=connection-outcome mode={:?} display={:?} fresh_security_pending={} bond_reboot_required={} remove_volatile_bond={} retain_only_bond={} connection={}",
         mode,
         display_state,
         fresh_security_pending_durability,
+        bond_reboot_required,
         remove_volatile_bond.is_some(),
         retain_only_bond.is_some(),
         connection_id.get()
@@ -1931,12 +1976,17 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         display_state = PairingDisplayState::Cleared;
     }
     let _ = display_state;
+    let fresh_security_disposition = profile::FreshSecurityDisposition::classify(
+        fresh_security_pending_durability,
+        bond_reboot_required,
+    );
     ServeConnectionOutcome {
         lifecycle_started: true,
         disconnected_event_observed,
         remove_volatile_bond,
+        purge_non_authoritative_bonds: fresh_security_disposition.scrub_non_authoritative_bonds(),
         retain_only_bond,
-        disable_bearer_until_reboot: fresh_security_pending_durability,
+        disable_bearer_until_reboot: fresh_security_disposition.disable_until_reboot(),
     }
 }
 
@@ -2092,7 +2142,7 @@ async fn exchange_ble_bond(
     handoff: &mut BearerBleBondHandoff<CriticalSectionRawMutex>,
     command: BleBondCommitCommand,
     connection: ConnectionId,
-) -> Option<BleBondCommitOutcome> {
+) -> BleBondExchangeResult {
     let mut pending = Some(command);
     let started_at = Instant::now();
     loop {
@@ -2104,15 +2154,18 @@ async fn exchange_ble_bond(
         if pending.is_none() {
             while let Some(reply) = handoff.try_receive_reply() {
                 if reply.connection() == connection {
-                    return Some(reply.outcome());
+                    return match reply.outcome() {
+                        BleBondCommitOutcome::Durable => BleBondExchangeResult::Durable,
+                        BleBondCommitOutcome::Failed => BleBondExchangeResult::ExplicitFailure,
+                    };
                 }
             }
         }
         if started_at.elapsed() >= Duration::from_millis(profile::HANDOFF_EXCHANGE_TIMEOUT_MS) {
-            // If the command crossed the handoff, the node still owns the
-            // exact bond and may complete it. The caller treats this timeout as
-            // non-durable and fail-stops BLE for the remainder of the boot.
-            return None;
+            // Only a command that crossed the handoff can still complete late.
+            // Pure queue pressure retains the exact command here and remains
+            // immediately retryable after this connection is scrubbed.
+            return BleBondExchangeResult::timed_out(pending.is_none());
         }
         Timer::after_millis(profile::API_POLL_INTERVAL_MS).await;
     }

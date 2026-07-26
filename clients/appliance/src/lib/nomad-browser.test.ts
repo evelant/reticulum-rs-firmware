@@ -398,6 +398,97 @@ describe("Nomad browser controller", () => {
     expect(controller.state).toEqual({ status: "idle" });
   });
 
+  test("reset ignores a deferred start result and does not begin polling", async () => {
+    const starting = deferred<NomadFetchStartResponse>();
+    let polls = 0;
+    const client: NomadFetchClient = {
+      async nomadFetchStart() {
+        return starting.promise;
+      },
+      async nomadFetchPoll() {
+        polls += 1;
+        return { state: "ready", page: "stale page" };
+      },
+    };
+    const controller = new NomadBrowserController(client, {
+      createIdempotencyKey: () => "22".repeat(16),
+      now: () => 700,
+    });
+
+    const running = controller.start("11".repeat(16));
+    await flushPromises();
+    expect(controller.state.status).toBe("starting");
+
+    controller.reset();
+    expect(controller.state).toEqual({ status: "idle" });
+    starting.resolve(accepted());
+    await running;
+
+    expect(polls).toBe(0);
+    expect(controller.state).toEqual({ status: "idle" });
+  });
+
+  test("reset ignores a deferred poll result", async () => {
+    const polling = deferred<NomadFetchPollResponse>();
+    const client: NomadFetchClient = {
+      async nomadFetchStart() {
+        return accepted();
+      },
+      async nomadFetchPoll() {
+        return polling.promise;
+      },
+    };
+    const controller = new NomadBrowserController(client, {
+      createIdempotencyKey: () => "22".repeat(16),
+      now: () => 800,
+    });
+
+    const running = controller.start("11".repeat(16));
+    await flushPromises();
+    expect(controller.state.status).toBe("pending");
+
+    controller.reset();
+    expect(controller.state).toEqual({ status: "idle" });
+    polling.resolve({ state: "ready", page: "wrong appliance" });
+    await running;
+
+    expect(controller.state).toEqual({ status: "idle" });
+  });
+
+  test("reset cancels a scheduled poll and prevents another request", async () => {
+    const scheduled: ScheduledPoll[] = [];
+    let polls = 0;
+    const client: NomadFetchClient = {
+      async nomadFetchStart() {
+        return accepted();
+      },
+      async nomadFetchPoll() {
+        polls += 1;
+        return { state: "pending", phase: "path_lookup" };
+      },
+    };
+    const controller = new NomadBrowserController(client, {
+      createIdempotencyKey: () => "22".repeat(16),
+      now: () => 900,
+      schedule: recordingScheduler(scheduled),
+    });
+
+    const running = controller.start("11".repeat(16));
+    await flushPromises();
+    expect(polls).toBe(1);
+    expect(scheduled).toHaveLength(1);
+
+    controller.reset();
+    await running;
+    expect(scheduled[0]?.cancelled).toBeTrue();
+    expect(controller.state).toEqual({ status: "idle" });
+
+    scheduled[0]?.callback();
+    await flushPromises();
+    expect(polls).toBe(1);
+    expect(controller.state).toEqual({ status: "idle" });
+  });
+
   test("dispose cancels a scheduled poll and ignores later work", async () => {
     const scheduled: ScheduledPoll[] = [];
     const client: NomadFetchClient = {

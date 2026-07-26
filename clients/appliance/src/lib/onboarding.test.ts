@@ -81,7 +81,7 @@ describe("onboarding recovery presentation", () => {
 });
 
 describe("native credential import presentation", () => {
-  test("labels the alpha import honestly and does not imply in-app BLE pairing", () => {
+  test("labels the fallback import honestly and points to the appliance manager", () => {
     const presentation = onboardingPresentation({
       available: true,
       method: "credential_import",
@@ -97,10 +97,8 @@ describe("native credential import presentation", () => {
     expect(presentation.startLabel).toBe("Choose credential");
     expect(presentation.identifierLabel).toBeNull();
     expect(presentation.instruction).toContain("qualified USB pairing workflow");
-    expect(presentation.instruction).toContain("selecting another board");
-    expect(presentation.instruction).toContain("single-board UI");
-    expect(presentation.instruction).toContain("Clearing local app data");
-    expect(presentation.instruction).toContain("Full in-app BLE pairing remains future work");
+    expect(presentation.instruction).toContain("Each valid board is retained");
+    expect(presentation.instruction).toContain("use Appliances to switch boards");
   });
 
   test("marks an imported credential ready and shows its exact target node", () => {

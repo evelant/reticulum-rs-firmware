@@ -10,14 +10,17 @@ use crate::usb_authenticated_session::UsbAuthenticatedSessionPhase;
 /// Milliseconds allowed for the central to confirm one indication.
 pub const INDICATION_CONFIRM_TIMEOUT_MS: u64 = 5_000;
 /// Milliseconds allowed for a connected central to enable TX indications.
-pub const CCCD_SUBSCRIBE_TIMEOUT_MS: u64 = 15_000;
+pub const CCCD_SUBSCRIBE_TIMEOUT_MS: u64 = 240_000;
 /// Milliseconds allowed to reach the first authenticated `Established` phase.
 ///
-/// This absolute, non-refreshing deadline starts after the indication CCCD and
-/// connection lifecycle have been accepted. Partial framing, admission
-/// pressure, and handshake progress do not extend it. Once authentication
-/// succeeds, authenticated idle/session policy is a separate concern.
-pub const PRE_AUTHENTICATION_TIMEOUT_MS: u64 = 30_000;
+/// This absolute, non-refreshing deadline starts when an authenticated,
+/// authoritative Bluetooth peer enters the ordinary device-API lifecycle. On a
+/// restored bond that can precede indication subscription, so this window
+/// deliberately overlaps the independent CCCD deadline. Partial framing,
+/// admission pressure, and handshake progress do not extend it. Once
+/// authentication succeeds, authenticated idle/session policy is a separate
+/// concern.
+pub const PRE_AUTHENTICATION_TIMEOUT_MS: u64 = 300_000;
 /// Milliseconds allowed for the one-time OS Bluetooth pairing ceremony.
 ///
 /// Trouble 0.6 applies Bluetooth's fixed 30-second SMP inactivity timer. Keep
@@ -41,7 +44,13 @@ pub const DISCONNECT_DRAIN_PROLONGED_LOG_MS: u64 = 5_000;
 /// A moved command remains owned by the bounded handoff or node actor. A bond
 /// timeout additionally fail-stops BLE for the boot, so a late durable outcome
 /// can never authorize Trouble's provisional bond in that incarnation.
-pub const HANDOFF_EXCHANGE_TIMEOUT_MS: u64 = 10_000;
+pub const HANDOFF_EXCHANGE_TIMEOUT_MS: u64 = 60_000;
+/// Maximum time one nonblocking GPIO observation may remain node-owned.
+///
+/// Button sampling is human-facing and can overlap flash or radio work. Give
+/// it a deliberately larger alpha envelope than atomic command exchanges so a
+/// slow scheduler turn does not masquerade as a failed pairing ceremony.
+pub const BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS: u64 = 120_000;
 /// Milliseconds of application-pairing idle time admitted per connection.
 pub const APPLICATION_PAIRING_IDLE_TIMEOUT_MS: u64 = 300_000;
 /// Number of BLE links admitted by this proof.
@@ -56,16 +65,124 @@ pub const CONTROLLER_ACTIVITY_MAX: usize = 2;
 /// L2CAP channels retained for signaling and ATT.
 pub const L2CAP_CHANNELS_MAX: usize = 2;
 
-/// Derive a stable static-random BLE address from the E290 eFuse EUI-48.
+/// Post-connection cleanup for one attempted fresh SMP ceremony.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FreshSecurityDisposition {
+    /// No provisional security material exists.
+    Clean,
+    /// Scrub non-authoritative host bonds and resume advertising.
+    ScrubAndRetry,
+    /// Scrub host bonds but reboot before trusting the durable bond store.
+    ScrubAndDisable,
+}
+
+impl FreshSecurityDisposition {
+    /// Classify cleanup from the two monotonic ceremony facts.
+    pub const fn classify(pending_durability: bool, bond_reboot_required: bool) -> Self {
+        match (pending_durability, bond_reboot_required) {
+            (false, _) => Self::Clean,
+            (true, false) => Self::ScrubAndRetry,
+            (true, true) => Self::ScrubAndDisable,
+        }
+    }
+
+    /// Whether Trouble's non-authoritative in-memory bonds must be removed.
+    pub const fn scrub_non_authoritative_bonds(self) -> bool {
+        !matches!(self, Self::Clean)
+    }
+
+    /// Whether a possibly late flash-commit outcome requires reboot remount.
+    pub const fn disable_until_reboot(self) -> bool {
+        matches!(self, Self::ScrubAndDisable)
+    }
+}
+
+/// Exact result of handing one freshly negotiated bond to the flash owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleBondExchangeResult {
+    /// The flash owner confirmed the exact durable successor.
+    Durable,
+    /// The flash owner definitively rejected the command.
+    ExplicitFailure,
+    /// Queue pressure retained the command locally until the exchange deadline.
+    TimedOutBeforeSend,
+    /// The command crossed the handoff, but no exact reply arrived by the deadline.
+    TimedOutAfterSend,
+}
+
+impl BleBondExchangeResult {
+    /// Classify a deadline from whether the command crossed the owning handoff.
+    pub const fn timed_out(command_sent: bool) -> Self {
+        if command_sent {
+            Self::TimedOutAfterSend
+        } else {
+            Self::TimedOutBeforeSend
+        }
+    }
+
+    /// Whether durable authority must be remounted before BLE can be trusted.
+    pub const fn bond_reboot_required(self) -> bool {
+        matches!(self, Self::ExplicitFailure | Self::TimedOutAfterSend)
+    }
+}
+
+/// Derive a stable static-random BLE address from the durable node identity.
 ///
 /// Trouble's `BdAddr` byte representation is little-endian relative to its
-/// displayed address, so the input is reversed first. Bluetooth static-random
-/// addresses require the two most-significant address bits to be `11`; those
-/// bits therefore belong in output byte 5.
-pub const fn static_random_address(eui48: [u8; 6]) -> [u8; 6] {
-    let mut address = [eui48[5], eui48[4], eui48[3], eui48[2], eui48[1], eui48[0]];
+/// displayed address, so the first six canonical identity-hash bytes are
+/// reversed. Bluetooth static-random addresses require the two
+/// most-significant address bits to be `11`; those bits therefore belong in
+/// output byte 5.
+///
+/// Ordinary boots reload the same durable Reticulum identity and therefore
+/// preserve the local address. Erasing the identity partition causes first
+/// provisioning to create a different identity and BLE address, preventing a
+/// stale phone-side bond or peripheral cache from being attached to a freshly
+/// initialized appliance.
+pub const fn static_random_address(identity_hash: [u8; 16]) -> [u8; 6] {
+    let mut address = [
+        identity_hash[5],
+        identity_hash[4],
+        identity_hash[3],
+        identity_hash[2],
+        identity_hash[1],
+        identity_hash[0],
+    ];
     address[5] = (address[5] & 0x3f) | 0xc0;
     address
+}
+
+/// Complete public inputs for BLE local addressing and human discovery.
+///
+/// The static-random address follows the durable node identity, while the
+/// unauthenticated local-name suffix remains bound to the physical board MAC.
+/// Grouping the already-derived address with its separate name input prevents
+/// the BLE task boundary from accidentally substituting one identity source
+/// for the other.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BleAdvertisingParameters {
+    static_random_address: [u8; 6],
+    local_name_mac: [u8; 6],
+}
+
+impl BleAdvertisingParameters {
+    /// Derive one boot's complete BLE advertising inputs.
+    pub const fn new(node_identity_hash: [u8; 16], local_name_mac: [u8; 6]) -> Self {
+        Self {
+            static_random_address: static_random_address(node_identity_hash),
+            local_name_mac,
+        }
+    }
+
+    /// Static-random local address derived from the durable node identity.
+    pub const fn static_random_address(self) -> [u8; 6] {
+        self.static_random_address
+    }
+
+    /// Physical MAC used only to construct the human-readable local name.
+    pub const fn local_name_mac(self) -> [u8; 6] {
+        self.local_name_mac
+    }
 }
 
 /// Failure to preserve the one-confirmation/one-fragment ownership rule.
@@ -106,7 +223,7 @@ impl PreAuthenticationDeadline {
         }
     }
 
-    /// Observe session progress at `elapsed_millis` since lifecycle acceptance.
+    /// Observe progress at `elapsed_millis` since ordinary lifecycle acceptance.
     ///
     /// The deadline is exclusive: first reaching `Established` at or after the
     /// timeout is too late. Both authenticated and expired outcomes are
@@ -240,19 +357,23 @@ const _: () = assert!(L2CAP_CHANNELS_MAX == 2);
 const _: () = assert!(INDICATION_CONFIRM_TIMEOUT_MS > 0);
 const _: () = assert!(CCCD_SUBSCRIBE_TIMEOUT_MS > INDICATION_CONFIRM_TIMEOUT_MS);
 const _: () = assert!(PRE_AUTHENTICATION_TIMEOUT_MS > CCCD_SUBSCRIBE_TIMEOUT_MS);
-const _: () = assert!(BLE_SECURITY_PAIRING_TIMEOUT_MS >= PRE_AUTHENTICATION_TIMEOUT_MS);
+const _: () = assert!(BLE_SECURITY_PAIRING_TIMEOUT_MS > 0);
 const _: () = assert!(DISCONNECT_DRAIN_RECHECK_INTERVAL_MS > 0);
 const _: () = assert!(DISCONNECT_DRAIN_PROLONGED_LOG_MS > DISCONNECT_DRAIN_RECHECK_INTERVAL_MS);
 const _: () = assert!(HANDOFF_EXCHANGE_TIMEOUT_MS > API_POLL_INTERVAL_MS);
+const _: () = assert!(BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS > HANDOFF_EXCHANGE_TIMEOUT_MS);
 const _: () = assert!(APPLICATION_PAIRING_IDLE_TIMEOUT_MS > HANDOFF_EXCHANGE_TIMEOUT_MS);
 
 #[cfg(test)]
 mod tests {
     use super::{
         APPLICATION_PAIRING_IDLE_TIMEOUT_MS, ApplicationPairingIdleDeadline,
-        BLE_SECURITY_PAIRING_TIMEOUT_MS, CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, IndicationGate,
-        IndicationGateError, PRE_AUTHENTICATION_TIMEOUT_MS, PreAuthenticationDeadline,
-        PreAuthenticationDeadlineStatus, static_random_address,
+        BLE_SECURITY_PAIRING_TIMEOUT_MS, BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS,
+        BleAdvertisingParameters, BleBondExchangeResult, CCCD_SUBSCRIBE_TIMEOUT_MS,
+        CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, FreshSecurityDisposition,
+        HANDOFF_EXCHANGE_TIMEOUT_MS, IndicationGate, IndicationGateError,
+        PRE_AUTHENTICATION_TIMEOUT_MS, PreAuthenticationDeadline, PreAuthenticationDeadlineStatus,
+        static_random_address,
     };
     use crate::usb_authenticated_session::UsbAuthenticatedSessionPhase;
 
@@ -263,22 +384,105 @@ mod tests {
     }
 
     #[test]
-    fn human_pairing_deadlines_are_forgiving_without_extending_ordinary_authentication() {
-        assert_eq!(PRE_AUTHENTICATION_TIMEOUT_MS, 30_000);
+    fn human_pairing_envelopes_are_deliberately_forgiving() {
+        assert_eq!(CCCD_SUBSCRIBE_TIMEOUT_MS, 240_000);
+        assert_eq!(PRE_AUTHENTICATION_TIMEOUT_MS, 300_000);
+        // Trouble owns Bluetooth's separate 30-second SMP transaction timer.
         assert_eq!(BLE_SECURITY_PAIRING_TIMEOUT_MS, 30_000);
+        assert_eq!(HANDOFF_EXCHANGE_TIMEOUT_MS, 60_000);
+        assert_eq!(BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS, 120_000);
         assert_eq!(APPLICATION_PAIRING_IDLE_TIMEOUT_MS, 300_000);
     }
 
     #[test]
-    fn static_random_address_is_stable_little_endian_and_sets_byte_five_bits() {
-        let address = static_random_address([0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88]);
+    fn durable_identity_preserves_static_random_address_across_reboots() {
+        let identity_hash = [
+            0xfd, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4, 0x15, 0xdd, 0x74, 0x36, 0x6f, 0xf7,
+            0x5f, 0x69,
+        ];
+        let first_boot = static_random_address(identity_hash);
+        let reboot = static_random_address(identity_hash);
+        assert_eq!(first_boot, [0x3b, 0x29, 0x1e, 0x12, 0x9f, 0xfd]);
+        assert_eq!(reboot, first_boot);
+        assert_eq!(first_boot[5] & 0xc0, 0xc0);
+    }
+
+    #[test]
+    fn reprovisioned_identity_rotates_static_random_address() {
+        let before_erase = static_random_address([
+            0xfd, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4, 0x15, 0xdd, 0x74, 0x36, 0x6f, 0xf7,
+            0x5f, 0x69,
+        ]);
+        let after_erase = static_random_address([
+            0x83, 0xa0, 0x9e, 0xd8, 0x07, 0xa0, 0xa7, 0xc6, 0x31, 0x38, 0x6d, 0xea, 0xa0, 0x44,
+            0x8f, 0xb9,
+        ]);
+        assert_ne!(after_erase, before_erase);
+        assert_eq!(after_erase[5] & 0xc0, 0xc0);
+    }
+
+    #[test]
+    fn advertising_parameters_keep_identity_address_separate_from_human_name() {
+        let identity_hash = [
+            0xfd, 0x9f, 0x12, 0x1e, 0x29, 0x3b, 0xf4, 0xa4, 0x15, 0xdd, 0x74, 0x36, 0x6f, 0xf7,
+            0x5f, 0x69,
+        ];
+        let physical_mac = [0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88];
+        let parameters = BleAdvertisingParameters::new(identity_hash, physical_mac);
+        assert_eq!(
+            parameters.static_random_address(),
+            static_random_address(identity_hash)
+        );
+        assert_eq!(parameters.local_name_mac(), physical_mac);
+    }
+
+    #[test]
+    fn only_a_node_owned_bond_failure_keeps_failed_pairing_reboot_scoped() {
+        let clean = FreshSecurityDisposition::classify(false, false);
+        assert_eq!(clean, FreshSecurityDisposition::Clean);
+        assert!(!clean.scrub_non_authoritative_bonds());
+        assert!(!clean.disable_until_reboot());
+
+        let precommit_failure = FreshSecurityDisposition::classify(true, false);
+        assert_eq!(precommit_failure, FreshSecurityDisposition::ScrubAndRetry);
+        assert!(precommit_failure.scrub_non_authoritative_bonds());
+        assert!(!precommit_failure.disable_until_reboot());
+
+        let ambiguous_commit = FreshSecurityDisposition::classify(true, true);
+        assert_eq!(ambiguous_commit, FreshSecurityDisposition::ScrubAndDisable);
+        assert!(ambiguous_commit.scrub_non_authoritative_bonds());
+        assert!(ambiguous_commit.disable_until_reboot());
+
+        assert_eq!(
+            FreshSecurityDisposition::classify(false, true),
+            FreshSecurityDisposition::Clean,
+            "a confirmed durable commit clears the prior attempt fact"
+        );
+    }
+
+    #[test]
+    fn bond_exchange_timeout_distinguishes_local_pressure_from_moved_ownership() {
+        let before_send = BleBondExchangeResult::timed_out(false);
+        assert_eq!(before_send, BleBondExchangeResult::TimedOutBeforeSend);
+        assert!(!before_send.bond_reboot_required());
+
+        let after_send = BleBondExchangeResult::timed_out(true);
+        assert_eq!(after_send, BleBondExchangeResult::TimedOutAfterSend);
+        assert!(after_send.bond_reboot_required());
+
+        assert!(!BleBondExchangeResult::Durable.bond_reboot_required());
+        assert!(BleBondExchangeResult::ExplicitFailure.bond_reboot_required());
+    }
+
+    #[test]
+    fn address_derivation_uses_identity_hash_prefix_not_efuse_mac_shape() {
+        let address = static_random_address([
+            0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
+            0x90, 0xa0,
+        ]);
         assert_eq!(address, [0x88, 0x3e, 0xe1, 0x04, 0xa7, 0xec]);
         assert_eq!(address[5] & 0xc0, 0xc0);
         assert_eq!(address[0], 0x88);
-        assert_ne!(
-            address,
-            static_random_address([0xac, 0xa7, 0x04, 0xe1, 0x3f, 0x88])
-        );
     }
 
     #[test]

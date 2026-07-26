@@ -1,3 +1,5 @@
+import type { NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
+
 import type {
   ApplianceSnapshot,
   ContactRequest,
@@ -21,6 +23,29 @@ export interface ApplianceClient {
   bootstrapSession(): Promise<void>;
   snapshot(): Promise<ApplianceSnapshot>;
   onboarding(): Promise<OnboardingView>;
+  /**
+   * List the native, device-keyed appliance profiles without exposing
+   * credential bytes or app-private filesystem paths.
+   *
+   * HTTP/web clients omit this native-only appliance-management capability.
+   */
+  profiles?(): Promise<NativeProfileStoreSnapshot>;
+  /**
+   * Close the current native owner, select an existing Rust-owned profile, and
+   * open its isolated credential/database pair.
+   */
+  activateProfile?(profileKey: string): Promise<NoContent>;
+  /**
+   * Quiesce the current native owner and enter the existing secure BLE
+   * onboarding flow for one additional physical appliance.
+   */
+  beginAddAppliance?(): Promise<NoContent>;
+  /**
+   * Report whether this bootstrapped client can add an appliance over BLE.
+   *
+   * Native Wi-Fi builds retain profile switching while returning false here.
+   */
+  supportsAdditionalBleOnboarding?(): boolean;
   /**
    * Credential-free, advertisement-only discovery for native first-run UI.
    *

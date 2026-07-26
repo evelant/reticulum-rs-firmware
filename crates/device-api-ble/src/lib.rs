@@ -10,10 +10,10 @@
 ///
 /// Generation 2 moves the complete service into a new UUID namespace. Bonded
 /// mobile platforms may otherwise reuse the generation-1 characteristic table,
-/// which did not contain the authenticated readiness characteristic.
+/// which did not contain the retained-link readiness characteristic.
 pub const GATT_PROFILE_MAJOR: u16 = 2;
 /// Backward-compatible revision of the GATT service contract.
-pub const GATT_PROFILE_MINOR: u16 = 0;
+pub const GATT_PROFILE_MINOR: u16 = 1;
 
 /// Project-owned primary service UUID in canonical text form.
 pub const SERVICE_UUID: &str = "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02";
@@ -21,11 +21,13 @@ pub const SERVICE_UUID: &str = "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02";
 pub const RX_UUID: &str = "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02";
 /// Device-to-phone indication characteristic UUID.
 pub const TX_UUID: &str = "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02";
-/// Authenticated-read confirmation characteristic UUID.
+/// Public retained-link readiness characteristic UUID.
 ///
-/// Reading this public value proves only that the platform's current GATT link
-/// has reached authenticated encryption. It is not an application credential
-/// or a device-authentication substitute.
+/// The marker remains `WAIT` until firmware has authenticated the current link
+/// and durably committed its bond. Reading it is deliberately unprotected so
+/// polling cannot initiate platform security before firmware observes physical
+/// presence. The value is not an application credential or a substitute for
+/// the authenticated RDA1 handshake.
 pub const SECURITY_CONFIRMATION_UUID: &str = "f3c8a0b3-5e7a-4c51-a3b9-7d2160d20a02";
 
 /// Project-owned primary service UUID as one 128-bit value.
@@ -34,7 +36,7 @@ pub const SERVICE_UUID_U128: u128 = 0xf3c8_a0b0_5e7a_4c51_a3b9_7d21_60d2_0a02;
 pub const RX_UUID_U128: u128 = 0xf3c8_a0b1_5e7a_4c51_a3b9_7d21_60d2_0a02;
 /// Device-to-phone characteristic UUID as one 128-bit value.
 pub const TX_UUID_U128: u128 = 0xf3c8_a0b2_5e7a_4c51_a3b9_7d21_60d2_0a02;
-/// Authenticated-read confirmation characteristic UUID as one 128-bit value.
+/// Public retained-link readiness characteristic UUID as one 128-bit value.
 pub const SECURITY_CONFIRMATION_UUID_U128: u128 = 0xf3c8_a0b3_5e7a_4c51_a3b9_7d21_60d2_0a02;
 
 /// Public value returned while authenticated application traffic is not ready.
@@ -42,9 +44,9 @@ pub const SECURITY_CONFIRMATION_PENDING_VALUE: [u8; 4] = *b"WAIT";
 /// Public value returned after authenticated, durable pairing state is ready
 /// to accept application protocol bytes on the retained link.
 ///
-/// Requiring this value, rather than treating any authenticated read as ready,
-/// prevents a central from racing the firmware's `PairingComplete` handling
-/// and durable bond commit.
+/// Requiring this firmware-owned transition, rather than treating link
+/// encryption alone as ready, prevents a central from racing the firmware's
+/// `PairingComplete` handling and durable bond commit.
 pub const SECURITY_CONFIRMATION_READY_VALUE: [u8; 4] = *b"RDY1";
 
 /// Primary service UUID bytes in the little-endian order used in BLE

@@ -7,6 +7,7 @@ import {
   type BleDriverDisconnectEvent,
   type BleDriverIndicationEvent,
   type BleGattDiscovery,
+  DEFAULT_BLE_CONNECTION_TIMEOUT_MS,
   ForegroundBleCentral,
 } from "./ble-central-core.ts";
 import type { BleGattProfile } from "./ble-central-types.ts";
@@ -386,6 +387,10 @@ describe("foreground BLE appliance discovery", () => {
 });
 
 describe("foreground BLE central", () => {
+  test("uses a reboot-tolerant default connection deadline", () => {
+    expect(DEFAULT_BLE_CONNECTION_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+  });
+
   test("declares the connection ready only after discovery and indication subscription", async () => {
     const driver = new FakeBleDriver();
     const notification = deferred();
@@ -451,6 +456,59 @@ describe("foreground BLE central", () => {
     expect(connection.name).toBe(target.name);
     expect(driver.events).toContain(`connect ${target.id}`);
     await central.dispose();
+  });
+
+  test("connects a previously discovered peripheral without waiting for its advertisement again", async () => {
+    const driver = new FakeBleDriver();
+    driver.autoDiscover = false;
+    const central = new ForegroundBleCentral(driver);
+    const selected = {
+      id: "selected-board",
+      name: "reticulum-e290-e13e88",
+    };
+    const scanning = central.scan(PROFILE.serviceUuid, { scanTimeoutMs: 5 });
+    await waitFor(() => driver.events.some((event) => event.startsWith("scan ")), "BLE scan");
+    driver.emitDiscovered(selected);
+    const candidates = await scanning;
+    expect(candidates).toEqual([
+      {
+        peripheralId: selected.id,
+        peripheralName: selected.name,
+        rssi: undefined,
+      },
+    ]);
+
+    const connection = await central.connect(PROFILE, {
+      peripheralId: candidates[0]?.peripheralId,
+      peripheralName: candidates[0]?.peripheralName,
+      scanTimeoutMs: 1,
+    });
+
+    expect(connection.peripheralId).toBe(selected.id);
+    expect(connection.name).toBe(selected.name);
+    expect(driver.events.map((event) => event.split(" ")[0])).toEqual([
+      "prepare",
+      "scan",
+      "stop",
+      "prepare",
+      "connect",
+      "discover",
+      "start",
+      "maximum",
+    ]);
+    expect(driver.scanAllowDuplicates).toEqual([true]);
+    await central.dispose();
+  });
+
+  test("rejects an empty selected peripheral before touching the BLE platform", async () => {
+    const driver = new FakeBleDriver();
+
+    await expect(
+      new ForegroundBleCentral(driver).connect(PROFILE, {
+        peripheralId: "   ",
+      }),
+    ).rejects.toThrow("BLE peripheral identifier must not be empty");
+    expect(driver.events).toEqual([]);
   });
 
   test("buffers and copies opaque indications until an observer is installed", async () => {
@@ -582,24 +640,28 @@ describe("foreground BLE central", () => {
         configure(driver: FakeBleDriver, gate: Promise<void>) {
           driver.connectGate = gate;
         },
+        connectionTimeoutMs: 5,
         expected: "BLE connection to",
       },
       {
         configure(driver: FakeBleDriver, gate: Promise<void>) {
           driver.discoveryGate = gate;
         },
+        connectionTimeoutMs: 100,
         expected: "BLE GATT discovery for",
       },
       {
         configure(driver: FakeBleDriver, gate: Promise<void>) {
           driver.notificationGate = gate;
         },
+        connectionTimeoutMs: 100,
         expected: "BLE indication subscription for",
       },
       {
         configure(driver: FakeBleDriver, gate: Promise<void>) {
           driver.maximumWriteGate = gate;
         },
+        connectionTimeoutMs: 100,
         expected: "BLE write MTU lookup for",
       },
     ] as const;
@@ -610,11 +672,36 @@ describe("foreground BLE central", () => {
 
       await expect(
         new ForegroundBleCentral(driver).connect(PROFILE, {
+          connectionTimeoutMs: setupCase.connectionTimeoutMs,
           operationTimeoutMs: 5,
         }),
       ).rejects.toThrow(setupCase.expected);
       expect(driver.events).toContain(`disconnect ${PERIPHERAL.id}`);
     }
+  });
+
+  test("does not reuse the short operation deadline for a slow iOS connection", async () => {
+    const driver = new FakeBleDriver();
+    const platformConnection = deferred();
+    driver.connectGate = platformConnection.promise;
+    const central = new ForegroundBleCentral(driver);
+    const pending = central.connect(PROFILE, {
+      connectionTimeoutMs: 100,
+      operationTimeoutMs: 5,
+      peripheralId: PERIPHERAL.id,
+    });
+    await waitFor(
+      () => driver.events.includes(`connect ${PERIPHERAL.id}`),
+      "platform connection attempt",
+    );
+
+    await Bun.sleep(15);
+    expect(driver.events).not.toContain(`disconnect ${PERIPHERAL.id}`);
+    platformConnection.resolve();
+
+    const connection = await pending;
+    expect(connection.peripheralId).toBe(PERIPHERAL.id);
+    await central.dispose();
   });
 
   test("setup failures retain ownership until their delayed disconnect event", async () => {
@@ -755,6 +842,7 @@ describe("foreground BLE central", () => {
     driver.disconnectEventGate = disconnectEvent.promise;
     const central = new ForegroundBleCentral(driver);
     const firstAttempt = central.connect(PROFILE, {
+      connectionTimeoutMs: 5,
       operationTimeoutMs: 5,
     });
     const oldDisconnectListener = driver.snapshotDisconnectListeners()[0];
@@ -795,6 +883,7 @@ describe("foreground BLE central", () => {
     driver.disconnectEventGate = disconnectEvent.promise;
     const central = new ForegroundBleCentral(driver);
     const firstAttempt = central.connect(PROFILE, {
+      connectionTimeoutMs: 5,
       operationTimeoutMs: 5,
     });
     void firstAttempt.catch(() => {});
@@ -848,6 +937,7 @@ describe("foreground BLE central", () => {
 
     await expect(
       central.connect(PROFILE, {
+        connectionTimeoutMs: 5,
         operationTimeoutMs: 5,
       }),
     ).rejects.toThrow("BLE connection to");
@@ -1014,10 +1104,17 @@ describe("foreground BLE central", () => {
     });
 
     driver.emitDisconnect({ peripheralId: "another", status: 1 });
-    driver.emitDisconnect({ status: 19 });
+    driver.emitDisconnect({
+      status: 19,
+      description: "Connection attempt timed out",
+      domain: "CBErrorDomain",
+      code: 6,
+    });
     driver.emitDisconnect({ status: 20 });
 
-    expect(disconnects).toEqual(["BLE disconnected (status 19)"]);
+    expect(disconnects).toEqual([
+      "BLE disconnected (Connection attempt timed out, status 19, CBErrorDomain, code 6)",
+    ]);
     await expect(connection.write(Uint8Array.of(1))).rejects.toThrow("closed");
     const replacement = await central.connect(PROFILE);
     expect(replacement.peripheralId).toBe(PERIPHERAL.id);

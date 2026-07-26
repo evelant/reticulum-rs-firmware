@@ -261,6 +261,20 @@ export class NomadBrowserController {
     this.#publish({ status: "idle" });
   }
 
+  /**
+   * Cancel the current presentation-local fetch and return to an empty browser.
+   *
+   * Device work that was already accepted may continue independently, but any
+   * late start or poll result and any scheduled local poll are detached from
+   * this controller. Profile switching uses this boundary so work started
+   * against one appliance cannot publish into another appliance's UI.
+   */
+  reset(): void {
+    if (this.#disposed) return;
+    this.#replaceRun();
+    this.#publish({ status: "idle" });
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;

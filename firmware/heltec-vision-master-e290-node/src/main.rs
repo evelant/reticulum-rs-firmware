@@ -108,6 +108,8 @@ use reticulum_device_identity_store::IdentityMirrorCoverage;
 #[cfg(feature = "display")]
 use reticulum_eink_ssd1680::{E290FrameBuffer, Ssd1680};
 #[cfg(feature = "ble-api-proof")]
+use reticulum_heltec_vision_master_e290_node::ble_api_profile::BleAdvertisingParameters;
+#[cfg(feature = "ble-api-proof")]
 use reticulum_heltec_vision_master_e290_node::ble_bond_handoff::BleBondHandoff;
 #[cfg(feature = "display")]
 use reticulum_heltec_vision_master_e290_node::display_handoff::{
@@ -1701,7 +1703,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         match ble_connector {
             Some(connector) => match ble_api_task::run(
                 connector,
-                base_mac_eui48,
+                BleAdvertisingParameters::new(identity_hash, base_mac_eui48),
                 ble_api_task::BleHandoffs::new(
                     usb_pairing_handoff,
                     usb_live_pairing_handoff,

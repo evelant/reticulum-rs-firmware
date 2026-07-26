@@ -77,7 +77,10 @@ The app defaults to the appliance's same-origin HTTP API on web. Native builds
 default to a Rust-owned app-private profile store. Each canonical credential is
 keyed by its validated device ID and has its own identity-bound SQLite
 database; atomic metadata selects the one profile opened by the current
-single-board UI. On first launch after this change, Rust migrates the prior
+native session. The Appliances sheet lists these generated, secret-free
+summaries, switches only after the current BLE/SQLite owner closes, and can
+quiesce the active profile before reusing secure BLE onboarding to add another
+board. On first launch after this change, Rust migrates the prior
 `reticulum-device-credential.rdpkey` and
 `reticulum-lxmf-chat-alpha-schema3.sqlite3` files into that credential's
 profile. Invalid legacy state remains available to the existing explicit
@@ -93,9 +96,11 @@ E290 device ID selects the exact Rust-generated advertised name rather than whic
 board happens to advertise first. While the app remains foregrounded, an unsuccessful attempt
 re-arms after two seconds without overlapping the prior GATT operation; retries suspend when the
 app backgrounds and resume when it becomes active again. The Reconnect action also retries
-discovery and the complete GATT link explicitly. BLE background restoration and phone-native live
-pairing are not implemented yet. USB OTG and USB serial/JTAG remain explicit unavailable connector
-stubs and do not silently fall back or claim a device connection.
+discovery and the complete GATT link explicitly. Foreground phone-native
+fileless pairing is implemented and powered-qualified on iOS; BLE background
+restoration remains unimplemented. USB OTG and USB serial/JTAG remain explicit
+unavailable connector stubs and do not silently fall back or claim a device
+connection.
 
 The **Nearby** contact action reads the connected E290's bounded projection of
 authenticated `lxmf.delivery` announces through that same BLE session. It does
@@ -117,32 +122,38 @@ On a fresh native install, the first-run screen can scan for the generated BLE s
 nearby appliances by advertised name, platform identifier, and RSSI. The user must select a row
 explicitly; the app never auto-selects the first advertisement. This bounded scan does not connect,
 subscribe, call the Rust authenticated actor, send credentials, or treat the advertised name as
-identity or provisioning state. The selected row is currently only preparation for the secure
-pairing step described by
-[ADR 0019](../../docs/adr/0019-secure-ble-appliance-onboarding.md).
+identity or provisioning state. The selected row is retained through the operating-system Bluetooth
+security prompt, board physical-presence checks, and Rust-owned credential activation described by
+[ADR 0019](../../docs/adr/0019-secure-ble-appliance-onboarding.md). When a discovery name exactly
+matches a saved profile's generated expected name, the UI offers **Switch** and never starts a new
+pairing ceremony from that hint.
 
 The alpha **credential import** path remains a secondary development fallback. Pair the intended
 board through the qualified USB managed-profile workflow, make a temporary copy of its exact
 96-byte Active `credential.rdpkey`, name the transfer copy with that board's normalized USB serial,
 transfer it to the phone, and choose it in the system file picker. Verify the filename: the current
 create-only alpha imports the first canonical credential immediately and has no secret-free
-board-identity confirmation screen. The native store can retain multiple device-keyed profiles,
-but the current UI intentionally opens only the active profile and does not yet expose adding or
-switching boards after setup. The Expo layer copies the selection to an app-owned cache
-path without reading its bytes, Rust validates and create-only publishes a mode-`0600` canonical
-credential into that device's profile, reopens the matching SQLite owner, and the Expo layer
-removes its cache copy in a `finally` path. On iOS it also deletes
+board-identity confirmation screen. The native store and Appliances sheet
+retain multiple device-keyed profiles and expose explicit switching; adding a
+board after setup uses the fileless secure BLE onboarding flow rather than
+credential-file import. The Expo layer copies an imported selection to an
+app-owned cache path without reading its bytes, Rust validates and create-only
+publishes a mode-`0600` canonical credential into that device's profile,
+reopens the matching SQLite owner, and the Expo layer removes its cache copy in
+a `finally` path. On iOS it also deletes
 the picker-created temporary copy after staging. Cancelled, malformed, and failed imports do not
 start BLE or replace an existing credential. The original transfer file remains outside the app's
 control and must be deleted by the user after a successful import.
 
 This import deliberately makes another usable copy of an authentication secret. The canonical
-file currently lives in the app's private Documents directory rather than Keychain/Keystore and
-may be included in platform backups. Treat the workflow as an alpha bridge for development
-devices, not the final provisioning or recovery design. Production work must pair the phone
-directly, give each client independently revocable authority, exclude secrets from backup, and add
-an identity preview/confirmation with an identity-bound atomic install plus explicit credential
-replacement/recovery.
+file currently lives in the app's private Documents directory rather than
+Keychain/Keystore and may be included in platform backups. Treat the import
+workflow as an alpha bridge for development and manual recovery, not the
+normal provisioning design: integrated secure BLE onboarding now pairs the
+phone directly without copying a credential file. Production work must give
+each client independently revocable authority, exclude secrets from backup,
+and add explicit credential replacement, factory-reset/recovery, and
+multi-phone lifecycle UX.
 
 Expo SDK 57's Android file picker takes a persistable content-provider permission and exposes no
 API to release it. The app does not persist the selected URI itself, but Android can retain that
@@ -155,17 +166,22 @@ Set `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` to the E290 proof endpoint
 The connector reloads the active profile's app-private credential for every
 handshake and uses the separately transcript-bound Wi-Fi session suite. For the
 current proof, use the same first-run credential import after pairing over the qualified USB
-workflow. Phone-native pairing, Keychain/Keystore migration, SoftAP joining, and credential
-rotation remain follow-up work. The session authenticates and integrity-protects API records but
-adds no application-layer confidentiality; the initial appliance SoftAP must therefore retain WPA2
-and this path must not be described as the final wireless security profile.
+workflow. Fileless phone pairing is available in BLE builds; Keychain/Keystore
+migration, SoftAP joining, and credential rotation remain follow-up work. The
+session authenticates and integrity-protects API records but adds no
+application-layer confidentiality; the initial appliance SoftAP must therefore
+retain WPA2 and this path must not be described as the final wireless security
+profile.
 
 The BLE connector currently uses that same active profile's app-private
 credential. It scans only for the Rust-generated GATT service, subscribes
 to the generated TX indication characteristic before declaring the link ready, and caps initial
 writes to the generated characteristic value bound. A generation-aware command pump rejects stale
-callbacks and reports every platform write exactly once. Platform writes have a ten-second bound so
-an OS BLE call cannot outlive Rust's longer ambiguous-write deadline. For an E290 credential, the
+callbacks and reports every platform write exactly once. Platform writes and individual GATT setup
+or teardown operations have a thirty-second bound, while the platform connection attempt has its
+own 90-second deadline because CoreBluetooth has no native connection timeout and a freshly
+rebooted board may take substantially longer than one ordinary GATT operation to produce a
+connection callback. For an E290 credential, the
 bridge derives the exact `reticulum-e290-<MAC suffix>` target from the authenticated device ID.
 `EXPO_PUBLIC_APPLIANCE_BLE_NAME` remains an explicit diagnostic fallback for a pre-existing
 canonical credential whose namespace does not provide a derivable board name. The current BLE

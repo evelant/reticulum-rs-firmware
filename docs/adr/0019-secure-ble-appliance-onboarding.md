@@ -1,15 +1,13 @@
 # ADR 0019: Secure BLE appliance onboarding
 
-- **Status:** accepted; credential-free candidate discovery, the board-neutral
-  display model, portable SSD1680 driver, powered display-only HIL, and opt-in
-  E290 production display actor are implemented. A bounded integrated
-  BLE-plus-display startup passed with esp-radio/PHY ownership established
-  before display initialization. The transport-neutral pairing client now has
-  a BLE bearer, and a separate native onboarding owner implements pair, resume,
-  confirmed abort, and device-keyed credential publication. Secure link
-  pairing and one-bond durability are source-integrated with host-tested
-  storage semantics; powered BLE live-pairing proof and Expo central/UI wiring
-  remain pending
+- **Status:** accepted and powered for the alpha success path. Credential-free
+  discovery, the production display actor, GPIO21-bound secure link pairing,
+  durable one-bond storage, the Expo BLE central/UI, Rust-native fileless
+  credential publication, retained reconnect, and two-profile add/switch flows
+  are implemented and powered-qualified on the two E290s. Fault-injected
+  negative cases, factory-reset/recovery UX, independently revocable
+  multi-phone authority, Android hardware, and background mobile lifecycle
+  qualification remain pending
 - **Date:** 2026-07-25
 - **Extends:** [ADR 0009](0009-device-api-credential-store-and-pairing.md),
   [ADR 0010](0010-device-api-live-pairing-protocol.md), and
@@ -17,11 +15,12 @@
 
 ## Context
 
-The alpha phone workflow imports a copy of an already activated 96-byte
-credential. It proved the authenticated BLE/LXMF product path, but it is not
-acceptable appliance onboarding: the user must provision over USB, transfer a
-secret file, and later remove the transfer copy. The app also cannot identify
-an unprovisioned board before it owns a credential.
+Before this ADR, the alpha phone workflow imported a copy of an already
+activated 96-byte credential. It proved the authenticated BLE/LXMF product
+path, but it was not acceptable appliance onboarding: the user had to
+provision over USB, transfer a secret file, and later remove the transfer copy.
+The app also could not identify an unprovisioned board before it owned a
+credential.
 
 BLE advertisements solve only candidate discovery. An advertised service UUID,
 local name, RSSI, or platform identifier is neither authenticated appliance
@@ -57,10 +56,10 @@ following ceremony completes.
 
 ### Bluetooth security precedes device authorization
 
-The BLE firmware profile will enable pinned Trouble `0.6.0` security, seed its
-CSPRNG from the existing hardware RNG, declare `DisplayOnly`, and mark the RX
-write plus TX CCCD as requiring authenticated security. After SMP, the
-firmware accepts onboarding records only when Trouble reports
+The BLE firmware profile enables pinned Trouble `0.6.0` security, seeds its
+CSPRNG from the existing hardware RNG, declares `DisplayOnly`, and marks the RX
+write as requiring authenticated security. After SMP, the firmware accepts
+onboarding records only when Trouble reports
 `SecurityLevel::EncryptedAuthenticated`; encrypted Just Works is a downgrade
 and must disconnect.
 
@@ -70,14 +69,19 @@ the phone's operating system owns entry. Fresh onboarding uses this order:
 1. the selected app connects and discovers only the public onboarding surface;
 2. a GPIO21 hold binds the sole current GATT epoch and opens a short onboarding
    window without yet making the connection bondable;
-3. Android explicitly requests bonding through the native BLE manager, while
-   iOS accesses the authentication-required characteristic/CCCD to trigger its
-   system pairing prompt;
+3. firmware requests SMP only for that presence-bound epoch, and the phone
+   operating system presents its pairing prompt;
 4. firmware treats `PassKeyDisplay` and `PairingComplete` as onboarding events
    only for that bound epoch; and
-5. after pairing, firmware requires authenticated encryption, a nonempty bond
-   durably committed by the sole flash owner, and authenticated subscription
-   before starting device authorization.
+5. after pairing, firmware requires authenticated encryption and a nonempty
+   bond durably committed by the sole flash owner before starting device
+   authorization; the indication subscription and retained-link readiness
+   marker are deliberately public so they cannot initiate SMP early.
+
+The app polls a public `WAIT`/`RDY1` retained-link marker while this ceremony is
+in progress. Reading that marker cannot initiate SMP, so an early Continue tap
+is harmless. Firmware publishes `RDY1` only after it has consumed the exact
+connection's pairing completion and durably committed the resulting bond.
 
 The target boundary keeps the passkey, Bluetooth keys, live-pairing PSK, and
 credential artifact out of TypeScript. Trouble's pinned SMP implementation has
@@ -185,13 +189,19 @@ strictly read-only and performs no automatic recovery. Pairing-time commit
 alternates two 4 KiB sectors, verifies the exact programmed successor, and
 remounts before reporting durable success.
 
+Queue pressure that retains the exact bond command on the BLE task side until
+the handoff deadline is scrubbed and remains immediately retryable. Once the
+command crosses to the flash owner, either an explicit persistence failure or
+a missing terminal reply requires BLE to remain disabled until reboot so the
+read-only boot mount can re-establish the sole durable authority.
+
 The alpha supports exactly one durable Bluetooth bond per board. A new
 authenticated pairing admitted by the GPIO21 physical-presence ceremony
 commits the next generation and replaces that one bond; it does not create a
 second peer slot. A bond-store mount failure suppresses only BLE for that boot,
 while LoRa and other independent transports continue. A restored authenticated
 bond can reconnect without repeating SMP, then use a fresh GPIO21 hold to open
-the separate 60-second application-pairing window when it needs to initialize
+the separate five-minute application-pairing window when it needs to initialize
 or add an appliance credential.
 
 Trouble `0.6.0` does not treat key material as a secret Rust type:
@@ -206,6 +216,15 @@ limitation to reassess when Trouble is updated.
 The Bluetooth bond authenticates the nearby radio link. The device-API
 credential independently grants revocable appliance operations. Neither is a
 substitute for the other.
+
+The peripheral's static-random local address is derived from the durable
+Reticulum node identity hash, while its human-readable local name retains the
+eFuse-MAC suffix as an unauthenticated selection hint. An ordinary reboot
+reloads the same identity and therefore preserves the platform peripheral
+identifier and bond relationship. A factory or full-chip erase provisions a
+new node identity and therefore rotates the BLE address, so stale phone-side
+bond and peripheral-cache state cannot be silently attached to the freshly
+initialized appliance.
 
 ### Native Rust owns live pairing and credential publication
 
@@ -225,22 +244,24 @@ exception above remains until the direct native pump replaces it.
 
 1. **Complete:** credential-free candidate discovery and explicit selection.
 2. **Complete:** semantic display model and coalescing firmware handoff.
-3. **Implemented with bounded evidence:** the asynchronous E290 e-paper HIL
-   passed on Board A, and one integrated BLE-plus-display boot passed after
-   establishing esp-radio/PHY ownership before display initialization.
-   Repeated boots and live pairing remain open.
-4. GPIO21 binding of the selected GATT epoch, followed by Trouble authenticated
-   pairing, passkey display, nonempty-bond enforcement, and downgrade rejection
-   for device authorization on only that epoch.
-5. **Source-integrated; powered proof pending:** sole-owner commit-last bond
-   persistence, strict read-only boot mount, and fail-closed remount after an
-   ambiguous commit.
-6. **Implemented in portable/native code; powered proof pending:** a distinct
-   device-API BLE pairing bearer and transcript binding over the secured,
-   presence-bound epoch.
-7. **Implemented natively; Expo wiring pending:** Rust-native onboarding owner
-   and app-private credential publication.
-8. Forced reconnect into the ordinary authenticated suite-3 session.
+3. **Powered alpha success path:** the asynchronous E290 e-paper HIL passed on
+   Board A, integrated BLE-plus-display boots passed after establishing
+   esp-radio/PHY ownership before display initialization, and both production
+   boards completed fileless pairing and retained reconnect. Fault-injected
+   pairing-failure/timeout renders and display soak remain open.
+4. **Powered:** GPIO21 binding of the selected GATT epoch, followed by Trouble
+   authenticated pairing, passkey display, nonempty-bond enforcement, and
+   downgrade rejection for device authorization on only that epoch.
+5. **Powered success path; negative injection pending:** sole-owner commit-last
+   bond persistence and strict read-only boot mount are qualified; fail-closed
+   remount after an ambiguous commit remains host-tested.
+6. **Powered:** a distinct device-API BLE pairing bearer and transcript binding
+   over the secured, presence-bound epoch.
+7. **Powered:** Rust-native onboarding owner and create-only app-private
+   credential publication without a credential file.
+8. **Powered:** forced reconnect into the ordinary authenticated suite-3
+   session, followed by a board reboot and automatic app reconnect without
+   another passkey.
 
 ## Acceptance
 
@@ -252,23 +273,46 @@ session without handling a file. A message and Nomad page must still cross the
 two-board LoRa path.
 
 The proof then reboots the board and cold-launches the app to demonstrate
-restored bond plus credential reconnect without another passkey. Negative cases
-include wrong/expired entry, Just Works downgrade, bond-store power-cut
-recovery, phone-forgot/board-retained, board-forgot/phone-retained, and
-selection of the other nearby appliance.
+restored bond plus credential reconnect without another passkey. Still-pending
+negative qualification includes wrong/expired entry, Just Works downgrade,
+bond-store power-cut recovery, phone-forgot/board-retained,
+board-forgot/phone-retained, and interrupted factory-reset/recovery paths.
+Independent multi-phone authority and revocation also remain future work.
+
+On 2026-07-26, Board `AC:A7:04:E1:3E:88` completed fileless iOS onboarding on
+MetalbeardMobile under the source-identical USB-diagnostic profile, restored
+its bond after reboot, and then automatically reconnected under the ordinary
+production profile with authenticated application traffic. The acceptance
+image was read back byte-for-byte from both E290s at 1,294,320 bytes and
+SHA-256
+`34b249ea21f9d3d7defe420a55d6acb3bf7ea507ea3ec33cc73132e909c14a5b`.
+Board `AC:A7:04:E1:3F:88` then completed fresh fileless onboarding under that
+exact production artifact. Both appliance profiles remained available in the
+app, and switching from `E1:3F:88` to `E1:3E:88` and back completed clean BLE
+disconnect, discovery, reconnect, subscription, and authenticated application
+traffic in each direction. A subsequent source-documentation clarification
+changed no runtime logic but produced the final 1,294,320-byte image at
+SHA-256
+`88d9592a0e98418a0295b7e12d91cb63755d342f143d956d48d58d0e317f691e`.
+That image embeds the checked-in E290 partition table and 80 MHz DIO flash
+profile, was read back byte-for-byte from both boards, and retained automatic
+bonded reconnect plus authenticated application traffic.
 
 ## Consequences
 
 - Candidate discovery can ship before credential creation because it transfers
   no authority and makes no identity claim.
 - E-paper is useful for secure confirmation. The isolated full refresh
-  completed in about 1.56 seconds, but the complete production
-  passkey-to-system-prompt interaction still must be tested inside Trouble's
-  fixed timeout.
+  completed in about 1.56 seconds, and the production
+  passkey-to-system-prompt interaction passed inside Trouble's fixed timeout.
+  Failure/timeout rendering and the full mobile lifecycle matrix remain to be
+  qualified.
 - Bluetooth and device-API key recovery are coupled in UX but remain separate
   storage and revocation domains.
 - Trouble's lack of pre-SMP admission permits transient non-bonding work from
   an unbound peer. It does not grant authority, but connection-level denial of
   service remains until a pinned admission hook is justified.
-- The credential-file importer remains a clearly labelled development fallback
-  until the complete powered first-run proof passes.
+- The credential-file importer remains a clearly labelled development/manual
+  recovery fallback. Powered first-run and add-board provisioning use the
+  fileless BLE flow; formal credential replacement, factory-reset/recovery, and
+  multi-phone authority UX remain deferred.

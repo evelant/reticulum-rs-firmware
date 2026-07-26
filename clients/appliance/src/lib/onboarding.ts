@@ -132,8 +132,7 @@ function baseOnboardingPresentation(view: OnboardingView): Omit<
         instruction:
           "Choose the .rdpkey produced by the qualified USB pairing workflow. " +
           "The app copies it into app-private storage without reading its secret bytes in TypeScript. " +
-          "Verify the transfer filename and physical board first: selecting another board's valid credential makes that board active, and this initial single-board UI does not expose profile switching yet. Clearing local app data is still required to correct a mistaken first import from this screen. " +
-          "Full in-app BLE pairing remains future work.",
+          "Verify the transfer filename and physical board first. Each valid board is retained as an isolated profile; after setup, use Appliances to switch boards or add another one.",
         canStart: true,
         canResume: false,
         canAbort: false,

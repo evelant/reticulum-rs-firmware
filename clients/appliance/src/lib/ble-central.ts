@@ -34,6 +34,19 @@ const PREFERRED_ANDROID_ATT_MTU = 247;
 
 let managerStarted: Promise<void> | undefined;
 
+function disconnectDescription(event: BleDisconnectPeripheralEvent): string | undefined {
+  // react-native-ble-manager 12.5 emits CoreBluetooth's localized description
+  // on iOS even though its public TypeScript event omits that runtime field.
+  const description = (
+    event as BleDisconnectPeripheralEvent & {
+      readonly description?: unknown;
+    }
+  ).description;
+  return typeof description === "string" && description.trim().length > 0
+    ? description.trim()
+    : undefined;
+}
+
 async function startManager(): Promise<void> {
   if (managerStarted === undefined) {
     managerStarted = (async () => {
@@ -129,6 +142,7 @@ class ReactNativeBleManagerDriver implements BleCentralDriver {
         listener({
           peripheralId: event.peripheral,
           status: event.status,
+          description: disconnectDescription(event),
           domain: event.domain,
           code: event.code,
         });

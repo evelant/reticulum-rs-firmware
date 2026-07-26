@@ -894,6 +894,12 @@ mod tests {
         assert!(main.contains("local_api_profile=ble-api-proof"));
         assert!(main.contains("usb=alpha-diagnostics-only"));
         assert!(main.contains("task=ble-api lora_routing=continue"));
+        assert!(
+            main.contains(
+                "ble_api_task::run(\n                connector,\n                BleAdvertisingParameters::new(identity_hash, base_mac_eui48),"
+            ),
+            "BLE identity must rotate with durable node reprovisioning while its human name remains MAC-suffixed"
+        );
 
         let ble = include_str!("ble_api_task.rs");
         assert!(ble.contains("static BLE_RESOURCES: StaticCell<"));
@@ -901,12 +907,18 @@ mod tests {
         assert!(ble.contains("#[gatt_service(uuid = gatt_profile::SERVICE_UUID_U128)]"));
         assert!(ble.contains("permissions(write = authenticated)"));
         assert!(ble.contains("#[characteristic(uuid = gatt_profile::TX_UUID_U128, indicate)]"));
+        assert!(
+            !ble.contains("permissions(read = authenticated)"),
+            "polling WAIT must not initiate SMP before firmware observes GPIO21"
+        );
         assert!(!ble.contains("write_without_response"));
         assert!(ble.contains("StreamDecoder::new()"));
         assert!(ble.contains("UsbAuthenticatedSession::new(session_parameters)"));
         assert!(ble.contains("AdStructure::ServiceUuids128(&SERVICE_UUIDS)"));
         assert!(ble.contains(".with_max_connections(profile::CONTROLLER_ACTIVITY_MAX as u8)"));
         assert!(ble.contains("it counts the advertiser and ACL link as distinct"));
+        assert!(ble.contains("Address::random(advertising.static_random_address())"));
+        assert!(ble.contains("gatt_profile::local_name(advertising.local_name_mac())"));
         let ble_profile = include_str!("ble_api_profile.rs");
         assert!(ble_profile.contains("pub const CONNECTIONS_MAX: usize ="));
         assert!(ble_profile.contains("pub const CONTROLLER_ACTIVITY_MAX: usize = 2;"));
@@ -931,8 +943,16 @@ mod tests {
         assert!(ble.contains("matches_authoritative_identity("));
         assert!(ble.contains("fresh_security_pending_durability = true;"));
         assert!(ble.contains("fresh_security_pending_durability = false;"));
+        assert!(ble.contains("purge_non_authoritative_bonds"));
+        assert!(ble.contains("status=PAIRING-RETRY-READY"));
         assert!(ble.contains("reason=unexpected-fresh-pairing-complete"));
-        assert!(ble.contains("disable_bearer_until_reboot: fresh_security_pending_durability"));
+        assert!(ble.contains("FreshSecurityDisposition::classify("));
+        assert!(ble_profile.contains("TimedOutBeforeSend,"));
+        assert!(ble.contains("BleBondExchangeResult::timed_out(pending.is_none())"));
+        assert!(ble.contains("outcome.bond_reboot_required()"));
+        assert!(ble.contains("fresh_security_disposition.scrub_non_authoritative_bonds()"));
+        assert!(ble.contains("fresh_security_disposition.disable_until_reboot()"));
+        assert!(ble.contains("PairingDisplayState::Pending(_) | PairingDisplayState::Rendered"));
         assert!(ble.contains("status=PAIRING-EXCLUSIVE-PENDING"));
         assert!(ble.contains("PairingExclusiveCloseDisposition::DrainBeforeClose"));
         assert!(ble.contains("request.accept(None, stack).await"));

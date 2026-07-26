@@ -18,13 +18,21 @@ export interface BleGattProfile {
 
 export interface BleConnectOptions {
   /**
+   * Bounds only the platform connection attempt. CoreBluetooth has no native
+   * connection timeout and can take longer than an ordinary GATT operation
+   * while a freshly rebooted peripheral becomes connectable.
+   */
+  readonly connectionTimeoutMs?: number;
+  /**
    * Selects a peripheral by its exact advertised name when more than one
    * appliance advertises the requested service.
    */
   readonly peripheralName?: string;
   /**
-   * Selects a known peripheral when more than one appliance advertises the
-   * requested service. The first matching advertisement is used when omitted.
+   * Connects directly to a peripheral selected by a preceding caller-owned
+   * scan. The platform identifier is already retained by the native BLE
+   * manager, so implementations must not require the same advertisement to be
+   * emitted again. The first matching advertisement is used when omitted.
    */
   readonly peripheralId?: string;
   /**
@@ -112,8 +120,10 @@ export interface BleCentral {
   scan(serviceUuid: string, options?: BleScanOptions): Promise<readonly BleCandidate[]>;
 
   /**
-   * Scans for the caller-owned service UUID and returns only after the service
-   * and characteristics are discovered and TX indications are subscribed.
+   * Connects a caller-selected peripheral directly when `peripheralId` is
+   * supplied. Otherwise scans for the caller-owned service UUID. Returns only
+   * after the service and characteristics are discovered and TX indications
+   * are subscribed.
    */
   connect(profile: BleGattProfile, options?: BleConnectOptions): Promise<BleConnection>;
 

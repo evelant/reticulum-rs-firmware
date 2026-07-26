@@ -239,6 +239,9 @@ RustBuffer
 uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_credential_status(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 RustBuffer
+uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_reconcile_onboarding_publication(
+    /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
+RustBuffer
 uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_snapshot(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_profile(
@@ -432,6 +435,8 @@ uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status();
+uint16_t
+uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication();
 uint16_t
 uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_snapshot();
 uint16_t
@@ -2387,6 +2392,19 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
                 rt, thisVal, args, count);
       });
   props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_"
+        "reconcile_onboarding_publication"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(
+          rt, "ubrn_uniffi_reticulum_appliance_native_fn_method_"
+              "nativeprofilestore_reconcile_onboarding_publication"),
+      1,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_reconcile_onboarding_publication(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_"
         "snapshot"] = jsi::Function::createFromHostFunction(
       rt,
       jsi::PropNameID::forAscii(rt, "ubrn_uniffi_reticulum_appliance_native_fn_"
@@ -3474,6 +3492,20 @@ NativeReticulumApplianceNative::NativeReticulumApplianceNative(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+        "nativeprofilestore_reconcile_onboarding_publication"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_reticulum_appliance_native_checksum_method_"
+                  "nativeprofilestore_reconcile_onboarding_publication"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_reticulum_appliance_native_checksum_method_"
@@ -4604,6 +4636,24 @@ jsi::Value NativeReticulumApplianceNative::
       rt, callInvoker, value);
 }
 jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_reconcile_onboarding_publication(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  RustCallStatus status =
+      uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::rustSuccess(
+          rt);
+  auto value =
+      uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_reconcile_onboarding_publication(
+          uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                            args[0]),
+          &status);
+  uniffi::reticulum_appliance_native::Bridging<RustCallStatus>::copyIntoJs(
+      rt, callInvoker, status, args[count - 1]);
+
+  return uniffi::reticulum_appliance_native::Bridging<RustBuffer>::toJs(
+      rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
     cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_snapshot(
         jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
         size_t count) {
@@ -5577,6 +5627,15 @@ jsi::Value NativeReticulumApplianceNative::
         size_t count) {
   auto value =
       uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeReticulumApplianceNative::
+    cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

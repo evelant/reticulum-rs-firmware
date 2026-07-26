@@ -513,19 +513,15 @@ export class NativeBleOnboardingTransport {
   }
 
   /**
-   * Wait until the authenticated-read marker says firmware has consumed SMP
-   * completion and durably opened the retained application-pairing link.
+   * Wait until the public marker says firmware has consumed SMP completion and
+   * durably opened the retained application-pairing link.
    *
-   * Expected ATT authentication failures and the public pending marker are
-   * retried without emitting native protocol bytes. With no caller-supplied
-   * timeout, the selected link remains retained until firmware becomes ready,
-   * the board disconnects, or the operator cancels. Firmware owns the bounded
-   * physical-presence and SMP windows; the app must not impose a shorter timer
-   * that tears down a valid ceremony before the button hold is observed.
-   *
-   * The caller must retain the explicit user Continue barrier before invoking
-   * this method so an authenticated read cannot initiate platform security
-   * before the operator has physically confirmed the selected board.
+   * Read failures and the public pending marker are retried without emitting
+   * native protocol bytes. The marker read is intentionally unprotected and
+   * cannot initiate platform security; firmware alone requests SMP after it
+   * observes GPIO21. With no caller-supplied timeout, the selected link remains
+   * retained until firmware becomes ready, the board disconnects, or the
+   * operator cancels.
    */
   async confirmAuthenticated(
     timeoutMs: number | null = null,

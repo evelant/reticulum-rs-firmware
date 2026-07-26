@@ -296,9 +296,11 @@ start at zero and accept only the exact next value. Duplicate, gap, overflow,
 reflection, bad tag or wrong session ID terminates the session. Proof and tag
 comparison is constant-time, session key material is zeroized where practical,
 and each bearer manager must enforce timeout and attempt-rate policy around this
-core. The BLE GATT proof now starts one absolute, non-refreshing 30-second
-pre-authentication deadline after indication subscription and lifecycle
-acceptance. Partial ClientHello framing, admission pressure, and stalled proof
+core. The BLE GATT proof starts one absolute, non-refreshing five-minute
+pre-authentication deadline when an authenticated, authoritative Bluetooth
+peer enters the ordinary device-API lifecycle. On a restored bond this
+deliberately overlaps the independent four-minute indication-subscription
+deadline. Partial ClientHello framing, admission pressure, and stalled proof
 flights do not extend it. Reaching `Established` before the deadline disarms
 that pre-authentication policy; authenticated idle/replacement policy and
 attempt-rate limits remain separate future work.

@@ -33,12 +33,15 @@ pub use onboarding::{
     NativeBleOnboarding, NativeBleOnboardingError, NativeBleOnboardingFailure,
     NativeBleOnboardingOperation, NativeBleOnboardingPhase, NativeBleOnboardingSnapshot,
 };
-pub use profile::{NativeProfileStore, NativeProfileStoreSnapshot, NativeProfileSummary};
+pub use profile::{
+    NativeOnboardingPublicationReconciliation, NativeProfileStore, NativeProfileStoreSnapshot,
+    NativeProfileSummary,
+};
 
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 9;
+pub const BRIDGE_API_MINOR: u16 = 10;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -83,7 +86,7 @@ pub struct NativeBleGattProfile {
     pub rx_uuid: String,
     /// Device-to-phone indication characteristic UUID.
     pub tx_uuid: String,
-    /// Authenticated-read confirmation characteristic UUID.
+    /// Public retained-link readiness characteristic UUID.
     pub security_confirmation_uuid: String,
     /// Public value proving that the retained authenticated link is ready for
     /// application protocol bytes.
@@ -147,7 +150,7 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 9,
+                bridge_api_minor: 10,
                 device_api_major: 1,
                 device_api_minor: 6,
                 max_message_bytes: 512,
@@ -167,7 +170,7 @@ mod tests {
             native_ble_gatt_profile(),
             NativeBleGattProfile {
                 major: 2,
-                minor: 0,
+                minor: 1,
                 service_uuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
                 rx_uuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
                 tx_uuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
