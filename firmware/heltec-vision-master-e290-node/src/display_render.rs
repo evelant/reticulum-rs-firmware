@@ -16,7 +16,9 @@ use embedded_graphics::{
     primitives::{Line, PrimitiveStyle, Rectangle},
     text::{Alignment, Baseline, Text, TextStyleBuilder},
 };
-use reticulum_appliance_display_model::{DisplayView, DisplayViewKind};
+use reticulum_appliance_display_model::{
+    DisplayCompositionState, DisplayHomeSnapshot, DisplaySetupState, DisplayView, DisplayViewKind,
+};
 use reticulum_eink_ssd1680::{E290_FRAME_HEIGHT, E290_FRAME_WIDTH, E290FrameBuffer};
 
 const HORIZONTAL_CENTER: i32 = (E290_FRAME_WIDTH / 2) as i32;
@@ -60,10 +62,7 @@ pub fn render_display_view(
             draw_large_status("STARTING", frame)?;
             draw_footer("LORA MESH INITIALIZING", frame)?;
         }
-        DisplayView::Ready { .. } => {
-            draw_large_status("READY", frame)?;
-            draw_footer("OPEN APP TO CONNECT", frame)?;
-        }
+        DisplayView::Home { snapshot } => draw_home(*snapshot, frame)?,
         DisplayView::Pairing {
             expires_after_seconds,
             ..
@@ -100,10 +99,6 @@ pub fn render_display_view(
                 frame,
             )?;
         }
-        DisplayView::PairingSucceeded { .. } => {
-            draw_large_status("PAIRED", frame)?;
-            draw_footer("SECURE CONNECTION READY", frame)?;
-        }
         DisplayView::PairingFailed { .. } => {
             draw_large_status("PAIR FAILED", frame)?;
             draw_footer("PRESS 21 TO TRY AGAIN", frame)?;
@@ -115,6 +110,69 @@ pub fn render_display_view(
     }
 
     Ok(())
+}
+
+fn draw_home(snapshot: DisplayHomeSnapshot, frame: &mut E290FrameBuffer) -> Result<(), Infallible> {
+    draw_centered(
+        snapshot.device_suffix().as_str(),
+        38,
+        MonoTextStyle::new(&FONT_10X20, BinaryColor::On),
+        frame,
+    )?;
+    draw_centered(
+        link_configuration(snapshot),
+        67,
+        MonoTextStyle::new(&FONT_6X10, BinaryColor::On),
+        frame,
+    )?;
+    draw_centered(
+        service_configuration(snapshot),
+        83,
+        MonoTextStyle::new(&FONT_6X10, BinaryColor::On),
+        frame,
+    )?;
+    draw_footer(
+        match snapshot.setup() {
+            DisplaySetupState::PairingRequired => "HOLD GPIO21 TO PAIR",
+            DisplaySetupState::Paired => "PAIRED - OPEN APP",
+            DisplaySetupState::Unavailable => "LOCAL API UNAVAILABLE",
+        },
+        frame,
+    )
+}
+
+const fn link_configuration(snapshot: DisplayHomeSnapshot) -> &'static str {
+    match (snapshot.lora(), snapshot.ble()) {
+        (DisplayCompositionState::Configured, DisplayCompositionState::Configured) => {
+            "LORA NA915  APP BLE"
+        }
+        (DisplayCompositionState::Configured, DisplayCompositionState::Unavailable) => {
+            "LORA NA915  APP BLE --"
+        }
+        (DisplayCompositionState::Unavailable, DisplayCompositionState::Configured) => {
+            "LORA --  APP BLE"
+        }
+        (DisplayCompositionState::Unavailable, DisplayCompositionState::Unavailable) => {
+            "LORA --  APP BLE --"
+        }
+    }
+}
+
+const fn service_configuration(snapshot: DisplayHomeSnapshot) -> &'static str {
+    match (snapshot.lxmf(), snapshot.nomad()) {
+        (DisplayCompositionState::Configured, DisplayCompositionState::Configured) => {
+            "SERVICES LXMF + NOMAD"
+        }
+        (DisplayCompositionState::Configured, DisplayCompositionState::Unavailable) => {
+            "SERVICE LXMF"
+        }
+        (DisplayCompositionState::Unavailable, DisplayCompositionState::Configured) => {
+            "SERVICE NOMAD"
+        }
+        (DisplayCompositionState::Unavailable, DisplayCompositionState::Unavailable) => {
+            "SERVICES UNAVAILABLE"
+        }
+    }
 }
 
 fn draw_large_status(status: &str, frame: &mut E290FrameBuffer) -> Result<(), Infallible> {
@@ -179,7 +237,8 @@ impl DecimalU16 {
 #[cfg(test)]
 mod tests {
     use reticulum_appliance_display_model::{
-        DisplayCommand, DisplayLabel, DisplayState, PairingPasskey, PairingSecretClearReason,
+        DisplayCommand, DisplayCompositionState, DisplayHomeSnapshot, DisplayLabel,
+        DisplaySetupState, DisplayState, PairingPasskey, PairingSecretClearReason,
         PairingWindowSeconds,
     };
 
@@ -187,6 +246,18 @@ mod tests {
 
     fn label() -> DisplayLabel {
         DisplayLabel::new("Reticulum E290").expect("fixture label fits")
+    }
+
+    fn home(setup: DisplaySetupState, lxmf: DisplayCompositionState) -> DisplayHomeSnapshot {
+        DisplayHomeSnapshot::new(
+            label(),
+            DisplayLabel::new("e13f88").expect("fixture suffix fits"),
+            setup,
+            DisplayCompositionState::Configured,
+            DisplayCompositionState::Configured,
+            lxmf,
+            DisplayCompositionState::Configured,
+        )
     }
 
     fn render(command: DisplayCommand) -> E290FrameBuffer {
@@ -209,10 +280,11 @@ mod tests {
     fn every_public_non_secret_state_renders_deterministically() {
         let commands = [
             DisplayCommand::ShowBooting { label: label() },
-            DisplayCommand::ShowReady { label: label() },
-            DisplayCommand::ClearPairingSecret {
-                label: label(),
-                reason: PairingSecretClearReason::Succeeded,
+            DisplayCommand::ShowHome {
+                snapshot: home(
+                    DisplaySetupState::PairingRequired,
+                    DisplayCompositionState::Configured,
+                ),
             },
             DisplayCommand::ClearPairingSecret {
                 label: label(),
@@ -228,6 +300,68 @@ mod tests {
             let frame = render(command);
             assert!(frame.as_bytes().iter().any(|byte| *byte != 0));
             assert!(frame.as_bytes().iter().any(|byte| *byte != u8::MAX));
+        }
+    }
+
+    #[test]
+    fn home_changes_for_pairing_state_and_boot_composition() {
+        let pairing_required = render(DisplayCommand::ShowHome {
+            snapshot: home(
+                DisplaySetupState::PairingRequired,
+                DisplayCompositionState::Configured,
+            ),
+        });
+        let paired = render(DisplayCommand::ShowHome {
+            snapshot: home(
+                DisplaySetupState::Paired,
+                DisplayCompositionState::Configured,
+            ),
+        });
+        let lxmf_unavailable = render(DisplayCommand::ShowHome {
+            snapshot: home(
+                DisplaySetupState::Paired,
+                DisplayCompositionState::Unavailable,
+            ),
+        });
+
+        assert_ne!(pairing_required.as_bytes(), paired.as_bytes());
+        assert_ne!(paired.as_bytes(), lxmf_unavailable.as_bytes());
+    }
+
+    #[test]
+    fn home_names_ble_as_the_local_app_bearer_in_every_link_variant() {
+        for (lora, ble, expected) in [
+            (
+                DisplayCompositionState::Configured,
+                DisplayCompositionState::Configured,
+                "LORA NA915  APP BLE",
+            ),
+            (
+                DisplayCompositionState::Configured,
+                DisplayCompositionState::Unavailable,
+                "LORA NA915  APP BLE --",
+            ),
+            (
+                DisplayCompositionState::Unavailable,
+                DisplayCompositionState::Configured,
+                "LORA --  APP BLE",
+            ),
+            (
+                DisplayCompositionState::Unavailable,
+                DisplayCompositionState::Unavailable,
+                "LORA --  APP BLE --",
+            ),
+        ] {
+            let snapshot = DisplayHomeSnapshot::new(
+                label(),
+                DisplayLabel::new("e13f88").expect("fixture suffix fits"),
+                DisplaySetupState::Paired,
+                lora,
+                ble,
+                DisplayCompositionState::Configured,
+                DisplayCompositionState::Configured,
+            );
+            assert_eq!(link_configuration(snapshot), expected);
         }
     }
 

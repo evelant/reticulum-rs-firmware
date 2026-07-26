@@ -213,6 +213,137 @@ impl PairingWindowSeconds {
     }
 }
 
+/// Whether one boot-composed appliance capability is present in the image.
+///
+/// This is deliberately not a live health or task-spawn state. A `Configured`
+/// capability records that its prerequisites were present in the composed boot
+/// graph; its actor may not have spawned yet and may later fault. Live actor
+/// telemetry belongs to a future display coordinator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisplayCompositionState {
+    /// The capability's prerequisites were present in the composed boot graph.
+    Configured,
+    /// The capability was unavailable when the boot graph was composed.
+    Unavailable,
+}
+
+/// Application-level setup represented by credential authority and pairing
+/// admission.
+///
+/// A Bluetooth bond alone never selects `Paired`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisplaySetupState {
+    /// No active application credential exists and setup is required. This
+    /// includes a valid empty authority and pre-authority media for which the
+    /// resident pairing policy can initialize or recover credentials.
+    PairingRequired,
+    /// The publishable authority contains at least one active application
+    /// credential.
+    Paired,
+    /// No active authority or resident pairing path was available.
+    Unavailable,
+}
+
+impl DisplaySetupState {
+    /// Compose setup from application credential authority and resident pairing
+    /// admission.
+    ///
+    /// A valid empty authority is always setup-required. Without an authority,
+    /// the pairing policy distinguishes a fresh or recoverable appliance from
+    /// a genuinely unavailable local API.
+    pub const fn from_application_state(
+        active_credential_count: Option<usize>,
+        pairing_policy_available: bool,
+    ) -> Self {
+        match active_credential_count {
+            Some(0) => Self::PairingRequired,
+            Some(_) => Self::Paired,
+            None if pairing_policy_available => Self::PairingRequired,
+            None => Self::Unavailable,
+        }
+    }
+}
+
+/// Complete non-secret boot-composition snapshot for the appliance Home view.
+///
+/// The physical suffix is the exact six-character suffix used by the
+/// board-specific discovery card. Capability fields describe composition,
+/// not task-spawn completion, live actor connectivity, or health.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DisplayHomeSnapshot {
+    label: DisplayLabel,
+    device_suffix: DisplayLabel,
+    setup: DisplaySetupState,
+    lora: DisplayCompositionState,
+    ble: DisplayCompositionState,
+    lxmf: DisplayCompositionState,
+    nomad: DisplayCompositionState,
+}
+
+impl DisplayHomeSnapshot {
+    /// Construct one complete Home snapshot.
+    pub const fn new(
+        label: DisplayLabel,
+        device_suffix: DisplayLabel,
+        setup: DisplaySetupState,
+        lora: DisplayCompositionState,
+        ble: DisplayCompositionState,
+        lxmf: DisplayCompositionState,
+        nomad: DisplayCompositionState,
+    ) -> Self {
+        Self {
+            label,
+            device_suffix,
+            setup,
+            lora,
+            ble,
+            lxmf,
+            nomad,
+        }
+    }
+
+    /// Public appliance product label.
+    pub const fn label(self) -> DisplayLabel {
+        self.label
+    }
+
+    /// Exact board suffix shown by discovery clients.
+    pub const fn device_suffix(self) -> DisplayLabel {
+        self.device_suffix
+    }
+
+    /// Application-level setup state.
+    pub const fn setup(self) -> DisplaySetupState {
+        self.setup
+    }
+
+    /// Boot-composed LoRa capability.
+    pub const fn lora(self) -> DisplayCompositionState {
+        self.lora
+    }
+
+    /// Boot-composed BLE device-API capability.
+    pub const fn ble(self) -> DisplayCompositionState {
+        self.ble
+    }
+
+    /// Boot-composed LXMF capability.
+    pub const fn lxmf(self) -> DisplayCompositionState {
+        self.lxmf
+    }
+
+    /// Boot-composed Nomad capability.
+    pub const fn nomad(self) -> DisplayCompositionState {
+        self.nomad
+    }
+
+    /// Return the same composition snapshot with an updated authoritative
+    /// application setup state.
+    pub const fn with_setup(self, setup: DisplaySetupState) -> Self {
+        Self { setup, ..self }
+    }
+}
+
 /// Non-secret semantic view kind suitable for diagnostics and assertions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayViewKind {
@@ -220,12 +351,10 @@ pub enum DisplayViewKind {
     Blank,
     /// The appliance is starting.
     Booting,
-    /// The appliance is ready for ordinary use.
-    Ready,
+    /// The appliance boot-composition Home snapshot is visible.
+    Home,
     /// A pairing passkey is currently visible.
     Pairing,
-    /// Pairing completed successfully.
-    PairingSucceeded,
     /// Pairing failed.
     PairingFailed,
     /// The pairing window expired.
@@ -244,10 +373,10 @@ pub enum DisplayView {
         /// Public appliance label.
         label: DisplayLabel,
     },
-    /// Show the ordinary ready state.
-    Ready {
-        /// Public appliance label.
-        label: DisplayLabel,
+    /// Show the non-secret boot-composition Home snapshot.
+    Home {
+        /// Complete snapshot rendered without claiming live actor telemetry.
+        snapshot: DisplayHomeSnapshot,
     },
     /// Show a temporary pairing passkey.
     Pairing {
@@ -257,11 +386,6 @@ pub enum DisplayView {
         passkey: PairingPasskey,
         /// Bounded relative pairing window rendered with the passkey.
         expires_after_seconds: PairingWindowSeconds,
-    },
-    /// Show successful pairing without retaining the passkey.
-    PairingSucceeded {
-        /// Public appliance label.
-        label: DisplayLabel,
     },
     /// Show failed pairing without retaining the passkey.
     PairingFailed {
@@ -281,9 +405,8 @@ impl DisplayView {
         match self {
             Self::Blank => DisplayViewKind::Blank,
             Self::Booting { .. } => DisplayViewKind::Booting,
-            Self::Ready { .. } => DisplayViewKind::Ready,
+            Self::Home { .. } => DisplayViewKind::Home,
             Self::Pairing { .. } => DisplayViewKind::Pairing,
-            Self::PairingSucceeded { .. } => DisplayViewKind::PairingSucceeded,
             Self::PairingFailed { .. } => DisplayViewKind::PairingFailed,
             Self::PairingTimedOut { .. } => DisplayViewKind::PairingTimedOut,
         }
@@ -294,11 +417,18 @@ impl DisplayView {
         match self {
             Self::Blank => None,
             Self::Booting { label }
-            | Self::Ready { label }
             | Self::Pairing { label, .. }
-            | Self::PairingSucceeded { label }
             | Self::PairingFailed { label }
             | Self::PairingTimedOut { label } => Some(label),
+            Self::Home { snapshot } => Some(&snapshot.label),
+        }
+    }
+
+    /// Return the complete Home snapshot when that view is active.
+    pub const fn home(&self) -> Option<DisplayHomeSnapshot> {
+        match self {
+            Self::Home { snapshot } => Some(*snapshot),
+            _ => None,
         }
     }
 
@@ -331,8 +461,6 @@ impl DisplayView {
 pub enum PairingSecretClearReason {
     /// The bounded pairing window expired.
     TimedOut,
-    /// Pairing completed and durable authorization was established.
-    Succeeded,
     /// Pairing failed or was refused.
     Failed,
     /// The appliance is preparing to reboot.
@@ -349,10 +477,10 @@ pub enum DisplayCommand {
         /// Public appliance label.
         label: DisplayLabel,
     },
-    /// Replace the current presentation with ordinary ready state.
-    ShowReady {
-        /// Public appliance label.
-        label: DisplayLabel,
+    /// Replace the current presentation with the boot-composition Home view.
+    ShowHome {
+        /// Complete non-secret Home snapshot.
+        snapshot: DisplayHomeSnapshot,
     },
     /// Install or replace the temporary pairing passkey.
     ShowPairing {
@@ -377,16 +505,12 @@ impl DisplayCommand {
     pub const fn requested_view(&self) -> DisplayViewKind {
         match self {
             Self::ShowBooting { .. } => DisplayViewKind::Booting,
-            Self::ShowReady { .. } => DisplayViewKind::Ready,
+            Self::ShowHome { .. } => DisplayViewKind::Home,
             Self::ShowPairing { .. } => DisplayViewKind::Pairing,
             Self::ClearPairingSecret {
                 reason: PairingSecretClearReason::TimedOut,
                 ..
             } => DisplayViewKind::PairingTimedOut,
-            Self::ClearPairingSecret {
-                reason: PairingSecretClearReason::Succeeded,
-                ..
-            } => DisplayViewKind::PairingSucceeded,
             Self::ClearPairingSecret {
                 reason: PairingSecretClearReason::Failed,
                 ..
@@ -482,8 +606,8 @@ impl DisplayState {
                     PairingSecretDisposition::Unchanged
                 },
             ),
-            DisplayCommand::ShowReady { label } => (
-                DisplayView::Ready { label },
+            DisplayCommand::ShowHome { snapshot } => (
+                DisplayView::Home { snapshot },
                 if previously_secret {
                     PairingSecretDisposition::ClearedByViewReplacement
                 } else {
@@ -509,7 +633,6 @@ impl DisplayState {
             DisplayCommand::ClearPairingSecret { label, reason } => {
                 let view = match reason {
                     PairingSecretClearReason::TimedOut => DisplayView::PairingTimedOut { label },
-                    PairingSecretClearReason::Succeeded => DisplayView::PairingSucceeded { label },
                     PairingSecretClearReason::Failed => DisplayView::PairingFailed { label },
                     PairingSecretClearReason::Reboot => DisplayView::Blank,
                 };
@@ -541,13 +664,26 @@ impl Default for DisplayState {
 #[cfg(test)]
 mod tests {
     use super::{
-        DISPLAY_LABEL_CAPACITY, DisplayCommand, DisplayLabel, DisplayLabelError, DisplayState,
-        DisplayViewKind, PairingPasskey, PairingPasskeyError, PairingSecretClearReason,
-        PairingSecretDisposition, PairingWindowSeconds, PairingWindowSecondsError,
+        DISPLAY_LABEL_CAPACITY, DisplayCommand, DisplayCompositionState, DisplayHomeSnapshot,
+        DisplayLabel, DisplayLabelError, DisplaySetupState, DisplayState, DisplayViewKind,
+        PairingPasskey, PairingPasskeyError, PairingSecretClearReason, PairingSecretDisposition,
+        PairingWindowSeconds, PairingWindowSecondsError,
     };
 
     fn label() -> DisplayLabel {
         DisplayLabel::new("Reticulum E290").expect("test label must fit")
+    }
+
+    fn home(setup: DisplaySetupState) -> DisplayHomeSnapshot {
+        DisplayHomeSnapshot::new(
+            label(),
+            DisplayLabel::new("e13f88").expect("test suffix fits"),
+            setup,
+            DisplayCompositionState::Configured,
+            DisplayCompositionState::Configured,
+            DisplayCompositionState::Configured,
+            DisplayCompositionState::Configured,
+        )
     }
 
     fn show_pairing(number: u32) -> DisplayCommand {
@@ -651,15 +787,48 @@ mod tests {
     }
 
     #[test]
+    fn home_retains_the_exact_selector_and_boot_composition_without_live_claims() {
+        let snapshot = home(DisplaySetupState::PairingRequired);
+        assert_eq!(snapshot.label().as_str(), "Reticulum E290");
+        assert_eq!(snapshot.device_suffix().as_str(), "e13f88");
+        assert_eq!(snapshot.setup(), DisplaySetupState::PairingRequired);
+        assert_eq!(snapshot.lora(), DisplayCompositionState::Configured);
+        assert_eq!(snapshot.ble(), DisplayCompositionState::Configured);
+        assert_eq!(snapshot.lxmf(), DisplayCompositionState::Configured);
+        assert_eq!(snapshot.nomad(), DisplayCompositionState::Configured);
+
+        let paired = snapshot.with_setup(DisplaySetupState::Paired);
+        assert_eq!(paired.setup(), DisplaySetupState::Paired);
+        assert_eq!(paired.device_suffix(), snapshot.device_suffix());
+        assert_eq!(paired.lora(), snapshot.lora());
+    }
+
+    #[test]
+    fn setup_composition_distinguishes_fresh_pairing_from_unavailable_authority() {
+        assert_eq!(
+            DisplaySetupState::from_application_state(Some(0), false),
+            DisplaySetupState::PairingRequired
+        );
+        assert_eq!(
+            DisplaySetupState::from_application_state(Some(2), true),
+            DisplaySetupState::Paired
+        );
+        assert_eq!(
+            DisplaySetupState::from_application_state(None, true),
+            DisplaySetupState::PairingRequired
+        );
+        assert_eq!(
+            DisplaySetupState::from_application_state(None, false),
+            DisplaySetupState::Unavailable
+        );
+    }
+
+    #[test]
     fn every_terminal_pairing_path_clears_the_secret_and_selects_a_safe_view() {
         for (reason, expected) in [
             (
                 PairingSecretClearReason::TimedOut,
                 DisplayViewKind::PairingTimedOut,
-            ),
-            (
-                PairingSecretClearReason::Succeeded,
-                DisplayViewKind::PairingSucceeded,
             ),
             (
                 PairingSecretClearReason::Failed,
@@ -687,16 +856,18 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_view_replacement_cannot_leave_a_stale_pairing_secret() {
+    fn home_replacement_clears_the_secret_and_can_report_durable_pairing() {
         let mut state = DisplayState::new();
         let _ = state.apply(show_pairing(654_321));
-        let transition = state.apply(DisplayCommand::ShowReady { label: label() });
-        assert_eq!(transition.current(), DisplayViewKind::Ready);
+        let paired = home(DisplaySetupState::Paired);
+        let transition = state.apply(DisplayCommand::ShowHome { snapshot: paired });
+        assert_eq!(transition.current(), DisplayViewKind::Home);
         assert_eq!(
             transition.secret_disposition(),
             PairingSecretDisposition::ClearedByViewReplacement
         );
         assert!(!state.owns_pairing_secret());
+        assert_eq!(state.view().home(), Some(paired));
     }
 
     #[test]

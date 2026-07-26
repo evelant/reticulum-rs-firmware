@@ -268,6 +268,22 @@ impl CredentialRuntime {
             .map(|mounted| mounted.revision().get())
     }
 
+    /// Number of active application credentials in the currently publishable
+    /// authority.
+    ///
+    /// `None` distinguishes an unavailable authority from a valid empty
+    /// authority. Bluetooth bond state is intentionally absent from this
+    /// application-level setup fact.
+    pub fn active_credential_count(&self) -> Option<usize> {
+        if !self.boot_state.authority_publishable() {
+            return None;
+        }
+        self.mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .map(reticulum_device_api_credentials::CredentialAuthority::active_count)
+    }
+
     /// Whether a retained authority can authenticate existing credentials.
     pub fn authority_publishable(&self) -> bool {
         self.boot_state.authority_publishable()
@@ -2120,6 +2136,7 @@ mod tests {
             CredentialBootState::UninitializedErased
         );
         assert_eq!(runtime.revision(), None);
+        assert_eq!(runtime.active_credential_count(), None);
         assert!(!runtime.authority_publishable());
         assert!(!runtime.mutation_eligible());
         assert!(runtime.pairing_policy_available());
@@ -2144,6 +2161,7 @@ mod tests {
         );
         assert_eq!(runtime.credential_boot_state(), CredentialBootState::Ready);
         assert_eq!(runtime.revision(), Some(1));
+        assert_eq!(runtime.active_credential_count(), Some(0));
         assert!(runtime.authority_publishable());
         assert!(runtime.mutation_eligible());
 
@@ -2244,6 +2262,12 @@ mod tests {
     fn interrupted_boot_trajectory_can_finish_initialization() {
         let (mut runtime, mut access) = interrupted_runtime();
         assert_eq!(
+            runtime.credential_boot_state(),
+            CredentialBootState::InitializationInterrupted
+        );
+        assert_eq!(runtime.active_credential_count(), None);
+        assert!(runtime.pairing_policy_available());
+        assert_eq!(
             runtime.initialization_status(),
             CredentialInitializationStatus::Eligible {
                 media: InitializableMedia::RecoverableInterrupted,
@@ -2255,6 +2279,7 @@ mod tests {
             InitializationDriveOutcome::Completed
         ));
         assert_eq!(runtime.revision(), Some(1));
+        assert_eq!(runtime.active_credential_count(), Some(0));
         assert!(runtime.authority_publishable());
         assert!(runtime.mutation_eligible());
     }
@@ -2445,6 +2470,7 @@ mod tests {
         assert!(active_generation.get() > offer.generation().get());
         assert_eq!(confirmation.generation(), active_generation);
         assert_eq!(authority.active_count(), 1);
+        assert_eq!(runtime.active_credential_count(), Some(1));
         assert!(
             authority
                 .pending_credential()

@@ -363,8 +363,8 @@ mod tests {
 
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
     use reticulum_appliance_display_model::{
-        DisplayCommand, DisplayLabel, DisplayState, DisplayViewKind, PairingPasskey,
-        PairingSecretClearReason, PairingWindowSeconds,
+        DisplayCommand, DisplayCompositionState, DisplayHomeSnapshot, DisplayLabel,
+        DisplaySetupState, DisplayState, DisplayViewKind, PairingPasskey, PairingWindowSeconds,
     };
 
     use super::{
@@ -375,6 +375,22 @@ mod tests {
 
     fn label() -> DisplayLabel {
         DisplayLabel::new("Reticulum E290").expect("test label must fit")
+    }
+
+    fn home() -> DisplayHomeSnapshot {
+        DisplayHomeSnapshot::new(
+            label(),
+            DisplayLabel::new("e13f88").expect("test suffix fits"),
+            DisplaySetupState::Paired,
+            DisplayCompositionState::Configured,
+            DisplayCompositionState::Configured,
+            DisplayCompositionState::Configured,
+            DisplayCompositionState::Configured,
+        )
+    }
+
+    fn show_home() -> DisplayCommand {
+        DisplayCommand::ShowHome { snapshot: home() }
     }
 
     fn handoff() -> (
@@ -391,7 +407,7 @@ mod tests {
             .publish_latest(DisplayCommand::ShowBooting { label: label() })
             .expect("first request ID");
         let second = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
+            .publish_latest(show_home())
             .expect("second request ID");
         assert!(first < second);
         let mut newest = second;
@@ -424,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_clear_supersedes_a_queued_passkey() {
+    fn paired_home_supersedes_a_queued_passkey() {
         let (mut publisher, mut receiver) = handoff();
         publisher
             .publish_latest(DisplayCommand::ShowPairing {
@@ -435,10 +451,7 @@ mod tests {
             })
             .expect("pairing request ID");
         let terminal_id = publisher
-            .publish_latest(DisplayCommand::ClearPairingSecret {
-                label: label(),
-                reason: PairingSecretClearReason::Succeeded,
-            })
+            .publish_latest(show_home())
             .expect("terminal request ID");
 
         let mut state = DisplayState::new();
@@ -448,7 +461,8 @@ mod tests {
         assert_eq!(terminal.request_id(), terminal_id);
         let (_, command) = terminal.into_parts();
         let _ = state.apply(command);
-        assert_eq!(state.view().kind(), DisplayViewKind::PairingSucceeded);
+        assert_eq!(state.view().kind(), DisplayViewKind::Home);
+        assert_eq!(state.view().home(), Some(home()));
         assert!(!state.owns_pairing_secret());
         assert!(receiver.try_take_latest().is_none());
     }
@@ -456,13 +470,13 @@ mod tests {
     #[test]
     fn rendered_and_faulted_completions_round_trip_without_secret_data() {
         let (mut publisher, mut receiver) = handoff();
-        let ready_id = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
-            .expect("ready request ID");
-        let request = receiver.try_take_latest().expect("ready request");
-        assert_eq!(request.request_id(), ready_id);
+        let home_id = publisher
+            .publish_latest(show_home())
+            .expect("home request ID");
+        let request = receiver.try_take_latest().expect("home request");
+        assert_eq!(request.request_id(), home_id);
         receiver.report_completion(DisplayCompletion::new(
-            ready_id,
+            home_id,
             request.requested_view(),
             DisplayRenderOutcome::Rendered,
         ));
@@ -471,8 +485,8 @@ mod tests {
         let rendered = publisher
             .try_take_completion()
             .expect("rendered completion");
-        assert_eq!(rendered.request_id(), ready_id);
-        assert_eq!(rendered.view(), DisplayViewKind::Ready);
+        assert_eq!(rendered.request_id(), home_id);
+        assert_eq!(rendered.view(), DisplayViewKind::Home);
         assert_eq!(rendered.outcome(), DisplayRenderOutcome::Rendered);
         assert!(publisher.try_take_completion().is_none());
 
@@ -501,7 +515,7 @@ mod tests {
             .expect("first request ID");
         let _ = receiver.try_take_latest().expect("first request");
         let second = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
+            .publish_latest(show_home())
             .expect("second request ID");
         let _ = receiver.try_take_latest().expect("second request");
 
@@ -512,7 +526,7 @@ mod tests {
         ));
         receiver.report_completion(DisplayCompletion::new(
             second,
-            DisplayViewKind::Ready,
+            DisplayViewKind::Home,
             DisplayRenderOutcome::Faulted,
         ));
 
@@ -520,7 +534,7 @@ mod tests {
             publisher.try_take_completion(),
             Some(DisplayCompletion::new(
                 second,
-                DisplayViewKind::Ready,
+                DisplayViewKind::Home,
                 DisplayRenderOutcome::Faulted,
             ))
         );
@@ -530,9 +544,7 @@ mod tests {
     #[test]
     fn async_request_and_completion_waits_take_preexisting_values() {
         let (mut publisher, mut receiver) = handoff();
-        let expected = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
-            .expect("request ID");
+        let expected = publisher.publish_latest(show_home()).expect("request ID");
         let request = embassy_futures::block_on(receiver.next());
         assert_eq!(request.request_id(), expected);
         receiver.report_completion(DisplayCompletion::new(
@@ -550,22 +562,20 @@ mod tests {
     #[test]
     fn exact_rendered_completion_satisfies_the_physical_gate() {
         let (mut publisher, mut receiver) = handoff();
-        let expected = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
-            .expect("request ID");
+        let expected = publisher.publish_latest(show_home()).expect("request ID");
         receiver.report_completion(DisplayCompletion::new(
             expected,
-            DisplayViewKind::Ready,
+            DisplayViewKind::Home,
             DisplayRenderOutcome::Rendered,
         ));
 
         assert_eq!(
             embassy_futures::block_on(
-                publisher.wait_for_rendered_completion(expected, DisplayViewKind::Ready)
+                publisher.wait_for_rendered_completion(expected, DisplayViewKind::Home)
             ),
             Ok(DisplayCompletion::new(
                 expected,
-                DisplayViewKind::Ready,
+                DisplayViewKind::Home,
                 DisplayRenderOutcome::Rendered,
             ))
         );
@@ -578,7 +588,7 @@ mod tests {
             .publish_latest(DisplayCommand::ShowBooting { label: label() })
             .expect("stale request ID");
         let expected = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
+            .publish_latest(show_home())
             .expect("expected request ID");
         receiver.report_completion(DisplayCompletion::new(
             stale,
@@ -587,21 +597,21 @@ mod tests {
         ));
 
         let mut wait =
-            pin!(publisher.wait_for_rendered_completion(expected, DisplayViewKind::Ready));
+            pin!(publisher.wait_for_rendered_completion(expected, DisplayViewKind::Home));
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
         assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
 
         receiver.report_completion(DisplayCompletion::new(
             expected,
-            DisplayViewKind::Ready,
+            DisplayViewKind::Home,
             DisplayRenderOutcome::Rendered,
         ));
         assert_eq!(
             wait.as_mut().poll(&mut context),
             Poll::Ready(Ok(DisplayCompletion::new(
                 expected,
-                DisplayViewKind::Ready,
+                DisplayViewKind::Home,
                 DisplayRenderOutcome::Rendered,
             )))
         );
@@ -614,11 +624,11 @@ mod tests {
             .publish_latest(DisplayCommand::ShowBooting { label: label() })
             .expect("expected request ID");
         let later = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
+            .publish_latest(show_home())
             .expect("later request ID");
         receiver.report_completion(DisplayCompletion::new(
             later,
-            DisplayViewKind::Ready,
+            DisplayViewKind::Home,
             DisplayRenderOutcome::Rendered,
         ));
         assert_eq!(
@@ -633,7 +643,7 @@ mod tests {
 
         let (mut publisher, mut receiver) = handoff();
         let expected = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
+            .publish_latest(show_home())
             .expect("expected request ID");
         receiver.report_completion(DisplayCompletion::new(
             expected,
@@ -642,30 +652,30 @@ mod tests {
         ));
         assert_eq!(
             embassy_futures::block_on(
-                publisher.wait_for_rendered_completion(expected, DisplayViewKind::Ready)
+                publisher.wait_for_rendered_completion(expected, DisplayViewKind::Home)
             ),
             Err(DisplayCompletionGateError::ViewMismatch {
-                expected: DisplayViewKind::Ready,
+                expected: DisplayViewKind::Home,
                 observed: DisplayViewKind::Booting,
             })
         );
 
         let (mut publisher, mut receiver) = handoff();
         let expected = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
+            .publish_latest(show_home())
             .expect("expected request ID");
         receiver.report_completion(DisplayCompletion::new(
             expected,
-            DisplayViewKind::Ready,
+            DisplayViewKind::Home,
             DisplayRenderOutcome::Faulted,
         ));
         assert_eq!(
             embassy_futures::block_on(
-                publisher.wait_for_rendered_completion(expected, DisplayViewKind::Ready)
+                publisher.wait_for_rendered_completion(expected, DisplayViewKind::Home)
             ),
             Err(DisplayCompletionGateError::Faulted {
                 request_id: expected,
-                view: DisplayViewKind::Ready,
+                view: DisplayViewKind::Home,
             })
         );
     }
@@ -693,13 +703,11 @@ mod tests {
     #[test]
     fn boot_clear_acknowledgement_is_independent_of_requests_and_completions() {
         let (mut publisher, mut receiver) = handoff();
-        let request_id = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
-            .expect("request ID");
+        let request_id = publisher.publish_latest(show_home()).expect("request ID");
         receiver.report_boot_clear(DisplayBootClearOutcome::Ready);
         receiver.report_completion(DisplayCompletion::new(
             request_id,
-            DisplayViewKind::Ready,
+            DisplayViewKind::Home,
             DisplayRenderOutcome::Rendered,
         ));
 
@@ -725,7 +733,7 @@ mod tests {
         let (mut publisher, mut receiver) = handoff();
         publisher.next_request_id = Some(u64::MAX);
         let final_id = publisher
-            .publish_latest(DisplayCommand::ShowReady { label: label() })
+            .publish_latest(show_home())
             .expect("last representable request ID");
         assert_eq!(final_id.sequence(), u64::MAX);
 
@@ -743,7 +751,7 @@ mod tests {
             .try_take_latest()
             .expect("rejection must preserve the prior request");
         assert_eq!(retained.request_id(), final_id);
-        assert_eq!(retained.requested_view(), DisplayViewKind::Ready);
+        assert_eq!(retained.requested_view(), DisplayViewKind::Home);
         assert!(receiver.try_take_latest().is_none());
     }
 

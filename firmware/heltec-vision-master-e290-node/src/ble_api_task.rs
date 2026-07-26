@@ -29,8 +29,8 @@ use esp_hal::{gpio::Input, peripherals::BT, rng::Trng};
 use esp_radio::ble::controller::{BleConnector, BleInitError};
 use log::{error, info, warn};
 use reticulum_appliance_display_model::{
-    DisplayCommand, DisplayLabel, DisplayViewKind, PairingPasskey, PairingSecretClearReason,
-    PairingWindowSeconds,
+    DisplayCommand, DisplayHomeSnapshot, DisplaySetupState, DisplayViewKind, PairingPasskey,
+    PairingSecretClearReason, PairingWindowSeconds,
 };
 use reticulum_ble_bond_store::BleBond;
 use reticulum_device_api_ble as gatt_profile;
@@ -254,6 +254,7 @@ impl BleHandoffs {
 pub(crate) struct BlePhysicalOwners {
     pairing_button: Input<'static>,
     display_publisher: Option<DisplayPublisher<CriticalSectionRawMutex>>,
+    display_home: DisplayHomeSnapshot,
     restored_bond: Option<BleBond>,
     bond_store_available: bool,
 }
@@ -262,12 +263,14 @@ impl BlePhysicalOwners {
     pub(crate) fn new(
         pairing_button: Input<'static>,
         display_publisher: Option<DisplayPublisher<CriticalSectionRawMutex>>,
+        display_home: DisplayHomeSnapshot,
         restored_bond: Option<BleBond>,
         bond_store_available: bool,
     ) -> Self {
         Self {
             pairing_button,
             display_publisher,
+            display_home,
             restored_bond,
             bond_store_available,
         }
@@ -277,6 +280,7 @@ impl BlePhysicalOwners {
 struct BleConnectionOwners {
     pairing_button: Input<'static>,
     display_publisher: Option<DisplayPublisher<CriticalSectionRawMutex>>,
+    display_home: DisplayHomeSnapshot,
 }
 
 /// Initialize the BLE controller before optional peripheral actors start.
@@ -369,6 +373,7 @@ async fn run_host<C>(
     let BlePhysicalOwners {
         pairing_button,
         display_publisher,
+        display_home,
         restored_bond,
         bond_store_available,
     } = physical;
@@ -461,6 +466,7 @@ async fn run_host<C>(
             BleConnectionOwners {
                 pairing_button,
                 display_publisher,
+                display_home,
             },
             authoritative_bond_identity,
         ),
@@ -511,6 +517,7 @@ async fn serve_advertising<C: Controller>(
     let BleConnectionOwners {
         pairing_button,
         mut display_publisher,
+        mut display_home,
     } = physical;
     let BleHandoffs {
         pairing: mut pairing_handoff,
@@ -581,6 +588,7 @@ async fn serve_advertising<C: Controller>(
             &mut session_rng,
             &pairing_button,
             &mut display_publisher,
+            &mut display_home,
             authoritative_bond_identity,
         )
         .await;
@@ -853,6 +861,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
     session_rng: &mut Trng,
     pairing_button: &Input<'static>,
     display_publisher: &mut Option<DisplayPublisher<CriticalSectionRawMutex>>,
+    display_home: &mut DisplayHomeSnapshot,
     mut authoritative_bond_identity: Option<Identity>,
 ) -> ServeConnectionOutcome {
     if server
@@ -939,6 +948,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
     let mut application_rx_observed = false;
     let mut display_state = PairingDisplayState::Idle;
     let mut display_clear_reason: Option<PairingSecretClearReason> = None;
+    let mut display_home_after_pairing = false;
     let started_at = pairing_time().get();
     let mut debouncer =
         ActiveLowButtonDebouncer::new(started_at, active_low_level(pairing_button.is_low()));
@@ -1070,13 +1080,13 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                         application_pairing_idle.ensure_started(Instant::now().as_millis());
                         if let Some(publisher) = display_publisher.as_mut()
                             && publisher
-                                .publish_latest(DisplayCommand::ShowReady {
-                                    label: appliance_display_label(),
+                                .publish_latest(DisplayCommand::ShowHome {
+                                    snapshot: *display_home,
                                 })
                                 .is_err()
                         {
                             warn!(
-                                "e290-node stage=ble-api status=LINK-RESET reason=restored-pairing-display-ready-fault connection={}",
+                                "e290-node stage=ble-api status=LINK-RESET reason=restored-pairing-display-home-fault connection={}",
                                 connection_id.get()
                             );
                             break;
@@ -1465,6 +1475,11 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                                         fault = true;
                                         break;
                                     };
+                                    retain_activated_application_home(
+                                        &transmission,
+                                        display_home,
+                                        &mut display_home_after_pairing,
+                                    );
                                     pairing_transmission = Some(transmission);
                                 }
                                 DecodeEvent::MalformedCobs
@@ -1493,6 +1508,11 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                                             fault = true;
                                             break;
                                         };
+                                        retain_activated_application_home(
+                                            &transmission,
+                                            display_home,
+                                            &mut display_home_after_pairing,
+                                        );
                                         pre_authentication_started_at = None;
                                         application_pairing_idle
                                             .ensure_started(Instant::now().as_millis());
@@ -1603,8 +1623,6 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                                     let activated = transmission.activation_succeeded;
                                     pairing_transmission = None;
                                     if activated {
-                                        display_clear_reason =
-                                            Some(PairingSecretClearReason::Succeeded);
                                         info!(
                                             "e290-node stage=ble-api status=APPLICATION-PAIRING-COMPLETE connection={} action=reconnect-authenticated",
                                             connection_id.get()
@@ -1718,7 +1736,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
                     break;
                 };
                 let request = publisher.publish_latest(DisplayCommand::ShowPairing {
-                    label: appliance_display_label(),
+                    label: display_home.label(),
                     passkey,
                     expires_after_seconds,
                 });
@@ -1886,22 +1904,31 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         retain_only_bond.is_some(),
         connection_id.get()
     );
-    if matches!(
-        display_state,
-        PairingDisplayState::Pending(_) | PairingDisplayState::Rendered
-    ) || display_clear_reason == Some(PairingSecretClearReason::Succeeded)
-    {
-        let reason = display_clear_reason.unwrap_or(PairingSecretClearReason::Failed);
+    if display_home_after_pairing {
         if let Some(publisher) = display_publisher.as_mut()
             && publisher
-                .publish_latest(DisplayCommand::ClearPairingSecret {
-                    label: appliance_display_label(),
-                    reason,
+                .publish_latest(DisplayCommand::ShowHome {
+                    snapshot: *display_home,
                 })
                 .is_ok()
         {
             display_state = PairingDisplayState::Cleared;
         }
+    } else if let Some(reason) = display_clear_reason.or_else(|| {
+        matches!(
+            display_state,
+            PairingDisplayState::Pending(_) | PairingDisplayState::Rendered
+        )
+        .then_some(PairingSecretClearReason::Failed)
+    }) && let Some(publisher) = display_publisher.as_mut()
+        && publisher
+            .publish_latest(DisplayCommand::ClearPairingSecret {
+                label: display_home.label(),
+                reason,
+            })
+            .is_ok()
+    {
+        display_state = PairingDisplayState::Cleared;
     }
     let _ = display_state;
     ServeConnectionOutcome {
@@ -1975,10 +2002,6 @@ fn durable_bond(event_security_level: SecurityLevel, bond: &BondInformation) -> 
 
 fn matches_authoritative_identity(authoritative: Option<Identity>, observed: Identity) -> bool {
     authoritative.is_some_and(|identity| identity.match_identity(&observed))
-}
-
-fn appliance_display_label() -> DisplayLabel {
-    DisplayLabel::new("Reticulum E290").expect("the fixed product label fits")
 }
 
 fn poll_pairing_display(
@@ -2229,6 +2252,20 @@ async fn announce_lifecycle(
             return false;
         }
         Timer::after_millis(profile::API_POLL_INTERVAL_MS).await;
+    }
+}
+
+fn retain_activated_application_home(
+    transmission: &PairingTransmission,
+    display_home: &mut DisplayHomeSnapshot,
+    display_home_after_pairing: &mut bool,
+) {
+    // `activation_succeeded` comes from the node's durable Activated response.
+    // ATT indication confirmation proves only client delivery, so it must not
+    // govern the board's authoritative setup truth.
+    if transmission.activation_succeeded {
+        *display_home = (*display_home).with_setup(DisplaySetupState::Paired);
+        *display_home_after_pairing = true;
     }
 }
 

@@ -291,29 +291,45 @@ proof unless a failing test promotes one into a release blocker.
   `SplashScreen` image. They did not prevent the bounded foreground BLE proofs,
   but the app configuration and launch artwork must be reconciled before
   claiming polished launch or background behavior.
-- With several identical attached boards, the app shows the selected USB serial
-  but the physical E290 has no corresponding identify cue. Until a display or
-  LED identify action is connected to the permanent image, an operator may have
-  to press the middle button labelled `21` on every candidate board. The
-  isolated display HIL has visually qualified the panel, but it does not yet
-  identify a selected production appliance. Only the selected serial owns the
-  pairing session, so this remains unacceptable final multi-device UX.
-- Native first-run BLE discovery now lists bounded service advertisements and
-  requires explicit selection without connecting. Advertisements do not reveal
-  whether an appliance is provisioned and are not authenticated identity. The
-  selected row cannot yet begin pairing. The allocation-free display model and
-  coalescing handoff own a zeroizing six-digit passkey plus explicit
-  timeout/success/failure/reboot clearing. The portable SSD1680 driver and
-  isolated E290 display HIL now pass powered full-refresh/deep-sleep and visual
-  demo checks. A bounded integrated BLE-plus-display startup also passed boot
-  clear, BLE advertising, the exact `Ready` rendered-completion gate, visual
-  `READY`, and composition readiness on Board A. The opt-in permanent display
-  actor and production semantic renderer are not yet connected to live
-  pairing. Trouble Secure
-  Connections events, GPIO21-bound BLE pairing bearer, durable bond store, and
-  Rust-owned phone credential install remain unimplemented. See
+- Native first-run BLE discovery lists bounded service advertisements and
+  requires explicit selection without connecting. The production display now
+  renders the same exact six-character board suffix as the app card, so an
+  operator can match a selected appliance without guessing which GPIO21 button
+  belongs to it. The suffix and advertisement remain unauthenticated selection
+  hints; only the credential-bound suite-3 session authenticates the device.
+- The permanent display actor now owns a static Home snapshot after its physical
+  boot-completion gate: board suffix, configured `LORA NA915` transport, BLE
+  local-app bearer, configured LXMF/Nomad services, and application setup
+  guidance. `PAIRED` is derived only from the active credential count in
+  publishable application authority, never from the BLE bond. An empty
+  authority, or pre-authority media with a resident initialization/recovery
+  pairing policy, shows pairing guidance; only the absence of both authority
+  and a pairing path reports the local API unavailable. A durably successful
+  application activation updates the cached setup fact before fallible client
+  response delivery and queues Paired Home; failures and timeouts remain
+  terminal. This snapshot is deliberately composition, not task-spawn
+  completion or live health:
+  `LORA`, `BLE`, `LXMF`, and `NOMAD` do not assert that an actor remains online
+  or connected. Live link state, queue/message counts, RF signal metadata,
+  storage pressure, and post-boot faults need a sole display-status coordinator
+  before they can be shown truthfully. Only the initial Home render has a
+  physical completion gate. Pairing-success Home and timeout/failure terminal
+  commands are accepted into the coalescing handoff without waiting for panel
+  completion; a render fault can therefore leave stale e-paper pixels until a
+  later successful update or reboot boot-clear. Adding a terminal render gate
+  is deferred rather than expanding the pairing owner in this slice. A
+  readback-verified upgrade of the paired `e13f88` board then passed the
+  powered Home-screen visual check and retained-profile iOS reconnection.
+  Fresh-pair success/failure transitions under the new Home presentation still
+  need separate powered requalification.
+- The allocation-free display model and coalescing handoff own a zeroizing
+  six-digit passkey plus explicit timeout/failure/reboot clearing. The portable
+  SSD1680 driver and isolated E290 display HIL pass powered full-refresh,
+  deep-sleep, and visual demo checks; integrated secure BLE onboarding,
+  GPIO21-bound Secure Connections, the durable bond store, and Rust-owned phone
+  credential install are implemented and bounded by the alpha proof. See
   [ADR 0019](adr/0019-secure-ble-appliance-onboarding.md). Trouble `0.6.0`
-  also has no public pre-SMP admission hook, so the first alpha design accepts
+  still has no public pre-SMP admission hook, so the first alpha design accepts
   transient non-bonding SMP work and immediate disconnect as a bounded
   connection/UX denial-of-service risk; only a presence-bound epoch with an
   authenticated, durably stored bond may reach device authorization.

@@ -1085,6 +1085,12 @@ impl ProductStorageCoordinator {
         self.credential_runtime.revision()
     }
 
+    /// Active application credentials in the publishable authority, or `None`
+    /// when no authority may currently authenticate.
+    pub(crate) fn active_credential_count(&self) -> Option<usize> {
+        self.credential_runtime.active_credential_count()
+    }
+
     /// Whether the retained authority may authenticate existing credentials.
     pub(crate) fn credential_authority_publishable(&self) -> bool {
         self.credential_runtime.authority_publishable()

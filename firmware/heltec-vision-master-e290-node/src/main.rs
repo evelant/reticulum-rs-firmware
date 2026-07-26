@@ -85,7 +85,10 @@ use esp_storage::FlashStorage;
 use log::{error, info, warn};
 use rand_core::RngCore;
 #[cfg(feature = "display")]
-use reticulum_appliance_display_model::{DisplayCommand, DisplayLabel, DisplayViewKind};
+use reticulum_appliance_display_model::{
+    DisplayCommand, DisplayCompositionState, DisplayHomeSnapshot, DisplayLabel, DisplaySetupState,
+    DisplayViewKind,
+};
 #[cfg(feature = "display")]
 use reticulum_board_heltec_vision_master_e290::EINK_SPI_FREQUENCY_HZ;
 use reticulum_board_heltec_vision_master_e290_radio::{
@@ -180,7 +183,7 @@ const LORA_INTERFACE: PacketInterfaceId = PacketInterfaceId::new(1);
 #[cfg(feature = "display")]
 const DISPLAY_BOOT_CLEAR_DEADLINE_MS: u64 = 15_000;
 #[cfg(feature = "display")]
-const DISPLAY_READY_DEADLINE_MS: u64 = 15_000;
+const DISPLAY_HOME_DEADLINE_MS: u64 = 15_000;
 
 type E290SpiDevice = ExclusiveDevice<Spi<'static, Async>, Output<'static>, Delay>;
 type ProductRadio =
@@ -211,6 +214,13 @@ pub(crate) type ProductSupervisor = NodeInterfaceSupervisor<
 fn allocate_display_frame()
 -> Result<Box<E290FrameBuffer, ExternalMemory>, allocator_api2::alloc::AllocError> {
     Box::try_new_in(E290FrameBuffer::new_white(), ExternalMemory)
+}
+
+#[cfg(feature = "display")]
+fn display_device_suffix(base_mac: [u8; 6]) -> DisplayLabel {
+    let local_name = reticulum_device_api_ble::local_name(base_mac);
+    DisplayLabel::from_bytes(&local_name[reticulum_device_api_ble::LOCAL_NAME_PREFIX.len()..])
+        .expect("the fixed BLE discovery suffix is valid display text")
 }
 
 static IRQ_TIMESTAMPS: IrqTimestampCapture = IrqTimestampCapture::new_monotonic_us(monotonic_us);
@@ -1170,6 +1180,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
     let credential_boot_state = storage_coordinator.credential_boot_state();
     let credential_binding = storage_coordinator.credential_binding();
     let credential_revision = storage_coordinator.credential_revision();
+    let active_credential_count = storage_coordinator.active_credential_count();
     let credential_authority_publishable = storage_coordinator.credential_authority_publishable();
     let credential_mutation_eligible = storage_coordinator.credential_mutation_eligible();
     let credential_pairing_policy_available =
@@ -1470,74 +1481,103 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
         frame_dispatcher,
         config::dispatcher_config(),
     ));
-    // Finish the qualified READY render before constructing the BLE task
-    // token. Secure BLE onboarding then receives the sole verified publisher
-    // without racing this startup completion gate.
+    #[cfg(feature = "display")]
+    let display_home = {
+        let setup = DisplaySetupState::from_application_state(
+            active_credential_count,
+            credential_pairing_policy_available,
+        );
+        #[cfg(feature = "ble-api-proof")]
+        let ble = if ble_connector.is_some() {
+            DisplayCompositionState::Configured
+        } else {
+            DisplayCompositionState::Unavailable
+        };
+        #[cfg(not(feature = "ble-api-proof"))]
+        let ble = DisplayCompositionState::Unavailable;
+        DisplayHomeSnapshot::new(
+            DisplayLabel::new("Reticulum E290").expect("the fixed product label fits"),
+            display_device_suffix(base_mac_eui48),
+            setup,
+            DisplayCompositionState::Configured,
+            ble,
+            if lxmf_destination.is_some() {
+                DisplayCompositionState::Configured
+            } else {
+                DisplayCompositionState::Unavailable
+            },
+            DisplayCompositionState::Configured,
+        )
+    };
+    // Finish the qualified boot-composition Home render before constructing
+    // the BLE task token. Secure BLE onboarding then receives the sole
+    // verified publisher and a Copy of this non-secret snapshot without
+    // racing the startup completion gate.
     #[cfg(feature = "display")]
     let display_publisher = match display_publisher {
         Some(mut publisher) => {
-            let ready_request = publisher.publish_latest(DisplayCommand::ShowReady {
-                label: DisplayLabel::new("Reticulum E290").expect("the fixed product label fits"),
+            let home_request = publisher.publish_latest(DisplayCommand::ShowHome {
+                snapshot: display_home,
             });
-            match ready_request {
+            match home_request {
                 Ok(request_id) => {
                     info!(
-                        "e290-node stage=display-request status=QUEUED request={} view=Ready",
+                        "e290-node stage=display-request status=QUEUED request={} view=Home",
                         request_id.sequence(),
                     );
-                    startup_diagnostic!("ready-request");
+                    startup_diagnostic!("home-request");
                     match with_timeout(
-                        Duration::from_millis(DISPLAY_READY_DEADLINE_MS),
-                        publisher.wait_for_rendered_completion(request_id, DisplayViewKind::Ready),
+                        Duration::from_millis(DISPLAY_HOME_DEADLINE_MS),
+                        publisher.wait_for_rendered_completion(request_id, DisplayViewKind::Home),
                     )
                     .await
                     {
                         Ok(Ok(completion)) => {
                             info!(
-                                "e290-node stage=display-ready status=PASS request={} view={:?} outcome={:?}",
+                                "e290-node stage=display-home status=PASS request={} view={:?} outcome={:?}",
                                 completion.request_id().sequence(),
                                 completion.view(),
                                 completion.outcome(),
                             );
-                            startup_diagnostic!("ready-completion");
+                            startup_diagnostic!("home-completion");
                             Some(publisher)
                         }
                         Ok(Err(error)) => {
                             match error {
                                 DisplayCompletionGateError::Superseded { .. } => {
-                                    startup_diagnostic!("ready-completion", failure = "superseded");
+                                    startup_diagnostic!("home-completion", failure = "superseded");
                                 }
                                 DisplayCompletionGateError::ViewMismatch { .. } => {
                                     startup_diagnostic!(
-                                        "ready-completion",
+                                        "home-completion",
                                         failure = "view-mismatch"
                                     );
                                 }
                                 DisplayCompletionGateError::Faulted { .. } => {
                                     startup_diagnostic!(
-                                        "ready-completion",
+                                        "home-completion",
                                         failure = "render-fault"
                                     );
                                 }
                             }
                             error!(
-                                "e290-node stage=display-ready status=DISABLED reason=completion-gate error={error:?} fresh_pairing=false lora_routing=continue"
+                                "e290-node stage=display-home status=DISABLED reason=completion-gate error={error:?} fresh_pairing=false lora_routing=continue"
                             );
                             None
                         }
                         Err(_) => {
-                            startup_diagnostic!("ready-completion", failure = "timeout");
+                            startup_diagnostic!("home-completion", failure = "timeout");
                             error!(
-                                "e290-node stage=display-ready status=DISABLED reason=completion-timeout request={} deadline_ms={} fresh_pairing=false lora_routing=continue",
+                                "e290-node stage=display-home status=DISABLED reason=completion-timeout request={} deadline_ms={} fresh_pairing=false lora_routing=continue",
                                 request_id.sequence(),
-                                DISPLAY_READY_DEADLINE_MS,
+                                DISPLAY_HOME_DEADLINE_MS,
                             );
                             None
                         }
                     }
                 }
                 Err(_) => {
-                    startup_diagnostic!("ready-request", failure = "request-id-exhausted");
+                    startup_diagnostic!("home-request", failure = "request-id-exhausted");
                     error!(
                         "e290-node stage=display-request status=FAIL reason=request-id-exhausted fresh_pairing=false lora_routing=continue"
                     );
@@ -1674,6 +1714,7 @@ async fn product_main(spawner: Spawner, usb_boot_boundary: ProductUsbBootBoundar
                 ble_api_task::BlePhysicalOwners::new(
                     pairing_button,
                     display_publisher,
+                    display_home,
                     restored_ble_bond,
                     boot_ble_bond_store_available,
                 ),

@@ -157,6 +157,7 @@ mod tests {
         node_journal_binding, partition_contract, rns_inbox_binding, storage_device_id_from_eui48,
     };
     use reticulum_node_core::{NodeConfig, NodeCore, NodeIdentity, NodeInstanceId};
+    use std::vec::Vec;
 
     #[test]
     fn permanent_partition_contract_preserves_exact_store_boundaries() {
@@ -307,6 +308,66 @@ mod tests {
                 "read-only BLE bond mount must precede {later_operation}"
             );
         }
+    }
+
+    #[test]
+    fn home_snapshot_uses_application_authority_and_one_display_owner() {
+        let main = include_str!("main.rs");
+        let count = main
+            .find("let active_credential_count = storage_coordinator.active_credential_count();")
+            .expect("Home setup must read the publishable application authority");
+        let home_start = main
+            .find("let display_home = {")
+            .expect("main must compose one complete non-secret Home snapshot");
+        let home_end = main[home_start..]
+            .find("// Finish the qualified boot-composition Home render")
+            .map(|offset| home_start + offset)
+            .expect("Home composition must precede the physical render gate");
+        let home = &main[home_start..home_end];
+        assert!(count < home_start);
+        assert!(home.contains("DisplaySetupState::from_application_state("));
+        assert!(home.contains("active_credential_count,"));
+        assert!(home.contains("credential_pairing_policy_available,"));
+        assert!(
+            !home.contains("bond"),
+            "Bluetooth security state must not define application setup"
+        );
+        assert!(home.contains("display_device_suffix(base_mac_eui48)"));
+        assert!(home.contains("DisplayCompositionState::Configured"));
+
+        let home_request = main
+            .find("DisplayCommand::ShowHome {\n                snapshot: display_home,")
+            .expect("startup must publish the complete Home snapshot");
+        let home_completion = main
+            .find("wait_for_rendered_completion(request_id, DisplayViewKind::Home)")
+            .expect("startup must physically gate the initial Home view");
+        let ble_owner = main
+            .find("ble_api_task::BlePhysicalOwners::new(")
+            .expect("BLE onboarding must receive the sole display publisher");
+        assert!(home_request < home_completion);
+        assert!(home_completion < ble_owner);
+        assert!(
+            main[ble_owner..].contains("display_home,"),
+            "BLE onboarding must retain a copy of the exact rendered Home snapshot"
+        );
+
+        let helper_start = main
+            .find("fn display_device_suffix")
+            .expect("the board must expose its discovery suffix");
+        let helper_end = main[helper_start..]
+            .find("\n}\n")
+            .map(|offset| helper_start + offset)
+            .expect("the suffix helper must be bounded");
+        let helper = &main[helper_start..helper_end];
+        assert!(helper.contains("reticulum_device_api_ble::local_name(base_mac)"));
+        assert!(helper.contains("reticulum_device_api_ble::LOCAL_NAME_PREFIX.len()"));
+
+        let storage = include_str!("platform_storage.rs");
+        assert!(storage.contains("pub(crate) fn active_credential_count(&self) -> Option<usize>"));
+        assert!(
+            storage.contains("self.credential_runtime.active_credential_count()"),
+            "the flash coordinator must delegate to mounted credential authority"
+        );
     }
 
     #[test]
@@ -894,34 +955,103 @@ mod tests {
             .map(|offset| restored_start + offset)
             .expect("restored authenticated pairing entry must end before fresh SMP");
         let restored = &ble[restored_start..restored_end];
-        let ready_display = restored
-            .find("DisplayCommand::ShowReady")
+        let home_display = restored
+            .find("DisplayCommand::ShowHome")
             .expect("restored pairing must replace any stale terminal display");
         let ready_confirmation = restored
             .find("gatt_profile::SECURITY_CONFIRMATION_READY_VALUE")
             .expect("restored pairing must publish authenticated readiness");
         assert!(
-            ready_display < ready_confirmation,
+            home_display < ready_confirmation,
             "the stale display must be replaced before the client observes RDY1"
         );
-        assert!(restored.contains("restored-pairing-display-ready-fault"));
+        assert!(restored.contains("restored-pairing-display-home-fault"));
 
+        let pairing_response_start = ble
+            .find("async fn handle_pairing_record")
+            .expect("the bearer must own one pairing response encoder");
+        let pairing_response_end = ble[pairing_response_start..]
+            .find("const fn matches_control_response")
+            .map(|offset| pairing_response_start + offset)
+            .expect("the pairing encoder must precede response matching helpers");
+        let pairing_response = &ble[pairing_response_start..pairing_response_end];
+        let durable_activation = pairing_response
+            .find("ActivateResult::Activated")
+            .expect("the encoded response must classify durable activation");
+        let response_encoded = pairing_response
+            .find("FramedRecord::encode(&record)")
+            .expect("the durable result must be framed for the client");
+        assert!(durable_activation < response_encoded);
+
+        let retain_helper_start = ble
+            .find("fn retain_activated_application_home")
+            .expect("durable activation must update cached Home authority");
+        let retain_helper_end = ble[retain_helper_start..]
+            .find("fn pairing_time")
+            .map(|offset| retain_helper_start + offset)
+            .expect("the cached Home helper must remain bounded");
+        let retain_helper = &ble[retain_helper_start..retain_helper_end];
+        assert!(retain_helper.contains("transmission.activation_succeeded"));
+        assert!(retain_helper.contains(".with_setup(DisplaySetupState::Paired)"));
+        assert!(retain_helper.contains("*display_home_after_pairing = true"));
+
+        let retain_calls: Vec<_> = ble
+            .match_indices("retain_activated_application_home(")
+            .map(|(offset, _)| offset)
+            .filter(|offset| *offset < retain_helper_start)
+            .collect();
+        assert_eq!(
+            retain_calls.len(),
+            2,
+            "both accepted pairing-record paths must retain durable setup truth"
+        );
+        for retain_call in retain_calls {
+            let pairing_record = ble[..retain_call]
+                .rfind("handle_pairing_record(")
+                .expect("Home retention must directly follow an accepted pairing response");
+            let transmission_owner = ble[retain_call..]
+                .find("pairing_transmission = Some(transmission);")
+                .map(|offset| retain_call + offset)
+                .expect("the encoded pairing response must retain its transmission owner");
+            assert!(pairing_record < retain_call);
+            assert!(
+                retain_call < transmission_owner,
+                "durable Home truth must precede fallible ATT response delivery"
+            );
+        }
+
+        let confirmation_start = ble
+            .find("if transmission.frame.is_complete()")
+            .expect("normal connection close must wait for complete confirmed delivery");
+        let confirmation_end = ble[confirmation_start..]
+            .find("break 'connection;")
+            .map(|offset| confirmation_start + offset)
+            .expect("confirmed successful activation must close the onboarding connection");
+        let confirmation = &ble[confirmation_start..confirmation_end];
+        assert!(confirmation.contains("transmission.activation_succeeded"));
+        assert!(!confirmation.contains("with_setup(DisplaySetupState::Paired)"));
+        assert!(!confirmation.contains("display_home_after_pairing = true"));
         let terminal_start = ble
-            .rfind("if matches!(\n        display_state,")
-            .expect("connection cleanup must own the terminal display transition");
+            .rfind("if display_home_after_pairing {")
+            .expect("connection cleanup must own the successful Home transition");
         let terminal_end = ble[terminal_start..]
             .find("let _ = display_state;")
             .map(|offset| terminal_start + offset)
             .expect("terminal display transition must precede outcome construction");
         let terminal = &ble[terminal_start..terminal_end];
         assert!(
-            terminal.contains("display_clear_reason == Some(PairingSecretClearReason::Succeeded)"),
-            "successful resumed pairing must enter terminal display cleanup without a passkey"
+            terminal.contains("DisplayCommand::ShowHome"),
+            "successful application pairing must publish the paired Home snapshot"
         );
         assert!(
             terminal.contains("DisplayCommand::ClearPairingSecret"),
-            "successful resumed pairing must render the paired state"
+            "failed and timed-out pairing must retain their terminal display path"
         );
+        assert!(
+            terminal.contains("display_clear_reason.or_else"),
+            "an explicit failure or timeout must render terminal even without a fresh passkey"
+        );
+        assert!(!ble.contains("PairingSecretClearReason::Succeeded"));
 
         let drain = ble
             .find("drain_connection(&gatt_connection")

@@ -17,8 +17,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import type {
   ApplianceSnapshot,
   BytesView,
-  ConnectionState,
-  ConnectionTransport,
   ContactView,
   OnboardingView,
   RecoveryRequest,
@@ -31,12 +29,17 @@ import {
   MAX_LXMF_BASIC_TITLE_BYTES,
 } from "../generated/api.ts";
 import { ApplianceApi } from "../lib/api";
+import {
+  applianceStatusPresentation,
+  connectionStateLabel,
+  connectionTransportLabel,
+} from "../lib/appliance-status.ts";
 import type { BleCandidate, BleScanOptions } from "../lib/ble-central-types.ts";
 import { type DraftIdentity, ensureDraftIdentity } from "../lib/draft.ts";
 import {
   ForegroundReconnect,
-  foregroundReconnectMessage,
   type ForegroundReconnectProgress,
+  foregroundReconnectMessage,
 } from "../lib/foreground-reconnect.ts";
 import { keyboardLayoutPolicy } from "../lib/keyboard-layout.ts";
 import { LatestRequest } from "../lib/latest-request.ts";
@@ -75,16 +78,6 @@ const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
 const KEYBOARD_LAYOUT = keyboardLayoutPolicy(Platform.OS);
 type Workspace = "lxmf" | "nomad";
 
-function connectionLabel(connection: ConnectionState | undefined): string {
-  return connection?.state.replaceAll("_", " ") ?? "starting";
-}
-
-function transportLabel(transport: ConnectionTransport): string {
-  return typeof transport === "string"
-    ? transport.replaceAll("_", " ")
-    : transport.other.replaceAll("_", " ");
-}
-
 function bytesText(field: BytesView): string {
   return field.encoding === "utf8" ? field.value : `hex:${field.value}`;
 }
@@ -115,6 +108,75 @@ function ActionButton({ disabled = false, label, onPress, secondary = false }: A
     >
       <Text style={[styles.buttonText, secondary && styles.buttonSecondaryText]}>{label}</Text>
     </Pressable>
+  );
+}
+
+interface ApplianceStatusCardProps {
+  readonly compact: boolean;
+  readonly nativeCore: NativeCoreStatus | null;
+  readonly snapshot: ApplianceSnapshot | null;
+}
+
+function ApplianceStatusCard({ compact, nativeCore, snapshot }: ApplianceStatusCardProps) {
+  const [showDetails, setShowDetails] = useState(false);
+  const presentation = applianceStatusPresentation(snapshot);
+  const nativeApiLabel =
+    nativeCore?.label ?? (Platform.OS === "web" ? "Web client" : "Checking native bridge");
+
+  return (
+    <View style={[styles.applianceStatusCard, compact && styles.applianceStatusCardCompact]}>
+      <View style={styles.applianceStatusHeading}>
+        <View style={styles.applianceStatusIdentity}>
+          <Text style={styles.eyebrow}>APPLIANCE STATUS</Text>
+          <Text selectable style={styles.applianceStatusBoard}>
+            {presentation.boardLabel}
+          </Text>
+          <Text
+            accessibilityLiveRegion="polite"
+            style={[
+              styles.applianceStatusConnection,
+              presentation.tone === "ready" && styles.applianceStatusConnectionReady,
+              presentation.tone === "faulted" && styles.applianceStatusConnectionFaulted,
+            ]}
+          >
+            {presentation.connectionLabel}
+          </Text>
+        </View>
+        <Pressable
+          accessibilityLabel={`${showDetails ? "Hide" : "Show"} appliance diagnostics`}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: showDetails }}
+          hitSlop={7}
+          onPress={() => setShowDetails((visible) => !visible)}
+          style={({ pressed }) => [styles.statusDetailsButton, pressed && styles.buttonPressed]}
+        >
+          <Text style={styles.statusDetailsButtonText}>
+            {showDetails ? "Hide details" : "Details"}
+          </Text>
+        </Pressable>
+      </View>
+      <View style={styles.applianceActivity}>
+        <Text style={styles.applianceActivityItem}>{presentation.pendingOutboxLabel}</Text>
+        <Text style={styles.applianceActivitySeparator}>·</Text>
+        <Text style={styles.applianceActivityItem}>{presentation.importedThisRunLabel}</Text>
+        <Text style={styles.applianceActivitySeparator}>·</Text>
+        <Text style={styles.applianceActivityItem}>{presentation.contactCountLabel}</Text>
+      </View>
+      <View style={styles.applianceDestination}>
+        <Text style={styles.applianceDestinationLabel}>LOCAL LXMF</Text>
+        <Text selectable style={styles.applianceDestinationValue}>
+          {presentation.lxmfDestination ?? "Not available"}
+        </Text>
+      </View>
+      {showDetails ? (
+        <View style={styles.applianceStatusDetails}>
+          <MetaRow label="Endpoint" value={presentation.endpoint ?? "Not connected"} />
+          <MetaRow label="Primary" value={presentation.primaryDestination ?? "Not available"} />
+          <MetaRow label="Device ID" value={presentation.deviceId ?? "Not available"} />
+          <MetaRow label="API" value={nativeApiLabel} />
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -896,7 +958,7 @@ function Sidebar({
       ? null
       : [
           snapshot?.device?.device_id ?? "",
-          transportLabel(readyConnection.transport),
+          connectionTransportLabel(readyConnection.transport),
           readyConnection.endpoint,
           readyConnection.device_label,
         ].join("\u0000");
@@ -1090,18 +1152,6 @@ function Sidebar({
           {contactRows}
         </ScrollView>
       )}
-      <View style={styles.deviceMeta}>
-        <MetaRow label="Connection" value={connectionLabel(snapshot?.connection)} />
-        <MetaRow
-          label="Transport"
-          value={readyConnection === undefined ? "—" : transportLabel(readyConnection.transport)}
-        />
-        <MetaRow label="Endpoint" value={readyConnection?.endpoint ?? "—"} />
-        <MetaRow label="Device" value={readyConnection?.device_label ?? "—"} />
-        <MetaRow label="Pending" value={String(snapshot?.pending_outbox ?? 0)} />
-        <MetaRow label="Imported" value={String(snapshot?.imported_this_run ?? 0)} />
-        <MetaRow label="Local LXMF" value={snapshot?.device?.lxmf_delivery_destination ?? "—"} />
-      </View>
     </>
   );
 
@@ -1280,8 +1330,9 @@ export default function ApplianceScreen() {
     AppState.currentState === null || AppState.currentState === "active",
   );
   const [reconnectRetry, setReconnectRetry] = useState(0);
-  const [reconnectProgress, setReconnectProgress] =
-    useState<ForegroundReconnectProgress | null>(null);
+  const [reconnectProgress, setReconnectProgress] = useState<ForegroundReconnectProgress | null>(
+    null,
+  );
   const [selected, setSelected] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineView[]>([]);
   const [workspace, setWorkspace] = useState<Workspace>("lxmf");
@@ -1308,8 +1359,7 @@ export default function ApplianceScreen() {
   // local error. The onboarding panel owns that state until setup is ready.
   const displayedError =
     error ??
-    (ready &&
-    (reconnectProgress === null || snapshot?.connection.state === "faulted")
+    (ready && (reconnectProgress === null || snapshot?.connection.state === "faulted")
       ? snapshot?.last_error
       : null);
   const selectedContact = contacts.find((contact) => contact.destination === selected);
@@ -1657,16 +1707,6 @@ export default function ApplianceScreen() {
           </View>
         </View>
         <View style={styles.statusCluster}>
-          {nativeCore === null ? null : (
-            <View
-              style={[
-                styles.pill,
-                nativeCore.state === "ready" ? styles.pillReady : styles.pillFaulted,
-              ]}
-            >
-              <Text style={styles.pillText}>{nativeCore.label}</Text>
-            </View>
-          )}
           <View
             style={[
               styles.pill,
@@ -1675,7 +1715,7 @@ export default function ApplianceScreen() {
             ]}
           >
             <Text style={styles.pillText}>
-              {ready ? connectionLabel(snapshot?.connection) : "setup required"}
+              {ready ? connectionStateLabel(snapshot?.connection) : "setup required"}
             </Text>
           </View>
           {compact ? null : (
@@ -1696,6 +1736,9 @@ export default function ApplianceScreen() {
           )}
         </View>
       </View>
+      {ready ? (
+        <ApplianceStatusCard compact={compact} nativeCore={nativeCore} snapshot={snapshot} />
+      ) : null}
       {displayedError === null || displayedError === undefined ? null : (
         <View accessibilityLiveRegion="assertive" style={styles.errorBanner}>
           <Text style={styles.errorText}>{displayedError}</Text>
@@ -1703,9 +1746,7 @@ export default function ApplianceScreen() {
       )}
       {reconnectProgress === null ? null : (
         <View accessibilityLiveRegion="polite" style={styles.reconnectBanner}>
-          <Text style={styles.reconnectText}>
-            {foregroundReconnectMessage(reconnectProgress)}
-          </Text>
+          <Text style={styles.reconnectText}>{foregroundReconnectMessage(reconnectProgress)}</Text>
         </View>
       )}
       {busy ? <ActivityIndicator color="#91e6a7" style={styles.activity} /> : null}
@@ -1825,6 +1866,77 @@ const styles = StyleSheet.create({
   pillReady: { borderColor: "#356344", backgroundColor: colors.greenDark },
   pillFaulted: { borderColor: "#70413d", backgroundColor: "#321d1b" },
   pillText: { color: colors.muted, fontSize: 12 },
+  applianceStatusCard: {
+    marginHorizontal: 28,
+    marginTop: 14,
+    padding: 14,
+    gap: 9,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 12,
+    backgroundColor: colors.panel,
+  },
+  applianceStatusCardCompact: {
+    marginHorizontal: 14,
+    marginTop: 10,
+    padding: 12,
+    gap: 8,
+  },
+  applianceStatusHeading: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  applianceStatusIdentity: { flex: 1, minWidth: 0 },
+  applianceStatusBoard: {
+    color: colors.text,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontSize: 15,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+  },
+  applianceStatusConnection: { marginTop: 4, color: colors.muted, fontSize: 12 },
+  applianceStatusConnectionReady: { color: colors.green },
+  applianceStatusConnectionFaulted: { color: colors.red },
+  statusDetailsButton: {
+    minHeight: 44,
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 999,
+  },
+  statusDetailsButtonText: { color: "#dfe8df", fontSize: 11, fontWeight: "700" },
+  applianceActivity: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 7 },
+  applianceActivityItem: { color: colors.text, fontSize: 12, fontWeight: "600" },
+  applianceActivitySeparator: { color: colors.muted, fontSize: 12 },
+  applianceDestination: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  applianceDestinationLabel: {
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+  },
+  applianceDestinationValue: {
+    flexShrink: 1,
+    color: colors.text,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  applianceStatusDetails: {
+    paddingTop: 10,
+    gap: 8,
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+  },
   button: {
     minHeight: 36,
     justifyContent: "center",
@@ -2056,13 +2168,6 @@ const styles = StyleSheet.create({
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
     fontSize: 11,
     lineHeight: 16,
-  },
-  deviceMeta: {
-    marginTop: 26,
-    paddingTop: 16,
-    gap: 8,
-    borderTopColor: colors.line,
-    borderTopWidth: 1,
   },
   metaRow: { flexDirection: "row", gap: 10 },
   metaLabel: {
