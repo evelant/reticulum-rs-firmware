@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn lora_projection_uses_the_last_accepted_packet_and_saturating_drop_groups() {
-        let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_22_DBM_CONFIGURATION);
+        let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_22_DBM_CONFIGURATION);
         cell.record_receive_pipeline(
             RxDiagnostics {
                 frames_seen: 7,
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn trace_projection_shortens_an_over_budget_page_and_ends_the_final_page() {
-        let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_22_DBM_CONFIGURATION);
+        let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_22_DBM_CONFIGURATION);
         cell.set_trace_boot_sequence(77);
         for tag in 1_u8..=3 {
             cell.record_route_selected(

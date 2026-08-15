@@ -16,7 +16,17 @@ const TARGET: &str = "xtensa-esp32s3-none-elf";
 const PARTITION_TABLE: &str = "partitions/e290.csv";
 const STACK_GUARD_OFFSET_BYTES: u64 = 60;
 const STACK_GUARD_BYTES: u64 = size_of::<u32>() as u64;
-const MINIMUM_STACK_HEADROOM_BYTES: u64 = 32 * 1024;
+// The reviewed powered credential-boot failure needed roughly 38 KiB beyond
+// the compiler's largest single frame: synchronous mount/classification,
+// executor and ROM memcpy frames are cumulative even though `.stack_sizes`
+// reports them one at a time. Round that observed nested use up to 40 KiB and
+// retain another 8 KiB for interrupt entry and future bounded growth. This
+// address-independent gate covers both formatted materialization and
+// unformatted-media classification.
+const REVIEWED_NESTED_STARTUP_STACK_BYTES: u64 = 40 * 1024;
+const MINIMUM_STACK_RESIDUAL_BYTES: u64 = 8 * 1024;
+const MINIMUM_STACK_HEADROOM_BYTES: u64 =
+    REVIEWED_NESTED_STARTUP_STACK_BYTES + MINIMUM_STACK_RESIDUAL_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Profile {
@@ -316,12 +326,10 @@ fn check_elf(path: &Path) -> Result<(), String> {
         .ok_or_else(|| "CPU0 stack symbols are not monotonically ordered".to_owned())?;
 
     let (record_count, maximum_frame) = stack_size_inventory(&file, path)?;
-    let required = maximum_frame
-        .checked_add(MINIMUM_STACK_HEADROOM_BYTES)
-        .ok_or_else(|| "stack policy calculation overflow".to_owned())?;
+    let required = minimum_required_stack(maximum_frame)?;
     if usable_stack < required {
         return Err(format!(
-            "CPU0 usable stack {usable_stack} bytes is smaller than largest compiler frame {maximum_frame} plus {MINIMUM_STACK_HEADROOM_BYTES}-byte headroom"
+            "CPU0 usable stack {usable_stack} bytes is smaller than largest compiler frame {maximum_frame} plus {MINIMUM_STACK_HEADROOM_BYTES}-byte reviewed nested-startup headroom"
         ));
     }
 
@@ -349,6 +357,12 @@ fn check_elf(path: &Path) -> Result<(), String> {
         usable_stack - maximum_frame
     );
     Ok(())
+}
+
+fn minimum_required_stack(maximum_frame: u64) -> Result<u64, String> {
+    maximum_frame
+        .checked_add(MINIMUM_STACK_HEADROOM_BYTES)
+        .ok_or_else(|| "stack policy calculation overflow".to_owned())
 }
 
 fn absolute_symbol(file: &object::File<'_>, path: &Path, name: &str) -> Result<u64, String> {
@@ -436,7 +450,10 @@ fn decode_uleb128(bytes: &[u8]) -> Result<(u64, usize), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Profile, Task, decode_uleb128, parse_task};
+    use super::{
+        MINIMUM_STACK_HEADROOM_BYTES, Profile, Task, decode_uleb128, minimum_required_stack,
+        parse_task,
+    };
 
     #[test]
     fn commands_default_to_gateway() {
@@ -470,5 +487,18 @@ mod tests {
     fn uleb128_decoder_is_bounded() {
         assert_eq!(decode_uleb128(&[0x80, 0x01]), Ok((128, 2)));
         assert!(decode_uleb128(&[0x80]).is_err());
+    }
+
+    #[test]
+    fn stack_policy_rejects_the_powered_credential_boot_regression() {
+        const REGRESSED_MAXIMUM_FRAME: u64 = 53_104;
+        const REGRESSED_USABLE_STACK: u64 = 89_612;
+
+        let required = minimum_required_stack(REGRESSED_MAXIMUM_FRAME)
+            .expect("the reviewed stack sizes fit u64");
+        assert_eq!(required, 102_256);
+        assert_eq!(MINIMUM_STACK_HEADROOM_BYTES, 48 * 1024);
+        assert!(REGRESSED_USABLE_STACK < required);
+        assert!(minimum_required_stack(u64::MAX).is_err());
     }
 }

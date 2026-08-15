@@ -83,6 +83,12 @@ display framebuffer can live there. Task stacks, synchronization primitives,
 interrupt-visible state, Wi-Fi/BLE controller memory, DMA buffers, and
 cache-off flash state require audited internal memory.
 
+The fixed route-diagnostics snapshot and radio-trace ring are plain,
+task-owned backing storage in PSRAM. The radio diagnostics mutexes, pending
+correlation owner, and all interrupt-visible radio state remain in internal
+memory; no trace or route backing is accessed from an interrupt or cache-off
+flash path.
+
 ## Ownership and concurrency
 
 The target uses bounded queues and sole owners instead of sharing mutable

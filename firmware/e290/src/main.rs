@@ -110,6 +110,7 @@ use reticulum_e290_firmware::{
     nomad_responder::activate_nomad_responder,
     pairing_control_handoff::PairingControlHandoff,
     radio_diagnostics::RadioDiagnosticsCell,
+    radio_trace::RadioTraceRing,
     rmap_discovery::{
         RmapDiscoveryStatusCell, RmapPublicationPolicy, activate_rmap_discovery_destination,
     },
@@ -230,6 +231,83 @@ fn allocate_display_frame()
     Box::try_new_in(E290FrameBuffer::new_white(), ExternalMemory)
 }
 
+#[inline(never)]
+fn leak_validated_external_or_inert<T: 'static>(
+    allocation: Box<T, ExternalMemory>,
+    stage: &str,
+    psram_start_address: usize,
+    psram_end_address: usize,
+) -> &'static mut T {
+    let bytes = mem::size_of::<T>();
+    let start = (&*allocation as *const T) as usize;
+    let end = match start.checked_add(bytes) {
+        Some(end) => end,
+        None => {
+            error!("e290-node stage={stage} status=FAIL reason=allocation-range-overflow");
+            inert_large_construction()
+        }
+    };
+    if !start.is_multiple_of(mem::align_of::<T>())
+        || start < psram_start_address
+        || end > psram_end_address
+    {
+        error!(
+            "e290-node stage={stage} status=FAIL reason=external-address allocation_start=0x{start:08x} allocation_end=0x{end:08x} psram_start=0x{psram_start_address:08x} psram_end=0x{psram_end_address:08x} expected_bytes={bytes} alignment={}",
+            mem::align_of::<T>(),
+        );
+        inert_large_construction()
+    }
+    info!(
+        "e290-node stage={stage} status=PASS ownership=boot-lifetime-external bytes={bytes} start=0x{start:08x} end=0x{end:08x}"
+    );
+    Box::leak(allocation)
+}
+
+/// Place only the plain trace backing in mapped PSRAM. Its mutex and pending
+/// correlation owner remain in the internal [`RadioDiagnosticsCell`].
+#[inline(never)]
+fn allocate_radio_trace_or_inert(
+    psram_start_address: usize,
+    psram_end_address: usize,
+) -> &'static mut RadioTraceRing {
+    let trace = match Box::try_new_in(RadioTraceRing::new(0), ExternalMemory) {
+        Ok(trace) => trace,
+        Err(_) => {
+            error!(
+                "e290-node stage=radio-trace status=FAIL reason=external-allocation expected_bytes={}",
+                mem::size_of::<RadioTraceRing>(),
+            );
+            inert_large_construction()
+        }
+    };
+    leak_validated_external_or_inert(trace, "radio-trace", psram_start_address, psram_end_address)
+}
+
+/// Place the caller-owned plain route snapshot in mapped PSRAM. It has no
+/// synchronization or interrupt-visible state and remains solely node-owned.
+#[inline(never)]
+fn allocate_route_diagnostics_or_inert(
+    psram_start_address: usize,
+    psram_end_address: usize,
+) -> &'static mut RouteDiagnosticsSnapshot<{ config::PATHS }> {
+    let routes = match Box::try_new_in(RouteDiagnosticsSnapshot::empty(), ExternalMemory) {
+        Ok(routes) => routes,
+        Err(_) => {
+            error!(
+                "e290-node stage=route-diagnostics status=FAIL reason=external-allocation expected_bytes={}",
+                mem::size_of::<RouteDiagnosticsSnapshot<{ config::PATHS }>>(),
+            );
+            inert_large_construction()
+        }
+    };
+    leak_validated_external_or_inert(
+        routes,
+        "route-diagnostics",
+        psram_start_address,
+        psram_end_address,
+    )
+}
+
 #[cfg(feature = "display")]
 fn display_device_suffix(base_mac: [u8; 6]) -> DisplayLabel {
     let local_name = reticulum_device_api_ble::local_name(base_mac);
@@ -281,8 +359,6 @@ static APPLICATION_EVENT_STORAGE: StaticCell<
 > = StaticCell::new();
 static DISPATCHER: StaticCell<ProductDispatcher> = StaticCell::new();
 static RADIO_DIAGNOSTICS: StaticCell<RadioDiagnosticsCell> = StaticCell::new();
-static ROUTE_DIAGNOSTICS: StaticCell<RouteDiagnosticsSnapshot<{ config::PATHS }>> =
-    StaticCell::new();
 static FLASH_STORAGE: StaticCell<FlashStorage<'static>> = StaticCell::new();
 static STORAGE_COORDINATOR: StaticCell<ProductStorageCoordinator> = StaticCell::new();
 static PAIRING_CONTROL: StaticCell<PairingControlHandoff<CriticalSectionRawMutex>> =
@@ -1284,10 +1360,12 @@ async fn product_main(spawner: Spawner) -> ! {
         )
         .expect("the product adapter commits only board-valid LoRa profiles");
         let radio_task_timing = config::RadioTaskTiming::for_configuration(radio_configuration);
-        let radio_diagnostics =
-            RADIO_DIAGNOSTICS.init_with(|| RadioDiagnosticsCell::new(radio_configuration));
+        let radio_trace = allocate_radio_trace_or_inert(psram_start_address, psram_end_address);
+        let radio_diagnostics = RADIO_DIAGNOSTICS
+            .init_with(|| RadioDiagnosticsCell::new(radio_configuration, radio_trace));
         radio_diagnostics.set_trace_boot_sequence(u64::from(announce_epoch.get()));
-        let route_diagnostics = ROUTE_DIAGNOSTICS.init(RouteDiagnosticsSnapshot::empty());
+        let route_diagnostics =
+            allocate_route_diagnostics_or_inert(psram_start_address, psram_end_address);
         let automatic_announces_enabled = storage_coordinator.automatic_announces_enabled();
         let rmap_discovery_enabled = storage_coordinator.rmap_discovery_enabled();
         let rmap_public_location = storage_coordinator.rmap_public_location();
@@ -1694,7 +1772,7 @@ async fn product_main(spawner: Spawner) -> ! {
         let display_available = false;
 
         let mut data_buffers = DATA_PACKET_STORAGE
-            .init([const { TxPacketBuffer::new() }; config::DATA_BUFFERS])
+            .init_with(|| [const { TxPacketBuffer::new() }; config::DATA_BUFFERS])
             .each_mut();
         for buffer in data_buffers.iter_mut() {
             if let Err(reason) = node.register_packet_buffer(buffer) {
@@ -1726,7 +1804,7 @@ async fn product_main(spawner: Spawner) -> ! {
                 }
             };
         let ordinary_buffers = ORDINARY_PACKET_STORAGE
-            .init([const { OrdinaryPacketBuffer::new() }; config::ORDINARY_BUFFERS])
+            .init_with(|| [const { OrdinaryPacketBuffer::new() }; config::ORDINARY_BUFFERS])
             .each_mut();
         let mut ordinary_pool = OrdinaryBufferPool::new();
         for buffer in ordinary_buffers {
@@ -1740,7 +1818,7 @@ async fn product_main(spawner: Spawner) -> ! {
         }
         let ordinary = construct_ordinary_coordinator_or_inert(ordinary_owner, ordinary_pool);
 
-        let fabric = INTERFACE_FABRIC.init(InterfaceFabric::new());
+        let fabric = INTERFACE_FABRIC.init_with(InterfaceFabric::new);
         let lora_data_pair = DATA_PERMIT.init(DataPermitHandoff::new()).split_paired();
         let lora_ordinary_pair = ORDINARY_PERMIT
             .init(OrdinaryPermitHandoff::new())
@@ -1830,17 +1908,19 @@ async fn product_main(spawner: Spawner) -> ! {
                     inert_large_construction()
                 }
             };
-        let dispatcher = DISPATCHER.init(SoleRadioTxDispatcher::new(
-            radio,
-            radio_rng,
-            tx_interface,
-            data_permit,
-            ordinary_permit,
-            frame_dispatcher,
-            config::dispatcher_config(radio_configuration),
-        ));
+        let dispatcher = DISPATCHER.init_with(|| {
+            SoleRadioTxDispatcher::new(
+                radio,
+                radio_rng,
+                tx_interface,
+                data_permit,
+                ordinary_permit,
+                frame_dispatcher,
+                config::dispatcher_config(radio_configuration),
+            )
+        });
         let application_event_storage = APPLICATION_EVENT_STORAGE
-            .init([const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS]);
+            .init_with(|| [const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS]);
         let application_events = ApplicationEventOwner::new(application_event_storage);
         let delayed_proofs = DelayedProofOwner::new(delayed_proof_storage);
         let (bearer_pairing_handoff, node_pairing_handoff) =

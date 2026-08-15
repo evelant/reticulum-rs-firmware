@@ -9,15 +9,15 @@ use reticulum_radio_tx_dispatch::DispatchOutcome;
 
 use crate::radio_trace::{
     RadioTraceAttemptOutcome, RadioTraceAttemptTerminal, RadioTraceEventKind,
-    RadioTraceInboundProof, RadioTraceInboundProofStage, RadioTraceProofIngress,
+    RadioTraceInboundProof, RadioTraceInboundProofStage, RadioTraceProofIngress, RadioTraceRing,
     RadioTraceRouteResolution, RadioTraceRouteSelected,
 };
 
 use super::{
-    AcceptedLoRaPacketObservation, LastDataTxObservation, MAXIMUM_RADIO_DIAGNOSTICS_SNAPSHOT_BYTES,
-    RadioDiagnosticsCell, RadioDiagnosticsSnapshot, RadioRuntimeState, RadioTxDispatchFamily,
-    RadioTxTerminalOutcome, classify_dispatch_outcome, inbound_proof_terminal_stage,
-    take_matching_inbound_proof,
+    AcceptedLoRaPacketObservation, LastDataTxObservation, MAXIMUM_RADIO_DIAGNOSTICS_CONTROL_BYTES,
+    MAXIMUM_RADIO_DIAGNOSTICS_SNAPSHOT_BYTES, RadioDiagnosticsCell, RadioDiagnosticsSnapshot,
+    RadioRuntimeState, RadioTxDispatchFamily, RadioTxTerminalOutcome, classify_dispatch_outcome,
+    inbound_proof_terminal_stage, take_matching_inbound_proof,
 };
 
 fn queued_proof(sha256: [u8; 32], packet_len: u16, interface: u8) -> RadioTraceInboundProof {
@@ -34,8 +34,14 @@ fn queued_proof(sha256: [u8; 32], packet_len: u16, interface: u8) -> RadioTraceI
 }
 
 #[test]
+fn synchronization_owner_excludes_the_large_trace_backing() {
+    assert!(mem::size_of::<RadioDiagnosticsCell>() <= MAXIMUM_RADIO_DIAGNOSTICS_CONTROL_BYTES);
+    assert!(mem::size_of::<RadioTraceRing>() > mem::size_of::<RadioDiagnosticsCell>());
+}
+
+#[test]
 fn construction_captures_the_exact_applied_profile_and_power() {
-    let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_22_DBM_CONFIGURATION);
+    let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_22_DBM_CONFIGURATION);
     let snapshot = cell.snapshot();
 
     assert_eq!(snapshot.state, RadioRuntimeState::Offline);
@@ -60,7 +66,7 @@ fn construction_captures_the_exact_applied_profile_and_power() {
 
 #[test]
 fn receive_projection_updates_counters_and_accepted_packet_atomically() {
-    let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_CONFIGURATION);
+    let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_CONFIGURATION);
     let pipeline = RxDiagnostics {
         frames_seen: 4,
         framing_errors: 1,
@@ -104,7 +110,7 @@ fn receive_projection_updates_counters_and_accepted_packet_atomically() {
 
 #[test]
 fn shared_cell_records_packet_correlated_rx_route_and_terminal_events() {
-    let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_CONFIGURATION);
+    let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_CONFIGURATION);
     cell.set_trace_boot_sequence(41);
     let packet = [0_u8; 19];
     let rx = cell
@@ -247,7 +253,7 @@ fn exact_non_transmitted_report_is_an_explicit_terminal_proof_failure() {
 
 #[test]
 fn terminal_counters_partition_success_access_rejection_and_failure() {
-    let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_CONFIGURATION);
+    let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_CONFIGURATION);
     cell.update(|state| {
         state.transmit.record_terminal(
             RadioTxTerminalOutcome::Transmitted,
@@ -291,7 +297,7 @@ fn terminal_counters_partition_success_access_rejection_and_failure() {
 
 #[test]
 fn ordinary_terminal_report_does_not_replace_last_data_packet_evidence() {
-    let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_CONFIGURATION);
+    let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_CONFIGURATION);
     let data = LastDataTxObservation {
         observed_at_plus_one_us: 11,
         outcome: RadioTxTerminalOutcome::AccessRejected,
@@ -325,7 +331,7 @@ fn ordinary_terminal_report_does_not_replace_last_data_packet_evidence() {
 
 #[test]
 fn counters_saturate_and_state_transitions_remain_copy_coherent() {
-    let cell = RadioDiagnosticsCell::new(E290_NA915_DEFAULT_CONFIGURATION);
+    let cell = RadioDiagnosticsCell::new_for_test(E290_NA915_DEFAULT_CONFIGURATION);
     cell.update(|state| {
         state.invalid_physical_frames = u64::MAX;
         state.ingress.enqueued = u64::MAX;

@@ -465,21 +465,37 @@ const _: () = assert!(
 /// Blocking latest-value cell shared by the sole radio actor and product API.
 pub struct RadioDiagnosticsCell {
     state: Mutex<CriticalSectionRawMutex, RefCell<RadioDiagnosticsSnapshot>>,
-    trace: Mutex<CriticalSectionRawMutex, RefCell<RadioTraceRing>>,
+    // The synchronization owner remains in audited internal memory. Only the
+    // large, plain trace backing may live in mapped PSRAM.
+    trace: Mutex<CriticalSectionRawMutex, RefCell<&'static mut RadioTraceRing>>,
     pending_inbound_proof_tx:
         Mutex<CriticalSectionRawMutex, RefCell<Option<RadioTraceInboundProof>>>,
 }
 
+const MAXIMUM_RADIO_DIAGNOSTICS_CONTROL_BYTES: usize = 512;
+const _: () = assert!(
+    core::mem::size_of::<RadioDiagnosticsCell>() <= MAXIMUM_RADIO_DIAGNOSTICS_CONTROL_BYTES
+);
+
 impl RadioDiagnosticsCell {
-    /// Construct an offline cell bound to one immutable applied configuration.
-    pub fn new(configuration: E290RadioConfiguration) -> Self {
+    /// Construct an offline cell bound to one immutable applied configuration
+    /// and one boot-lifetime trace backing allocation.
+    ///
+    /// Product integration must keep this synchronization owner in internal
+    /// memory. The supplied plain trace ring may live in validated mapped
+    /// PSRAM and is never accessed by an interrupt or cache-off flash path.
+    pub fn new(configuration: E290RadioConfiguration, trace: &'static mut RadioTraceRing) -> Self {
         Self {
             state: Mutex::new(RefCell::new(RadioDiagnosticsSnapshot::new(configuration))),
-            // Main supplies the persistent boot sequence before tasks start.
-            // Zero keeps host construction and pre-initialization explicit.
-            trace: Mutex::new(RefCell::new(RadioTraceRing::new(0))),
+            trace: Mutex::new(RefCell::new(trace)),
             pending_inbound_proof_tx: Mutex::new(RefCell::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(configuration: E290RadioConfiguration) -> Self {
+        let trace = std::boxed::Box::leak(std::boxed::Box::new(RadioTraceRing::new(0)));
+        Self::new(configuration, trace)
     }
 
     /// Copy one coherent fixed-size snapshot.
