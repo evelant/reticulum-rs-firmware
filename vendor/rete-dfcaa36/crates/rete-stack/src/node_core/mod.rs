@@ -406,6 +406,11 @@ pub struct PreparedLinkDataPacketRef<'a> {
 /// callers retain enough typed detail for diagnostics and capacity handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestRejection {
+    /// A source-bound known-path response could not enter the announce queue.
+    PathResponseQueueFull {
+        /// Destination whose response was rejected.
+        dest_hash: DestHash,
+    },
     /// A valid LINKREQUEST could not be retained in a bounded Link table.
     LinkTableFull {
         /// Link ID whose admission failed.
@@ -922,8 +927,16 @@ impl<S: rete_transport::TransportStorage> NodeCore<S> {
     }
 
     /// Build a path request packet for a destination.
-    pub fn request_path(&self, dest_hash: &DestHash) -> OutboundPacket {
-        let raw = Transport::<S>::build_path_request(dest_hash);
+    pub fn request_path<R: RngCore>(
+        &self,
+        dest_hash: &DestHash,
+        rng: &mut R,
+    ) -> OutboundPacket {
+        let raw = Transport::<S>::build_path_request(
+            dest_hash,
+            self.transport.local_identity_hash(),
+            rng,
+        );
         OutboundPacket::broadcast(raw)
     }
 
@@ -4072,14 +4085,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase: Path request origination tests
+    // Path request origination tests
     // -----------------------------------------------------------------------
 
     #[test]
     fn path_request_produces_valid_packet() {
-        let core = make_core(b"path-req-test");
+        let mut core = make_core(b"path-req-test");
+        core.enable_transport();
         let dest = DestHash::from([0xBB; rete_core::TRUNCATED_HASH_LEN]);
-        let outbound = core.request_path(&dest);
+        let mut rng = rand::thread_rng();
+        let outbound = core.request_path(&dest, &mut rng);
         let parsed = Packet::parse(&outbound.data).unwrap();
         assert_eq!(parsed.packet_type, PacketType::Data);
         assert_eq!(parsed.dest_type, rete_core::DestType::Plain);
@@ -4087,7 +4102,15 @@ mod tests {
             parsed.destination_hash,
             rete_transport::PATH_REQUEST_DEST.as_ref()
         );
-        assert_eq!(parsed.payload, dest.as_ref());
+        assert_eq!(parsed.payload.len(), rete_core::TRUNCATED_HASH_LEN * 3);
+        assert_eq!(
+            &parsed.payload[..rete_core::TRUNCATED_HASH_LEN],
+            dest.as_ref()
+        );
+        assert_eq!(
+            &parsed.payload[rete_core::TRUNCATED_HASH_LEN..rete_core::TRUNCATED_HASH_LEN * 2],
+            core.identity().hash().as_ref()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4115,7 +4138,7 @@ mod tests {
         // local=true means it's sent immediately
         assert_eq!(pending.len(), 1);
         // The announce should be valid
-        let pkt = Packet::parse(&pending[0]).unwrap();
+        let pkt = Packet::parse(&pending[0].raw).unwrap();
         assert_eq!(pkt.packet_type, PacketType::Announce);
     }
 
@@ -4645,7 +4668,7 @@ mod tests {
         let pending = core.transport.pending_outbound(1000, &mut rng);
         assert_eq!(pending.len(), 1);
 
-        let pkt = Packet::parse(&pending[0]).unwrap();
+        let pkt = Packet::parse(&pending[0].raw).unwrap();
         assert_eq!(pkt.packet_type, PacketType::Announce);
         assert_eq!(pkt.destination_hash, lxmf_hash.as_ref());
     }

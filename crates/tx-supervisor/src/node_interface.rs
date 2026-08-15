@@ -26,8 +26,8 @@ use reticulum_interface_router::{
 use reticulum_node_core::{
     AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, ApplicationEventOfferError,
     ApplicationEventOfferReport, ApplicationEventOwner, ApplicationLinkBinding, AttemptHandle,
-    CapacitySnapshot, DestinationHash, EmbeddedNodeMetrics, IngressAnnounceEgress,
-    IngressBroadcastPolicy, IngressBroadcastScope, IngressReport, InitiateLinkError, LinkHandle,
+    CapacitySnapshot, DestinationHash, EmbeddedNodeMetrics, IngressBroadcastPolicy,
+    IngressBroadcastScope, IngressEgressSet, IngressReport, InitiateLinkError, LinkHandle,
     LinkState, LocalDestinationAnnounceTargetError, LxmfMessageLocation, MaintenanceReport,
     MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, NodeConfig,
     NodeConstructionError, NodeCore, NodeIdentity, NodeInstanceId, OrdinaryActionCapacitySnapshot,
@@ -1796,7 +1796,10 @@ where
                     InterfaceTopology::PointToPoint => IngressBroadcastScope::PointToPoint,
                 };
                 let eligible = self.router.eligible_interfaces();
-                let allowed = self.router.announce_egress_interfaces(interface);
+                let announce_allowed = self.router.announce_egress_interfaces(interface);
+                let recursive_path_search = self
+                    .router
+                    .recursive_path_search_egress_interfaces(interface);
                 let default_egress =
                     eligible
                         .ok()
@@ -1805,21 +1808,29 @@ where
                             InterfaceTopology::PointToPoint => eligible.without(interface),
                         });
                 let mut broadcast_policy = IngressBroadcastPolicy::new(broadcast_scope);
-                match (allowed, default_egress) {
+                match (announce_allowed, default_egress) {
                     (Ok(allowed), Some(default_egress)) if allowed == default_egress => {}
                     (Ok(allowed), _) => {
                         broadcast_policy = broadcast_policy
-                            .with_announce_egress(IngressAnnounceEgress::from_bits(allowed.bits()));
+                            .with_announce_egress(IngressEgressSet::from_bits(allowed.bits()));
                     }
                     (Err(_), _) => {
                         // A stale/out-of-profile registry cannot safely widen
                         // announce propagation. Suppress only this exact
-                        // ingress-derived announce; ordinary traffic keeps its
+                        // ingress-derived announce; routed traffic keeps its
                         // existing route contract and registry diagnostics.
                         broadcast_policy =
-                            broadcast_policy.with_announce_egress(IngressAnnounceEgress::empty());
+                            broadcast_policy.with_announce_egress(IngressEgressSet::empty());
                     }
                 }
+                broadcast_policy = match recursive_path_search {
+                    Ok(Some(allowed)) => broadcast_policy.with_recursive_path_search_egress(
+                        IngressEgressSet::from_bits(allowed.bits()),
+                    ),
+                    Ok(None) => broadcast_policy,
+                    Err(_) => broadcast_policy
+                        .with_recursive_path_search_egress(IngressEgressSet::empty()),
+                };
                 let packet = ingress.into_packet();
                 let ingress_observation = PacketIngressObservation::remote(
                     interface,

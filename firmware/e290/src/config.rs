@@ -9,7 +9,7 @@ use reticulum_board_e290_radio::{E290_NA915_DEFAULT_PROFILE, E290RadioConfigurat
 use reticulum_interface_router::InterfaceTopology;
 use reticulum_interface_router::{
     AdvertisedBitrate, AnnouncePropagationMode, InterfaceConfigId, InterfaceCost,
-    InterfaceProperties, LogicalMtu,
+    InterfaceProperties, LogicalMtu, RecursivePathSearchMode,
 };
 use reticulum_node_core::{
     MonotonicMillis, OrdinaryActionAdmissionError, PacketInterfaceId, TxCompletionCode,
@@ -799,6 +799,7 @@ pub const fn interface_properties(profile: LoRaProfile) -> InterfaceProperties {
         LORA_INTERFACE_COST,
     )
     .with_announce_mode(AnnouncePropagationMode::Internal)
+    .with_recursive_path_search_mode(RecursivePathSearchMode::Unrestricted)
 }
 
 /// Construct immutable registry properties for outbound TCP slot one.
@@ -815,6 +816,7 @@ pub const fn tcp_interface_properties() -> InterfaceProperties {
     )
     .with_topology(InterfaceTopology::PointToPoint)
     .with_announce_mode(AnnouncePropagationMode::Boundary)
+    .with_recursive_path_search_mode(RecursivePathSearchMode::Boundary)
 }
 
 /// Product diagnostic completion codes for the DATA coordinator.
@@ -979,6 +981,14 @@ mod tests {
         assert_eq!(
             tcp_interface_properties().announce_mode(),
             AnnouncePropagationMode::Boundary
+        );
+        assert_eq!(
+            interface_properties(E290_NA915_DEFAULT_PROFILE).recursive_path_search_mode(),
+            RecursivePathSearchMode::Unrestricted
+        );
+        assert_eq!(
+            tcp_interface_properties().recursive_path_search_mode(),
+            RecursivePathSearchMode::Boundary
         );
     }
 

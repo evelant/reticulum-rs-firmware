@@ -65,10 +65,10 @@ pub use reticulum_rns_rete::{
     DelayedProofReservationError, DelayedProofSequence, DelayedProofSlot, DelayedProofSlotId,
     DelayedProofTransaction, DelayedProofTransactionError, DelayedProofTransactionFailure,
     EmbeddedNodeMetrics, InboundData, InboundDataProjection, InboundProofEvidence,
-    IngressAnnounceEgress, IngressBroadcastPolicy, IngressBroadcastScope, IngressDisposition,
-    IngressMetadata, IngressReport, LxmfMessageLocation, MonotonicInstant, NodeActions,
-    OutboundDispatchInterval, OutboundProtocolToken, PacketType, RetainedProofCommitSuccess,
-    project_inbound_data,
+    IngressBroadcastPolicy, IngressBroadcastScope, IngressDisposition, IngressDropReason,
+    IngressEgressSet, IngressMetadata, IngressReport, LxmfMessageLocation, MonotonicInstant,
+    NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType,
+    RetainedProofCommitSuccess, project_inbound_data,
 };
 use sha2::{Digest, Sha256};
 
@@ -5237,7 +5237,7 @@ impl<
     }
 
     /// Precise Link-clock ingress with exact provenance, media topology and an
-    /// optional exact announce-egress restriction.
+    /// optional exact discovery-egress restriction.
     #[allow(
         clippy::too_many_arguments,
         reason = "receipt-atomic ingress keeps both clocks, packet provenance, routing policy and entropy owner explicit"

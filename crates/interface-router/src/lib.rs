@@ -212,6 +212,32 @@ impl AnnouncePropagationMode {
     }
 }
 
+/// Recursive unknown-path search role of one Reticulum interface.
+///
+/// Python Reticulum applies this policy independently from announce
+/// propagation. In particular, a Boundary request searches only Boundary and
+/// Gateway interfaces; it does not search a Full interface merely because
+/// ordinary announces can cross that pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecursivePathSearchMode {
+    /// Full and point-to-point interfaces do not initiate recursive searches.
+    Disabled,
+    /// Internal, access-point and roaming interfaces search every other online
+    /// interface.
+    Unrestricted,
+    /// Boundary interfaces search only Boundary and Gateway interfaces.
+    Boundary,
+    /// Gateway interfaces search every other online interface and are eligible
+    /// targets of Boundary searches.
+    Gateway,
+}
+
+impl RecursivePathSearchMode {
+    const fn boundary_search_target(self) -> bool {
+        matches!(self, Self::Boundary | Self::Gateway)
+    }
+}
+
 /// Transport-neutral properties interpreted by an interface actor or future
 /// route policy, never by a concrete-radio branch in this registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,6 +248,7 @@ pub struct InterfaceProperties {
     cost: InterfaceCost,
     topology: InterfaceTopology,
     announce_mode: AnnouncePropagationMode,
+    recursive_path_search_mode: RecursivePathSearchMode,
 }
 
 impl InterfaceProperties {
@@ -242,6 +269,7 @@ impl InterfaceProperties {
             cost,
             topology: InterfaceTopology::SharedMedium,
             announce_mode: AnnouncePropagationMode::Full,
+            recursive_path_search_mode: RecursivePathSearchMode::Disabled,
         }
     }
 
@@ -254,6 +282,12 @@ impl InterfaceProperties {
     /// Select this interface's announce-propagation role.
     pub const fn with_announce_mode(mut self, mode: AnnouncePropagationMode) -> Self {
         self.announce_mode = mode;
+        self
+    }
+
+    /// Select how unknown path requests received on this interface recurse.
+    pub const fn with_recursive_path_search_mode(mut self, mode: RecursivePathSearchMode) -> Self {
+        self.recursive_path_search_mode = mode;
         self
     }
 
@@ -285,6 +319,11 @@ impl InterfaceProperties {
     /// Reticulum announce-propagation role.
     pub const fn announce_mode(self) -> AnnouncePropagationMode {
         self.announce_mode
+    }
+
+    /// Reticulum recursive unknown-path search role.
+    pub const fn recursive_path_search_mode(self) -> RecursivePathSearchMode {
+        self.recursive_path_search_mode
     }
 }
 
@@ -530,6 +569,15 @@ pub enum AnnounceEgressSetError {
     InterfaceOutsideProfile(InterfaceDescriptor),
 }
 
+/// Failure to derive recursive path-search egress for one ingress interface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecursivePathSearchEgressSetError {
+    /// The supplied ingress interface is not registered.
+    SourceUnavailable(PacketInterfaceId),
+    /// A registered identity cannot fit the compact route profile.
+    InterfaceOutsideProfile(InterfaceDescriptor),
+}
+
 /// Fixed-capacity authoritative packet-interface registry.
 ///
 /// Lookup is a bounded linear scan. The intended embedded profile has only a
@@ -675,6 +723,49 @@ impl<const SLOTS: usize> InterfaceRegistry<SLOTS> {
             egress = with_interface;
         }
         Ok(egress)
+    }
+
+    /// Derive recursive unknown-path search egress for `source`.
+    ///
+    /// Every recursive request excludes its ingress interface, including a
+    /// shared medium. Disabled sources produce an empty set. Boundary sources
+    /// select only Boundary and Gateway targets; Unrestricted and Gateway
+    /// sources select every other online interface.
+    pub fn recursive_path_search_egress_interfaces(
+        &self,
+        source: PacketInterfaceId,
+    ) -> Result<Option<InterfaceSet>, RecursivePathSearchEgressSetError> {
+        let Some(source_descriptor) = self.descriptor(source) else {
+            return Err(RecursivePathSearchEgressSetError::SourceUnavailable(source));
+        };
+        let source_mode = source_descriptor.properties.recursive_path_search_mode;
+        if source_mode == RecursivePathSearchMode::Disabled {
+            return Ok(None);
+        }
+        let mut egress = InterfaceSet::empty();
+        for descriptor in self.slots.iter().filter_map(|slot| slot.descriptor) {
+            let interface = descriptor.lease.interface;
+            let Some(with_interface) = egress.with(interface) else {
+                return Err(RecursivePathSearchEgressSetError::InterfaceOutsideProfile(
+                    descriptor,
+                ));
+            };
+            if !descriptor.online || interface == source {
+                continue;
+            }
+            let selected = match source_mode {
+                RecursivePathSearchMode::Disabled => unreachable!("disabled source returned early"),
+                RecursivePathSearchMode::Boundary => descriptor
+                    .properties
+                    .recursive_path_search_mode
+                    .boundary_search_target(),
+                RecursivePathSearchMode::Unrestricted | RecursivePathSearchMode::Gateway => true,
+            };
+            if selected {
+                egress = with_interface;
+            }
+        }
+        Ok(Some(egress))
     }
 
     /// Validate one lease against the current authoritative record.
@@ -2589,6 +2680,15 @@ where
         source: PacketInterfaceId,
     ) -> Result<InterfaceSet, AnnounceEgressSetError> {
         self.registry.announce_egress_interfaces(source)
+    }
+
+    /// Derive recursive unknown-path search egress for one registered ingress.
+    pub fn recursive_path_search_egress_interfaces(
+        &self,
+        source: PacketInterfaceId,
+    ) -> Result<Option<InterfaceSet>, RecursivePathSearchEgressSetError> {
+        self.registry
+            .recursive_path_search_egress_interfaces(source)
     }
 
     /// Consume, validate, apply or reject, and acknowledge at most one actor

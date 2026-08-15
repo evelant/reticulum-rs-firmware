@@ -28,7 +28,8 @@ pub mod storage_std;
 pub mod transport;
 
 pub use announce::{
-    validate_announce, AnnounceError, AnnounceInfo, PendingAnnounce, RATCHET_KEY_LEN,
+    validate_announce, AnnounceError, AnnounceInfo, PendingAnnounce, PendingOutboundAnnounce,
+    RATCHET_KEY_LEN,
 };
 pub use buffer::{StreamBuffer, StreamDataMessage};
 pub use channel::{
@@ -65,8 +66,8 @@ pub use storage_std::StdStorage;
 pub use transport::{
     AnnounceRateEntry, ChannelMaintenanceAction, ForwardTarget, IngestResult, LinkTableEntry,
     LinkTableKind, PendingChannelRetry, PendingChannelTeardown, ResourceOptions, ReverseEntry,
-    SendError, TickResult, TickSummary, Transport, TransportStats, PATH_REQUEST_DEST,
-    PATHFINDER_M, RECEIPT_TIMEOUT, REVERSE_TIMEOUT,
+    SendError, TickResult, TickSummary, Transport, TransportStats, is_path_request_ingress,
+    PATH_REQUEST_DEST, PATHFINDER_M, RECEIPT_TIMEOUT, REVERSE_TIMEOUT,
 };
 
 // ---------------------------------------------------------------------------

@@ -129,18 +129,18 @@ const _: () = assert!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InterfaceId(pub u8);
 
-/// Compact set of interfaces allowed to receive one ingress-derived announce.
+/// Compact set of interfaces allowed to receive one ingress-derived broadcast.
 ///
-/// Product routing policy computes this set from authoritative interface
+/// Product routing policy computes the set from authoritative interface
 /// metadata while exact ingress provenance is still available. The protocol
 /// owner only carries the resulting identifiers; it does not know concrete
 /// bearers or product interface roles. Identifiers above 63 are outside the
 /// current embedded routing profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct IngressAnnounceEgress(u64);
+pub struct IngressEgressSet(u64);
 
-impl IngressAnnounceEgress {
-    /// Empty egress set, which suppresses the exact ingress-derived announce.
+impl IngressEgressSet {
+    /// Empty egress set, which suppresses the exact ingress-derived broadcast.
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -155,9 +155,16 @@ impl IngressAnnounceEgress {
         self.0
     }
 
-    /// Whether no interface is allowed to receive the announce.
+    /// Whether no interface is allowed to receive the broadcast.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
+    }
+
+    const fn without(self, interface: InterfaceId) -> Self {
+        if interface.0 >= 64 {
+            return self;
+        }
+        Self(self.0 & !(1_u64 << interface.0))
     }
 }
 
@@ -262,14 +269,16 @@ pub enum IngressBroadcastScope {
 
 /// Product-supplied forwarding policy for broadcasts derived from one ingress.
 ///
-/// Topology controls reflection of announces and path requests. An optional
-/// announce-egress set additionally constrains only the exact announce derived
-/// from this ingress. Unrelated local or timer-due announces emitted in the
-/// same native action envelope remain unrestricted.
+/// Announce propagation and recursive path search are independent in Python
+/// Reticulum, so each has its own optional egress selection. `None` for a
+/// recursive search means that the ingress mode does not discover unknown
+/// paths; `Some(empty)` means discovery is enabled but no eligible egress is
+/// currently online, which still retains pending-request provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngressBroadcastPolicy {
     scope: IngressBroadcastScope,
-    announce_egress: Option<IngressAnnounceEgress>,
+    announce_egress: Option<IngressEgressSet>,
+    recursive_path_search_egress: Option<IngressEgressSet>,
 }
 
 impl IngressBroadcastPolicy {
@@ -278,6 +287,7 @@ impl IngressBroadcastPolicy {
         Self {
             scope,
             announce_egress: None,
+            recursive_path_search_egress: None,
         }
     }
 
@@ -285,8 +295,18 @@ impl IngressBroadcastPolicy {
     ///
     /// An empty set suppresses that forwarding action while retaining normal
     /// ingress processing, including route and identity learning.
-    pub const fn with_announce_egress(mut self, egress: IngressAnnounceEgress) -> Self {
+    pub const fn with_announce_egress(mut self, egress: IngressEgressSet) -> Self {
         self.announce_egress = Some(egress);
+        self
+    }
+
+    /// Enable recursive unknown-path search and select its exact egress set.
+    ///
+    /// Passing an empty set deliberately retains pending discovery provenance
+    /// without emitting a request, matching Boundary behavior when no
+    /// Boundary or Gateway target is online.
+    pub const fn with_recursive_path_search_egress(mut self, egress: IngressEgressSet) -> Self {
+        self.recursive_path_search_egress = Some(egress);
         self
     }
 
@@ -296,8 +316,14 @@ impl IngressBroadcastPolicy {
     }
 
     /// Optional exact announce-egress restriction.
-    pub const fn announce_egress(self) -> Option<IngressAnnounceEgress> {
+    pub const fn announce_egress(self) -> Option<IngressEgressSet> {
         self.announce_egress
+    }
+
+    /// Recursive search egress, or `None` when the ingress mode does not
+    /// recursively discover unknown paths.
+    pub const fn recursive_path_search_egress(self) -> Option<IngressEgressSet> {
+        self.recursive_path_search_egress
     }
 }
 
@@ -317,7 +343,7 @@ pub enum TxTarget {
     /// Send on every eligible interface except the triggering interface.
     AllExcept(InterfaceId),
     /// Send only on the selected compact interface set.
-    Selected(IngressAnnounceEgress),
+    Selected(IngressEgressSet),
 }
 
 /// Stable product-owned identifier for one packet delivery receipt.
@@ -2443,6 +2469,10 @@ pub enum IngressDropReason {
     ReverseRouteConflict {
         truncated_hash: [u8; rete_core::TRUNCATED_HASH_LEN],
     },
+    /// A recursive unknown-path request could not retain requester provenance.
+    DiscoveryPathTableFull { limit: usize },
+    /// A known-path response could not enter the bounded announce queue.
+    PathResponseQueueFull { destination: DestHash, limit: usize },
 }
 
 impl core::fmt::Display for IngressDropReason {
@@ -2517,6 +2547,15 @@ impl core::fmt::Display for IngressDropReason {
             }
             Self::ReverseRouteConflict { truncated_hash } => {
                 write!(f, "reverse route conflicts for hash {truncated_hash:02x?}")
+            }
+            Self::DiscoveryPathTableFull { limit } => {
+                write!(f, "pending discovery path table is full (limit {limit})")
+            }
+            Self::PathResponseQueueFull { destination, limit } => {
+                write!(
+                    f,
+                    "path response queue is full for {destination:02x?} (limit {limit})"
+                )
             }
         }
     }
@@ -2703,6 +2742,18 @@ pub struct IngressCounters {
     pub native_duplicate: u64,
     pub native_invalid: u64,
     pub native_no_outcome: u64,
+    /// Unknown-path requests retained while no recursive egress was eligible.
+    pub discovery_path_requests_without_egress: u64,
+    /// Fresh path requests coalesced behind an already-pending destination.
+    pub discovery_path_requests_coalesced: u64,
+    /// Pending discovery entries removed after their 15-second timeout.
+    pub discovery_path_requests_expired: u64,
+    /// Matching newly accepted announces returned to the retained requester.
+    pub discovery_path_responses: u64,
+    /// Recursive searches rejected because bounded requester provenance was full.
+    pub discovery_path_table_full: u64,
+    /// Known-path responses rejected because the announce queue was full.
+    pub path_response_queue_full: u64,
     pub premature_link_events_suppressed: u64,
     pub routing_invariant_drops: u64,
     pub header2_filtered: u64,
@@ -2825,6 +2876,9 @@ pub struct EmbeddedNodeMetrics {
     pub receipt_terminals: ReceiptTerminalCounters,
     pub transport: TransportCounters,
     pub capacity: HeaplessCapacitySnapshot,
+    /// Pending recursive discovery provenance. This embedded-only table is
+    /// bounded by the configured path capacity.
+    pub pending_discovery_paths: crate::capacity::CapacityUse,
 }
 
 /// Result of timer maintenance using a bounded receipt-terminal sink.
@@ -3248,20 +3302,43 @@ struct IngressPreflight {
     metadata: IngressMetadata,
     proof_expectation: Option<InboundProofExpectation>,
     local_path_request: Option<DestHash>,
-    path_response: Option<DestHash>,
+    announce_path_before: Option<[u8; 32]>,
     derived_broadcast: Option<IngressDerivedBroadcast>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IngressDerivedBroadcast {
-    Announce { destination: DestHash },
-    PathRequest { packet_hash: [u8; 32] },
+    Announce {
+        destination: DestHash,
+    },
+    PathRequest {
+        destination: DestHash,
+        tag: [u8; TRUNCATED_HASH_LEN],
+        tag_len: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IngressDerivedTarget {
     AllExceptSource,
-    Selected(IngressAnnounceEgress),
+    SelectedAnnounce(IngressEgressSet),
+    SelectedPathSearch(IngressEgressSet),
+}
+
+const DISCOVERY_PATH_REQUEST_TIMEOUT_SECONDS: u64 = 15;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingDiscoveryPath {
+    destination: DestHash,
+    requesting_interface: InterfaceId,
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoveryPathRequestAdmission {
+    NotRecursive,
+    Existing,
+    Reserved { index: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3433,6 +3510,7 @@ pub struct EmbeddedNode<
     admission: AdmissionCounters,
     receipt_terminals: ReceiptTerminalCounters,
     request_dispatches: [Option<RequestDispatchEntry>; PATHS],
+    pending_discovery_paths: [Option<PendingDiscoveryPath>; PATHS],
     local_announce_target: Option<(DestHash, InterfaceId)>,
 }
 
@@ -3460,6 +3538,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             admission: AdmissionCounters::default(),
             receipt_terminals: ReceiptTerminalCounters::default(),
             request_dispatches: core::array::from_fn(|_| None),
+            pending_discovery_paths: core::array::from_fn(|_| None),
             local_announce_target: None,
         })
     }
@@ -3520,6 +3599,11 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 .cast::<Option<RequestDispatchEntry>>();
             for index in 0..PATHS {
                 request_dispatches.add(index).write(None);
+            }
+            let pending_discovery_paths = addr_of_mut!((*destination_ptr).pending_discovery_paths)
+                .cast::<Option<PendingDiscoveryPath>>();
+            for index in 0..PATHS {
+                pending_discovery_paths.add(index).write(None);
             }
             addr_of_mut!((*destination_ptr).local_announce_target).write(None);
 
@@ -4000,6 +4084,14 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             receipt_terminals: self.receipt_terminals,
             transport: self.core.transport.stats().into(),
             capacity: heapless_capacity_snapshot(&self.core),
+            pending_discovery_paths: crate::capacity::CapacityUse {
+                used: self
+                    .pending_discovery_paths
+                    .iter()
+                    .filter(|entry| entry.is_some())
+                    .count(),
+                limit: PATHS,
+            },
         }
     }
 
@@ -4060,7 +4152,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     }
 
     /// Precise Link-clock ingress with media topology and an optional exact
-    /// announce-egress restriction.
+    /// discovery-egress restriction.
     pub fn ingest_at_with_broadcast_policy<R: RngCore + CryptoRng>(
         &mut self,
         raw: &[u8],
@@ -4123,13 +4215,19 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             Ok(preflight) => preflight,
             Err(report) => return report,
         };
+        let discovery_admission =
+            match self.prepare_discovery_path_request(&preflight, policy, interface, now) {
+                Ok(admission) => admission,
+                Err(reason) => return self.reject(reason, preflight.metadata),
+            };
         self.arm_retained_proof(&preflight);
         let mut native = self
             .core
             .handle_ingest_at(raw, now, link_now, interface.0, rng);
         self.restore_retained_proof(&preflight);
         self.answer_local_path_request(&mut native, &preflight, now, rng);
-        self.suppress_path_response_rebroadcast(&mut native, &preflight);
+        self.finish_discovery_path_request(&mut native, &preflight, policy, discovery_admission);
+        self.answer_pending_discovery_path(&mut native, &preflight, now);
         self.finish_ingest(
             native,
             preflight,
@@ -4262,7 +4360,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     }
 
     /// Receipt-atomic ingress with exact provenance, media topology and an
-    /// optional exact announce-egress restriction.
+    /// optional exact discovery-egress restriction.
     #[allow(
         clippy::too_many_arguments,
         reason = "observed receipt-atomic ingress keeps each clock, provenance, routing policy, entropy owner and terminal sink explicit"
@@ -4286,6 +4384,15 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             Ok(preflight) => preflight,
             Err(report) => return Ok(report),
         };
+        let discovery_admission =
+            match self.prepare_discovery_path_request(&preflight, policy, interface, now) {
+                Ok(admission) => admission,
+                Err(reason) => {
+                    let mut report = self.reject(reason, preflight.metadata);
+                    report.actions.attach_exact_ingress_observation(ingress);
+                    return Ok(report);
+                }
+            };
         let mut native_sink = NativeReceiptSink::with_ingress(sink, ingress);
         self.arm_retained_proof(&preflight);
         let native = self.core.handle_ingest_with_receipt_sink_at(
@@ -4308,7 +4415,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             }
         };
         self.answer_local_path_request(&mut native, &preflight, now, rng);
-        self.suppress_path_response_rebroadcast(&mut native, &preflight);
+        self.finish_discovery_path_request(&mut native, &preflight, policy, discovery_admission);
+        self.answer_pending_discovery_path(&mut native, &preflight, now);
         let mut report =
             self.finish_ingest(native, preflight, interface, policy, native_sink.committed);
         report.actions.attach_exact_ingress_observation(ingress);
@@ -4382,18 +4490,25 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             }
         };
 
+        let derived_broadcast = ingress_derived_broadcast(&packet);
+        let announce_path_before = match derived_broadcast {
+            Some(IngressDerivedBroadcast::Announce { destination }) => self
+                .core
+                .transport
+                .get_path(&destination)
+                .and_then(|path| path.announce_raw.as_deref())
+                .map(|raw| Sha256::digest(raw).into()),
+            _ => None,
+        };
+
         Ok(IngressPreflight {
             before_duplicate: self.core.transport.stats().packets_dropped_dedup,
             before_invalid: self.core.transport.stats().packets_dropped_invalid,
             metadata,
             proof_expectation,
             local_path_request: self.local_path_request(&packet),
-            path_response: (packet.header_type == HeaderType::Header1
-                && packet.packet_type == PacketType::Announce
-                && packet.dest_type == DestType::Single
-                && packet.context == CONTEXT_PATH_RESPONSE)
-                .then(|| DestHash::from_slice(packet.destination_hash)),
-            derived_broadcast: ingress_derived_broadcast(&packet),
+            announce_path_before,
+            derived_broadcast,
         })
     }
 
@@ -4468,11 +4583,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
 
     fn local_path_request(&self, packet: &Packet<'_>) -> Option<DestHash> {
         if self.role != NodeRole::Transport
-            || packet.header_type != HeaderType::Header1
-            || packet.packet_type != PacketType::Data
-            || packet.dest_type != DestType::Plain
-            || packet.context != CONTEXT_NONE
-            || packet.destination_hash != rete_transport::PATH_REQUEST_DEST.as_ref()
+            || !rete_transport::is_path_request_ingress(packet)
             || packet.payload.len() < TRUNCATED_HASH_LEN
         {
             return None;
@@ -4526,8 +4637,9 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             .packets
             .retain(|outbound| !is_forwarded_path_request_for(&outbound.data, &destination));
         if native.packets.len() == before {
-            // Native Rete's destination throttle classified this request as a
-            // duplicate, so it must not produce another response.
+            // Native Rete's exact destination-and-tag deduplication classified
+            // this request as a duplicate, so it must not produce another
+            // response.
             return;
         }
 
@@ -4543,40 +4655,166 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         self.ingress.local_path_responses = self.ingress.local_path_responses.saturating_add(1);
     }
 
-    fn suppress_path_response_rebroadcast(
+    fn prepare_discovery_path_request(
+        &mut self,
+        preflight: &IngressPreflight,
+        policy: IngressBroadcastPolicy,
+        interface: InterfaceId,
+        now: u64,
+    ) -> Result<DiscoveryPathRequestAdmission, IngressDropReason> {
+        self.expire_pending_discovery_paths(now);
+        let Some(IngressDerivedBroadcast::PathRequest { destination, .. }) =
+            preflight.derived_broadcast
+        else {
+            return Ok(DiscoveryPathRequestAdmission::NotRecursive);
+        };
+        if self.role != NodeRole::Transport
+            || policy.recursive_path_search_egress().is_none()
+            || self.core.transport.is_local_destination(&destination)
+            || self.core.transport.get_path(&destination).is_some()
+        {
+            return Ok(DiscoveryPathRequestAdmission::NotRecursive);
+        }
+
+        if self
+            .pending_discovery_paths
+            .iter()
+            .flatten()
+            .any(|entry| entry.destination == destination)
+        {
+            return Ok(DiscoveryPathRequestAdmission::Existing);
+        }
+
+        let Some(index) = self
+            .pending_discovery_paths
+            .iter()
+            .position(Option::is_none)
+        else {
+            return Err(IngressDropReason::DiscoveryPathTableFull { limit: PATHS });
+        };
+        self.pending_discovery_paths[index] = Some(PendingDiscoveryPath {
+            destination,
+            requesting_interface: interface,
+            expires_at: now.saturating_add(DISCOVERY_PATH_REQUEST_TIMEOUT_SECONDS),
+        });
+        Ok(DiscoveryPathRequestAdmission::Reserved { index })
+    }
+
+    fn finish_discovery_path_request(
         &mut self,
         native: &mut IngestOutcome,
         preflight: &IngressPreflight,
+        policy: IngressBroadcastPolicy,
+        admission: DiscoveryPathRequestAdmission,
     ) {
-        let Some(destination) = preflight.path_response else {
+        let Some(IngressDerivedBroadcast::PathRequest {
+            destination,
+            tag,
+            tag_len,
+        }) = preflight.derived_broadcast
+        else {
             return;
         };
-        native
-            .packets
-            .retain(|outbound| match Packet::parse(&outbound.data) {
-                Ok(packet) => {
-                    packet.packet_type != PacketType::Announce
-                        || packet.dest_type != DestType::Single
-                        || packet.destination_hash != destination.as_ref()
-                }
-                Err(_) => true,
-            });
+        let forwarded_index = native.packets.iter().rposition(|outbound| {
+            is_forwarded_path_request_for_tag(
+                &outbound.data,
+                &destination,
+                &tag[..usize::from(tag_len)],
+            )
+        });
 
-        let pending = self.core.transport.announce_count();
-        for _ in 0..pending {
-            let Some(announce) = self.core.transport.next_announce() else {
-                break;
-            };
-            let is_path_response = announce.dest_hash == destination
-                && !announce.local
-                && Packet::parse(&announce.raw).is_ok_and(|packet| {
-                    packet.packet_type == PacketType::Announce
-                        && packet.dest_type == DestType::Single
-                        && packet.context == CONTEXT_PATH_RESPONSE
-                });
-            if !is_path_response {
-                let requeued = self.core.transport.queue_announce(announce);
-                debug_assert!(requeued, "popped announce must fit its original queue");
+        match admission {
+            DiscoveryPathRequestAdmission::Reserved { index } => {
+                if forwarded_index.is_none() {
+                    if self.pending_discovery_paths[index]
+                        .is_some_and(|entry| entry.destination == destination)
+                    {
+                        self.pending_discovery_paths[index] = None;
+                    }
+                } else if policy
+                    .recursive_path_search_egress()
+                    .is_some_and(IngressEgressSet::is_empty)
+                {
+                    self.ingress.discovery_path_requests_without_egress = self
+                        .ingress
+                        .discovery_path_requests_without_egress
+                        .saturating_add(1);
+                }
+            }
+            DiscoveryPathRequestAdmission::Existing => {
+                if let Some(index) = forwarded_index {
+                    native.packets.remove(index);
+                    self.ingress.discovery_path_requests_coalesced = self
+                        .ingress
+                        .discovery_path_requests_coalesced
+                        .saturating_add(1);
+                }
+            }
+            DiscoveryPathRequestAdmission::NotRecursive => {
+                if let Some(index) = forwarded_index {
+                    native.packets.remove(index);
+                }
+            }
+        }
+    }
+
+    fn answer_pending_discovery_path(
+        &mut self,
+        native: &mut IngestOutcome,
+        preflight: &IngressPreflight,
+        now: u64,
+    ) {
+        let Some(IngressDerivedBroadcast::Announce { destination }) = preflight.derived_broadcast
+        else {
+            return;
+        };
+        let accepted = native.events.iter().any(|event| {
+            matches!(
+                event,
+                NativeNodeEvent::AnnounceReceived { dest_hash, .. } if *dest_hash == destination
+            )
+        });
+        if !accepted {
+            return;
+        }
+        let Some(path) = self.core.transport.get_path(&destination) else {
+            return;
+        };
+        let Some(cached) = path.announce_raw.as_deref() else {
+            return;
+        };
+        let cached_fingerprint: [u8; 32] = Sha256::digest(cached).into();
+        if preflight.announce_path_before == Some(cached_fingerprint) {
+            return;
+        }
+        let Some(requesting_interface) = self
+            .pending_discovery_paths
+            .iter()
+            .flatten()
+            .find(|entry| entry.destination == destination && now < entry.expires_at)
+            .map(|entry| entry.requesting_interface)
+        else {
+            return;
+        };
+        let Some(response) = mark_cached_path_response(cached) else {
+            return;
+        };
+        native.packets.push(OutboundPacket::new(
+            response,
+            PacketRouting::ExactInterface(requesting_interface.0),
+        ));
+        self.ingress.discovery_path_responses =
+            self.ingress.discovery_path_responses.saturating_add(1);
+    }
+
+    fn expire_pending_discovery_paths(&mut self, now: u64) {
+        for entry in &mut self.pending_discovery_paths {
+            if entry.is_some_and(|pending| now >= pending.expires_at) {
+                *entry = None;
+                self.ingress.discovery_path_requests_expired = self
+                    .ingress
+                    .discovery_path_requests_expired
+                    .saturating_add(1);
             }
         }
     }
@@ -4646,6 +4884,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         self.reclaim_native_request_terminals(&native.events);
         if let Some(rejection) = native.rejection.take() {
             let reason = match rejection {
+                IngestRejection::PathResponseQueueFull { dest_hash } => {
+                    IngressDropReason::PathResponseQueueFull {
+                        destination: dest_hash,
+                        limit: ANNOUNCES,
+                    }
+                }
                 IngestRejection::LinkTableFull {
                     table: LinkTableKind::Owned,
                     ..
@@ -5115,6 +5359,14 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             IngressDropReason::ReverseRouteConflict { .. } => {
                 self.ingress.reverse_route_conflict =
                     self.ingress.reverse_route_conflict.saturating_add(1);
+            }
+            IngressDropReason::DiscoveryPathTableFull { .. } => {
+                self.ingress.discovery_path_table_full =
+                    self.ingress.discovery_path_table_full.saturating_add(1);
+            }
+            IngressDropReason::PathResponseQueueFull { .. } => {
+                self.ingress.path_response_queue_full =
+                    self.ingress.path_response_queue_full.saturating_add(1);
             }
             IngressDropReason::LinkRequestDestinationType(_)
             | IngressDropReason::LinkRequestContext(_)
@@ -6510,14 +6762,15 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         Ok(())
     }
 
-    /// Flush queued announces into broadcast transmission actions.
+    /// Flush queued announces while preserving any exact interface attached
+    /// to a delayed cached path response.
     pub fn flush_announces<R: RngCore>(&mut self, now: u64, rng: &mut R) -> Vec<TxPacket> {
         let mut actions = NodeActions::without_retained_proofs(
             Default::default(),
             self.core
                 .flush_announces(now, rng)
                 .into_iter()
-                .map(|packet| TxPacket::broadcast(packet.data))
+                .map(resolve_origin_packet)
                 .collect(),
             0,
         );
@@ -6554,6 +6807,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         link_now: MonotonicInstant,
         rng: &mut R,
     ) -> NodeActions {
+        self.expire_pending_discovery_paths(now);
         let native = self.core.handle_tick_at(now, link_now, rng);
         self.finish_tick(native)
     }
@@ -6588,6 +6842,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         R: RngCore + CryptoRng,
         S: ReceiptTerminalSink,
     {
+        self.expire_pending_discovery_paths(now);
         let mut native_sink = NativeReceiptSink::new(sink);
         let native =
             self.core
@@ -6769,6 +7024,33 @@ fn is_forwarded_path_request_for(raw: &[u8], destination: &DestHash) -> bool {
             && packet.destination_hash == rete_transport::PATH_REQUEST_DEST.as_ref()
             && packet.payload.starts_with(destination.as_ref())
     })
+}
+
+fn is_forwarded_path_request_for_tag(raw: &[u8], destination: &DestHash, tag: &[u8]) -> bool {
+    Packet::parse(raw).is_ok_and(|packet| {
+        packet.header_type == HeaderType::Header1
+            && packet.packet_type == PacketType::Data
+            && packet.dest_type == DestType::Plain
+            && packet.context == CONTEXT_NONE
+            && packet.destination_hash == rete_transport::PATH_REQUEST_DEST.as_ref()
+            && packet.payload.len() == TRUNCATED_HASH_LEN * 2 + tag.len()
+            && &packet.payload[..TRUNCATED_HASH_LEN] == destination.as_ref()
+            && &packet.payload[TRUNCATED_HASH_LEN * 2..] == tag
+    })
+}
+
+fn mark_cached_path_response(raw: &[u8]) -> Option<Vec<u8>> {
+    let packet = Packet::parse(raw).ok()?;
+    if packet.header_type != HeaderType::Header2
+        || packet.packet_type != PacketType::Announce
+        || packet.dest_type != DestType::Single
+    {
+        return None;
+    }
+    let context_offset = 2 + (2 * TRUNCATED_HASH_LEN);
+    let mut response = raw.to_vec();
+    *response.get_mut(context_offset)? = CONTEXT_PATH_RESPONSE;
+    Some(response)
 }
 
 fn suppress_inbound_proof_actions(
@@ -7051,14 +7333,24 @@ fn ingress_derived_broadcast(packet: &Packet<'_>) -> Option<IngressDerivedBroadc
             destination: DestHash::from_slice(packet.destination_hash),
         });
     }
-    if packet.header_type == HeaderType::Header1
-        && packet.packet_type == PacketType::Data
-        && packet.dest_type == DestType::Plain
-        && packet.context == CONTEXT_NONE
-        && packet.destination_hash == rete_transport::PATH_REQUEST_DEST.as_ref()
+    if rete_transport::is_path_request_ingress(packet) && packet.payload.len() > TRUNCATED_HASH_LEN
     {
+        let tag_start = if packet.payload.len() > TRUNCATED_HASH_LEN * 2 {
+            TRUNCATED_HASH_LEN * 2
+        } else {
+            TRUNCATED_HASH_LEN
+        };
+        let tag_bytes = packet.payload.get(tag_start..)?;
+        if tag_bytes.is_empty() {
+            return None;
+        }
+        let tag_len = core::cmp::min(tag_bytes.len(), TRUNCATED_HASH_LEN);
+        let mut tag = [0_u8; TRUNCATED_HASH_LEN];
+        tag[..tag_len].copy_from_slice(&tag_bytes[..tag_len]);
         return Some(IngressDerivedBroadcast::PathRequest {
-            packet_hash: packet.compute_hash(),
+            destination: DestHash::from_slice(&packet.payload[..TRUNCATED_HASH_LEN]),
+            tag,
+            tag_len: tag_len as u8,
         });
     }
     None
@@ -7071,18 +7363,15 @@ fn ingress_derived_override(
 ) -> Option<IngressDerivedOverride> {
     let target = match derived {
         IngressDerivedBroadcast::Announce { .. } => match policy.announce_egress() {
-            Some(egress) => IngressDerivedTarget::Selected(egress),
+            Some(egress) => IngressDerivedTarget::SelectedAnnounce(egress),
             None if policy.scope() == IngressBroadcastScope::PointToPoint => {
                 IngressDerivedTarget::AllExceptSource
             }
             None => return None,
         },
-        IngressDerivedBroadcast::PathRequest { .. }
-            if policy.scope() == IngressBroadcastScope::PointToPoint =>
-        {
-            IngressDerivedTarget::AllExceptSource
+        IngressDerivedBroadcast::PathRequest { .. } => {
+            IngressDerivedTarget::SelectedPathSearch(policy.recursive_path_search_egress()?)
         }
-        IngressDerivedBroadcast::PathRequest { .. } => return None,
     };
     let matching = native.packets.iter().rposition(|outbound| {
         if outbound.routing != PacketRouting::All {
@@ -7096,14 +7385,15 @@ fn ingress_derived_override(
                 packet.packet_type == PacketType::Announce
                     && packet.destination_hash == destination.as_ref()
             }
-            IngressDerivedBroadcast::PathRequest { packet_hash } => {
-                packet.header_type == HeaderType::Header1
-                    && packet.packet_type == PacketType::Data
-                    && packet.dest_type == DestType::Plain
-                    && packet.context == CONTEXT_NONE
-                    && packet.destination_hash == rete_transport::PATH_REQUEST_DEST.as_ref()
-                    && packet.compute_hash() == packet_hash
-            }
+            IngressDerivedBroadcast::PathRequest {
+                destination,
+                tag,
+                tag_len,
+            } => is_forwarded_path_request_for_tag(
+                &outbound.data,
+                &destination,
+                &tag[..usize::from(tag_len)],
+            ),
         }
     });
     let index = matching?;
@@ -7124,8 +7414,15 @@ fn resolve_packet_with_derived_target(
     let protocol_token = packet.protocol_token();
     let target = match target {
         IngressDerivedTarget::AllExceptSource => TxTarget::AllExcept(source),
-        IngressDerivedTarget::Selected(egress) if egress.is_empty() => return None,
-        IngressDerivedTarget::Selected(egress) => TxTarget::Selected(egress),
+        IngressDerivedTarget::SelectedAnnounce(egress) if egress.is_empty() => return None,
+        IngressDerivedTarget::SelectedAnnounce(egress) => TxTarget::Selected(egress),
+        IngressDerivedTarget::SelectedPathSearch(egress) => {
+            let egress = egress.without(source);
+            if egress.is_empty() {
+                return None;
+            }
+            TxTarget::Selected(egress)
+        }
     };
     Some(TxPacket {
         bytes: packet.data,

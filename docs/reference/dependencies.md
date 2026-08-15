@@ -13,10 +13,19 @@ Git revision. The current workspace declares revision
 overlay under `vendor/rete-dfcaa36`.
 
 The overlay supplies bounded in-place construction required by the embedded
-composition; protocol behavior is unchanged from the pinned revision. Its
-exact delta and removal conditions are in `vendor/rete-dfcaa36/PATCHES.md`. Do
-not point a build at an ignored `reference/rete` checkout or mix Rete crate
-revisions.
+composition and aligns path discovery with the Python authority: exact tagged
+request parsing and rebuilding, source-bound `PATH_RESPONSE` emission,
+non-rebroadcast response learning, bounded cached-response coalescing, and
+missing-path recovery from a repeated signed announce. It also rejects invalid
+announce destination types and over-height plain ingress before those packets
+can mutate transport state. The product adapter owns the separate bounded
+15-second table that returns a recursively discovered path only to its original
+requester. The embedded subset does not implement Python's optional per-
+interface ingress/egress path-request frequency controllers; its bounded tag,
+pending-discovery, and response-queue capacities fail closed and are not
+minimum-interval throttles. The exact overlay delta and removal conditions are in
+`vendor/rete-dfcaa36/PATCHES.md`. Do not point a build at an ignored
+`reference/rete` checkout or mix Rete crate revisions.
 
 Rete declares `MIT OR Apache-2.0` in its package metadata. Its reviewed snapshot
 does not include canonical license files, so a distributable corresponding-

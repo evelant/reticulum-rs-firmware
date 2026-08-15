@@ -108,6 +108,12 @@ Cancellation, timeout, queue rejection, and link loss must return or reconcile
 the exact owner. An interface generation prevents work retained for an old
 connection from being reused after reconnect.
 
+Cancelling an in-flight SX1262 future is a destructive hardware boundary. Once
+the dispatcher has returned the exact completion and crossed any authorized
+frame durability gate, firmware may use one rate-limited software reset to
+reconstruct the consumed radio owner. An early repeat stays contained as an
+interface-local fail-stop rather than rebooting the independent appliance.
+
 ## Routing and interface roles
 
 The router operates on stable interface IDs and explicit targets. Medium-
@@ -116,11 +122,26 @@ CAD/backoff, airtime authorization, RF deadlines, and physical `TxDone`; the
 TCP actor owns name resolution, connection backoff, HDLC framing, and stream
 credit.
 
-Interface roles constrain announce forwarding. The local LoRa mesh is an
-internal domain and a public point-to-point TCP uplink is a boundary. Announces
-learned from the public boundary do not flood onto LoRa, while local and LoRa
-announces may leave through TCP. Ordinary DATA, proofs, Links, and path requests
-remain routed by Reticulum rather than by a bearer-specific shortcut.
+Interface roles constrain discovery forwarding. The local LoRa mesh is an
+Internal domain and the public point-to-point TCP uplink is a Boundary. Announce
+propagation follows Reticulum's mode matrix: a Boundary announce cannot enter an
+Internal interface, while an Internal announce may cross the Boundary.
+Recursive unknown-path search is a separate policy. An Internal request searches
+every other online interface, and a Boundary request searches only other
+Boundary or Gateway interfaces; every recursive request excludes its ingress
+interface, including a shared medium. With the current two-interface gateway,
+this lets LoRa discovery query TCP without reflecting onto LoRa and prevents a
+public TCP query from becoming LoRa traffic.
+
+Path requests are deduplicated by their exact destination and tag. An unknown
+recursive request retains its original requesting interface for 15 seconds,
+even when no eligible egress is online, so a newly learned matching path returns
+as an exact source-only `PATH_RESPONSE`. Known and local responses are likewise
+source-bound. A `PATH_RESPONSE` can restore a missing path but is never queued
+as an ordinary announce rebroadcast. The embedded pending-discovery and delayed-
+response queues are bounded, coalesce by destination where Reticulum does, and
+fail closed with observable counters when full. Addressed DATA, proofs, and
+Links remain routed by Reticulum rather than by a bearer-specific shortcut.
 
 ## Durable messaging
 

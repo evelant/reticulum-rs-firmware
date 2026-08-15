@@ -181,7 +181,7 @@ fn setup_sender() -> (TestNode<3>, DestinationHash, CounterRng) {
 }
 
 #[test]
-fn announce_egress_uses_exact_source_and_mode_pair_without_bearer_knowledge() {
+fn announce_and_recursive_path_egress_use_independent_rns_policies() {
     let mtu = LogicalMtu::try_new(500).expect("test MTU must be nonzero");
     let properties = |config| {
         InterfaceProperties::new(
@@ -196,7 +196,9 @@ fn announce_egress_uses_exact_source_and_mode_pair_without_bearer_knowledge() {
         .register(
             InterfaceQueueId::new(0),
             PacketInterfaceId::new(1),
-            properties(1).with_announce_mode(AnnouncePropagationMode::Internal),
+            properties(1)
+                .with_announce_mode(AnnouncePropagationMode::Internal)
+                .with_recursive_path_search_mode(RecursivePathSearchMode::Unrestricted),
             true,
         )
         .expect("internal shared-medium interface registers");
@@ -206,7 +208,8 @@ fn announce_egress_uses_exact_source_and_mode_pair_without_bearer_knowledge() {
             PacketInterfaceId::new(2),
             properties(2)
                 .with_topology(InterfaceTopology::PointToPoint)
-                .with_announce_mode(AnnouncePropagationMode::Boundary),
+                .with_announce_mode(AnnouncePropagationMode::Boundary)
+                .with_recursive_path_search_mode(RecursivePathSearchMode::Boundary),
             true,
         )
         .expect("boundary point-to-point interface registers");
@@ -238,6 +241,28 @@ fn announce_egress_uses_exact_source_and_mode_pair_without_bearer_knowledge() {
         Err(AnnounceEgressSetError::SourceUnavailable(
             PacketInterfaceId::new(9)
         ))
+    );
+
+    assert_eq!(
+        registry
+            .recursive_path_search_egress_interfaces(PacketInterfaceId::new(2))
+            .expect("registered boundary source resolves"),
+        Some(InterfaceSet::empty()),
+        "Boundary searches do not use the announce matrix and therefore do not enter Full or Internal"
+    );
+    assert_eq!(
+        registry
+            .recursive_path_search_egress_interfaces(PacketInterfaceId::new(1))
+            .expect("registered internal source resolves"),
+        Some(interfaces(&[2, 3])),
+        "an Internal search reaches every online non-source interface and never reflects on its shared medium"
+    );
+    assert_eq!(
+        registry
+            .recursive_path_search_egress_interfaces(PacketInterfaceId::new(3))
+            .expect("registered Full source resolves"),
+        None,
+        "Full does not initiate recursive searches without recursive_prs"
     );
 }
 

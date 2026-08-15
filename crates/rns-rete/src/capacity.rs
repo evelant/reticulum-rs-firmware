@@ -40,7 +40,7 @@ impl CapacityUse {
 /// Publicly observable occupancy for a heapless Rete node.
 ///
 /// Rete does not currently expose occupancy for its identity, resource,
-/// announce-replay, announce-rate, path-request-throttle, or packet-dedup
+/// announce-replay, announce-rate, path-request-dedup, or packet-dedup
 /// tables. Those collections therefore cannot be represented here without an
 /// upstream API change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +291,7 @@ mod tests {
             local_rebroadcasts: 0,
             block_rebroadcasts: false,
             received_hops: 0,
+            attached_interface: None,
         }
     }
 

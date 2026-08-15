@@ -300,7 +300,8 @@ fn snapshot_round_trip_does_not_restore_or_advertise_unbound_paths() {
 
     let mut rng = rand::thread_rng();
     let identity = Identity::from_seed(b"test-identity").unwrap();
-    let mut request = TestTransport::build_path_request(&destination);
+    let mut request =
+        TestTransport::build_path_request(&destination, None, &mut rng);
     assert!(matches!(
         restored.ingest_on(&mut request, 101, 2, &mut rng, &identity),
         IngestResult::PathRequestForward { .. }
@@ -1397,7 +1398,7 @@ fn announce_rebroadcast_as_header2_when_transport() {
     assert!(!pending.is_empty(), "should have a pending announce");
 
     let rebroadcast = &pending[0];
-    let rpkt = Packet::parse(rebroadcast).unwrap();
+    let rpkt = Packet::parse(&rebroadcast.raw).unwrap();
     assert_eq!(
         rpkt.header_type,
         HeaderType::Header2,
@@ -1473,7 +1474,7 @@ fn rebroadcast_hops_preserved() {
     let pending = t.pending_outbound(1006, &mut rng);
     assert!(!pending.is_empty());
 
-    let rpkt = Packet::parse(&pending[0]).unwrap();
+    let rpkt = Packet::parse(&pending[0].raw).unwrap();
     // Original hops was 0, after ingest it's incremented to 1
     assert_eq!(rpkt.hops, 1, "rebroadcast should preserve hops from ingest");
 }

@@ -3,6 +3,7 @@
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
+use esp_hal::{ram, system::software_reset};
 use log::{error, info, warn};
 use reticulum_interface_router::{
     ActorIngressSendError, AvailableIngressBuffer, IngressSignalObservation,
@@ -21,6 +22,16 @@ use crate::{ProductDispatcher, config};
 use reticulum_e290_firmware::radio_diagnostics::{
     AcceptedLoRaPacketObservation, RadioDiagnosticsCell,
 };
+use reticulum_e290_firmware::radio_recovery::{
+    self, RadioRecoveryDisposition, RadioRecoveryResetMarkerState,
+};
+
+// A nonzero marker survives software reset and bounds recovery for the sole
+// physical radio owner. Zero is restored by a power-on reset. Torn writes are
+// treated as armed, so interruption while recording the marker cannot create a
+// reboot loop.
+#[ram(unstable(rtc_fast, persistent))]
+static mut RADIO_RECOVERY_RESET_MARKER: [u32; 2] = [0; 2];
 
 #[embassy_executor::task]
 pub async fn run(
@@ -380,7 +391,7 @@ async fn receive_once(
         Ok(step) => step,
         Err(_) => {
             error!(
-                "e290-node stage=lora-rx status=WATCHDOG-EXPIRED watchdog_us={watchdog} action=cancel-recover-actor-fail-stop"
+                "e290-node stage=lora-rx status=WATCHDOG-EXPIRED watchdog_us={watchdog} action=cancel-drain-rate-limited-software-reset"
             );
             recover_cancelled_and_drain(dispatcher, diagnostics).await;
             RadioReceiveStep::Disabled(
@@ -568,7 +579,7 @@ async fn run_radio_operation(
         }
         Err(_) => {
             error!(
-                "e290-node stage=lora-{operation} status=WATCHDOG-EXPIRED watchdog_us={watchdog_us} action=cancel-recover-actor-fail-stop"
+                "e290-node stage=lora-{operation} status=WATCHDOG-EXPIRED watchdog_us={watchdog_us} action=cancel-drain-rate-limited-software-reset"
             );
             recover_cancelled_and_drain(dispatcher, diagnostics).await;
             DispatchProgress::Disabled
@@ -634,7 +645,22 @@ async fn recover_cancelled_and_drain(
                     }
                 }
             }
-            RadioTxDispatcherStep::Disabled(_) => return,
+            RadioTxDispatcherStep::Disabled(fault) => {
+                let residue = dispatcher.fault_residue_kind();
+                if matches!(
+                    fault,
+                    reticulum_radio_tx_dispatch::DispatcherFault::RadioUnavailable
+                        | reticulum_radio_tx_dispatch::DispatcherFault::ReceiveCancelled
+                ) && residue.is_none()
+                {
+                    recover_radio_owner_after_exact_drain(diagnostics, fault).await;
+                } else {
+                    error!(
+                        "e290-node stage=lora-recovery status=FAIL reason=exact-owner-drain-incomplete dispatcher_fault={fault:?} residue={residue:?} action=retain-dispatcher-and-fail-stop"
+                    );
+                }
+                return;
+            }
             RadioTxDispatcherStep::NeedReceiveRecovery => {
                 let _ = dispatcher.recover_cancelled_radio_operation();
                 if let Some(report) = dispatcher.take_last_report() {
@@ -647,6 +673,69 @@ async fn recover_cancelled_and_drain(
                 );
                 return;
             }
+        }
+    }
+}
+
+fn retained_radio_recovery_marker() -> RadioRecoveryResetMarkerState {
+    // SAFETY: The permanent radio task is the sole runtime owner of this marker.
+    // Volatile access creates no reference to the mutable static, and startup
+    // deliberately preserves this RTC region across software reset.
+    let marker =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(RADIO_RECOVERY_RESET_MARKER)) };
+    radio_recovery::classify_radio_recovery_reset_marker(marker)
+}
+
+fn arm_radio_recovery_reset_marker() {
+    let marker = core::ptr::addr_of_mut!(RADIO_RECOVERY_RESET_MARKER).cast::<u32>();
+    // SAFETY: The permanent radio task is the sole runtime writer. Store the
+    // nonzero complement first so either torn-write boundary is classified as
+    // a previous recovery attempt.
+    unsafe {
+        core::ptr::write_volatile(
+            marker.add(1),
+            radio_recovery::RADIO_RECOVERY_RESET_MARKER_WORDS[1],
+        );
+        core::ptr::write_volatile(marker, radio_recovery::RADIO_RECOVERY_RESET_MARKER_WORDS[0]);
+    }
+}
+
+/// Reset the whole MCU only after cancellation recovery has returned every
+/// exact packet/completion owner and the dispatcher has reached Disabled.
+///
+/// The sole-radio contract intentionally destroys initialized SPI/GPIO driver
+/// ownership when an operation future is dropped. A software reset is therefore
+/// the narrow safe reconstruction path. A rapid repeat returns to the caller,
+/// which enters the ordinary interface-local fail-stop with all remaining
+/// ingress and dispatcher owners retained.
+async fn recover_radio_owner_after_exact_drain(
+    diagnostics: &RadioDiagnosticsCell,
+    fault: reticulum_radio_tx_dispatch::DispatcherFault,
+) {
+    diagnostics.mark_faulted();
+    let marker = retained_radio_recovery_marker();
+    let boot_uptime_ms = Instant::now().as_millis();
+    match radio_recovery::radio_recovery_disposition(marker.is_clean(), boot_uptime_ms) {
+        RadioRecoveryDisposition::SoftwareReset => {
+            arm_radio_recovery_reset_marker();
+            error!(
+                "e290-node stage=lora-recovery status=RESETTING reason=cancelled-radio-operation dispatcher_fault={fault:?} exact_owner_drain=complete action=software-reset retained_marker={} boot_uptime_ms={} rearm_uptime_ms={}",
+                marker.label(),
+                boot_uptime_ms,
+                radio_recovery::RADIO_RECOVERY_RESET_REARM_UPTIME_MS,
+            );
+            // Preserve the terminal diagnostic on USB Serial/JTAG before ROM
+            // tears down the chip and reconstructs every physical owner.
+            Timer::after_millis(100).await;
+            software_reset();
+        }
+        RadioRecoveryDisposition::FailStopUntilPowerCycle => {
+            error!(
+                "e290-node stage=lora-recovery status=RESET-SUPPRESSED reason=loop-guard dispatcher_fault={fault:?} exact_owner_drain=complete retained_marker={} boot_uptime_ms={} rearm_uptime_ms={} action=actor-fail-stop-until-power-cycle",
+                marker.label(),
+                boot_uptime_ms,
+                radio_recovery::RADIO_RECOVERY_RESET_REARM_UPTIME_MS,
+            );
         }
     }
 }

@@ -894,9 +894,10 @@ fn native_announce_packet(tag: u8, rng: &mut CounterRng) -> Vec<u8> {
     actions.packets[0].bytes().to_vec()
 }
 
-fn first_forwarded_announce_job(
+fn first_forwarded_discovery_job(
     through_point_to_point: bool,
     boundary_roles: bool,
+    path_request: bool,
 ) -> Option<(NodeTxTarget, PacketInterfaceId)> {
     let relay = TestNode::new(
         identity(90),
@@ -912,9 +913,15 @@ fn first_forwarded_announce_job(
     let mut tcp_properties = properties(2).with_topology(InterfaceTopology::PointToPoint);
     if boundary_roles {
         lora_properties = lora_properties
-            .with_announce_mode(reticulum_interface_router::AnnouncePropagationMode::Internal);
+            .with_announce_mode(reticulum_interface_router::AnnouncePropagationMode::Internal)
+            .with_recursive_path_search_mode(
+                reticulum_interface_router::RecursivePathSearchMode::Unrestricted,
+            );
         tcp_properties = tcp_properties
-            .with_announce_mode(reticulum_interface_router::AnnouncePropagationMode::Boundary);
+            .with_announce_mode(reticulum_interface_router::AnnouncePropagationMode::Boundary)
+            .with_recursive_path_search_mode(
+                reticulum_interface_router::RecursivePathSearchMode::Boundary,
+            );
     }
     let lora_descriptor = supervisor
         .router
@@ -947,12 +954,31 @@ fn first_forwarded_announce_job(
         .bind_ingress(source_descriptor)
         .expect("current descriptor binds to its ingress actor");
     let mut rng = CounterRng::default();
-    let packet = native_announce_packet(91, &mut rng);
+    let packet = if path_request {
+        let requester = TestNode::new(
+            identity(91),
+            "reticulum",
+            &["aggregate-path-requester"],
+            NodeInstanceId::new([0xeb; 16]),
+            NodeConfig::transport(),
+        )
+        .expect("path requester must construct");
+        requester
+            .request_path(&DestinationHash::new([0xb5; 16]), &mut rng)
+            .expect("path request must build")
+            .packets[0]
+            .bytes()
+            .to_vec()
+    } else {
+        native_announce_packet(91, &mut rng)
+    };
+    let metrics_before = supervisor.node_metrics();
     let mut buffer = source_ingress
         .try_receive_buffer()
         .expect("source actor owns a reusable ingress buffer");
+    let buffer_id = buffer.id();
     buffer.capacity_mut()[..packet.len()].copy_from_slice(&packet);
-    let sealed = buffer.seal(packet.len()).expect("announce packet seals");
+    let sealed = buffer.seal(packet.len()).expect("discovery packet seals");
     source_ingress
         .try_send(authority, sealed)
         .expect("completed ingress queue has capacity");
@@ -960,11 +986,40 @@ fn first_forwarded_announce_job(
     let processed = match supervisor.step_ingress(MonotonicSeconds::new(40), admission(), &mut rng)
     {
         NodeInterfaceIngressStep::Processed(processed) => processed,
-        _ => panic!("announce ingress did not process"),
+        _ => panic!("discovery ingress did not process"),
     };
     assert_eq!(processed.actions_backpressured(), None);
     assert_eq!(processed.terminal_action_fault(), None);
     assert_eq!(processed.recycle_fault(), None);
+    let report = processed.into_report();
+    let first_available = source_ingress
+        .try_receive_buffer()
+        .expect("discovery ingress pool retains an available buffer");
+    if first_available.id() != buffer_id {
+        assert_eq!(
+            source_ingress
+                .try_receive_buffer()
+                .expect("the processed exact buffer must be recycled behind its peer slot")
+                .id(),
+            buffer_id
+        );
+    }
+    if through_point_to_point && boundary_roles && path_request {
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        let metrics_after = supervisor.node_metrics();
+        assert_eq!(
+            metrics_after.ingress.discovery_path_requests_without_egress,
+            metrics_before
+                .ingress
+                .discovery_path_requests_without_egress
+                + 1
+        );
+        assert_eq!(
+            metrics_after.transport.packets_received,
+            metrics_before.transport.packets_received + 1
+        );
+        assert_eq!(metrics_after.pending_discovery_paths.used, 1);
+    }
 
     let mut routed = None;
     for _ in 0..64 {
@@ -972,10 +1027,10 @@ fn first_forwarded_announce_job(
             routed = Some(job);
             break;
         }
-        assert!(
-            tcp_tx.try_receive_job().is_none(),
-            "interface ordering must route this fixture through LoRa first"
-        );
+        if let Some(job) = tcp_tx.try_receive_job() {
+            routed = Some(job);
+            break;
+        }
         if matches!(
             supervisor.step(MonotonicMillis::new(40_000)).transition(),
             NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::NonPacketActionsReady)
@@ -983,13 +1038,9 @@ fn first_forwarded_announce_job(
             let _ = drain_and_discard_application_events(&mut supervisor);
         }
     }
-    assert!(
-        tcp_tx.try_receive_job().is_none(),
-        "the serialized first hop must not skip the lower-numbered LoRa interface"
-    );
     let routed = routed?;
     let InterfaceTxJob::Ordinary(job) = routed else {
-        panic!("forwarded announce changed owner family")
+        panic!("forwarded discovery packet changed owner family")
     };
     let (_ticket, job) = job.into_parts();
     let prepared = job.prepared();
@@ -1882,7 +1933,7 @@ fn queued_ingress_action_pressure_recycles_buffer_and_retries_exact_actions() {
 #[test]
 fn point_to_point_ingress_broadcast_excludes_its_source_interface() {
     let (target, first_interface) =
-        first_forwarded_announce_job(true, false).expect("Full-mode announce forwards");
+        first_forwarded_discovery_job(true, false, false).expect("Full-mode announce forwards");
 
     assert_eq!(target, NodeTxTarget::AllExcept(PacketInterfaceId::new(2)));
     assert_eq!(first_interface, PacketInterfaceId::new(1));
@@ -1891,7 +1942,7 @@ fn point_to_point_ingress_broadcast_excludes_its_source_interface() {
 #[test]
 fn shared_medium_ingress_broadcast_preserves_same_interface_relay() {
     let (target, first_interface) =
-        first_forwarded_announce_job(false, false).expect("Full-mode announce forwards");
+        first_forwarded_discovery_job(false, false, false).expect("Full-mode announce forwards");
 
     assert_eq!(target, NodeTxTarget::All);
     assert_eq!(
@@ -1904,7 +1955,7 @@ fn shared_medium_ingress_broadcast_preserves_same_interface_relay() {
 #[test]
 fn boundary_tcp_announce_does_not_enter_internal_lora() {
     assert_eq!(
-        first_forwarded_announce_job(true, true),
+        first_forwarded_discovery_job(true, true, false),
         None,
         "the exact Boundary ingress announce has no eligible Internal LoRa egress"
     );
@@ -1913,9 +1964,29 @@ fn boundary_tcp_announce_does_not_enter_internal_lora() {
 #[test]
 fn internal_lora_announce_can_relay_locally_and_cross_boundary() {
     let (target, first_interface) =
-        first_forwarded_announce_job(false, true).expect("Internal announce forwards");
+        first_forwarded_discovery_job(false, true, false).expect("Internal announce forwards");
     assert_eq!(target, NodeTxTarget::All);
     assert_eq!(first_interface, PacketInterfaceId::new(1));
+}
+
+#[test]
+fn boundary_tcp_unknown_path_search_does_not_enter_internal_lora() {
+    assert_eq!(
+        first_forwarded_discovery_job(true, true, true),
+        None,
+        "the Boundary search-mode filter excludes Internal LoRa"
+    );
+}
+
+#[test]
+fn internal_lora_unknown_path_search_can_cross_boundary() {
+    let (target, first_interface) = first_forwarded_discovery_job(false, true, true)
+        .expect("Internal unknown-path search forwards");
+    assert_eq!(
+        target,
+        NodeTxTarget::Selected(reticulum_node_core::InterfaceSet::from_bits(1 << 2))
+    );
+    assert_eq!(first_interface, PacketInterfaceId::new(2));
 }
 
 #[test]

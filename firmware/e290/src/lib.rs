@@ -39,6 +39,7 @@ pub mod pairing_policy;
 pub mod pairing_records;
 pub mod partition_contract;
 pub mod radio_diagnostics;
+pub mod radio_recovery;
 pub mod radio_trace;
 pub mod reticulum_probe;
 pub mod rmap_discovery;

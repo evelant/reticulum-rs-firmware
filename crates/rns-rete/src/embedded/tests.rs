@@ -4909,7 +4909,7 @@ fn native_reverse_route_conflict_maps_to_stable_product_diagnostics() {
             metadata: IngressMetadata::default(),
             proof_expectation: None,
             local_path_request: None,
-            path_response: None,
+            announce_path_before: None,
             derived_broadcast: None,
         },
         InterfaceId(1),
@@ -6328,7 +6328,7 @@ fn retained_proof_invariant_rejection_publishes_no_event_or_packet_owner() {
                 },
             )),
             local_path_request: None,
-            path_response: None,
+            announce_path_before: None,
             derived_broadcast: None,
         },
         InterfaceId(7),
@@ -6935,7 +6935,7 @@ fn point_to_point_announce_retargets_only_its_forward_and_drops_only_its_retry()
 }
 
 #[test]
-fn explicit_announce_egress_suppresses_only_the_matching_forward() {
+fn explicit_announce_egress_suppresses_only_the_matching_announce_forward() {
     let mut relay = TestNode::new(
         identity(69),
         "reticulum",
@@ -6957,7 +6957,7 @@ fn explicit_announce_egress_suppresses_only_the_matching_forward() {
         MonotonicInstant::from_secs(100),
         InterfaceId(2),
         IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
-            .with_announce_egress(IngressAnnounceEgress::empty()),
+            .with_announce_egress(IngressEgressSet::empty()),
         &mut rng,
     );
 
@@ -6996,7 +6996,7 @@ fn explicit_announce_egress_retains_exact_selected_interface_ids() {
     let mut rng = CounterRng::default();
     peer.queue_announce(None, 100, &mut rng).unwrap();
     let inbound = peer.flush_announces(100, &mut rng).remove(0);
-    let selected = IngressAnnounceEgress::from_bits((1 << 3) | (1 << 7));
+    let selected = IngressEgressSet::from_bits((1 << 3) | (1 << 7));
 
     let report = relay.ingest_at_with_broadcast_policy(
         inbound.bytes(),
@@ -7049,7 +7049,7 @@ fn shared_medium_announce_keeps_same_interface_forward_and_native_retry() {
 }
 
 #[test]
-fn point_to_point_unknown_path_request_excludes_only_its_source() {
+fn recursive_unknown_path_request_excludes_source_and_rebuilds_relay_payload() {
     let mut relay = TestNode::new(
         identity(67),
         "reticulum",
@@ -7065,9 +7065,11 @@ fn point_to_point_unknown_path_request_excludes_only_its_source() {
     )
     .unwrap();
     let mut rng = CounterRng::default();
-    let request = requester
-        .request_path(&DestHash::from([0xa5; TRUNCATED_HASH_LEN]), &mut rng)
-        .unwrap();
+    let destination = DestHash::from([0xa5; TRUNCATED_HASH_LEN]);
+    let request = requester.request_path(&destination, &mut rng).unwrap();
+    let source = Packet::parse(request.bytes()).unwrap();
+    let source_tag = &source.payload[TRUNCATED_HASH_LEN * 2..];
+    let selected = IngressEgressSet::from_bits((1 << 2) | (1 << 9));
 
     let report = relay.ingest_at_with_broadcast_policy(
         request.bytes(),
@@ -7075,20 +7077,704 @@ fn point_to_point_unknown_path_request_excludes_only_its_source() {
         MonotonicInstant::from_secs(100),
         InterfaceId(9),
         IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
-            .with_announce_egress(IngressAnnounceEgress::empty()),
+            .with_recursive_path_search_egress(selected),
         &mut rng,
     );
     assert_eq!(report.actions.packets.len(), 1);
     assert_eq!(
         report.actions.packets[0].target(),
-        TxTarget::AllExcept(InterfaceId(9))
+        TxTarget::Selected(IngressEgressSet::from_bits(1 << 2))
+    );
+    let forwarded = Packet::parse(report.actions.packets[0].bytes()).unwrap();
+    assert_eq!(
+        &forwarded.payload[..TRUNCATED_HASH_LEN],
+        destination.as_ref()
     );
     assert_eq!(
-        Packet::parse(report.actions.packets[0].bytes())
+        &forwarded.payload[TRUNCATED_HASH_LEN..TRUNCATED_HASH_LEN * 2],
+        relay.identity_hash().as_ref()
+    );
+    assert_eq!(&forwarded.payload[TRUNCATED_HASH_LEN * 2..], source_tag);
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 1);
+}
+
+#[test]
+fn boundary_empty_egress_retains_and_coalesces_global_pending_discovery() {
+    let mut relay = TestNode::new(
+        identity(73),
+        "reticulum",
+        &["boundary-relay"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let requester = TestNode::new(
+        identity(74),
+        "reticulum",
+        &["requester"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let mut rng = CounterRng::default();
+    let destination = DestHash::from([0xb5; TRUNCATED_HASH_LEN]);
+    let boundary_request = requester.request_path(&destination, &mut rng).unwrap();
+
+    let suppressed = relay.ingest_at_with_broadcast_policy(
+        boundary_request.bytes(),
+        100,
+        MonotonicInstant::from_secs(100),
+        InterfaceId(2),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+            .with_recursive_path_search_egress(IngressEgressSet::empty()),
+        &mut rng,
+    );
+
+    assert_eq!(suppressed.disposition, IngressDisposition::Processed);
+    assert!(suppressed.actions.packets.is_empty());
+    let after_suppressed = relay.metrics();
+    assert_eq!(after_suppressed.ingress.admitted, 1);
+    assert_eq!(
+        after_suppressed
+            .ingress
+            .discovery_path_requests_without_egress,
+        1
+    );
+    assert_eq!(after_suppressed.transport.packets_received, 1);
+    assert_eq!(after_suppressed.pending_discovery_paths.used, 1);
+
+    let internal_request = requester.request_path(&destination, &mut rng).unwrap();
+    assert_ne!(
+        Packet::parse(boundary_request.bytes())
             .unwrap()
             .compute_hash(),
-        Packet::parse(request.bytes()).unwrap().compute_hash()
+        Packet::parse(internal_request.bytes())
+            .unwrap()
+            .compute_hash(),
+        "the cross-interface request must carry an independent discovery tag"
     );
+    let selected = IngressEgressSet::from_bits((1 << 1) | (1 << 2));
+    let coalesced = relay.ingest_at_with_broadcast_policy(
+        internal_request.bytes(),
+        101,
+        MonotonicInstant::from_secs(101),
+        InterfaceId(1),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::SharedMedium)
+            .with_recursive_path_search_egress(selected),
+        &mut rng,
+    );
+    assert!(coalesced.actions.packets.is_empty());
+    assert_eq!(relay.metrics().ingress.discovery_path_requests_coalesced, 1);
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 1);
+
+    let _ = relay.tick(115, &mut rng);
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 0);
+    assert_eq!(relay.metrics().ingress.discovery_path_requests_expired, 1);
+
+    let after_timeout = requester.request_path(&destination, &mut rng).unwrap();
+    let forwarded = relay.ingest_at_with_broadcast_policy(
+        after_timeout.bytes(),
+        116,
+        MonotonicInstant::from_secs(116),
+        InterfaceId(1),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::SharedMedium)
+            .with_recursive_path_search_egress(selected),
+        &mut rng,
+    );
+    assert_eq!(forwarded.actions.packets.len(), 1);
+    assert_eq!(
+        forwarded.actions.packets[0].target(),
+        TxTarget::Selected(IngressEgressSet::from_bits(1 << 2))
+    );
+}
+
+#[test]
+fn internal_recursive_search_never_reflects_onto_shared_ingress() {
+    let mut relay = TestNode::new(
+        identity(75),
+        "reticulum",
+        &["internal-relay"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let requester = TestNode::new(
+        identity(76),
+        "reticulum",
+        &["requester"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let mut rng = CounterRng::default();
+    let request = requester
+        .request_path(&DestHash::from([0xc5; TRUNCATED_HASH_LEN]), &mut rng)
+        .unwrap();
+    let selected = IngressEgressSet::from_bits((1 << 1) | (1 << 2));
+
+    let report = relay.ingest_at_with_broadcast_policy(
+        request.bytes(),
+        100,
+        MonotonicInstant::from_secs(100),
+        InterfaceId(1),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::SharedMedium)
+            .with_recursive_path_search_egress(selected),
+        &mut rng,
+    );
+
+    assert_eq!(report.actions.packets.len(), 1);
+    assert_eq!(
+        report.actions.packets[0].target(),
+        TxTarget::Selected(IngressEgressSet::from_bits(1 << 2))
+    );
+}
+
+#[test]
+fn boundary_known_path_response_waits_for_grace_and_returns_only_to_source() {
+    let mut relay = TestNode::new(
+        identity(77),
+        "reticulum",
+        &["boundary-relay"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let mut peer = node(78);
+    let peer_destination = peer.destination_hash();
+    let relay_identity = relay.identity_hash();
+    let requester = TestNode::new(
+        identity(79),
+        "reticulum",
+        &["requester"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let mut rng = CounterRng::default();
+
+    peer.queue_announce(None, 100, &mut rng).unwrap();
+    let announce = peer.flush_announces(100, &mut rng).remove(0);
+    let source_announce = Packet::parse(announce.bytes()).unwrap();
+    let source_hops = source_announce.hops;
+    let source_context_flag = source_announce.context_flag;
+    let source_payload = source_announce.payload.to_vec();
+    let learned = relay.ingest_at_with_broadcast_policy(
+        announce.bytes(),
+        100,
+        MonotonicInstant::from_secs(100),
+        InterfaceId(1),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::SharedMedium)
+            .with_announce_egress(IngressEgressSet::empty()),
+        &mut rng,
+    );
+    assert!(learned.actions.packets.is_empty());
+    assert!(relay.has_path(&peer_destination));
+
+    let request = requester.request_path(&peer_destination, &mut rng).unwrap();
+    let response = relay.ingest_at_with_broadcast_policy(
+        request.bytes(),
+        101,
+        MonotonicInstant::from_secs(101),
+        InterfaceId(2),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+            .with_announce_egress(IngressEgressSet::empty()),
+        &mut rng,
+    );
+    assert!(response.actions.packets.is_empty());
+    assert!(relay.tick(101, &mut rng).packets.is_empty());
+
+    let due = relay.tick(102, &mut rng);
+    assert_eq!(due.packets.len(), 1);
+    assert_eq!(due.packets[0].target(), TxTarget::Only(InterfaceId(2)));
+    let response_announce = Packet::parse(due.packets[0].bytes()).unwrap();
+    assert_eq!(response_announce.header_type, HeaderType::Header2);
+    assert_eq!(response_announce.packet_type, PacketType::Announce);
+    assert_eq!(response_announce.context, CONTEXT_PATH_RESPONSE);
+    assert_eq!(
+        response_announce.transport_id,
+        Some(relay_identity.as_ref())
+    );
+    assert_eq!(
+        response_announce.destination_hash,
+        peer_destination.as_ref()
+    );
+    assert_eq!(response_announce.hops, source_hops.saturating_add(1));
+    assert_eq!(response_announce.context_flag, source_context_flag);
+    assert_eq!(response_announce.payload, source_payload.as_slice());
+
+    let mut second_relay = TestNode::new(
+        identity(80),
+        "reticulum",
+        &["second-relay"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let classified = second_relay
+        .preflight_ingest(
+            due.packets[0].bytes(),
+            InterfaceId(3),
+            IngressOrigin::RemoteInterface,
+        )
+        .expect("valid H2 path response passes preflight");
+    assert!(matches!(
+        classified.derived_broadcast,
+        Some(IngressDerivedBroadcast::Announce { destination }) if destination == peer_destination
+    ));
+    let learned_response = second_relay.ingest_at_with_broadcast_policy(
+        due.packets[0].bytes(),
+        102,
+        MonotonicInstant::from_secs(102),
+        InterfaceId(3),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::SharedMedium),
+        &mut rng,
+    );
+    assert_eq!(learned_response.disposition, IngressDisposition::Processed);
+    assert!(second_relay.has_path(&peer_destination));
+    assert_eq!(
+        second_relay.route(&peer_destination).unwrap().received_on,
+        Some(InterfaceId(3))
+    );
+    assert!(learned_response.actions.packets.is_empty());
+    assert_eq!(second_relay.metrics().capacity.announces.used, 0);
+    assert!(second_relay.tick(108, &mut rng).packets.is_empty());
+
+    let second_request = requester.request_path(&peer_destination, &mut rng).unwrap();
+    let second_response = relay.ingest_at_with_broadcast_policy(
+        second_request.bytes(),
+        103,
+        MonotonicInstant::from_secs(103),
+        InterfaceId(3),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+            .with_announce_egress(IngressEgressSet::empty()),
+        &mut rng,
+    );
+    assert!(second_response.actions.packets.is_empty());
+    assert!(relay.tick(103, &mut rng).packets.is_empty());
+    let second_due = relay.tick(104, &mut rng);
+    assert_eq!(second_due.packets.len(), 1);
+    assert_eq!(
+        second_due.packets[0].target(),
+        TxTarget::Only(InterfaceId(3))
+    );
+    assert_eq!(
+        Packet::parse(second_due.packets[0].bytes())
+            .unwrap()
+            .context,
+        CONTEXT_PATH_RESPONSE
+    );
+    assert!(relay.tick(110, &mut rng).packets.is_empty());
+}
+
+#[test]
+fn recursive_path_response_returns_to_exact_requester_and_never_rebroadcasts() {
+    let mut relay = TestNode::new(
+        identity(81),
+        "reticulum",
+        &["recursive-relay"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let relay_identity = relay.identity_hash();
+    let requester = TestNode::new(
+        identity(82),
+        "reticulum",
+        &["recursive-requester"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let mut destination = node(83);
+    let destination_hash = destination.destination_hash();
+    let mut rng = CounterRng::default();
+
+    let request = requester.request_path(&destination_hash, &mut rng).unwrap();
+    let request_packet = Packet::parse(request.bytes()).unwrap();
+    let original_tag = request_packet.payload[TRUNCATED_HASH_LEN * 2..].to_vec();
+    let recursive = relay.ingest_at_with_broadcast_policy(
+        request.bytes(),
+        100,
+        MonotonicInstant::from_secs(100),
+        InterfaceId(1),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::SharedMedium)
+            .with_recursive_path_search_egress(IngressEgressSet::from_bits(1 << 2)),
+        &mut rng,
+    );
+    assert_eq!(recursive.actions.packets.len(), 1);
+    assert_eq!(
+        recursive.actions.packets[0].target(),
+        TxTarget::Selected(IngressEgressSet::from_bits(1 << 2))
+    );
+    let forwarded = Packet::parse(recursive.actions.packets[0].bytes()).unwrap();
+    assert_eq!(
+        &forwarded.payload[TRUNCATED_HASH_LEN..TRUNCATED_HASH_LEN * 2],
+        relay_identity.as_ref()
+    );
+    assert_eq!(&forwarded.payload[TRUNCATED_HASH_LEN * 2..], original_tag);
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 1);
+
+    destination.queue_announce(None, 100, &mut rng).unwrap();
+    let source = destination.flush_announces(100, &mut rng).remove(0);
+    let source = Packet::parse(source.bytes()).unwrap();
+    let upstream_transport = IdentityHash::from([0xd2; TRUNCATED_HASH_LEN]);
+    let mut upstream_raw = [0_u8; RNS_MTU];
+    let upstream_len = PacketBuilder::new(&mut upstream_raw)
+        .header_type(HeaderType::Header2)
+        .transport_type(rete_core::TRANSPORT_TYPE_TRANSPORT)
+        .packet_type(PacketType::Announce)
+        .dest_type(DestType::Single)
+        .context_flag(source.context_flag)
+        .hops(source.hops)
+        .transport_id(upstream_transport.as_ref())
+        .destination_hash(source.destination_hash)
+        .context(CONTEXT_PATH_RESPONSE)
+        .payload(source.payload)
+        .build()
+        .unwrap();
+
+    let returned = relay.ingest_at_with_broadcast_policy(
+        &upstream_raw[..upstream_len],
+        101,
+        MonotonicInstant::from_secs(101),
+        InterfaceId(2),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+            .with_announce_egress(IngressEgressSet::empty()),
+        &mut rng,
+    );
+    assert_eq!(returned.actions.packets.len(), 1);
+    assert_eq!(
+        returned.actions.packets[0].target(),
+        TxTarget::Only(InterfaceId(1))
+    );
+    let response = Packet::parse(returned.actions.packets[0].bytes()).unwrap();
+    assert_eq!(response.header_type, HeaderType::Header2);
+    assert_eq!(response.context, CONTEXT_PATH_RESPONSE);
+    assert_eq!(response.transport_id, Some(relay_identity.as_ref()));
+    assert_eq!(response.destination_hash, destination_hash.as_ref());
+    assert_eq!(response.context_flag, source.context_flag);
+    assert_eq!(response.payload, source.payload);
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 1);
+    assert_eq!(relay.metrics().ingress.discovery_path_responses, 1);
+
+    let duplicate = relay.ingest_at_with_broadcast_policy(
+        &upstream_raw[..upstream_len],
+        102,
+        MonotonicInstant::from_secs(102),
+        InterfaceId(2),
+        IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+            .with_announce_egress(IngressEgressSet::empty()),
+        &mut rng,
+    );
+    assert_eq!(duplicate.disposition, IngressDisposition::NativeDuplicate);
+    assert!(duplicate.actions.packets.is_empty());
+    assert_eq!(relay.metrics().ingress.discovery_path_responses, 1);
+
+    let mut unrelated = TestNode::new(
+        identity(84),
+        "reticulum",
+        &["unrelated-relay"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let learned = unrelated.ingest(
+        returned.actions.packets[0].bytes(),
+        101,
+        InterfaceId(7),
+        &mut rng,
+    );
+    assert_eq!(learned.disposition, IngressDisposition::Processed);
+    assert!(unrelated.has_path(&destination_hash));
+    assert!(learned.actions.packets.is_empty());
+    assert!(unrelated.tick(108, &mut rng).packets.is_empty());
+
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 1);
+    assert!(relay.tick(114, &mut rng).packets.is_empty());
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 1);
+    assert!(relay.tick(115, &mut rng).packets.is_empty());
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 0);
+}
+
+#[test]
+fn pending_discovery_capacity_fails_closed_before_recursive_forwarding() {
+    let mut relay = TestNode::new(
+        identity(85),
+        "reticulum",
+        &["bounded-discovery"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let requester = TestNode::new(
+        identity(86),
+        "reticulum",
+        &["bounded-requester"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let mut rng = CounterRng::default();
+    let policy = IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+        .with_recursive_path_search_egress(IngressEgressSet::empty());
+
+    for tag in 0_u8..4 {
+        let destination = DestHash::from([tag.wrapping_add(1); TRUNCATED_HASH_LEN]);
+        let request = requester.request_path(&destination, &mut rng).unwrap();
+        let admitted = relay.ingest_at_with_broadcast_policy(
+            request.bytes(),
+            200,
+            MonotonicInstant::from_secs(200),
+            InterfaceId(2),
+            policy,
+            &mut rng,
+        );
+        assert_eq!(admitted.disposition, IngressDisposition::Processed);
+        assert!(admitted.actions.packets.is_empty());
+    }
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 4);
+
+    let destination = DestHash::from([0xf0; TRUNCATED_HASH_LEN]);
+    let request = requester.request_path(&destination, &mut rng).unwrap();
+    let received_before = relay.metrics().transport.packets_received;
+    let rejected = relay.ingest_at_with_broadcast_policy(
+        request.bytes(),
+        201,
+        MonotonicInstant::from_secs(201),
+        InterfaceId(2),
+        policy,
+        &mut rng,
+    );
+    assert_eq!(
+        rejected.disposition,
+        IngressDisposition::Rejected(IngressDropReason::DiscoveryPathTableFull { limit: 4 })
+    );
+    assert!(rejected.actions.packets.is_empty());
+    let metrics = relay.metrics();
+    assert_eq!(metrics.pending_discovery_paths.used, 4);
+    assert_eq!(metrics.ingress.discovery_path_table_full, 1);
+    assert_eq!(metrics.transport.packets_received, received_before);
+
+    assert!(relay.tick(215, &mut rng).packets.is_empty());
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 0);
+}
+
+#[test]
+fn every_native_path_request_shape_remains_under_boundary_policy() {
+    let mut relay = TestNode::new(
+        identity(87),
+        "reticulum",
+        &["path-shape-policy"],
+        EmbeddedNodeConfig::transport(),
+    )
+    .unwrap();
+    let relay_identity = relay.identity_hash();
+    let requester_identity = identity(88).hash();
+    let mut rng = CounterRng::default();
+    let policy = IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+        .with_recursive_path_search_egress(IngressEgressSet::empty());
+
+    let build = |destination: DestHash,
+                 header: HeaderType,
+                 transport_id: Option<IdentityHash>,
+                 destination_type: DestType,
+                 context: u8,
+                 hops: u8| {
+        let mut payload = [0_u8; TRUNCATED_HASH_LEN * 3];
+        payload[..TRUNCATED_HASH_LEN].copy_from_slice(destination.as_ref());
+        payload[TRUNCATED_HASH_LEN..TRUNCATED_HASH_LEN * 2]
+            .copy_from_slice(requester_identity.as_ref());
+        payload[TRUNCATED_HASH_LEN * 2..].fill(destination.as_ref()[0]);
+        let mut raw = [0_u8; RNS_MTU];
+        let mut builder = PacketBuilder::new(&mut raw)
+            .header_type(header)
+            .packet_type(PacketType::Data)
+            .dest_type(destination_type)
+            .hops(hops)
+            .destination_hash(rete_transport::PATH_REQUEST_DEST.as_ref())
+            .context(context)
+            .payload(&payload);
+        if let Some(transport_id) = transport_id {
+            builder = builder
+                .transport_type(rete_core::TRANSPORT_TYPE_TRANSPORT)
+                .transport_id(transport_id.as_ref());
+        }
+        let length = builder.build().unwrap();
+        raw[..length].to_vec()
+    };
+
+    let h1_destination = DestHash::from([0xa1; TRUNCATED_HASH_LEN]);
+    let h1 = build(
+        h1_destination,
+        HeaderType::Header1,
+        None,
+        DestType::Plain,
+        0x73,
+        0,
+    );
+    let h1_report = relay.ingest_at_with_broadcast_policy(
+        &h1,
+        300,
+        MonotonicInstant::from_secs(300),
+        InterfaceId(2),
+        policy,
+        &mut rng,
+    );
+    assert_eq!(h1_report.disposition, IngressDisposition::Processed);
+    assert!(h1_report.actions.packets.is_empty());
+
+    let h2_destination = DestHash::from([0xa2; TRUNCATED_HASH_LEN]);
+    let h2 = build(
+        h2_destination,
+        HeaderType::Header2,
+        Some(relay_identity),
+        DestType::Plain,
+        0x74,
+        0,
+    );
+    let h2_report = relay.ingest_at_with_broadcast_policy(
+        &h2,
+        301,
+        MonotonicInstant::from_secs(301),
+        InterfaceId(2),
+        policy,
+        &mut rng,
+    );
+    assert_eq!(h2_report.disposition, IngressDisposition::Processed);
+    assert!(h2_report.actions.packets.is_empty());
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 2);
+
+    let wrong_transport = build(
+        DestHash::from([0xa3; TRUNCATED_HASH_LEN]),
+        HeaderType::Header2,
+        Some(IdentityHash::from([0xff; TRUNCATED_HASH_LEN])),
+        DestType::Plain,
+        CONTEXT_NONE,
+        0,
+    );
+    let wrong = relay.ingest_at_with_broadcast_policy(
+        &wrong_transport,
+        302,
+        MonotonicInstant::from_secs(302),
+        InterfaceId(2),
+        policy,
+        &mut rng,
+    );
+    assert!(matches!(
+        wrong.disposition,
+        IngressDisposition::Rejected(IngressDropReason::Header2NotAddressedToUs { .. })
+    ));
+    assert!(wrong.actions.packets.is_empty());
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 2);
+
+    let overheight_destination = DestHash::from([0xa4; TRUNCATED_HASH_LEN]);
+    let overheight = build(
+        overheight_destination,
+        HeaderType::Header1,
+        None,
+        DestType::Plain,
+        CONTEXT_NONE,
+        1,
+    );
+    let invalid = relay.ingest_at_with_broadcast_policy(
+        &overheight,
+        303,
+        MonotonicInstant::from_secs(303),
+        InterfaceId(2),
+        policy,
+        &mut rng,
+    );
+    assert_eq!(invalid.disposition, IngressDisposition::NativeInvalid);
+    assert!(invalid.actions.packets.is_empty());
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 2);
+
+    let valid_zero_hop = build(
+        overheight_destination,
+        HeaderType::Header1,
+        None,
+        DestType::Plain,
+        CONTEXT_NONE,
+        0,
+    );
+    let admitted = relay.ingest_at_with_broadcast_policy(
+        &valid_zero_hop,
+        304,
+        MonotonicInstant::from_secs(304),
+        InterfaceId(2),
+        policy,
+        &mut rng,
+    );
+    assert_eq!(admitted.disposition, IngressDisposition::Processed);
+    assert!(admitted.actions.packets.is_empty());
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 3);
+
+    for destination_type in [DestType::Single, DestType::Group, DestType::Link] {
+        let invalid = build(
+            DestHash::from([0xa5; TRUNCATED_HASH_LEN]),
+            HeaderType::Header1,
+            None,
+            destination_type,
+            CONTEXT_NONE,
+            0,
+        );
+        let report = relay.ingest_at_with_broadcast_policy(
+            &invalid,
+            305,
+            MonotonicInstant::from_secs(305),
+            InterfaceId(2),
+            policy,
+            &mut rng,
+        );
+        assert!(report.actions.packets.is_empty());
+    }
+    assert_eq!(relay.metrics().pending_discovery_paths.used, 3);
+}
+
+#[test]
+fn nonsingle_announce_is_invalid_before_route_replay_or_egress_state() {
+    let mut source = node(89);
+    let destination = source.destination_hash();
+    let mut rng = CounterRng::default();
+    source.queue_announce(None, 400, &mut rng).unwrap();
+    let valid = source.flush_announces(400, &mut rng).remove(0);
+    let valid_packet = Packet::parse(valid.bytes()).unwrap();
+
+    for (index, destination_type) in [DestType::Plain, DestType::Group, DestType::Link]
+        .into_iter()
+        .enumerate()
+    {
+        let mut relay = TestNode::new(
+            identity(90_u8.wrapping_add(index as u8)),
+            "reticulum",
+            &["announce-shape-policy"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut raw = [0_u8; RNS_MTU];
+        let length = PacketBuilder::new(&mut raw)
+            .packet_type(PacketType::Announce)
+            .dest_type(destination_type)
+            .context_flag(valid_packet.context_flag)
+            .hops(valid_packet.hops)
+            .destination_hash(valid_packet.destination_hash)
+            .context(valid_packet.context)
+            .payload(valid_packet.payload)
+            .build()
+            .unwrap();
+        let invalid = relay.ingest_at_with_broadcast_policy(
+            &raw[..length],
+            400,
+            MonotonicInstant::from_secs(400),
+            InterfaceId(2),
+            IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+                .with_announce_egress(IngressEgressSet::empty()),
+            &mut rng,
+        );
+        assert_eq!(invalid.disposition, IngressDisposition::NativeInvalid);
+        assert!(invalid.actions.packets.is_empty());
+        assert!(!relay.has_path(&destination));
+        assert_eq!(relay.metrics().capacity.announces.used, 0);
+
+        let accepted = relay.ingest_at_with_broadcast_policy(
+            valid.bytes(),
+            401,
+            MonotonicInstant::from_secs(401),
+            InterfaceId(2),
+            IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+                .with_announce_egress(IngressEgressSet::empty()),
+            &mut rng,
+        );
+        assert_eq!(accepted.disposition, IngressDisposition::Processed);
+        assert!(relay.has_path(&destination));
+    }
 }
 
 #[test]
@@ -7307,15 +7993,31 @@ fn local_secondary_path_request_returns_exact_path_response_once() {
     assert!(duplicate.actions.packets.is_empty());
     assert_eq!(responder.metrics().ingress.local_path_responses, 1);
 
+    let cross_interface_request = requester.request_path(&secondary, &mut rng).unwrap();
+    let cross_interface = responder.ingest(
+        cross_interface_request.bytes(),
+        101,
+        InterfaceId(8),
+        &mut rng,
+    );
+    assert_eq!(cross_interface.disposition, IngressDisposition::Processed);
+    assert_eq!(cross_interface.actions.packets.len(), 1);
+    assert_eq!(
+        cross_interface.actions.packets[0].target(),
+        TxTarget::Only(InterfaceId(8)),
+        "a fresh destination-plus-tag request receives an exact source response"
+    );
+    assert_eq!(responder.metrics().ingress.local_path_responses, 2);
+
     let fresh_request = requester.request_path(&secondary, &mut rng).unwrap();
     let fresh = responder.ingest(fresh_request.bytes(), 121, InterfaceId(7), &mut rng);
     assert_eq!(fresh.disposition, IngressDisposition::Processed);
     assert_eq!(fresh.actions.packets.len(), 1);
-    assert_eq!(responder.metrics().ingress.local_path_responses, 2);
+    assert_eq!(responder.metrics().ingress.local_path_responses, 3);
 }
 
 #[test]
-fn unknown_path_request_remains_forwarded_without_local_response() {
+fn full_mode_default_does_not_recursively_search_unknown_path() {
     let mut transport = TestNode::new(
         identity(75),
         "reticulum",
@@ -7334,9 +8036,8 @@ fn unknown_path_request_remains_forwarded_without_local_response() {
     let mut rng = CounterRng::default();
     let request = requester.request_path(&missing, &mut rng).unwrap();
     let report = transport.ingest(request.bytes(), 200, InterfaceId(9), &mut rng);
-    assert_eq!(report.disposition, IngressDisposition::Processed);
-    assert_eq!(report.actions.packets.len(), 1);
-    assert_eq!(report.actions.packets[0].target(), TxTarget::All);
-    assert_eq!(report.actions.packets[0].bytes(), request.bytes());
+    assert_eq!(report.disposition, IngressDisposition::NoObservableOutcome);
+    assert!(report.actions.packets.is_empty());
+    assert_eq!(transport.metrics().pending_discovery_paths.used, 0);
     assert_eq!(transport.metrics().ingress.local_path_responses, 0);
 }
