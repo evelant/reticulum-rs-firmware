@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
 import type {
@@ -12,10 +12,21 @@ import {
   loraDataTxEvidenceLabel,
   loraTxSummaryLabel,
   type RadioRoutesControllerState,
+  type RetainedRouteTransportFamily,
+  retainedRouteFamily,
   routeExpiryLabel,
 } from "../lib/radio-routes.ts";
 
 const COLLAPSED_ROUTE_LIMIT = 4;
+
+const ROUTE_FAMILY_TABS: readonly {
+  readonly label: string;
+  readonly value: RetainedRouteTransportFamily;
+}[] = [
+  { label: "LoRa", value: "lora" },
+  { label: "TCP", value: "tcp" },
+  { label: "Fallback & other", value: "other" },
+];
 
 interface RadioRoutesPanelProps {
   readonly disabled?: boolean;
@@ -72,6 +83,17 @@ function routeInterfaceLabel(route: RetainedRouteView, snapshot: RadioRoutesStat
   return record === undefined
     ? `interface ${route.retained_interface_id}`
     : `${interfaceKindLabel(record.kind)} · interface ${record.id}`;
+}
+
+function familyEmptyLabel(family: RetainedRouteTransportFamily): string {
+  switch (family) {
+    case "lora":
+      return "No LoRa routes are currently retained.";
+    case "tcp":
+      return "No TCP routes are currently retained.";
+    case "other":
+      return "No fallback or other-interface routes are currently retained.";
+  }
 }
 
 function shortHash(hash: string): string {
@@ -138,6 +160,7 @@ function RouteRow({
 
 export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRoutesPanelProps) {
   const [expanded, setExpanded] = useState(false);
+  const [routeFamily, setRouteFamily] = useState<RetainedRouteTransportFamily>("lora");
   const [showAllRoutes, setShowAllRoutes] = useState(false);
   const snapshot = state.snapshot;
 
@@ -163,10 +186,24 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
           .filter((part): part is string => part !== null)
           .join(" · ");
 
+  const familyRoutes = useMemo(() => {
+    const grouped: Record<RetainedRouteTransportFamily, RetainedRouteView[]> = {
+      lora: [],
+      tcp: [],
+      other: [],
+    };
+    if (snapshot !== null) {
+      for (const route of snapshot.routes) {
+        grouped[retainedRouteFamily(route, snapshot)].push(route);
+      }
+    }
+    return grouped;
+  }, [snapshot]);
+
   const visibleRoutes =
     snapshot === null || showAllRoutes
-      ? (snapshot?.routes ?? [])
-      : snapshot.routes.slice(0, COLLAPSED_ROUTE_LIMIT);
+      ? familyRoutes[routeFamily]
+      : familyRoutes[routeFamily].slice(0, COLLAPSED_ROUTE_LIMIT);
 
   return (
     <View style={styles.panel}>
@@ -334,14 +371,43 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
                 {snapshot.usable_route_count}/{snapshot.retained_route_count} usable
               </Text>
             </View>
+            <View accessibilityRole="tablist" style={styles.routeTabs}>
+              {ROUTE_FAMILY_TABS.map((option) => {
+                const selected = routeFamily === option.value;
+                return (
+                  <Pressable
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected }}
+                    key={option.value}
+                    onPress={() => {
+                      setRouteFamily(option.value);
+                      setShowAllRoutes(false);
+                    }}
+                    style={({ pressed }) => [
+                      styles.routeTab,
+                      selected && styles.routeTabSelected,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text style={[styles.routeTabText, selected && styles.routeTabTextSelected]}>
+                      {option.label} ({familyRoutes[option.value].length})
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
             {visibleRoutes.length === 0 ? (
-              <Text style={styles.help}>The Rete path table currently retains no routes.</Text>
+              <Text style={styles.help}>
+                {snapshot.routes.length === 0
+                  ? "The Rete path table currently retains no routes."
+                  : familyEmptyLabel(routeFamily)}
+              </Text>
             ) : (
               visibleRoutes.map((route) => (
                 <RouteRow key={route.destination} route={route} snapshot={snapshot} />
               ))
             )}
-            {snapshot.routes.length > COLLAPSED_ROUTE_LIMIT ? (
+            {familyRoutes[routeFamily].length > COLLAPSED_ROUTE_LIMIT ? (
               <Pressable
                 accessibilityRole="button"
                 onPress={() => setShowAllRoutes((current) => !current)}
@@ -350,7 +416,7 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
                 <Text style={styles.showMoreText}>
                   {showAllRoutes
                     ? "Show fewer routes"
-                    : `Show all ${snapshot.routes.length} routes`}
+                    : `Show all ${familyRoutes[routeFamily].length} routes`}
                 </Text>
               </Pressable>
             ) : null}
@@ -495,6 +561,19 @@ const styles = StyleSheet.create({
   stateFaulted: { color: colors.red },
   meta: { color: colors.muted, fontSize: 9, lineHeight: 14 },
   routeCount: { color: colors.green, fontSize: 10, fontWeight: "800" },
+  routeTabs: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  routeTab: {
+    minHeight: 30,
+    justifyContent: "center",
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+  },
+  routeTabSelected: { borderColor: "#5b9c69", backgroundColor: colors.greenDark },
+  routeTabText: { color: colors.muted, fontSize: 9, fontWeight: "700" },
+  routeTabTextSelected: { color: colors.green },
   routeRow: {
     padding: 9,
     gap: 3,

@@ -1,4 +1,8 @@
-import type { DiagnosticLoraLastTxView, RadioRoutesStatusView } from "../generated/api.ts";
+import type {
+  DiagnosticLoraLastTxView,
+  RadioRoutesStatusView,
+  RetainedRouteView,
+} from "../generated/api.ts";
 
 /** Normal foreground refresh interval for the bounded radio/routes snapshot. */
 export const RADIO_ROUTES_POLL_INTERVAL_MS = 5_000;
@@ -62,6 +66,32 @@ export function loraDataTxEvidenceLabel(lastTx: DiagnosticLoraLastTxView): strin
   return evidence === null
     ? null
     : `Interface ${evidence.interface_id} · ${evidence.encoded_packet_len} bytes`;
+}
+
+/** Transport family used to group retained routes in the diagnostics UI. */
+export type RetainedRouteTransportFamily = "lora" | "tcp" | "other";
+
+/**
+ * Resolve a retained route's transport family through its retained interface
+ * record. Broadcast-fallback routes carry no interface and belong to "other":
+ * they are not specific to a single packet interface.
+ */
+export function retainedRouteFamily(
+  route: RetainedRouteView,
+  snapshot: RadioRoutesStatusView,
+): RetainedRouteTransportFamily {
+  if (route.retained_interface_id === null) return "other";
+  const record = snapshot.interfaces.find(
+    (candidate) => candidate.id === route.retained_interface_id,
+  );
+  switch (record?.kind) {
+    case "lora":
+      return "lora";
+    case "tcp":
+      return "tcp";
+    default:
+      return "other";
+  }
 }
 
 function errorText(error: unknown): string {

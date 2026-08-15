@@ -8,6 +8,7 @@ import {
   loraTxSummaryLabel,
   RadioRoutesController,
   type RadioRoutesControllerState,
+  retainedRouteFamily,
   routeExpiryLabel,
 } from "./radio-routes.ts";
 
@@ -200,5 +201,60 @@ describe("radio and route age labels", () => {
     } as const;
     expect(loraTxSummaryLabel(lastTx)).toBe("1s ago · data · access rejected");
     expect(loraDataTxEvidenceLabel(lastTx)).toBe("Interface 1 · 183 bytes");
+  });
+});
+
+describe("retainedRouteFamily", () => {
+  const route = (retainedInterfaceId: number | null): Parameters<typeof retainedRouteFamily>[0] =>
+    ({
+      destination: "01ab",
+      expires_in_ms: 30_000,
+      hops: 1,
+      last_local_use_age_ms: 1_000,
+      learned_age_ms: 1_000,
+      next_hop_identity: null,
+      resolution: "exact_ready",
+      retained_interface_id: retainedInterfaceId,
+    }) as const;
+
+  test("resolves the retained interface kind to a transport family", () => {
+    const view: RadioRoutesStatusView = {
+      ...snapshot(1),
+      interfaces: [
+        {
+          id: 1,
+          kind: "lora",
+          state: "online",
+          generation: 1,
+          logical_mtu: 500,
+          bitrate: null,
+        },
+        {
+          id: 2,
+          kind: "tcp",
+          state: "online",
+          generation: 1,
+          logical_mtu: 1480,
+          bitrate: 1_000_000,
+        },
+        {
+          id: 3,
+          kind: "other",
+          state: "offline",
+          generation: 1,
+          logical_mtu: 500,
+          bitrate: null,
+        },
+      ],
+    };
+    expect(retainedRouteFamily(route(1), view)).toBe("lora");
+    expect(retainedRouteFamily(route(2), view)).toBe("tcp");
+    expect(retainedRouteFamily(route(3), view)).toBe("other");
+  });
+
+  test("treats broadcast fallback and unresolved interfaces as other", () => {
+    const view: RadioRoutesStatusView = { ...snapshot(1), interfaces: [] };
+    expect(retainedRouteFamily(route(null), view)).toBe("other");
+    expect(retainedRouteFamily(route(9), view)).toBe("other");
   });
 });

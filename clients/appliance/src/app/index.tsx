@@ -6,14 +6,13 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Linking,
-  ScrollView,
   Text,
   useWindowDimensions,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { ActivityPanel } from "../components/ActivityPanel.tsx";
+import { ActivityWorkspace } from "../components/ActivityWorkspace.tsx";
 import { ActionButton } from "../components/AppliancePrimitives.tsx";
 import { ApplianceSidebar } from "../components/ApplianceSidebar.tsx";
 import { ApplianceStatusCard, type ProfileOperation } from "../components/ApplianceStatusCard.tsx";
@@ -25,7 +24,7 @@ import { ConnectivityPanel } from "../components/ConnectivityPanel.tsx";
 import { ConversationPanel, type QueueMessageResult } from "../components/ConversationPanel.tsx";
 import { NomadPanel } from "../components/NomadPanel.tsx";
 import { OnboardingPanel } from "../components/OnboardingPanel.tsx";
-import { type RadioTraceExportFormat, RadioTracePanel } from "../components/RadioTracePanel.tsx";
+import type { RadioTraceExportFormat } from "../components/RadioTracePanel.tsx";
 import { TransmissionMapPanel } from "../components/TransmissionMapPanel.tsx";
 import type {
   ApplianceSnapshot,
@@ -1780,52 +1779,37 @@ export default function ApplianceScreen() {
     </View>
   );
   const activityShell = (
-    <ScrollView
-      contentContainerStyle={styles.activityContent}
-      keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
-      keyboardShouldPersistTaps="handled"
-      style={styles.activityScroller}
-    >
-      <ActivityPanel
-        contacts={contacts}
-        conversationPeers={conversations}
-        disabled={!ready}
-        error={activityError}
-        fieldTelemetry={fieldTelemetryState}
-        loading={activityLoading}
-        messageLocationPreference={messageLocationPreference}
-        onLoadOlder={() => void loadActivity(true)}
-        onRefresh={() => void loadActivity(false)}
-        onToggleFieldTelemetry={
-          fieldTelemetryController === null
-            ? undefined
-            : (enabled) => {
-                void fieldTelemetryController.setEnabled(enabled);
-              }
-        }
-        onToggleMessageLocationDefault={(enabled) => {
-          void setMessageLocationDefault(enabled);
-        }}
-        page={activityPage}
-      />
-      {api.radioTrace === undefined ? (
-        <Text style={styles.secondaryText}>
-          Durable packet-correlated RF tracing is unavailable in this client build.
-        </Text>
-      ) : (
-        <RadioTracePanel
-          disabled={!ready}
-          error={radioTraceError}
-          exportError={radioTraceExportError}
-          exporting={radioTraceExporting}
-          loading={radioTraceLoading}
-          onExport={(format) => void exportCompleteRadioTrace(format)}
-          onLoadOlder={() => void loadRadioTrace(true)}
-          onRefresh={() => void loadRadioTrace(false)}
-          page={radioTracePage}
-        />
-      )}
-    </ScrollView>
+    <ActivityWorkspace
+      contacts={contacts}
+      conversationPeers={conversations}
+      disabled={!ready}
+      activityError={activityError}
+      activityLoading={activityLoading}
+      activityPage={activityPage}
+      fieldTelemetry={fieldTelemetryState}
+      messageLocationPreference={messageLocationPreference}
+      onLoadOlderActivity={() => void loadActivity(true)}
+      onRefreshActivity={() => void loadActivity(false)}
+      onToggleFieldTelemetry={
+        fieldTelemetryController === null
+          ? undefined
+          : (enabled) => {
+              void fieldTelemetryController.setEnabled(enabled);
+            }
+      }
+      onToggleMessageLocationDefault={(enabled) => {
+        void setMessageLocationDefault(enabled);
+      }}
+      radioTraceAvailable={api.radioTrace !== undefined}
+      radioTraceError={radioTraceError}
+      radioTraceExportError={radioTraceExportError}
+      radioTraceExporting={radioTraceExporting}
+      radioTraceLoading={radioTraceLoading}
+      radioTracePage={radioTracePage}
+      onExportRadioTrace={(format) => void exportCompleteRadioTrace(format)}
+      onLoadOlderRadioTrace={() => void loadRadioTrace(true)}
+      onRefreshRadioTrace={() => void loadRadioTrace(false)}
+    />
   );
   const mapDataError = [activityError, radioTraceError]
     .filter((message): message is string => message !== null)
