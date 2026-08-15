@@ -1,4 +1,5 @@
 import type {
+  PacketEvidenceView,
   RadioTraceEventKindView,
   RadioTraceEventView,
   RadioTraceRouteResolutionView,
@@ -55,18 +56,25 @@ function profileMetadata(event: RadioTraceEventView): string[] {
   ];
 }
 
+function packetEvidenceMetadata(packet: PacketEvidenceView): string[] {
+  return [
+    `Encoded packet ${packet.encoded_packet_len} bytes`,
+    `Packet SHA-256 ${packet.encoded_packet_sha256}`,
+  ];
+}
+
 function packetMetadata(
   event: Extract<RadioTraceEventKindView, { kind: "data_tx" | "logical_rx" | "route_selected" }>,
 ): string[] {
-  return [
-    `Encoded packet ${event.packet_evidence.encoded_packet_len} bytes`,
-    `Packet SHA-256 ${event.packet_evidence.encoded_packet_sha256}`,
-  ];
+  return packetEvidenceMetadata(event.packet_evidence);
 }
 
 function tokenMetadata(event: RadioTraceEventKindView): string[] {
   if (event.kind === "logical_rx") {
     return event.rns_packet_hash === null ? [] : [`RNS packet hash ${event.rns_packet_hash}`];
+  }
+  if (event.kind === "inbound_proof") {
+    return [`Inbound DATA correlation token ${event.correlation_token}`];
   }
   return [`RNS attempt token ${event.rns_attempt_token}`];
 }
@@ -157,6 +165,8 @@ export function isRadioTraceAttention(event: RadioTraceEventView): boolean {
       return false;
     case "attempt_terminal":
       return event.event.outcome !== "delivered";
+    case "inbound_proof":
+      return event.event.stage === "physical_tx_failed";
   }
 }
 
@@ -230,6 +240,49 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
       }
       metadata.push(...tokenMetadata(evidence));
       break;
+    case "inbound_proof":
+      switch (evidence.stage) {
+        case "data_logical_rx":
+          title = "Inbound DATA reconstructed";
+          break;
+        case "durable_commit":
+          title = "Inbound LXMF committed durably";
+          tone = "success";
+          break;
+        case "proof_retained":
+          title = "Delivery proof retained durably";
+          break;
+        case "proof_staged":
+          title = "Delivery proof staged";
+          break;
+        case "ordinary_queued":
+          title = "Delivery proof accepted for transmission";
+          break;
+        case "physical_tx_done":
+          title = "Delivery proof reached TxDone";
+          tone = "success";
+          break;
+        case "physical_tx_failed":
+          title = "Delivery proof did not reach TxDone";
+          tone = "danger";
+          break;
+      }
+      if (evidence.message_id !== null) metadata.push(`LXMF message ${evidence.message_id}`);
+      if (evidence.interface_id !== null) {
+        metadata.push(
+          evidence.rssi_dbm === null || evidence.snr_db === null
+            ? `Interface ${evidence.interface_id} · no physical signal retained`
+            : `Inbound DATA · interface ${evidence.interface_id} · RSSI ${evidence.rssi_dbm} dBm · SNR ${evidence.snr_db} dB`,
+        );
+      }
+      if (evidence.packet_evidence !== null) {
+        metadata.push(...packetEvidenceMetadata(evidence.packet_evidence));
+      }
+      if (evidence.dispatch_outcome !== null) {
+        metadata.push(txOutcomeLabel(evidence.dispatch_outcome));
+      }
+      metadata.push(...tokenMetadata(evidence));
+      break;
   }
 
   if (event.correlation !== null) {
@@ -240,7 +293,7 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
       ...phoneLocationMetadata(event.correlation.attempt_location, event.imported_at_unix_ms),
     );
   } else {
-    metadata.push("Not correlated to a local message attempt");
+    metadata.push("Not correlated to a local outbound message attempt");
   }
   metadata.push(...profileMetadata(event));
 
@@ -260,7 +313,13 @@ export function filterRadioTrace(
       if (filter === "route" && event.event.kind !== "route_selected") return false;
       if (filter === "tx" && event.event.kind !== "data_tx") return false;
       if (filter === "rx" && event.event.kind !== "logical_rx") return false;
-      if (filter === "terminal" && event.event.kind !== "attempt_terminal") return false;
+      if (
+        filter === "terminal" &&
+        event.event.kind !== "attempt_terminal" &&
+        event.event.kind !== "inbound_proof"
+      ) {
+        return false;
+      }
       if (filter === "attention" && !isRadioTraceAttention(event)) return false;
       if (normalizedQuery === "") return true;
       const presentation = radioTracePresentation(event);

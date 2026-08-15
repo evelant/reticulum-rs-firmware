@@ -28,8 +28,7 @@ fn empty_radio_trace_page() -> reticulum_device_api::RadioTracePage {
         true,
         false,
     );
-    reticulum_device_api::RadioTracePage::new(1, profile, 1, 1, false, [None, None, None], None)
-        .unwrap()
+    reticulum_device_api::RadioTracePage::new(1, profile, 1, 1, false, [None, None], None).unwrap()
 }
 
 struct TestDatabase(PathBuf);
@@ -2091,7 +2090,8 @@ async fn actor_serializes_network_reads_and_secret_bearing_mutations() {
             "rssi_dbm": -68,
             "tcp_peer_state": "waiting_for_network",
             "last_tcp_failure": null,
-            "dns_diagnostics": null
+            "dns_diagnostics": null,
+            "rmap_status": null
         })
     );
     assert_eq!(

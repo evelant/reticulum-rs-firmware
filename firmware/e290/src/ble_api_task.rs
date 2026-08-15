@@ -12,12 +12,13 @@
 use core::{num::NonZeroU64, str};
 
 use ::embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use bt_hci::{cmd::le::LeReadLocalSupportedFeatures, controller::ControllerCmdSync};
 use embassy_futures::{
     join::join,
     select::{Either, select},
 };
 use embassy_time::{Duration, Instant, Timer};
-use esp_hal::{gpio::Input, peripherals::BT, rng::Trng};
+use esp_hal::{gpio::Input, peripherals::BT, ram, rng::Trng, system::software_reset};
 use esp_radio::ble::controller::{BleConnector, BleInitError};
 use log::{error, info, warn};
 use reticulum_appliance_display_model::{
@@ -72,6 +73,13 @@ static BLE_LOCAL_NAME: StaticCell<[u8; gatt_profile::LOCAL_NAME_BYTES]> = Static
 static BLE_RECOVERY_LOCAL_NAME: StaticCell<[u8; gatt_profile::RECOVERY_LOCAL_NAME_BYTES]> =
     StaticCell::new();
 static BLE_SERVER: StaticCell<Server<'static>> = StaticCell::new();
+
+// A nonzero marker survives software reset and rate-limits the only recovery
+// path available when Trouble's private connection manager and the controller
+// disagree. Zero is restored by a power-on reset. Treat torn writes as armed,
+// so a reset during this update cannot create a reboot loop.
+#[ram(unstable(rtc_fast, persistent))]
+static mut BLE_RECOVERY_RESET_MARKER: [u32; 2] = [0; 2];
 
 // These handles are part of the deployed BLE database ABI even though clients
 // address characteristics by UUID. Bonded Apple platforms cache the resolved
@@ -301,7 +309,7 @@ async fn run_host<C>(
     session_rng: Trng,
     physical: BlePhysicalOwners,
 ) where
-    C: Controller,
+    C: Controller + ControllerCmdSync<LeReadLocalSupportedFeatures>,
 {
     let resources = BLE_RESOURCES.init(HostResources::new());
     let address = Address::random(advertising.static_random_address());
@@ -453,7 +461,7 @@ async fn run_controller<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, 
     clippy::too_many_arguments,
     reason = "the one advertiser retains each sole host, protocol, and physical owner explicitly"
 )]
-async fn serve_advertising<C: Controller>(
+async fn serve_advertising<C: Controller + ControllerCmdSync<LeReadLocalSupportedFeatures>>(
     stack: &Stack<'_, C, DefaultPacketPool>,
     peripheral: &mut Peripheral<'_, C, DefaultPacketPool>,
     server: &'static Server<'static>,
@@ -540,7 +548,7 @@ async fn serve_advertising<C: Controller>(
         .await;
         let ServeConnectionOutcome {
             lifecycle_started,
-            disconnected_event_observed,
+            disconnect_observation,
             remove_volatile_bond,
             purge_non_authoritative_bonds,
             retain_only_bond,
@@ -552,11 +560,18 @@ async fn serve_advertising<C: Controller>(
         // The final GATT reference stays live through that drain, then Trouble
         // itself gates slot reuse on Disconnected state plus refcount zero.
         authenticated_session.reset();
-        drain_connection(&gatt_connection, connection, disconnected_event_observed).await;
+        let drain_result =
+            drain_connection(&gatt_connection, connection, disconnect_observation).await;
         // Trouble will not reuse the sole HostResources connection slot until
         // its state is Disconnected and the final Connection reference is gone.
         // Keep this drop visibly ahead of every path to the next advertiser.
         drop(gatt_connection);
+        let disable_ble_after_host_recovery = match drain_result {
+            DisconnectDrainResult::Drained => false,
+            DisconnectDrainResult::HostRecoveryRequired {
+                manager_reports_connected,
+            } => recover_ble_host_after_drain_timeout(connection, manager_reports_connected).await,
+        };
         if let Some(identity) = remove_volatile_bond
             && stack.remove_bond_information(identity).is_err()
         {
@@ -666,46 +681,130 @@ async fn serve_advertising<C: Controller>(
             );
             core::future::pending::<()>().await;
         }
+        if disable_ble_after_host_recovery {
+            error!(
+                "e290-node stage=ble-api status=DISABLED reason=ble-host-recovery-loop-guard connection={} recovery=power-cycle",
+                connection.get()
+            );
+            core::future::pending::<()>().await;
+        }
+    }
+}
+
+type DisconnectObservation = profile::BleDisconnectEvidence;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DisconnectDrainResult {
+    Drained,
+    HostRecoveryRequired { manager_reports_connected: bool },
+}
+
+fn retained_ble_recovery_marker() -> profile::BleRecoveryResetMarkerState {
+    // SAFETY: This task is the sole runtime owner of the marker. Volatile raw
+    // access creates no reference to the mutable static and is required because
+    // startup intentionally preserves this RTC region across software reset.
+    let marker =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(BLE_RECOVERY_RESET_MARKER)) };
+    profile::classify_ble_recovery_reset_marker(marker)
+}
+
+fn arm_ble_recovery_reset_marker() {
+    let marker = core::ptr::addr_of_mut!(BLE_RECOVERY_RESET_MARKER).cast::<u32>();
+    // SAFETY: This task is the sole runtime writer. Write the nonzero checksum
+    // first so interruption at either store is conservatively classified as a
+    // previous recovery attempt rather than as a clean marker.
+    unsafe {
+        core::ptr::write_volatile(marker.add(1), profile::BLE_RECOVERY_RESET_MARKER_WORDS[1]);
+        core::ptr::write_volatile(marker, profile::BLE_RECOVERY_RESET_MARKER_WORDS[0]);
+    }
+}
+
+async fn recover_ble_host_after_drain_timeout(
+    connection_id: ConnectionId,
+    manager_reports_connected: bool,
+) -> bool {
+    let marker = retained_ble_recovery_marker();
+    let boot_uptime_ms = Instant::now().as_millis();
+    match profile::ble_host_recovery_disposition(marker.is_clean(), boot_uptime_ms) {
+        profile::BleHostRecoveryDisposition::SoftwareReset => {
+            arm_ble_recovery_reset_marker();
+            error!(
+                "e290-node stage=ble-api status=HOST-RECOVERY action=software-reset reason=disconnect-drain-timeout manager_reports_connected={} retained_marker={} boot_uptime_ms={} rearm_uptime_ms={} connection={}",
+                manager_reports_connected,
+                marker.label(),
+                boot_uptime_ms,
+                profile::BLE_RECOVERY_RESET_REARM_UPTIME_MS,
+                connection_id.get()
+            );
+            // Preserve the terminal diagnostic on USB Serial/JTAG before the
+            // ROM tears down the whole chip.
+            Timer::after_millis(100).await;
+            software_reset();
+        }
+        profile::BleHostRecoveryDisposition::DisableBleUntilPowerCycle => {
+            error!(
+                "e290-node stage=ble-api status=HOST-RECOVERY-SUPPRESSED reason=loop-guard manager_reports_connected={} retained_marker={} boot_uptime_ms={} rearm_uptime_ms={} action=finish-logical-disconnect-then-disable-ble connection={}",
+                manager_reports_connected,
+                marker.label(),
+                boot_uptime_ms,
+                profile::BLE_RECOVERY_RESET_REARM_UPTIME_MS,
+                connection_id.get()
+            );
+            true
+        }
     }
 }
 
 async fn drain_connection<P: PacketPool>(
     connection: &GattConnection<'_, '_, P>,
     connection_id: ConnectionId,
-    disconnected_event_observed: bool,
-) {
+    disconnect_observation: DisconnectObservation,
+) -> DisconnectDrainResult {
     let raw = connection.raw();
 
     // `ConnectionManager::disconnected` stores Disconnected before publishing
-    // the event. If serve_connection consumed that exact event, waiting for a
-    // second copy would stall forever.
-    if disconnected_event_observed {
-        if raw.is_connected() {
-            warn!(
-                "e290-node stage=ble-api status=DISCONNECT-DRAIN-INCONSISTENT reason=observed-event-but-manager-connected action=release-final-reference connection={}",
-                connection_id.get()
-            );
-        }
+    // the event. An exact serve event or a manager-state fallback observed
+    // before this task requests disconnect therefore proves completion when
+    // the manager also reports false. Waiting for a duplicate event would
+    // stall forever. Conversely, an event/state disagreement is not healthy
+    // enough to release into the next advertiser.
+    let connected_before_request = raw.is_connected();
+    if profile::ble_disconnect_drain_entry_disposition(
+        disconnect_observation,
+        connected_before_request,
+    ) == profile::BleDisconnectDrainEntryDisposition::Drained
+    {
+        let source = match disconnect_observation {
+            DisconnectObservation::ServeEvent => "serve-event",
+            DisconnectObservation::ManagerStateFallback => "manager-state-fallback",
+            DisconnectObservation::None => "none",
+        };
         info!(
-            "e290-node stage=ble-api status=DISCONNECT-DRAINED source=serve-event connection={}",
+            "e290-node stage=ble-api status=DISCONNECT-DRAINED source={} manager_reports_connected=false connection={}",
+            source,
             connection_id.get()
         );
-        return;
+        return DisconnectDrainResult::Drained;
+    }
+    if disconnect_observation != DisconnectObservation::None && connected_before_request {
+        warn!(
+            "e290-node stage=ble-api status=DISCONNECT-DRAIN-INCONSISTENT observation={disconnect_observation:?} reason=disconnect-evidence-but-manager-connected action=request-and-bound-drain connection={}",
+            connection_id.get()
+        );
     }
 
     // This call is idempotent when the controller has already disconnected.
     // Do not use the subsequent `is_connected() == false` as completion:
-    // Trouble 0.6 reports false for its intermediate DisconnectRequest state.
-    let connected_before_request = raw.is_connected();
+    // the pinned Trouble reports false for its intermediate DisconnectRequest state.
     raw.disconnect();
     info!(
-        "e290-node stage=ble-api status=DISCONNECT-DRAINING connected_before_request={} connection={}",
+        "e290-node stage=ble-api status=DISCONNECT-DRAINING observation={disconnect_observation:?} connected_before_request={} timeout_ms={} connection={}",
         connected_before_request,
+        profile::DISCONNECT_DRAIN_TIMEOUT_MS,
         connection_id.get()
     );
 
     let drain_started_at = Instant::now();
-    let mut last_prolonged_log_at = drain_started_at;
     loop {
         match select(
             raw.next(),
@@ -719,7 +818,7 @@ async fn drain_connection<P: PacketPool>(
                     drain_started_at.elapsed().as_millis(),
                     connection_id.get()
                 );
-                return;
+                return DisconnectDrainResult::Drained;
             }
             Either::First(_) => {}
             Either::Second(()) => {
@@ -727,16 +826,18 @@ async fn drain_connection<P: PacketPool>(
                 // Disconnected into false. It is diagnostic only; the exact
                 // Disconnected event remains the sole success gate.
                 let manager_reports_connected = raw.is_connected();
-                if last_prolonged_log_at.elapsed()
-                    >= Duration::from_millis(profile::DISCONNECT_DRAIN_PROLONGED_LOG_MS)
+                if profile::ble_disconnect_drain_disposition(drain_started_at.elapsed().as_millis())
+                    == profile::BleDisconnectDrainDisposition::RecoverHost
                 {
-                    warn!(
-                        "e290-node stage=ble-api status=DISCONNECT-DRAINING elapsed_ms={} manager_reports_connected={} completion=awaiting-disconnected-event connection={}",
+                    error!(
+                        "e290-node stage=ble-api status=DISCONNECT-DRAIN-TIMEOUT elapsed_ms={} manager_reports_connected={} action=bounded-host-recovery connection={}",
                         drain_started_at.elapsed().as_millis(),
                         manager_reports_connected,
                         connection_id.get()
                     );
-                    last_prolonged_log_at = Instant::now();
+                    return DisconnectDrainResult::HostRecoveryRequired {
+                        manager_reports_connected,
+                    };
                 }
             }
         }
@@ -778,8 +879,12 @@ async fn advertise<'stack, 'server, C: Controller>(
     };
     info!("e290-node stage=ble-api status=ADVERTISING");
     let connection = advertiser.accept().await?.with_attribute_server(server)?;
+    let params = connection.raw().params();
     info!(
-        "e290-node stage=ble-api status=LINK-CONNECTED session=pending-tx-cccd internal_free={}",
+        "e290-node stage=ble-api status=LINK-CONNECTED session=pending-tx-cccd interval_us={} latency={} supervision_timeout_ms={} internal_free={}",
+        params.conn_interval.as_micros(),
+        params.peripheral_latency,
+        params.supervision_timeout.as_millis(),
         esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into())
     );
     Ok(connection)
@@ -787,7 +892,7 @@ async fn advertise<'stack, 'server, C: Controller>(
 
 struct ServeConnectionOutcome {
     lifecycle_started: bool,
-    disconnected_event_observed: bool,
+    disconnect_observation: DisconnectObservation,
     remove_volatile_bond: Option<Identity>,
     purge_non_authoritative_bonds: bool,
     retain_only_bond: Option<Identity>,
@@ -796,11 +901,119 @@ struct ServeConnectionOutcome {
     application_credential_activated: bool,
 }
 
+fn reconcile_disconnect_observation(
+    observation: DisconnectObservation,
+    manager_reports_connected: bool,
+    connection_id: ConnectionId,
+    observation_point: &'static str,
+) -> DisconnectObservation {
+    if observation == DisconnectObservation::None
+        && profile::ble_manager_state_disposition(manager_reports_connected)
+            == profile::BleManagerStateDisposition::ReconcileDisconnect
+    {
+        warn!(
+            "e290-node stage=ble-api status=LINK-DROPPED source=manager-state-fallback reason=disconnected-event-not-observed observation={} action=reconcile-and-release-disconnected-slot connection={}",
+            observation_point,
+            connection_id.get()
+        );
+        DisconnectObservation::ManagerStateFallback
+    } else {
+        observation
+    }
+}
+
+async fn request_safe_connection_parameters<
+    C: Controller + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+    P: PacketPool,
+>(
+    stack: &Stack<'_, C, P>,
+    connection: &GattConnection<'_, '_, P>,
+    connection_id: ConnectionId,
+) {
+    let raw = connection.raw();
+    let current = raw.params();
+    let derived = match profile::derive_ble_connection_update_parameters(
+        current.conn_interval.as_micros(),
+        current.peripheral_latency,
+        current.supervision_timeout.as_millis(),
+    ) {
+        Ok(derived) => derived,
+        Err(reason) => {
+            warn!(
+                "e290-node stage=ble-api status=CONNECTION-PARAMS-PROACTIVE-SKIPPED reason={reason:?} interval_us={} latency={} current_supervision_timeout_ms={} action=retain-central-parameters connection={}",
+                current.conn_interval.as_micros(),
+                current.peripheral_latency,
+                current.supervision_timeout.as_millis(),
+                connection_id.get()
+            );
+            return;
+        }
+    };
+    if derived.supervision_timeout_ms() == current.supervision_timeout.as_millis() {
+        info!(
+            "e290-node stage=ble-api status=CONNECTION-PARAMS-PROACTIVE-SKIPPED reason=already-safe interval_us={} latency={} supervision_timeout_ms={} connection={}",
+            derived.interval_us(),
+            derived.latency(),
+            derived.supervision_timeout_ms(),
+            connection_id.get()
+        );
+        return;
+    }
+    let desired = RequestedConnParams {
+        min_connection_interval: Duration::from_micros(derived.interval_us()),
+        max_connection_interval: Duration::from_micros(derived.interval_us()),
+        max_latency: derived.latency(),
+        min_event_length: Duration::from_ticks(0),
+        max_event_length: Duration::from_ticks(0),
+        supervision_timeout: Duration::from_millis(derived.supervision_timeout_ms()),
+    };
+    info!(
+        "e290-node stage=ble-api status=CONNECTION-PARAMS-PROACTIVE-REQUEST requested_interval_us={} requested_latency={} current_supervision_timeout_ms={} effective_supervision_timeout_ms={} connection={}",
+        derived.interval_us(),
+        derived.latency(),
+        current.supervision_timeout.as_millis(),
+        derived.supervision_timeout_ms(),
+        connection_id.get()
+    );
+    match select(
+        raw.update_connection_params(stack, &desired),
+        Timer::after_millis(profile::PROACTIVE_CONNECTION_PARAMETER_REQUEST_TIMEOUT_MS),
+    )
+    .await
+    {
+        Either::First(Ok(())) => {
+            info!(
+                "e290-node stage=ble-api status=CONNECTION-PARAMS-PROACTIVE-SUBMITTED effective_interval_us={} effective_latency={} effective_supervision_timeout_ms={} completion=await-negotiated-event connection={}",
+                derived.interval_us(),
+                derived.latency(),
+                derived.supervision_timeout_ms(),
+                connection_id.get()
+            );
+        }
+        Either::First(Err(reason)) => {
+            warn!(
+                "e290-node stage=ble-api status=CONNECTION-PARAMS-PROACTIVE-FAILED reason={reason:?} action=retain-central-parameters connection={}",
+                connection_id.get()
+            );
+        }
+        Either::Second(()) => {
+            warn!(
+                "e290-node stage=ble-api status=CONNECTION-PARAMS-PROACTIVE-TIMEOUT timeout_ms={} action=continue-gatt-with-central-parameters connection={}",
+                profile::PROACTIVE_CONNECTION_PARAMETER_REQUEST_TIMEOUT_MS,
+                connection_id.get()
+            );
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "one BLE link retains each exact session and handoff owner explicitly"
 )]
-async fn serve_connection<C: Controller, P: PacketPool>(
+async fn serve_connection<
+    C: Controller + ControllerCmdSync<LeReadLocalSupportedFeatures>,
+    P: PacketPool,
+>(
     stack: &Stack<'_, C, P>,
     server: &Server<'_>,
     connection: &GattConnection<'_, '_, P>,
@@ -817,6 +1030,8 @@ async fn serve_connection<C: Controller, P: PacketPool>(
     display_home: &mut DisplayHomeSnapshot,
     mut authoritative_bond_identity: Option<Identity>,
 ) -> ServeConnectionOutcome {
+    let raw = connection.raw();
+    request_safe_connection_parameters(stack, connection, connection_id).await;
     if server
         .set(
             &server.api.security_confirmation,
@@ -830,7 +1045,12 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         );
         return ServeConnectionOutcome {
             lifecycle_started: false,
-            disconnected_event_observed: false,
+            disconnect_observation: reconcile_disconnect_observation(
+                DisconnectObservation::None,
+                raw.is_connected(),
+                connection_id,
+                "security-confirmation-reset",
+            ),
             remove_volatile_bond: None,
             purge_non_authoritative_bonds: false,
             retain_only_bond: None,
@@ -856,7 +1076,12 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         );
         return ServeConnectionOutcome {
             lifecycle_started: false,
-            disconnected_event_observed: false,
+            disconnect_observation: reconcile_disconnect_observation(
+                DisconnectObservation::None,
+                raw.is_connected(),
+                connection_id,
+                "connected-lifecycle",
+            ),
             remove_volatile_bond: None,
             purge_non_authoritative_bonds: false,
             retain_only_bond: None,
@@ -872,7 +1097,12 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         );
         return ServeConnectionOutcome {
             lifecycle_started: true,
-            disconnected_event_observed: false,
+            disconnect_observation: reconcile_disconnect_observation(
+                DisconnectObservation::None,
+                raw.is_connected(),
+                connection_id,
+                "session-admission",
+            ),
             remove_volatile_bond: None,
             purge_non_authoritative_bonds: false,
             retain_only_bond: None,
@@ -887,7 +1117,6 @@ async fn serve_connection<C: Controller, P: PacketPool>(
     let tx_cccd = tx
         .cccd_handle
         .expect("the indication characteristic always owns a CCCD");
-    let raw = connection.raw();
     let mut decoder = StreamDecoder::new();
     let mut sequence_gate = ExactNextSequenceGate::new(connection_id);
     let mut indication = IndicationGate::new();
@@ -897,7 +1126,7 @@ async fn serve_connection<C: Controller, P: PacketPool>(
     let mut pre_authentication = PreAuthenticationDeadline::new();
     let mut pre_authentication_started_at: Option<Instant> = None;
     let mut cccd_enabled = false;
-    let mut disconnected_event_observed = false;
+    let mut disconnect_observation = DisconnectObservation::None;
     let mut remove_volatile_bond: Option<Identity> = None;
     let mut retain_only_bond: Option<Identity> = None;
     let mut fresh_security_pending_durability = false;
@@ -1367,23 +1596,82 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         )
         .await
         {
-            Either::Second(()) => {}
+            Either::Second(()) => {
+                if profile::ble_manager_state_disposition(raw.is_connected())
+                    == profile::BleManagerStateDisposition::ReconcileDisconnect
+                {
+                    disconnect_observation = DisconnectObservation::ManagerStateFallback;
+                    warn!(
+                        "e290-node stage=ble-api status=LINK-DROPPED source=manager-state-fallback reason=disconnected-event-not-observed action=reconcile-and-release-disconnected-slot connection={}",
+                        connection_id.get()
+                    );
+                    break;
+                }
+            }
             Either::First(GattConnectionEvent::Disconnected { reason }) => {
-                disconnected_event_observed = true;
+                disconnect_observation = DisconnectObservation::ServeEvent;
                 info!(
-                    "e290-node stage=ble-api status=LINK-DROPPED reason={reason:?} connection={}",
+                    "e290-node stage=ble-api status=LINK-DROPPED source=serve-event reason={reason:?} connection={}",
                     connection_id.get()
                 );
                 break;
             }
+            Either::First(GattConnectionEvent::ConnectionParamsUpdated {
+                conn_interval,
+                peripheral_latency,
+                supervision_timeout,
+            }) => {
+                info!(
+                    "e290-node stage=ble-api status=CONNECTION-PARAMS-NEGOTIATED interval_us={} latency={} supervision_timeout_ms={} connection={}",
+                    conn_interval.as_micros(),
+                    peripheral_latency,
+                    supervision_timeout.as_millis(),
+                    connection_id.get()
+                );
+            }
             Either::First(GattConnectionEvent::RequestConnectionParams(request)) => {
-                if request.accept(None, stack).await.is_err() {
+                let requested = request.params().clone();
+                let requested_timeout_ms = requested.supervision_timeout.as_millis();
+                let applied_timeout_ms = match profile::derive_ble_connection_update_parameters(
+                    requested.max_connection_interval.as_micros(),
+                    requested.max_latency,
+                    requested_timeout_ms,
+                ) {
+                    Ok(derived) => derived.supervision_timeout_ms(),
+                    Err(reason) => {
+                        warn!(
+                            "e290-node stage=ble-api status=CONNECTION-PARAMS-POLICY-DEGRADED reason={reason:?} action=apply-timeout-floor-then-let-trouble-validate-complete-request connection={}",
+                            connection_id.get()
+                        );
+                        profile::safe_supervision_timeout_ms(requested_timeout_ms)
+                    }
+                };
+                let mut applied = requested.clone();
+                applied.supervision_timeout = Duration::from_millis(applied_timeout_ms);
+                info!(
+                    "e290-node stage=ble-api status=CONNECTION-PARAMS-REQUEST min_interval_us={} max_interval_us={} latency={} min_event_length_us={} max_event_length_us={} requested_supervision_timeout_ms={} applied_supervision_timeout_ms={} clamped={} connection={}",
+                    requested.min_connection_interval.as_micros(),
+                    requested.max_connection_interval.as_micros(),
+                    requested.max_latency,
+                    requested.min_event_length.as_micros(),
+                    requested.max_event_length.as_micros(),
+                    requested_timeout_ms,
+                    applied_timeout_ms,
+                    requested_timeout_ms != applied_timeout_ms,
+                    connection_id.get()
+                );
+                if request.accept(Some(&applied), stack).await.is_err() {
                     warn!(
                         "e290-node stage=ble-api status=LINK-RESET reason=connection-params-response-fault connection={}",
                         connection_id.get()
                     );
                     break;
                 }
+                info!(
+                    "e290-node stage=ble-api status=CONNECTION-PARAMS-ACCEPTED applied_supervision_timeout_ms={} connection={}",
+                    applied_timeout_ms,
+                    connection_id.get()
+                );
             }
             Either::First(GattConnectionEvent::Gatt { event }) => match event {
                 GattEvent::Write(write) if write.handle() == tx_cccd => {
@@ -1861,9 +2149,19 @@ async fn serve_connection<C: Controller, P: PacketPool>(
         fresh_security_pending_durability,
         bond_reboot_required,
     );
+    // A disconnect can occur while this task is awaiting a bounded handoff or
+    // indication confirmation rather than while it is polling GATT events.
+    // Reconcile once more before returning so a dropped terminal event still
+    // carries authoritative pre-drain manager evidence.
+    disconnect_observation = reconcile_disconnect_observation(
+        disconnect_observation,
+        raw.is_connected(),
+        connection_id,
+        "serve-exit",
+    );
     ServeConnectionOutcome {
         lifecycle_started: true,
-        disconnected_event_observed,
+        disconnect_observation,
         remove_volatile_bond,
         purge_non_authoritative_bonds: fresh_security_disposition.scrub_non_authoritative_bonds(),
         retain_only_bond,

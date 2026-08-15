@@ -1,7 +1,7 @@
 # Device API
 
 The local device API is an allocation-bounded, bearer-neutral protocol between
-an appliance and a trusted client. The current unreleased version is **2.0**.
+an appliance and a trusted client. The current unreleased version is **3.0**.
 Rust definitions in `crates/device-api` and their wire tests are authoritative;
 this document explains the stable boundary and current product surface.
 
@@ -24,13 +24,34 @@ The current BLE application bearer provides authentication and integrity. It
 does not add a second end-to-end confidentiality layer above Bluetooth and
 Reticulum.
 
+## BLE link lifecycle
+
+The E290 accepts a central's valid connection interval, latency, and event
+lengths, but raises supervision timeouts shorter than six seconds to six
+seconds. It also proactively requests that floor immediately after connecting,
+using the already-negotiated interval and latency unchanged, because a central
+need not send a later parameter request. Firmware diagnostics report the
+initial, requested, applied, and subsequently negotiated parameters. The
+proactive HCI request is bounded to two seconds so it cannot indefinitely delay
+GATT service; rejection or timeout retains the central's current parameters.
+
+Trouble's per-connection event queue is intentionally eight entries, but event
+delivery is not a lifecycle correctness requirement. The bearer also polls the
+manager's connected state, releases an already-disconnected slot when the
+terminal event was dropped, and bounds an incomplete controller disconnect to
+five seconds. Because the pinned public Trouble API cannot reinitialize its
+host and controller in place, the first irrecoverable drain performs a full
+software reset. An RTC-retained, torn-write-safe marker suppresses an early
+second reset and disables only BLE until a power cycle; the LoRa/node tasks
+remain active.
+
 ## Version and encoding
 
 Every message carries major and minor version numbers. A decoder accepts any
 minor revision within its major generation and skips unknown numeric map fields,
 but it rejects another major version, missing or duplicate known fields, unknown
 closed-enum values, indefinite CBOR containers, excessive nesting, and trailing
-bytes. New minor revisions must preserve all fields defined by 2.0.
+bytes. New minor revisions must preserve all fields defined by 3.0.
 
 Encoder output uses definite containers, ascending unsigned numeric keys, and
 preferred integer representations. One logical message is exactly one CBOR
@@ -52,7 +73,7 @@ item; framing owns stream boundaries and recovery.
 | Saved Wi-Fi profiles | 4 |
 | Diagnostic interface slots | 4 |
 | Route entries per page | 4 |
-| Radio-trace events per page | 3 |
+| Radio-trace events per page | 2 |
 | Wi-Fi SSID | 1–32 bytes |
 | WPA2-Personal passphrase | 8–63 printable ASCII bytes |
 
@@ -90,7 +111,7 @@ authorization credential.
 | `0xf009` | `nomad.fetch_poll` | poll the principal-owned request |
 | `0xf00a` | `network.config_get` | read redacted desired network state |
 | `0xf00b` | `network.config_mutate` | compare-and-swap a network policy change |
-| `0xf00c` | `network.status` | read live Wi-Fi, DNS, and TCP state |
+| `0xf00c` | `network.status` | read live Wi-Fi, DNS, TCP, and RMAP publication state |
 | `0xf00d` | `manual_service_announce` | queue one coalesced announce cycle |
 | `0xf00e` | `node.diagnostics` | bounded interface, LoRa, and Reticulum snapshot |
 | `0xf00f` | `route_diagnostics.page` | page retained route evidence |
@@ -138,8 +159,17 @@ not infer remote signal or end-to-end path quality.
 
 The boot-scoped radio trace contains route selection, terminal DATA dispatch,
 physical frame completion, logical receive, and delivery proof/timeout events.
-Sequence cursors include a boot identifier so a reboot cannot silently skip
-events. Ring overwrite is reported as incomplete history.
+It also correlates the receiver-side path from reconstructed DATA through
+durable LXMF commit, retained/staged/queued proof ownership, and physical proof
+TxDone or failure. A page carries at most two events so every maximum-sized
+proof stage fits the fixed 512-byte response envelope. Sequence cursors include
+a boot identifier so a reboot cannot silently skip events. Ring overwrite is
+reported as incomplete history.
+
+`network.status` distinguishes desired RMAP configuration from configuration
+applied by the running firmware. It reports the current stamp phase, initial
+TCP gate, queue admission outcome, next due time, and any typed deferral or
+failure reason; coordinator acceptance is not presented as physical egress.
 
 A Reticulum probe establishes only that a compatible destination returned a
 proof through the normal routing path. It does not establish LXMF availability,

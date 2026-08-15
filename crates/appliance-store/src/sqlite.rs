@@ -19,16 +19,16 @@ use crate::{
     PhoneLocationSample, PhoneLocationSource, PhoneLocationUnavailableReason, ReconcileWork,
     RfTraceAttemptObservation, RfTraceAttemptOutcome, RfTraceBootId, RfTraceEvent, RfTraceEventId,
     RfTraceEventSequence, RfTraceIdentityHash, RfTraceImportBatch, RfTraceImportOutcome,
-    RfTraceInterfaceId, RfTraceMessageCorrelation, RfTraceObservation, RfTraceObservationKind,
-    RfTracePage, RfTracePageRequest, RfTraceProofIngress, RfTraceRadioProfile,
-    RfTraceRouteObservation, RfTraceRouteResolution, RfTraceRxObservation, RfTraceScope,
-    RfTraceTxObservation, RfTraceTxOutcome, RnsAttemptToken, StatusProjectionOutcome,
-    SubmissionFailure, SubmissionId, SubmissionState, TimelineDirection, TimelineEntry,
-    TimelineSequence, UnixTimestampMillis,
+    RfTraceInboundProofObservation, RfTraceInboundProofStage, RfTraceInterfaceId,
+    RfTraceMessageCorrelation, RfTraceObservation, RfTraceObservationKind, RfTracePage,
+    RfTracePageRequest, RfTraceProofIngress, RfTraceRadioProfile, RfTraceRouteObservation,
+    RfTraceRouteResolution, RfTraceRxObservation, RfTraceScope, RfTraceTxObservation,
+    RfTraceTxOutcome, RnsAttemptToken, StatusProjectionOutcome, SubmissionFailure, SubmissionId,
+    SubmissionState, TimelineDirection, TimelineEntry, TimelineSequence, UnixTimestampMillis,
 };
 
 /// Current SQLite `PRAGMA user_version` owned by this adapter.
-pub const SQLITE_SCHEMA_VERSION: u32 = 10;
+pub const SQLITE_SCHEMA_VERSION: u32 = 11;
 
 const INBOUND_COLUMNS: &str = "message_id, sequence, local_destination, source, timestamp_unix_ms, \
                                title, content, ingress_interface, ingress_rssi, ingress_snr, \
@@ -81,7 +81,8 @@ const RF_TRACE_COLUMNS: &str = "e.id, e.boot_id, e.imported_at_unix_ms, e.event_
                                e.tx_outcome, e.planned_frames, e.completed_frames, \
                                e.frame_completed_0_us, e.frame_completed_1_us, e.authorized, \
                                e.rx_rssi, e.rx_snr, e.attempt_outcome, e.proof_interface, \
-                               e.proof_rssi, e.proof_snr, e.timeline_sequence, e.outbox_id, \
+                               e.proof_rssi, e.proof_snr, e.inbound_stage, \
+                               e.inbound_message_id, e.timeline_sequence, e.outbox_id, \
                                e.attempt_number, e.location_state, e.location_latitude_e6, \
                                e.location_longitude_e6, e.location_accuracy_mm, \
                                e.location_altitude_mm, e.location_vertical_accuracy_mm, \
@@ -399,6 +400,17 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreError
         transaction.commit()?;
         return Ok(());
     }
+    if version == 10 {
+        transaction.execute_batch(
+            "ALTER TABLE rf_trace_events ADD COLUMN inbound_stage INTEGER \
+                 CHECK (inbound_stage BETWEEN 0 AND 6);\n\
+             ALTER TABLE rf_trace_events ADD COLUMN inbound_message_id BLOB \
+                 CHECK (inbound_message_id IS NULL OR length(inbound_message_id) = 32);",
+        )?;
+        transaction.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)?;
+        transaction.commit()?;
+        return Ok(());
+    }
     if version != 0 {
         return Err(SqliteStoreError::UnsupportedSchemaVersion(version));
     }
@@ -615,6 +627,9 @@ fn create_rf_trace_schema(transaction: &Transaction<'_>) -> Result<(), SqliteSto
              proof_interface INTEGER CHECK (proof_interface BETWEEN 0 AND 255),\n\
              proof_rssi INTEGER CHECK (proof_rssi BETWEEN -32768 AND 32767),\n\
              proof_snr INTEGER CHECK (proof_snr BETWEEN -32768 AND 32767),\n\
+             inbound_stage INTEGER CHECK (inbound_stage BETWEEN 0 AND 6),\n\
+             inbound_message_id BLOB \
+                 CHECK (inbound_message_id IS NULL OR length(inbound_message_id) = 32),\n\
              timeline_sequence INTEGER CHECK (timeline_sequence > 0),\n\
              outbox_id INTEGER CHECK (outbox_id > 0),\n\
              attempt_number INTEGER CHECK (attempt_number BETWEEN 1 AND 4294967295),\n\
@@ -1655,6 +1670,8 @@ struct RawRfTrace {
     proof_interface: Option<i64>,
     proof_rssi: Option<i64>,
     proof_snr: Option<i64>,
+    inbound_stage: Option<i64>,
+    inbound_message_id: Option<Vec<u8>>,
     timeline_sequence: Option<i64>,
     outbox_id: Option<i64>,
     attempt_number: Option<i64>,
@@ -1710,30 +1727,32 @@ fn raw_rf_trace(row: &Row<'_>) -> rusqlite::Result<RawRfTrace> {
         proof_interface: row.get(24)?,
         proof_rssi: row.get(25)?,
         proof_snr: row.get(26)?,
-        timeline_sequence: row.get(27)?,
-        outbox_id: row.get(28)?,
-        attempt_number: row.get(29)?,
-        location_state: row.get(30)?,
-        location_latitude_e6: row.get(31)?,
-        location_longitude_e6: row.get(32)?,
-        location_accuracy_mm: row.get(33)?,
-        location_altitude_mm: row.get(34)?,
-        location_vertical_accuracy_mm: row.get(35)?,
-        location_captured_at_unix_ms: row.get(36)?,
-        location_authorization: row.get(37)?,
-        location_source: row.get(38)?,
-        location_mocked: row.get(39)?,
-        location_unavailable_reason: row.get(40)?,
-        profile_fingerprint: row.get(41)?,
-        frequency_hz: row.get(42)?,
-        bandwidth_hz: row.get(43)?,
-        preamble_symbols: row.get(44)?,
-        requested_power_dbm: row.get(45)?,
-        spreading_factor: row.get(46)?,
-        coding_rate_denominator: row.get(47)?,
-        explicit_header: row.get(48)?,
-        crc: row.get(49)?,
-        iq_inverted: row.get(50)?,
+        inbound_stage: row.get(27)?,
+        inbound_message_id: row.get(28)?,
+        timeline_sequence: row.get(29)?,
+        outbox_id: row.get(30)?,
+        attempt_number: row.get(31)?,
+        location_state: row.get(32)?,
+        location_latitude_e6: row.get(33)?,
+        location_longitude_e6: row.get(34)?,
+        location_accuracy_mm: row.get(35)?,
+        location_altitude_mm: row.get(36)?,
+        location_vertical_accuracy_mm: row.get(37)?,
+        location_captured_at_unix_ms: row.get(38)?,
+        location_authorization: row.get(39)?,
+        location_source: row.get(40)?,
+        location_mocked: row.get(41)?,
+        location_unavailable_reason: row.get(42)?,
+        profile_fingerprint: row.get(43)?,
+        frequency_hz: row.get(44)?,
+        bandwidth_hz: row.get(45)?,
+        preamble_symbols: row.get(46)?,
+        requested_power_dbm: row.get(47)?,
+        spreading_factor: row.get(48)?,
+        coding_rate_denominator: row.get(49)?,
+        explicit_header: row.get(50)?,
+        crc: row.get(51)?,
+        iq_inverted: row.get(52)?,
     })
 }
 
@@ -1867,6 +1886,23 @@ fn decode_rf_attempt_outcome(value: i64) -> Result<RfTraceAttemptOutcome, Sqlite
     })
 }
 
+fn decode_rf_inbound_proof_stage(value: i64) -> Result<RfTraceInboundProofStage, SqliteStoreError> {
+    Ok(match value {
+        0 => RfTraceInboundProofStage::DataLogicalRx,
+        1 => RfTraceInboundProofStage::DurableCommit,
+        2 => RfTraceInboundProofStage::ProofRetained,
+        3 => RfTraceInboundProofStage::ProofStaged,
+        4 => RfTraceInboundProofStage::OrdinaryQueued,
+        5 => RfTraceInboundProofStage::PhysicalTxDone,
+        6 => RfTraceInboundProofStage::PhysicalTxFailed,
+        _ => {
+            return Err(SqliteStoreError::CorruptData(
+                "RF trace inbound proof stage",
+            ));
+        }
+    })
+}
+
 fn decode_rf_packet(
     raw: &RawRfTrace,
 ) -> Result<(RfTraceInterfaceId, PacketEvidence), SqliteStoreError> {
@@ -1905,6 +1941,23 @@ fn decode_rf_token(raw: &RawRfTrace) -> Result<Option<RnsAttemptToken>, SqliteSt
             )?))
         })
         .transpose()
+}
+
+fn decode_rf_optional_packet(raw: &RawRfTrace) -> Result<Option<PacketEvidence>, SqliteStoreError> {
+    match (raw.packet_len, raw.packet_sha256.clone()) {
+        (None, None) => Ok(None),
+        (Some(length), Some(sha256)) => Ok(Some(
+            PacketEvidence::new(
+                u16::try_from(length)
+                    .map_err(|_| SqliteStoreError::CorruptData("RF trace packet length"))?,
+                EncodedPacketSha256::new(array_from_blob(sha256, "RF trace packet digest")?),
+            )
+            .map_err(|_| SqliteStoreError::CorruptData("RF trace packet evidence"))?,
+        )),
+        _ => Err(SqliteStoreError::CorruptData(
+            "RF trace partial packet evidence",
+        )),
+    }
 }
 
 fn decode_rf_trace(raw: RawRfTrace) -> Result<RfTraceEvent, SqliteStoreError> {
@@ -2034,6 +2087,65 @@ fn decode_rf_trace(raw: RawRfTrace) -> Result<RfTraceEvent, SqliteStoreError> {
                 .map_err(|_| SqliteStoreError::CorruptData("RF trace route submission"))?,
             ))
         }
+        3 if raw.inbound_stage.is_some() => {
+            if raw.attempt_outcome.is_some()
+                || raw.proof_interface.is_some()
+                || raw.proof_rssi.is_some()
+                || raw.proof_snr.is_some()
+            {
+                return Err(SqliteStoreError::CorruptData(
+                    "RF trace inbound proof mixed terminal evidence",
+                ));
+            }
+            let interface = raw
+                .interface_id
+                .map(|interface| {
+                    u8::try_from(interface)
+                        .map(RfTraceInterfaceId::new)
+                        .map_err(|_| SqliteStoreError::CorruptData("RF trace proof interface"))
+                })
+                .transpose()?;
+            let signal = match (raw.rx_rssi, raw.rx_snr) {
+                (None, None) => None,
+                (Some(rssi), Some(snr)) => Some((
+                    i16::try_from(rssi)
+                        .map_err(|_| SqliteStoreError::CorruptData("RF trace proof RSSI"))?,
+                    i16::try_from(snr)
+                        .map_err(|_| SqliteStoreError::CorruptData("RF trace proof SNR"))?,
+                )),
+                _ => {
+                    return Err(SqliteStoreError::CorruptData(
+                        "RF trace partial inbound proof signal",
+                    ));
+                }
+            };
+            RfTraceObservationKind::InboundProof(
+                RfTraceInboundProofObservation::new(
+                    token.ok_or(SqliteStoreError::CorruptData(
+                        "RF trace inbound proof token",
+                    ))?,
+                    decode_rf_inbound_proof_stage(raw.inbound_stage.ok_or(
+                        SqliteStoreError::CorruptData("RF trace inbound proof stage"),
+                    )?)?,
+                    raw.inbound_message_id
+                        .clone()
+                        .map(|message_id| {
+                            Ok::<_, SqliteStoreError>(MessageId::new(array_from_blob(
+                                message_id,
+                                "RF trace inbound message id",
+                            )?))
+                        })
+                        .transpose()?,
+                    decode_rf_optional_packet(&raw)?,
+                    interface,
+                    signal,
+                    raw.tx_outcome.map(decode_rf_tx_outcome).transpose()?,
+                )
+                .ok_or(SqliteStoreError::CorruptData(
+                    "RF trace inbound proof evidence",
+                ))?,
+            )
+        }
         3 => {
             let proof_ingress =
                 match (raw.proof_interface, raw.proof_rssi, raw.proof_snr) {
@@ -2145,6 +2257,8 @@ struct EncodedRfObservation {
     proof_interface: Option<i64>,
     proof_rssi: Option<i64>,
     proof_snr: Option<i64>,
+    inbound_stage: Option<i64>,
+    inbound_message_id: Option<Vec<u8>>,
 }
 
 fn encode_rf_tx_outcome(outcome: RfTraceTxOutcome) -> i64 {
@@ -2186,6 +2300,18 @@ fn encode_rf_attempt_outcome(outcome: RfTraceAttemptOutcome) -> i64 {
     }
 }
 
+fn encode_rf_inbound_proof_stage(stage: RfTraceInboundProofStage) -> i64 {
+    match stage {
+        RfTraceInboundProofStage::DataLogicalRx => 0,
+        RfTraceInboundProofStage::DurableCommit => 1,
+        RfTraceInboundProofStage::ProofRetained => 2,
+        RfTraceInboundProofStage::ProofStaged => 3,
+        RfTraceInboundProofStage::OrdinaryQueued => 4,
+        RfTraceInboundProofStage::PhysicalTxDone => 5,
+        RfTraceInboundProofStage::PhysicalTxFailed => 6,
+    }
+}
+
 fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservation {
     let mut encoded = EncodedRfObservation {
         kind: 0,
@@ -2210,6 +2336,8 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
         proof_interface: None,
         proof_rssi: None,
         proof_snr: None,
+        inbound_stage: None,
+        inbound_message_id: None,
     };
     match observation.kind() {
         RfTraceObservationKind::DataTx(tx) => {
@@ -2279,6 +2407,29 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
                     encoded.proof_snr = Some(i64::from(snr));
                 }
             }
+        }
+        RfTraceObservationKind::InboundProof(proof) => {
+            // Kind 3 is the persisted proof-event family. `inbound_stage`
+            // distinguishes receiver lifecycle events from attempt terminals
+            // while preserving existing version-10 rows during migration.
+            encoded.kind = 3;
+            encoded.attempt_token = Some(proof.rns_attempt_token().as_bytes().to_vec());
+            encoded.inbound_stage = Some(encode_rf_inbound_proof_stage(proof.stage()));
+            encoded.inbound_message_id = proof
+                .message_id()
+                .map(|message_id| message_id.as_bytes().to_vec());
+            if let Some(packet) = proof.packet_evidence() {
+                encoded.packet_len = Some(i64::from(packet.encoded_packet_len()));
+                encoded.packet_sha256 = Some(packet.encoded_packet_sha256().as_bytes().to_vec());
+            }
+            encoded.interface_id = proof
+                .interface()
+                .map(|interface| i64::from(interface.get()));
+            if let Some((rssi, snr)) = proof.signal() {
+                encoded.rx_rssi = Some(i64::from(rssi));
+                encoded.rx_snr = Some(i64::from(snr));
+            }
+            encoded.tx_outcome = proof.dispatch_outcome().map(encode_rf_tx_outcome);
         }
     }
     encoded
@@ -2603,7 +2754,8 @@ fn insert_rf_trace_event(
              route_next_hop, route_hops, route_resolution, submission_id, tx_outcome,\n\
              planned_frames, completed_frames, frame_completed_0_us, frame_completed_1_us,\n\
              authorized, rx_rssi, rx_snr, attempt_outcome, proof_interface, proof_rssi,\n\
-             proof_snr, timeline_sequence, outbox_id, attempt_number, location_state,\n\
+             proof_snr, inbound_stage, inbound_message_id, timeline_sequence, outbox_id,\n\
+             attempt_number, location_state,\n\
              location_latitude_e6, location_longitude_e6, location_accuracy_mm,\n\
              location_altitude_mm, location_vertical_accuracy_mm,\n\
              location_captured_at_unix_ms, location_authorization, location_source,\n\
@@ -2611,7 +2763,7 @@ fn insert_rf_trace_event(
          ) VALUES (\n\
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,\n\
              ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,\n\
-             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41\n\
+             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43\n\
          )",
         params![
             sqlite_integer(id, "RF trace id")?,
@@ -2641,6 +2793,8 @@ fn insert_rf_trace_event(
             encoded.proof_interface,
             encoded.proof_rssi,
             encoded.proof_snr,
+            encoded.inbound_stage,
+            encoded.inbound_message_id,
             correlation_columns.timeline_sequence,
             correlation_columns.outbox_id,
             correlation_columns.attempt_number,

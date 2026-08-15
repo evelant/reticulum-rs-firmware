@@ -17,20 +17,22 @@ use reticulum_appliance_runtime::{
     NomadFetchStartResponse, PacketEvidenceView, PhoneLocationAuthorizationView,
     PhoneLocationObservationView, PhoneLocationSourceView, PhoneLocationUnavailableReasonView,
     RadioRoutesStatusView, RadioTraceAttemptOutcomeView, RadioTraceEventKindView,
-    RadioTraceEventView, RadioTraceMessageCorrelationView, RadioTracePageRequest,
-    RadioTracePageView, RadioTraceProfileView, RadioTraceRouteResolutionView,
-    RadioTraceTxOutcomeView, RetainedRouteView, ReticulumDnsDiagnosticsView,
-    ReticulumDnsPrimaryOutcomeView, ReticulumDnsRawAttemptView, ReticulumDnsRawOutcomeView,
-    ReticulumDnsRawSetupStateView, ReticulumDnsRawSourceView, ReticulumDnsResolutionSourceView,
-    ReticulumDnsResolutionView, ReticulumProbeFailure, ReticulumProbeIngressView,
-    ReticulumProbePhase, ReticulumProbePollRequest, ReticulumProbePollResponse,
-    ReticulumProbeSignalView, ReticulumProbeStartOutcome, ReticulumProbeStartRequest,
-    ReticulumProbeStartResponse, ReticulumProbeSuccessView, ReticulumTcpFailureView,
-    ReticulumTcpPeerHostnameInput, ReticulumTcpPeerIpv4Input, ReticulumTcpPeerStateView,
-    ReticulumTcpPeerView, RetrySendOutcome, RetrySendRequest, RetrySendResponse, RmapPhoneLocation,
-    RnsDiagnosticsView, RouteDiagnosticResolutionView, SendOutcome, SendRequest, SendResponse,
-    TimelineDirection, TimelineStatus, TimelineView, WifiCredentialUpdate, WifiNetworkProfileView,
-    WifiStationStateView,
+    RadioTraceEventView, RadioTraceInboundProofStageView, RadioTraceMessageCorrelationView,
+    RadioTracePageRequest, RadioTracePageView, RadioTraceProfileView,
+    RadioTraceRouteResolutionView, RadioTraceTxOutcomeView, RetainedRouteView,
+    ReticulumDnsDiagnosticsView, ReticulumDnsPrimaryOutcomeView, ReticulumDnsRawAttemptView,
+    ReticulumDnsRawOutcomeView, ReticulumDnsRawSetupStateView, ReticulumDnsRawSourceView,
+    ReticulumDnsResolutionSourceView, ReticulumDnsResolutionView, ReticulumProbeFailure,
+    ReticulumProbeIngressView, ReticulumProbePhase, ReticulumProbePollRequest,
+    ReticulumProbePollResponse, ReticulumProbeSignalView, ReticulumProbeStartOutcome,
+    ReticulumProbeStartRequest, ReticulumProbeStartResponse, ReticulumProbeSuccessView,
+    ReticulumTcpFailureView, ReticulumTcpPeerHostnameInput, ReticulumTcpPeerIpv4Input,
+    ReticulumTcpPeerStateView, ReticulumTcpPeerView, RetrySendOutcome, RetrySendRequest,
+    RetrySendResponse, RmapDeferredReasonView, RmapEgressConfirmationView,
+    RmapInitialTcpGateStateView, RmapPhoneLocation, RmapQueueOutcomeView, RmapRuntimeStatusView,
+    RmapStampPhaseView, RnsDiagnosticsView, RouteDiagnosticResolutionView, SendOutcome,
+    SendRequest, SendResponse, TimelineDirection, TimelineStatus, TimelineView,
+    WifiCredentialUpdate, WifiNetworkProfileView, WifiStationStateView,
 };
 use reticulum_device_api::{
     API_VERSION_MAJOR, API_VERSION_MINOR, DEFAULT_RETICULUM_TCP_PORT, MAX_LXMF_BASIC_CONTENT_BYTES,
@@ -137,6 +139,12 @@ pub fn render_api_bindings() -> String {
     append_declaration::<ReticulumDnsResolutionSourceView>(&mut output, &config);
     append_declaration::<ReticulumDnsResolutionView>(&mut output, &config);
     append_declaration::<ReticulumDnsDiagnosticsView>(&mut output, &config);
+    append_declaration::<RmapStampPhaseView>(&mut output, &config);
+    append_declaration::<RmapInitialTcpGateStateView>(&mut output, &config);
+    append_declaration::<RmapQueueOutcomeView>(&mut output, &config);
+    append_declaration::<RmapEgressConfirmationView>(&mut output, &config);
+    append_declaration::<RmapDeferredReasonView>(&mut output, &config);
+    append_declaration::<RmapRuntimeStatusView>(&mut output, &config);
     append_declaration::<NetworkRuntimeStatusView>(&mut output, &config);
     append_declaration::<WifiCredentialUpdate>(&mut output, &config);
     append_declaration::<ReticulumTcpPeerIpv4Input>(&mut output, &config);
@@ -164,6 +172,7 @@ pub fn render_api_bindings() -> String {
     append_declaration::<RadioTraceRouteResolutionView>(&mut output, &config);
     append_declaration::<RadioTraceTxOutcomeView>(&mut output, &config);
     append_declaration::<RadioTraceAttemptOutcomeView>(&mut output, &config);
+    append_declaration::<RadioTraceInboundProofStageView>(&mut output, &config);
     append_declaration::<RadioTraceEventKindView>(&mut output, &config);
     append_declaration::<RadioTraceMessageCorrelationView>(&mut output, &config);
     append_declaration::<RadioTraceEventView>(&mut output, &config);
@@ -288,6 +297,10 @@ mod tests {
         assert!(bindings.contains("\"backoff\""));
         assert!(bindings.contains("\"dns_timeout\""));
         assert!(bindings.contains("export type ReticulumDnsDiagnosticsView ="));
+        assert!(bindings.contains("export type RmapRuntimeStatusView ="));
+        assert!(bindings.contains("\"ordinary_admission_deferred\""));
+        assert!(bindings.contains("\"initial_tcp_not_ready\""));
+        assert!(bindings.contains("rmap_status: RmapRuntimeStatusView | null"));
         assert!(bindings.contains("\"kind\": \"response_code\""));
         assert!(bindings.contains("dns_diagnostics: ReticulumDnsDiagnosticsView | null"));
         assert!(bindings.contains("\"outcome\": \"revision_conflict\""));

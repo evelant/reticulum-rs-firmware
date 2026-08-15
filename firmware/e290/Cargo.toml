@@ -84,6 +84,9 @@ zeroize.workspace = true
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 allocator-api2 = { workspace = true, features = ["alloc"] }
+# Trouble's public connection-update bound names this upstream trait directly
+# rather than re-exporting it from the host prelude.
+bt-hci = { version = "=0.9.0", default-features = false }
 reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
 reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
 
@@ -138,7 +141,10 @@ trouble-host = { git = "https://github.com/embassy-rs/trouble.git", rev = "088e0
     # Current upstream still cfg-gates two security mutex imports behind the
     # central role. This is compile-time only; the product remains peripheral.
     "central",
-    "connection-event-queue-size-4",
+    # One link's eight-entry queue costs 320 bytes of target BSS over four
+    # entries. It reduces event loss during pairing bursts; manager-state and
+    # bounded-drain recovery remain the correctness guarantee.
+    "connection-event-queue-size-8",
     "default-packet-pool-mtu-255",
     "derive",
     "gatt",

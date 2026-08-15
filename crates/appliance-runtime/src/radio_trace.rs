@@ -166,6 +166,54 @@ fn core_observation(
                 ingress,
             ))
         }
+        device_api::RadioTraceEventKind::InboundProof(proof) => {
+            let packet = proof.packet().map(|packet| {
+                core::PacketEvidence::new(
+                    packet.packet_len(),
+                    core::EncodedPacketSha256::new(*packet.encoded_packet_sha256().as_bytes()),
+                )
+                .expect("device inbound proof packet evidence is structurally non-empty")
+            });
+            let stage = match proof.stage() {
+                device_api::RadioTraceInboundProofStage::DataLogicalRx => {
+                    core::RfTraceInboundProofStage::DataLogicalRx
+                }
+                device_api::RadioTraceInboundProofStage::DurableCommit => {
+                    core::RfTraceInboundProofStage::DurableCommit
+                }
+                device_api::RadioTraceInboundProofStage::ProofRetained => {
+                    core::RfTraceInboundProofStage::ProofRetained
+                }
+                device_api::RadioTraceInboundProofStage::ProofStaged => {
+                    core::RfTraceInboundProofStage::ProofStaged
+                }
+                device_api::RadioTraceInboundProofStage::OrdinaryQueued => {
+                    core::RfTraceInboundProofStage::OrdinaryQueued
+                }
+                device_api::RadioTraceInboundProofStage::PhysicalTxDone => {
+                    core::RfTraceInboundProofStage::PhysicalTxDone
+                }
+                device_api::RadioTraceInboundProofStage::PhysicalTxFailed => {
+                    core::RfTraceInboundProofStage::PhysicalTxFailed
+                }
+            };
+            core::RfTraceObservationKind::InboundProof(
+                core::RfTraceInboundProofObservation::new(
+                    core_token(proof.correlation_token()),
+                    stage,
+                    proof.message_id().map(core::MessageId::new),
+                    packet,
+                    proof.interface_id().map(core::RfTraceInterfaceId::new),
+                    proof
+                        .signal()
+                        .map(|signal| (signal.rssi_dbm(), signal.snr_db())),
+                    proof.dispatch_outcome().map(core_tx_outcome),
+                )
+                .ok_or_else(|| {
+                    "device inbound proof trace contradicted its lifecycle stage".to_owned()
+                })?,
+            )
+        }
         _ => return Err("device returned an unsupported radio trace event kind".to_owned()),
     };
     Ok(core::RfTraceObservation::new(
@@ -439,6 +487,34 @@ pub enum RadioTraceAttemptOutcomeView {
     Unsent,
 }
 
+/// Receiver-side durable DATA-to-proof lifecycle stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum RadioTraceInboundProofStageView {
+    DataLogicalRx,
+    DurableCommit,
+    ProofRetained,
+    ProofStaged,
+    OrdinaryQueued,
+    PhysicalTxDone,
+    PhysicalTxFailed,
+}
+
+impl From<core::RfTraceInboundProofStage> for RadioTraceInboundProofStageView {
+    fn from(stage: core::RfTraceInboundProofStage) -> Self {
+        match stage {
+            core::RfTraceInboundProofStage::DataLogicalRx => Self::DataLogicalRx,
+            core::RfTraceInboundProofStage::DurableCommit => Self::DurableCommit,
+            core::RfTraceInboundProofStage::ProofRetained => Self::ProofRetained,
+            core::RfTraceInboundProofStage::ProofStaged => Self::ProofStaged,
+            core::RfTraceInboundProofStage::OrdinaryQueued => Self::OrdinaryQueued,
+            core::RfTraceInboundProofStage::PhysicalTxDone => Self::PhysicalTxDone,
+            core::RfTraceInboundProofStage::PhysicalTxFailed => Self::PhysicalTxFailed,
+        }
+    }
+}
+
 /// Typed event-specific RF trace evidence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -484,6 +560,16 @@ pub enum RadioTraceEventKindView {
         proof_interface_id: Option<u8>,
         proof_rssi_dbm: Option<i16>,
         proof_snr_db: Option<i16>,
+    },
+    InboundProof {
+        correlation_token: String,
+        stage: RadioTraceInboundProofStageView,
+        message_id: Option<String>,
+        packet_evidence: Option<PacketEvidenceView>,
+        interface_id: Option<u8>,
+        rssi_dbm: Option<i16>,
+        snr_db: Option<i16>,
+        dispatch_outcome: Option<RadioTraceTxOutcomeView>,
     },
 }
 
@@ -540,6 +626,21 @@ impl From<core::RfTraceObservationKind> for RadioTraceEventKindView {
                     proof_interface_id: ingress.map(|ingress| ingress.interface().get()),
                     proof_rssi_dbm: signal.map(|signal| signal.0),
                     proof_snr_db: signal.map(|signal| signal.1),
+                }
+            }
+            core::RfTraceObservationKind::InboundProof(proof) => {
+                let signal = proof.signal();
+                Self::InboundProof {
+                    correlation_token: hex::encode(proof.rns_attempt_token().as_bytes()),
+                    stage: proof.stage().into(),
+                    message_id: proof
+                        .message_id()
+                        .map(|message_id| hex::encode(message_id.as_bytes())),
+                    packet_evidence: proof.packet_evidence().map(Into::into),
+                    interface_id: proof.interface().map(|interface| interface.get()),
+                    rssi_dbm: signal.map(|signal| signal.0),
+                    snr_db: signal.map(|signal| signal.1),
+                    dispatch_outcome: proof.dispatch_outcome().map(Into::into),
                 }
             }
         }
@@ -629,5 +730,70 @@ impl From<core::RfTracePage> for RadioTracePageView {
             next_before_event_id: page.next_before().map(core::RfTraceEventId::get),
             history_incomplete: page.history_incomplete(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inbound_proof_device_event_preserves_correlation_and_terminal_evidence() {
+        let packet = device_api::RadioTraceInboundProofPacket::try_new(
+            123,
+            device_api::EncodedPacketSha256::new([0x33; 32]),
+        )
+        .unwrap();
+        let proof = device_api::RadioTraceInboundProof::try_new(
+            device_api::RadioTraceAttemptToken::new([0x11; 32]),
+            device_api::RadioTraceInboundProofStage::PhysicalTxFailed,
+            Some([0x22; 32]),
+            Some(packet),
+            Some(7),
+            Some(device_api::IngressSignal::new(-104, 7)),
+            Some(device_api::RadioTraceTxOutcome::TxFault),
+        )
+        .unwrap();
+        let observation = core_observation(device_api::RadioTraceEvent::new(
+            3,
+            4_000,
+            device_api::RadioTraceEventKind::InboundProof(proof),
+        ))
+        .unwrap();
+
+        let core::RfTraceObservationKind::InboundProof(proof) = observation.kind() else {
+            panic!("device inbound proof must remain a typed receiver lifecycle event");
+        };
+        assert_eq!(proof.rns_attempt_token().as_bytes(), &[0x11; 32]);
+        assert_eq!(
+            proof.stage(),
+            core::RfTraceInboundProofStage::PhysicalTxFailed
+        );
+        assert_eq!(proof.message_id().unwrap().as_bytes(), &[0x22; 32]);
+        assert_eq!(proof.packet_evidence().unwrap().encoded_packet_len(), 123);
+        assert_eq!(proof.interface().unwrap().get(), 7);
+        assert_eq!(proof.signal(), Some((-104, 7)));
+        assert_eq!(
+            proof.dispatch_outcome(),
+            Some(core::RfTraceTxOutcome::TxFault)
+        );
+
+        let value = serde_json::to_value(RadioTraceEventKindView::from(
+            core::RfTraceObservationKind::InboundProof(proof),
+        ))
+        .unwrap();
+        assert_eq!(value["kind"], "inbound_proof");
+        assert_eq!(value["stage"], "physical_tx_failed");
+        assert_eq!(value["correlation_token"], "11".repeat(32));
+        assert_eq!(value["message_id"], "22".repeat(32));
+        assert_eq!(value["packet_evidence"]["encoded_packet_len"], 123);
+        assert_eq!(
+            value["packet_evidence"]["encoded_packet_sha256"],
+            "33".repeat(32)
+        );
+        assert_eq!(value["interface_id"], 7);
+        assert_eq!(value["rssi_dbm"], -104);
+        assert_eq!(value["snr_db"], 7);
+        assert_eq!(value["dispatch_outcome"], "tx_fault");
     }
 }

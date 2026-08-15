@@ -10,7 +10,7 @@
 use core::fmt;
 
 use crate::application_events::ApplicationEventId;
-use crate::embedded::{NodeActions, RetainedInboundProof};
+use crate::embedded::{InboundProofEvidence, NodeActions, RetainedInboundProof};
 
 /// Stable index of one caller-provided delayed-proof slot.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -514,6 +514,15 @@ impl DelayedProofLease<'_, '_> {
     /// FIFO sequence assigned at reservation time.
     pub const fn sequence(&self) -> DelayedProofSequence {
         self.sequence
+    }
+
+    /// Copy-only covered-DATA and encoded-proof correlation evidence.
+    pub fn evidence(&self) -> InboundProofEvidence {
+        self.owner.slots[self.id.slot.0]
+            .proof
+            .as_ref()
+            .expect("a valid delayed-proof lease retains its exact proof")
+            .evidence()
     }
 
     /// Release the exact proof as a packet-only ordinary-router envelope.

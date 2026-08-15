@@ -35,7 +35,8 @@ use reticulum_rns_rete::{
     IngressObservation as RnsIngressObservation, IngressOrigin as RnsIngressOrigin,
     IngressSignalObservation as RnsIngressSignalObservation, InterfaceId as RnsInterfaceId,
     LinkAdmissionError as RnsLinkAdmissionError, LinkId as RnsLinkId, LinkState as RnsLinkState,
-    NodeRole as RnsNodeRole, PathRequestBuildError as RnsPathRequestBuildError,
+    LocalAnnounceTargetError as RnsLocalAnnounceTargetError, NodeRole as RnsNodeRole,
+    PathRequestBuildError as RnsPathRequestBuildError,
     PrepareBasicLxmfError as RnsPrepareBasicLxmfError, PrepareDataError as RnsPrepareDataError,
     PrepareDirectLxmfLinkDataError as RnsPrepareDirectLxmfLinkDataError,
     PrepareDirectRequestError as RnsPrepareDirectRequestError,
@@ -63,10 +64,11 @@ pub use reticulum_rns_rete::{
     DelayedProofId, DelayedProofLease, DelayedProofOwner, DelayedProofOwnerCounters,
     DelayedProofReservationError, DelayedProofSequence, DelayedProofSlot, DelayedProofSlotId,
     DelayedProofTransaction, DelayedProofTransactionError, DelayedProofTransactionFailure,
-    EmbeddedNodeMetrics, InboundData, InboundDataProjection, IngressAnnounceEgress,
-    IngressBroadcastPolicy, IngressBroadcastScope, IngressDisposition, IngressMetadata,
-    IngressReport, LxmfMessageLocation, MonotonicInstant, NodeActions, OutboundDispatchInterval,
-    OutboundProtocolToken, PacketType, RetainedProofCommitSuccess, project_inbound_data,
+    EmbeddedNodeMetrics, InboundData, InboundDataProjection, InboundProofEvidence,
+    IngressAnnounceEgress, IngressBroadcastPolicy, IngressBroadcastScope, IngressDisposition,
+    IngressMetadata, IngressReport, LxmfMessageLocation, MonotonicInstant, NodeActions,
+    OutboundDispatchInterval, OutboundProtocolToken, PacketType, RetainedProofCommitSuccess,
+    project_inbound_data,
 };
 use sha2::{Digest, Sha256};
 
@@ -144,6 +146,16 @@ pub fn rns_packet_hash(raw: &[u8]) -> Option<[u8; 32]> {
     reticulum_rns_rete::parse_packet(raw)
         .ok()
         .map(|packet| packet.compute_hash())
+}
+
+/// Parse one complete RNS packet and return its wire packet type.
+///
+/// Firmware diagnostics use this narrow projection to classify DATA receive
+/// stages without depending on the protocol adapter's concrete parser type.
+pub fn rns_packet_type(raw: &[u8]) -> Option<PacketType> {
+    reticulum_rns_rete::parse_packet(raw)
+        .ok()
+        .map(|packet| packet.packet_type)
 }
 
 /// Extract the compact correlation tag from one explicit RNS delivery proof.
@@ -1425,6 +1437,21 @@ pub enum LocalDestinationProofPolicyError {
 pub enum LocalDestinationLinkPolicyError {
     /// The destination is not registered on this node.
     DestinationNotRegistered,
+}
+
+/// Failure to bind a local announce destination to one exact packet interface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalDestinationAnnounceTargetError {
+    /// The named destination is not registered on this node.
+    DestinationNotRegistered,
+}
+
+impl From<RnsLocalAnnounceTargetError> for LocalDestinationAnnounceTargetError {
+    fn from(error: RnsLocalAnnounceTargetError) -> Self {
+        match error {
+            RnsLocalAnnounceTargetError::DestinationNotRegistered => Self::DestinationNotRegistered,
+        }
+    }
 }
 
 impl From<RnsInboundProofPolicyError> for LocalDestinationProofPolicyError {
@@ -4089,6 +4116,20 @@ impl<
         } else {
             Err(LocalDestinationLinkPolicyError::DestinationNotRegistered)
         }
+    }
+
+    /// Bind one local announce destination and its native retransmits to an exact interface.
+    pub fn set_local_announce_interface_target(
+        &mut self,
+        destination: &DestinationHash,
+        interface: PacketInterfaceId,
+    ) -> Result<(), LocalDestinationAnnounceTargetError> {
+        self.rns
+            .set_local_announce_interface_target(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                RnsInterfaceId(interface.get()),
+            )
+            .map_err(LocalDestinationAnnounceTargetError::from)
     }
 
     /// Admit one signed local announce into the bounded protocol queue.

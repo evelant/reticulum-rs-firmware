@@ -38,6 +38,7 @@ import {
 } from "../lib/public-reticulum-endpoints.ts";
 import type { RadioRoutesControllerState } from "../lib/radio-routes.ts";
 import { randomHex } from "../lib/random.ts";
+import { rmapRuntimePresentation } from "../lib/rmap-runtime-diagnostics.ts";
 import {
   reticulumDnsDiagnosticDetails,
   reticulumTcpDiagnostic,
@@ -256,6 +257,10 @@ export function ConnectivityPanel({
   const configuration = state.configuration;
   const tcpDiagnostic = reticulumTcpDiagnostic(state.runtime);
   const dnsDetails = reticulumDnsDiagnosticDetails(state.runtime);
+  const rmapRuntime = rmapRuntimePresentation(
+    state.runtime,
+    configuration?.rmap_discovery_enabled ?? false,
+  );
 
   const saveWifi = async () => {
     if (wifiForm === null) return;
@@ -699,8 +704,28 @@ export function ConnectivityPanel({
               <Text style={styles.sectionTitle}>RMAP World discovery</Text>
               <Text style={styles.secondary}>
                 Opt in to a signed public marker for this appliance&apos;s LoRa interface. RMAP
-                announces on its own approximately six-hour schedule.
+                targets the configured public TCP interface once it is ready, or available Reticulum
+                interfaces on a radio-only node. Its six-hour cadence begins only after a
+                publication is accepted.
               </Text>
+            </View>
+            <View accessibilityLiveRegion="polite" style={styles.rmapStatus}>
+              <Text style={styles.rmapStatusEyebrow}>CURRENT STATUS</Text>
+              <Text
+                style={[
+                  styles.rmapStatusHeadline,
+                  rmapRuntime.tone === "error" && styles.rmapStatusError,
+                  rmapRuntime.tone === "success" && styles.rmapStatusSuccess,
+                  rmapRuntime.tone === "warning" && styles.rmapStatusWarning,
+                ]}
+              >
+                {rmapRuntime.headline}
+              </Text>
+              {rmapRuntime.rows.map((row) => (
+                <Text key={row} selectable style={styles.rmapStatusRow}>
+                  {row}
+                </Text>
+              ))}
             </View>
             <View style={styles.compactSwitchList}>
               <View style={styles.switchRow}>
@@ -1149,6 +1174,25 @@ const styles = StyleSheet.create({
   },
   sectionHeadingCopy: { flex: 1, minWidth: 220, gap: 2 },
   sectionTitle: { color: colors.text, fontSize: 16, fontWeight: "800" },
+  rmapStatus: {
+    padding: 10,
+    gap: 2,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.panel2,
+  },
+  rmapStatusEyebrow: {
+    color: colors.muted,
+    fontSize: 8,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  rmapStatusHeadline: { color: colors.text, fontSize: 13, fontWeight: "800" },
+  rmapStatusError: { color: colors.red },
+  rmapStatusSuccess: { color: colors.green },
+  rmapStatusWarning: { color: "#f1c56c" },
+  rmapStatusRow: { color: colors.muted, fontSize: 9, lineHeight: 13 },
   compactSwitchList: { gap: 2 },
   endpointList: { gap: 6 },
   endpointRow: {

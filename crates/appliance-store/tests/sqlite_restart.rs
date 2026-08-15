@@ -12,9 +12,10 @@ use reticulum_appliance_store::{
     MessageId, OutboxCommitOutcome, OutboxMaterial, OutboxRetryOutcome, OutboxStatus,
     PacketEvidence, PhoneLocationAuthorization, PhoneLocationSample, PhoneLocationSource,
     PhoneLocationUnavailableReason, ReconcileWork, RfTraceBootId, RfTraceEventSequence,
-    RfTraceImportBatch, RfTraceInterfaceId, RfTraceObservation, RfTraceObservationKind,
-    RfTracePageRequest, RfTraceRadioProfile, RfTraceRouteObservation, RfTraceRouteResolution,
-    RfTraceScope, RfTraceTxObservation, RfTraceTxOutcome, RnsAttemptToken, SQLITE_SCHEMA_VERSION,
+    RfTraceImportBatch, RfTraceInboundProofObservation, RfTraceInboundProofStage,
+    RfTraceInterfaceId, RfTraceObservation, RfTraceObservationKind, RfTracePageRequest,
+    RfTraceRadioProfile, RfTraceRouteObservation, RfTraceRouteResolution, RfTraceScope,
+    RfTraceTxObservation, RfTraceTxOutcome, RnsAttemptToken, SQLITE_SCHEMA_VERSION,
     SqliteChatStore, SqliteStoreError, SubmissionFailure, SubmissionId, SubmissionState,
     TimelineDirection, UnixTimestampMillis,
 };
@@ -169,6 +170,25 @@ fn rf_tx(sequence: u64, token: u8) -> RfTraceObservation {
     )
 }
 
+fn rf_inbound_proof(sequence: u64, token: u8) -> RfTraceObservation {
+    RfTraceObservation::new(
+        RfTraceEventSequence::new(sequence).unwrap(),
+        sequence * 1_000,
+        RfTraceObservationKind::InboundProof(
+            RfTraceInboundProofObservation::new(
+                RnsAttemptToken::new([token; 32]),
+                RfTraceInboundProofStage::PhysicalTxFailed,
+                Some(MessageId::new([0xc1; 32])),
+                Some(evidence(0xc2)),
+                Some(RfTraceInterfaceId::new(1)),
+                Some((-104, 7)),
+                Some(RfTraceTxOutcome::TxFault),
+            )
+            .unwrap(),
+        ),
+    )
+}
+
 #[test]
 fn database_binding_is_persistent_and_rejects_a_different_device() {
     let database = TestDatabase::new("device-binding");
@@ -253,14 +273,14 @@ fn non_current_schema_is_rejected_without_mutation() {
             )
             .unwrap();
         connection
-            .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION - 1)
+            .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION - 2)
             .unwrap();
     }
 
     assert!(matches!(
         SqliteChatStore::open(&database.path),
         Err(SqliteStoreError::UnsupportedSchemaVersion(version))
-            if version == SQLITE_SCHEMA_VERSION - 1
+            if version == SQLITE_SCHEMA_VERSION - 2
     ));
 
     let connection = rusqlite::Connection::open(&database.path).unwrap();
@@ -268,7 +288,7 @@ fn non_current_schema_is_rejected_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        SQLITE_SCHEMA_VERSION - 1
+        SQLITE_SCHEMA_VERSION - 2
     );
     assert_eq!(
         connection
@@ -285,6 +305,58 @@ fn non_current_schema_is_rejected_without_mutation() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(outbox_columns, vec!["obsolete"]);
+}
+
+#[test]
+fn schema_ten_rf_trace_rows_migrate_to_eleven_without_data_loss() {
+    let database = TestDatabase::new("schema-ten-rf-trace-migration");
+    let expected = rf_tx(1, 0xa1);
+    {
+        let mut store = SqliteChatStore::open(&database.path).unwrap();
+        let batch = RfTraceImportBatch::new(
+            RfTraceBootId::new(0xa2),
+            rf_profile(0xa3),
+            2_000,
+            false,
+            vec![expected],
+        )
+        .unwrap();
+        assert_eq!(store.import_rf_trace_batch(batch).unwrap().inserted(), 1);
+        store.close().unwrap();
+    }
+
+    {
+        let connection = rusqlite::Connection::open(&database.path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE rf_trace_events DROP COLUMN inbound_message_id;\n\
+                 ALTER TABLE rf_trace_events DROP COLUMN inbound_stage;",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 10_u32)
+            .unwrap();
+    }
+
+    let reopened = SqliteChatStore::open(&database.path).unwrap();
+    assert_eq!(reopened.schema_version().unwrap(), SQLITE_SCHEMA_VERSION);
+    let page = reopened
+        .rf_trace(RfTracePageRequest::new(RfTraceScope::All, None, 10).unwrap())
+        .unwrap();
+    assert_eq!(page.events().len(), 1);
+    assert_eq!(page.events()[0].observation(), expected);
+
+    let connection = rusqlite::Connection::open(&database.path).unwrap();
+    let mut statement = connection
+        .prepare("PRAGMA table_info(rf_trace_events)")
+        .unwrap();
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.iter().any(|name| name == "inbound_stage"));
+    assert!(columns.iter().any(|name| name == "inbound_message_id"));
 }
 
 #[test]
@@ -717,4 +789,39 @@ fn sqlite_rf_trace_round_trip_duplicate_and_restart_preserve_correlation() {
         })
         .unwrap();
     assert_eq!(tx.frame_completed_at_us(), [Some(1_800), Some(1_900)]);
+}
+
+#[test]
+fn sqlite_rf_trace_restart_preserves_inbound_proof_lifecycle_evidence() {
+    let database = TestDatabase::new("rf-trace-inbound-proof");
+    {
+        let mut store = SqliteChatStore::open(&database.path).unwrap();
+        let batch = RfTraceImportBatch::new(
+            RfTraceBootId::new(0xf1),
+            rf_profile(0xf2),
+            6_000,
+            false,
+            vec![rf_inbound_proof(1, 0xf3)],
+        )
+        .unwrap();
+        assert_eq!(store.import_rf_trace_batch(batch).unwrap().inserted(), 1);
+        store.close().unwrap();
+    }
+
+    let reopened = SqliteChatStore::open(&database.path).unwrap();
+    let page = reopened
+        .rf_trace(RfTracePageRequest::new(RfTraceScope::All, None, 10).unwrap())
+        .unwrap();
+    let [event] = page.events() else {
+        panic!("one inbound proof event must survive restart");
+    };
+    let RfTraceObservationKind::InboundProof(proof) = event.observation().kind() else {
+        panic!("the persisted event must retain its inbound proof kind");
+    };
+    assert_eq!(proof.stage(), RfTraceInboundProofStage::PhysicalTxFailed);
+    assert_eq!(proof.message_id(), Some(MessageId::new([0xc1; 32])));
+    assert_eq!(proof.packet_evidence(), Some(evidence(0xc2)));
+    assert_eq!(proof.interface(), Some(RfTraceInterfaceId::new(1)));
+    assert_eq!(proof.signal(), Some((-104, 7)));
+    assert_eq!(proof.dispatch_outcome(), Some(RfTraceTxOutcome::TxFault));
 }

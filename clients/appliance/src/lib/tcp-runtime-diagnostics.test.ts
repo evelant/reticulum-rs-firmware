@@ -21,6 +21,7 @@ function status(
     dns_diagnostics: null,
     ipv4_address: "192.0.2.10",
     last_tcp_failure: lastTcpFailure,
+    rmap_status: null,
     rssi_dbm: -70,
     tcp_peer_state: tcpPeerState,
     wifi_state: "connected",

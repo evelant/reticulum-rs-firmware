@@ -2800,6 +2800,10 @@ where
 
     /// Route one exact ordinary protocol-action owner to its selected
     /// interface.
+    #[allow(
+        clippy::result_large_err,
+        reason = "route failure must return the exact ordinary packet owner inline"
+    )]
     pub fn try_route_ordinary(
         &mut self,
         job: OrdinaryTxJob<'static>,

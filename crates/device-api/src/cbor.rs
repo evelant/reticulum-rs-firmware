@@ -17,11 +17,12 @@ use crate::model::{
     ProbePollRequest, ProbePollResponse, ProbeStartAccepted, ProbeStartOutcome, ProbeStartRequest,
     ProbeSuccess, RESPONSE_ERROR, RadioTraceAppliedLoraProfile, RadioTraceAttemptOutcome,
     RadioTraceAttemptTerminal, RadioTraceAttemptToken, RadioTraceCursor, RadioTraceDataTx,
-    RadioTraceEvent, RadioTraceEventKind, RadioTraceLogicalRx, RadioTracePacketEvidence,
-    RadioTracePage, RadioTracePageRequest, RadioTraceRouteSelected, RadioTraceTxOutcome,
-    RequestEnvelope, RequestId, ResponseEnvelope, RnsDiagnostics, RouteDiagnosticEntry,
-    RouteDiagnosticResolution, RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionFailure,
-    SubmissionId, SubmissionState, SubmissionStatus,
+    RadioTraceEvent, RadioTraceEventKind, RadioTraceInboundProof, RadioTraceInboundProofPacket,
+    RadioTraceInboundProofStage, RadioTraceLogicalRx, RadioTracePacketEvidence, RadioTracePage,
+    RadioTracePageRequest, RadioTraceRouteSelected, RadioTraceTxOutcome, RequestEnvelope,
+    RequestId, ResponseEnvelope, RnsDiagnostics, RouteDiagnosticEntry, RouteDiagnosticResolution,
+    RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionFailure, SubmissionId,
+    SubmissionState, SubmissionStatus,
 };
 #[cfg(feature = "network-config")]
 use crate::model::{
@@ -34,8 +35,10 @@ use crate::model::{
     ReticulumDnsResolution, ReticulumDnsResolutionSource, ReticulumTcpFailure,
     ReticulumTcpPeerConfigSummary, ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate,
     ReticulumTcpPeerHostname, ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState,
-    ReticulumTcpPeerUpdate, RmapConfig, RmapLocation, WifiCredentialUpdate,
-    WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate, WifiSsid, WifiStationState,
+    ReticulumTcpPeerUpdate, RmapConfig, RmapDeferredReason, RmapEgressConfirmation,
+    RmapInitialTcpGateState, RmapLocation, RmapQueueOutcome, RmapRuntimeStatus, RmapStampPhase,
+    WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate,
+    WifiSsid, WifiStationState,
 };
 #[cfg(feature = "lxmf")]
 use crate::model::{
@@ -250,6 +253,30 @@ pub enum RequiredField {
     NetworkLastTcpFailure,
     /// Optional bounded DNS diagnostics at network-status key 9.
     NetworkDnsDiagnostics,
+    /// Optional RMAP publication diagnostics at network-status key 10.
+    NetworkRmapStatus,
+    /// Exact compact RMAP status array.
+    RmapRuntimeStatus,
+    /// Applied-configuration flag at RMAP status index 0.
+    RmapRuntimeConfigApplied,
+    /// Stamp phase at RMAP status index 1.
+    RmapRuntimeStampPhase,
+    /// Stamp-attempt count at RMAP status index 2.
+    RmapRuntimeStampAttempts,
+    /// Initial TCP gate state at RMAP status index 3.
+    RmapRuntimeInitialTcpGate,
+    /// Accepted publication count at RMAP status index 4.
+    RmapRuntimeQueuedCount,
+    /// Last queue outcome at RMAP status index 5.
+    RmapRuntimeLastQueueOutcome,
+    /// Optional last queue-attempt uptime at RMAP status index 6.
+    RmapRuntimeLastQueueAt,
+    /// Physical-egress evidence at RMAP status index 7.
+    RmapRuntimeEgressConfirmation,
+    /// Optional next-due delay at RMAP status index 8.
+    RmapRuntimeNextDue,
+    /// Optional deferral reason at RMAP status index 9.
+    RmapRuntimeDeferredReason,
     /// Optional DHCP gateway at DNS-diagnostics key 0.
     ReticulumDnsGatewayIpv4,
     /// Fixed DHCP resolver slots at DNS-diagnostics key 1.
@@ -606,6 +633,22 @@ pub enum RequiredField {
     RadioTraceTerminalOutcome,
     /// Optional proof ingress at attempt-terminal key 2.
     RadioTraceTerminalProofIngress,
+    /// Correlation token at inbound-proof key 0.
+    RadioTraceInboundProofCorrelationToken,
+    /// Durable receiver lifecycle stage at inbound-proof key 1.
+    RadioTraceInboundProofStage,
+    /// Optional validated LXMF message identifier at inbound-proof key 2.
+    RadioTraceInboundProofMessageId,
+    /// Optional encoded packet SHA-256 at inbound-proof key 3.
+    RadioTraceInboundProofPacketSha256,
+    /// Optional encoded packet length at inbound-proof key 4.
+    RadioTraceInboundProofPacketLength,
+    /// Optional receive or proof-return interface at inbound-proof key 5.
+    RadioTraceInboundProofInterface,
+    /// Optional receiver signal pair at inbound-proof key 6.
+    RadioTraceInboundProofSignal,
+    /// Optional physical proof-dispatch outcome at inbound-proof key 7.
+    RadioTraceInboundProofDispatchOutcome,
     /// Submission state at body key 1.
     SubmissionState,
     /// State-specific prepared packet length at body key 2.
@@ -781,6 +824,8 @@ pub enum DecodeError {
     InvalidRadioTraceRouteSelected,
     /// A radio-trace terminal event carried partial proof-ingress signal data.
     InvalidRadioTraceAttemptTerminal,
+    /// A radio-trace inbound-proof stage carried contradictory evidence.
+    InvalidRadioTraceInboundProof,
     /// A DNS diagnostic contained contradictory state-specific fields.
     InvalidReticulumDnsDiagnostics,
     /// An LXMF summary contained a semantically impossible value combination.
@@ -1807,6 +1852,7 @@ fn encode_network_status(
     put!(encoder.map(
         8 + u64::from(status.last_tcp_failure.is_some())
             + u64::from(status.dns_diagnostics.is_some())
+            + u64::from(status.rmap_status.is_some())
     ));
     put!(encoder.u8(0));
     put!(encoder.u64(status.configured_revision));
@@ -1859,6 +1905,50 @@ fn encode_network_status(
     if let Some(diagnostics) = status.dns_diagnostics {
         put!(encoder.u8(9));
         encode_reticulum_dns_diagnostics(encoder, diagnostics)?;
+    }
+    if let Some(rmap) = status.rmap_status {
+        put!(encoder.u8(10));
+        encode_rmap_runtime_status(encoder, rmap)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "network-config")]
+fn encode_rmap_runtime_status(
+    encoder: &mut SliceEncoder<'_>,
+    status: RmapRuntimeStatus,
+) -> Result<(), EncodeError> {
+    put!(encoder.array(10));
+    put!(encoder.bool(status.config_applied));
+    put!(encoder.u8(status.stamp_phase.wire_code()));
+    put!(encoder.u64(status.stamp_attempts));
+    put!(encoder.u8(status.initial_tcp_gate.wire_code()));
+    put!(encoder.u32(status.queued_count));
+    put!(encoder.u8(status.last_queue_outcome.wire_code()));
+    match status.last_queue_attempt_at_uptime_seconds {
+        Some(at) => {
+            put!(encoder.u64(at));
+        }
+        None => {
+            put!(encoder.null());
+        }
+    }
+    put!(encoder.u8(status.egress_confirmation.wire_code()));
+    match status.next_due_in_seconds {
+        Some(delay) => {
+            put!(encoder.u64(delay));
+        }
+        None => {
+            put!(encoder.null());
+        }
+    }
+    match status.deferred_reason {
+        Some(reason) => {
+            put!(encoder.u8(reason.wire_code()));
+        }
+        None => {
+            put!(encoder.null());
+        }
     }
     Ok(())
 }
@@ -2543,6 +2633,9 @@ fn encode_radio_trace_event(
         RadioTraceEventKind::AttemptTerminal(terminal) => {
             encode_radio_trace_attempt_terminal(encoder, terminal)
         }
+        RadioTraceEventKind::InboundProof(proof) => {
+            encode_radio_trace_inbound_proof(encoder, proof)
+        }
     }
 }
 
@@ -2629,6 +2722,60 @@ fn encode_radio_trace_attempt_terminal(
     put!(encoder.u8(terminal.outcome().wire_code()));
     match terminal.proof_ingress() {
         Some(ingress) => encode_ingress_observation(encoder, ingress)?,
+        None => {
+            put!(encoder.null());
+        }
+    }
+    Ok(())
+}
+
+fn encode_radio_trace_inbound_proof(
+    encoder: &mut SliceEncoder<'_>,
+    proof: RadioTraceInboundProof,
+) -> Result<(), EncodeError> {
+    put!(encoder.array(8));
+    put!(encoder.bytes(proof.correlation_token().as_bytes()));
+    put!(encoder.u8(proof.stage().wire_code()));
+    match proof.message_id() {
+        Some(message_id) => {
+            put!(encoder.bytes(&message_id));
+        }
+        None => {
+            put!(encoder.null());
+        }
+    }
+    match proof.packet() {
+        Some(packet) => {
+            put!(encoder.bytes(packet.encoded_packet_sha256().as_bytes()));
+            put!(encoder.u16(packet.packet_len()));
+        }
+        None => {
+            put!(encoder.null());
+            put!(encoder.null());
+        }
+    }
+    match proof.interface_id() {
+        Some(interface) => {
+            put!(encoder.u8(interface));
+        }
+        None => {
+            put!(encoder.null());
+        }
+    }
+    match proof.signal() {
+        Some(signal) => {
+            put!(encoder.array(2));
+            put!(encoder.i16(signal.rssi_dbm()));
+            put!(encoder.i16(signal.snr_db()));
+        }
+        None => {
+            put!(encoder.null());
+        }
+    }
+    match proof.dispatch_outcome() {
+        Some(outcome) => {
+            put!(encoder.u8(outcome.wire_code()));
+        }
         None => {
             put!(encoder.null());
         }
@@ -5561,6 +5708,7 @@ fn decode_radio_trace_event_compact(
         3 => RadioTraceEventKind::AttemptTerminal(decode_radio_trace_attempt_terminal_compact(
             decoder,
         )?),
+        4 => RadioTraceEventKind::InboundProof(decode_radio_trace_inbound_proof_compact(decoder)?),
         other => {
             return Err(DecodeError::InvalidValue {
                 field: RequiredField::RadioTraceEventKind,
@@ -5692,6 +5840,101 @@ fn decode_radio_trace_attempt_terminal_compact(
     ))
 }
 
+fn decode_radio_trace_inbound_proof_compact(
+    decoder: &mut Decoder<'_>,
+) -> Result<RadioTraceInboundProof, DecodeError> {
+    decode_exact_array_len(decoder, 8, RequiredField::RadioTraceEventValue)?;
+    let correlation_token = RadioTraceAttemptToken::new(decode_fixed_bytes::<32>(
+        decoder,
+        RequiredField::RadioTraceInboundProofCorrelationToken,
+    )?);
+    let stage =
+        decode_radio_trace_inbound_proof_stage(decoder.u8().map_err(|_| DecodeError::Malformed)?)?;
+    let message_id =
+        decode_optional_fixed_bytes::<32>(decoder, RequiredField::RadioTraceInboundProofMessageId)?;
+    let packet_sha256 = decode_optional_fixed_bytes::<32>(
+        decoder,
+        RequiredField::RadioTraceInboundProofPacketSha256,
+    )?;
+    let packet_len = if matches!(
+        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+        Type::Null
+    ) {
+        decoder.null().map_err(|_| DecodeError::Malformed)?;
+        None
+    } else {
+        Some(decoder.u16().map_err(|_| DecodeError::Malformed)?)
+    };
+    let packet = match (packet_sha256, packet_len) {
+        (None, None) => None,
+        (Some(sha256), Some(packet_len)) => {
+            RadioTraceInboundProofPacket::try_new(packet_len, EncodedPacketSha256::new(sha256))
+        }
+        _ => return Err(DecodeError::InvalidRadioTraceInboundProof),
+    };
+    let interface_id = if matches!(
+        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+        Type::Null
+    ) {
+        decoder.null().map_err(|_| DecodeError::Malformed)?;
+        None
+    } else {
+        Some(decoder.u8().map_err(|_| DecodeError::Malformed)?)
+    };
+    let signal = if matches!(
+        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+        Type::Null
+    ) {
+        decoder.null().map_err(|_| DecodeError::Malformed)?;
+        None
+    } else {
+        decode_exact_array_len(decoder, 2, RequiredField::RadioTraceInboundProofSignal)?;
+        Some(IngressSignal::new(
+            decoder.i16().map_err(|_| DecodeError::Malformed)?,
+            decoder.i16().map_err(|_| DecodeError::Malformed)?,
+        ))
+    };
+    let dispatch_outcome = if matches!(
+        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+        Type::Null
+    ) {
+        decoder.null().map_err(|_| DecodeError::Malformed)?;
+        None
+    } else {
+        Some(decode_radio_trace_tx_outcome(
+            decoder.u8().map_err(|_| DecodeError::Malformed)?,
+        )?)
+    };
+    RadioTraceInboundProof::try_new(
+        correlation_token,
+        stage,
+        message_id,
+        packet,
+        interface_id,
+        signal,
+        dispatch_outcome,
+    )
+    .map_err(|_| DecodeError::InvalidRadioTraceInboundProof)
+}
+
+fn decode_radio_trace_inbound_proof_stage(
+    value: u8,
+) -> Result<RadioTraceInboundProofStage, DecodeError> {
+    match value {
+        0 => Ok(RadioTraceInboundProofStage::DataLogicalRx),
+        1 => Ok(RadioTraceInboundProofStage::DurableCommit),
+        2 => Ok(RadioTraceInboundProofStage::ProofRetained),
+        3 => Ok(RadioTraceInboundProofStage::ProofStaged),
+        4 => Ok(RadioTraceInboundProofStage::OrdinaryQueued),
+        5 => Ok(RadioTraceInboundProofStage::PhysicalTxDone),
+        6 => Ok(RadioTraceInboundProofStage::PhysicalTxFailed),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::RadioTraceInboundProofStage,
+            value: u64::from(other),
+        }),
+    }
+}
+
 fn decode_radio_trace_tx_outcome(value: u8) -> Result<RadioTraceTxOutcome, DecodeError> {
     let outcome = match value {
         0 => RadioTraceTxOutcome::Transmitted,
@@ -5816,6 +6059,8 @@ fn decode_network_status(body: &[u8]) -> Result<NetworkRuntimeStatus, DecodeErro
     let mut last_tcp_failure = None;
     let mut dns_diagnostics_seen = false;
     let mut dns_diagnostics = None;
+    let mut rmap_status_seen = false;
+    let mut rmap_status = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -5915,6 +6160,11 @@ fn decode_network_status(body: &[u8]) -> Result<NetworkRuntimeStatus, DecodeErro
                 dns_diagnostics_seen = true;
                 dns_diagnostics = Some(decode_reticulum_dns_diagnostics(&mut decoder)?);
             }
+            10 => {
+                reject_duplicate(rmap_status_seen, RequiredField::NetworkRmapStatus)?;
+                rmap_status_seen = true;
+                rmap_status = Some(decode_rmap_runtime_status(&mut decoder)?);
+            }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
@@ -5935,7 +6185,7 @@ fn decode_network_status(body: &[u8]) -> Result<NetworkRuntimeStatus, DecodeErro
     if !rssi_seen {
         return Err(DecodeError::MissingField(RequiredField::NetworkRssiDbm));
     }
-    NetworkRuntimeStatus::new_with_tcp_diagnostics(
+    let status = NetworkRuntimeStatus::new_with_tcp_diagnostics(
         require(configured_revision, RequiredField::NetworkConfigRevision)?,
         require(applied_revision, RequiredField::NetworkAppliedRevision)?,
         require(wifi_state, RequiredField::NetworkWifiState)?,
@@ -5947,7 +6197,52 @@ fn decode_network_status(body: &[u8]) -> Result<NetworkRuntimeStatus, DecodeErro
         last_tcp_failure,
         dns_diagnostics,
     )
-    .map_err(|_| DecodeError::InvalidWifiSsid)
+    .map_err(|_| DecodeError::InvalidWifiSsid)?;
+    Ok(match rmap_status {
+        Some(rmap) => status.with_rmap_status(rmap),
+        None => status,
+    })
+}
+
+#[cfg(feature = "network-config")]
+fn decode_rmap_runtime_status(decoder: &mut Decoder<'_>) -> Result<RmapRuntimeStatus, DecodeError> {
+    decode_exact_array_len(decoder, 10, RequiredField::RmapRuntimeStatus)?;
+    let config_applied = decoder.bool().map_err(|_| DecodeError::Malformed)?;
+    let stamp_phase = decode_rmap_stamp_phase(decoder.u8().map_err(|_| DecodeError::Malformed)?)?;
+    let stamp_attempts = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+    let initial_tcp_gate =
+        decode_rmap_initial_tcp_gate(decoder.u8().map_err(|_| DecodeError::Malformed)?)?;
+    let queued_count = decoder.u32().map_err(|_| DecodeError::Malformed)?;
+    let last_queue_outcome =
+        decode_rmap_queue_outcome(decoder.u8().map_err(|_| DecodeError::Malformed)?)?;
+    let last_queue_attempt_at_uptime_seconds =
+        decode_optional_u64(decoder, RequiredField::RmapRuntimeLastQueueAt)?;
+    let egress_confirmation =
+        decode_rmap_egress_confirmation(decoder.u8().map_err(|_| DecodeError::Malformed)?)?;
+    let next_due_in_seconds = decode_optional_u64(decoder, RequiredField::RmapRuntimeNextDue)?;
+    let deferred_reason = if matches!(
+        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+        Type::Null
+    ) {
+        decoder.null().map_err(|_| DecodeError::Malformed)?;
+        None
+    } else {
+        Some(decode_rmap_deferred_reason(
+            decoder.u8().map_err(|_| DecodeError::Malformed)?,
+        )?)
+    };
+    Ok(RmapRuntimeStatus::new(
+        config_applied,
+        stamp_phase,
+        stamp_attempts,
+        initial_tcp_gate,
+        queued_count,
+        last_queue_outcome,
+        last_queue_attempt_at_uptime_seconds,
+        egress_confirmation,
+        next_due_in_seconds,
+        deferred_reason,
+    ))
 }
 
 #[cfg(feature = "network-config")]
@@ -6196,6 +6491,22 @@ fn decode_optional_ipv4(
     }
 }
 
+#[cfg(feature = "network-config")]
+fn decode_optional_u64(
+    decoder: &mut Decoder<'_>,
+    _field: RequiredField,
+) -> Result<Option<u64>, DecodeError> {
+    if matches!(
+        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+        Type::Null
+    ) {
+        decoder.null().map_err(|_| DecodeError::Malformed)?;
+        Ok(None)
+    } else {
+        decoder.u64().map(Some).map_err(|_| DecodeError::Malformed)
+    }
+}
+
 fn decode_exact_array_len(
     decoder: &mut Decoder<'_>,
     expected: usize,
@@ -6259,6 +6570,81 @@ fn decode_tcp_failure(value: u8) -> Result<ReticulumTcpFailure, DecodeError> {
         8 => Ok(ReticulumTcpFailure::TransmitFailed),
         other => Err(DecodeError::InvalidValue {
             field: RequiredField::NetworkLastTcpFailure,
+            value: u64::from(other),
+        }),
+    }
+}
+
+#[cfg(feature = "network-config")]
+fn decode_rmap_stamp_phase(value: u8) -> Result<RmapStampPhase, DecodeError> {
+    match value {
+        0 => Ok(RmapStampPhase::Disabled),
+        1 => Ok(RmapStampPhase::Searching),
+        2 => Ok(RmapStampPhase::Ready),
+        3 => Ok(RmapStampPhase::Exhausted),
+        4 => Ok(RmapStampPhase::Faulted),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::RmapRuntimeStampPhase,
+            value: u64::from(other),
+        }),
+    }
+}
+
+#[cfg(feature = "network-config")]
+fn decode_rmap_initial_tcp_gate(value: u8) -> Result<RmapInitialTcpGateState, DecodeError> {
+    match value {
+        0 => Ok(RmapInitialTcpGateState::NotRequired),
+        1 => Ok(RmapInitialTcpGateState::Waiting),
+        2 => Ok(RmapInitialTcpGateState::Open),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::RmapRuntimeInitialTcpGate,
+            value: u64::from(other),
+        }),
+    }
+}
+
+#[cfg(feature = "network-config")]
+fn decode_rmap_queue_outcome(value: u8) -> Result<RmapQueueOutcome, DecodeError> {
+    match value {
+        0 => Ok(RmapQueueOutcome::NotAttempted),
+        1 => Ok(RmapQueueOutcome::Accepted),
+        2 => Ok(RmapQueueOutcome::AnnounceAdmissionDeferred),
+        3 => Ok(RmapQueueOutcome::OrdinaryAdmissionDeferred),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::RmapRuntimeLastQueueOutcome,
+            value: u64::from(other),
+        }),
+    }
+}
+
+#[cfg(feature = "network-config")]
+fn decode_rmap_egress_confirmation(value: u8) -> Result<RmapEgressConfirmation, DecodeError> {
+    match value {
+        0 => Ok(RmapEgressConfirmation::NotApplicable),
+        1 => Ok(RmapEgressConfirmation::NotObserved),
+        2 => Ok(RmapEgressConfirmation::Confirmed),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::RmapRuntimeEgressConfirmation,
+            value: u64::from(other),
+        }),
+    }
+}
+
+#[cfg(feature = "network-config")]
+fn decode_rmap_deferred_reason(value: u8) -> Result<RmapDeferredReason, DecodeError> {
+    match value {
+        0 => Ok(RmapDeferredReason::DiscoveryModelInvalid),
+        1 => Ok(RmapDeferredReason::PayloadEncodingFailed),
+        2 => Ok(RmapDeferredReason::StampInitializationFailed),
+        3 => Ok(RmapDeferredReason::DestinationActivationFailed),
+        4 => Ok(RmapDeferredReason::StampSearchExhausted),
+        5 => Ok(RmapDeferredReason::InitialTcpNotReady),
+        6 => Ok(RmapDeferredReason::AnnouncePayloadTooLarge),
+        7 => Ok(RmapDeferredReason::AnnounceQueueFull),
+        8 => Ok(RmapDeferredReason::AnnounceConstructionRejected),
+        9 => Ok(RmapDeferredReason::OrdinaryQueueRejected),
+        other => Err(DecodeError::InvalidValue {
+            field: RequiredField::RmapRuntimeDeferredReason,
             value: u64::from(other),
         }),
     }
@@ -7321,6 +7707,21 @@ fn decode_fixed_bytes<const N: usize>(
             expected: N,
             actual: bytes.len(),
         })
+}
+
+fn decode_optional_fixed_bytes<const N: usize>(
+    decoder: &mut Decoder<'_>,
+    field: RequiredField,
+) -> Result<Option<[u8; N]>, DecodeError> {
+    if matches!(
+        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+        Type::Null
+    ) {
+        decoder.null().map_err(|_| DecodeError::Malformed)?;
+        Ok(None)
+    } else {
+        decode_fixed_bytes(decoder, field).map(Some)
+    }
 }
 
 fn decode_direct_radio_availability(value: u8) -> Result<CapabilityAvailability, DecodeError> {

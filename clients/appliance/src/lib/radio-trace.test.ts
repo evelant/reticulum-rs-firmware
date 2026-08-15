@@ -163,6 +163,54 @@ describe("RF trace presentation", () => {
     expect(isRadioTraceAttention(timeout)).toBeTrue();
   });
 
+  test("shows the receiver DATA-to-proof lifecycle with shared correlation evidence", () => {
+    const received = event(
+      {
+        kind: "inbound_proof",
+        correlation_token: "45".repeat(32),
+        stage: "data_logical_rx",
+        message_id: null,
+        packet_evidence: PACKET,
+        interface_id: 1,
+        rssi_dbm: -104,
+        snr_db: 7,
+        dispatch_outcome: null,
+      },
+      { correlation: null },
+    );
+    const failed = event(
+      {
+        kind: "inbound_proof",
+        correlation_token: "45".repeat(32),
+        stage: "physical_tx_failed",
+        message_id: "67".repeat(32),
+        packet_evidence: PACKET,
+        interface_id: 1,
+        rssi_dbm: null,
+        snr_db: null,
+        dispatch_outcome: "tx_fault",
+      },
+      { event_id: 8, correlation: null },
+    );
+
+    const receivedPresentation = radioTracePresentation(received);
+    expect(receivedPresentation.title).toBe("Inbound DATA reconstructed");
+    expect(receivedPresentation.metadata).toContain(
+      "Inbound DATA · interface 1 · RSSI -104 dBm · SNR 7 dB",
+    );
+    expect(receivedPresentation.metadata).toContain(
+      `Inbound DATA correlation token ${"45".repeat(32)}`,
+    );
+    const failedPresentation = radioTracePresentation(failed);
+    expect(failedPresentation.title).toBe("Delivery proof did not reach TxDone");
+    expect(failedPresentation.tone).toBe("danger");
+    expect(failedPresentation.metadata).toContain("Physical transmit fault");
+    expect(failedPresentation.metadata).toContain(`LXMF message ${"67".repeat(32)}`);
+    expect(isRadioTraceAttention(received)).toBeFalse();
+    expect(isRadioTraceAttention(failed)).toBeTrue();
+    expect(filterRadioTrace([received, failed], "terminal", "")).toEqual([failed, received]);
+  });
+
   test("filters by kind, attention, correlation and searchable evidence", () => {
     const route = event({
       kind: "route_selected",

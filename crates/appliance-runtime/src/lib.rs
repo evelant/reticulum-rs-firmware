@@ -69,8 +69,9 @@ pub use network::{
     ReticulumDnsRawOutcomeView, ReticulumDnsRawSetupStateView, ReticulumDnsRawSourceView,
     ReticulumDnsResolutionSourceView, ReticulumDnsResolutionView, ReticulumTcpFailureView,
     ReticulumTcpPeerHostnameInput, ReticulumTcpPeerIpv4Input, ReticulumTcpPeerStateView,
-    ReticulumTcpPeerView, RmapPhoneLocation, WifiCredentialUpdate, WifiNetworkProfileView,
-    WifiStationStateView,
+    ReticulumTcpPeerView, RmapDeferredReasonView, RmapEgressConfirmationView,
+    RmapInitialTcpGateStateView, RmapPhoneLocation, RmapQueueOutcomeView, RmapRuntimeStatusView,
+    RmapStampPhaseView, WifiCredentialUpdate, WifiNetworkProfileView, WifiStationStateView,
 };
 pub use nomad::{
     NomadFetchFailure, NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse,
@@ -84,9 +85,9 @@ pub use probe::{
 };
 pub use radio_trace::{
     RadioTraceAttemptOutcomeView, RadioTraceEventKindView, RadioTraceEventView,
-    RadioTraceMessageCorrelationView, RadioTracePageRequest, RadioTracePageView,
-    RadioTraceProfileView, RadioTraceRequestError, RadioTraceRouteResolutionView,
-    RadioTraceTxOutcomeView,
+    RadioTraceInboundProofStageView, RadioTraceMessageCorrelationView, RadioTracePageRequest,
+    RadioTracePageView, RadioTraceProfileView, RadioTraceRequestError,
+    RadioTraceRouteResolutionView, RadioTraceTxOutcomeView,
 };
 
 const COMMAND_CAPACITY: usize = 32;

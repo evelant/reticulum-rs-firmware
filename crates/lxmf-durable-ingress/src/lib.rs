@@ -36,7 +36,7 @@ use reticulum_lxmf_store::{
 use reticulum_node_core::{
     APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventId, ApplicationEventKind,
     ApplicationEventLease, ApplicationLinkRole, DelayedProofId, DelayedProofOwner,
-    DelayedProofTransactionError,
+    DelayedProofTransactionError, InboundProofEvidence,
 };
 
 #[cfg(test)]
@@ -71,6 +71,7 @@ pub struct DurableIngressSuccess {
     receipt: DurableMessageReceipt,
     kind: DurableIngressCommitKind,
     queued_proof_id: Option<DelayedProofId>,
+    proof_evidence: Option<InboundProofEvidence>,
 }
 
 impl DurableIngressSuccess {
@@ -95,6 +96,11 @@ impl DurableIngressSuccess {
     /// result is correlation evidence only and does not authorize transmission.
     pub const fn queued_proof_id(self) -> Option<DelayedProofId> {
         self.queued_proof_id
+    }
+
+    /// Covered-DATA and encoded-proof evidence for a queued retained proof.
+    pub const fn proof_evidence(self) -> Option<InboundProofEvidence> {
+        self.proof_evidence
     }
 }
 
@@ -385,12 +391,14 @@ where
     let acknowledged = transaction.acknowledge_into_ready();
     let acknowledged_event_id = acknowledged.event_id();
     let queued_proof_id = acknowledged.proof_id();
+    let proof_evidence = acknowledged.proof_evidence();
     drop(acknowledged.into_event());
     DurableIngressOutcome::Durable(DurableIngressSuccess {
         event_id: acknowledged_event_id,
         receipt,
         kind,
         queued_proof_id: Some(queued_proof_id),
+        proof_evidence: Some(proof_evidence),
     })
 }
 
@@ -431,6 +439,7 @@ where
             receipt,
             kind,
             queued_proof_id: None,
+            proof_evidence: None,
         }),
         Err(_failure) => unreachable!(
             "an exclusively owned proofless lease cannot acquire a retained proof after store I/O"

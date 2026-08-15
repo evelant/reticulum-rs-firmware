@@ -73,7 +73,7 @@ use reticulum_appliance_display_model::{
 #[cfg(feature = "display")]
 use reticulum_board_e290::EINK_SPI_FREQUENCY_HZ;
 use reticulum_board_e290_radio::{E290Na915TxPower, E290Radio, E290RadioConfiguration};
-use reticulum_device_api::LxmfPeerDiscoveryIncarnation;
+use reticulum_device_api::{LxmfPeerDiscoveryIncarnation, RmapDeferredReason};
 use reticulum_device_api_handoff::DeviceApiHandoff;
 use reticulum_device_api_pairing::DeviceId;
 #[cfg(feature = "appliance")]
@@ -110,7 +110,9 @@ use reticulum_e290_firmware::{
     nomad_responder::activate_nomad_responder,
     pairing_control_handoff::PairingControlHandoff,
     radio_diagnostics::RadioDiagnosticsCell,
-    rmap_discovery::{RmapPublicationPolicy, activate_rmap_discovery_destination},
+    rmap_discovery::{
+        RmapDiscoveryStatusCell, RmapPublicationPolicy, activate_rmap_discovery_destination,
+    },
     session_admission_handoff::SessionAdmissionHandoff,
     storage_device_id_from_eui48,
 };
@@ -297,6 +299,7 @@ static AUTHENTICATED_API: StaticCell<
 static WIFI_STATION_STATUS: StaticCell<WifiStationStatusCell> = StaticCell::new();
 #[cfg(feature = "gateway")]
 static WIFI_TCP_STATUS: StaticCell<WifiTcpStatusCell> = StaticCell::new();
+static RMAP_DISCOVERY_STATUS: StaticCell<RmapDiscoveryStatusCell> = StaticCell::new();
 #[cfg(feature = "display")]
 static DISPLAY_HANDOFF: StaticCell<DisplayHandoff<CriticalSectionRawMutex>> = StaticCell::new();
 #[cfg(feature = "display")]
@@ -1252,6 +1255,8 @@ async fn product_main(spawner: Spawner) -> ! {
         #[cfg(feature = "gateway")]
         let wifi_tcp_status: &'static WifiTcpStatusCell =
             WIFI_TCP_STATUS.init(WifiTcpStatusCell::new());
+        let rmap_discovery_status: &'static RmapDiscoveryStatusCell =
+            RMAP_DISCOVERY_STATUS.init(RmapDiscoveryStatusCell::new());
         let storage_coordinator = flash_owner.into_storage_coordinator(
             submission_runtime,
             lxmf,
@@ -1262,6 +1267,7 @@ async fn product_main(spawner: Spawner) -> ! {
             wifi_station_status,
             #[cfg(feature = "gateway")]
             wifi_tcp_status,
+            rmap_discovery_status,
         );
         let storage_service_available = storage_coordinator.submission_service_available();
         let lxmf_service_available = storage_coordinator.lxmf_service_available();
@@ -1279,7 +1285,7 @@ async fn product_main(spawner: Spawner) -> ! {
         .expect("the product adapter commits only board-valid LoRa profiles");
         let radio_task_timing = config::RadioTaskTiming::for_configuration(radio_configuration);
         let radio_diagnostics =
-            RADIO_DIAGNOSTICS.init(RadioDiagnosticsCell::new(radio_configuration));
+            RADIO_DIAGNOSTICS.init_with(|| RadioDiagnosticsCell::new(radio_configuration));
         radio_diagnostics.set_trace_boot_sequence(u64::from(announce_epoch.get()));
         let route_diagnostics = ROUTE_DIAGNOSTICS.init(RouteDiagnosticsSnapshot::empty());
         let automatic_announces_enabled = storage_coordinator.automatic_announces_enabled();
@@ -1291,7 +1297,7 @@ async fn product_main(spawner: Spawner) -> ! {
             #[cfg(feature = "gateway")]
             {
                 if wifi_tcp_bootstrap.is_some() {
-                    RmapPublicationPolicy::await_initial_interface(TCP_INTERFACE)
+                    RmapPublicationPolicy::require_interface(TCP_INTERFACE)
                 } else {
                     RmapPublicationPolicy::immediate()
                 }
@@ -1486,6 +1492,12 @@ async fn product_main(spawner: Spawner) -> ! {
         let rmap_destination = if rmap_discovery_enabled {
             match activate_rmap_discovery_destination(node) {
                 Ok(destination) => {
+                    if let Some(interface) = rmap_publication_policy.initial_interface() {
+                        node.set_local_announce_interface_target(&destination, interface)
+                            .expect(
+                                "the newly registered RMAP destination remains available for exact targeting",
+                            );
+                    }
                     let name_bytes = rmap_discovery_name(base_mac_eui48);
                     let name = core::str::from_utf8(&name_bytes)
                         .expect("the fixed RMAP interface name is ASCII");
@@ -1506,7 +1518,12 @@ async fn product_main(spawner: Spawner) -> ! {
                             Ok(packed) => {
                                 match DiscoveryStampSearch::new(&packed, DEFAULT_STAMP_COST) {
                                     Ok(search) => {
-                                        application_volatile.configure_rmap(packed, search);
+                                        application_volatile.configure_rmap(
+                                            packed,
+                                            search,
+                                            rmap_discovery_status,
+                                            rmap_publication_policy,
+                                        );
                                         info!(
                                             "e290-node stage=rmap-discovery status=ENABLED destination={:02x?} transport_id={identity_hash:02x?} name={name} public_location={} stamp_cost={DEFAULT_STAMP_COST} interval_hours=6",
                                             destination.as_bytes(),
@@ -1515,6 +1532,10 @@ async fn product_main(spawner: Spawner) -> ! {
                                         Some(destination)
                                     }
                                     Err(reason) => {
+                                        rmap_discovery_status.publish_activation_failure(
+                                            rmap_publication_policy,
+                                            RmapDeferredReason::StampInitializationFailed,
+                                        );
                                         warn!(
                                             "e290-node stage=rmap-discovery status=DISABLED reason=stamp-initialization-{reason:?} lora_routing=continue"
                                         );
@@ -1523,6 +1544,10 @@ async fn product_main(spawner: Spawner) -> ! {
                                 }
                             }
                             Err(reason) => {
+                                rmap_discovery_status.publish_activation_failure(
+                                    rmap_publication_policy,
+                                    RmapDeferredReason::PayloadEncodingFailed,
+                                );
                                 warn!(
                                     "e290-node stage=rmap-discovery status=DISABLED reason=payload-encoding-{reason:?} lora_routing=continue"
                                 );
@@ -1530,6 +1555,10 @@ async fn product_main(spawner: Spawner) -> ! {
                             }
                         },
                         Err(reason) => {
+                            rmap_discovery_status.publish_activation_failure(
+                                rmap_publication_policy,
+                                RmapDeferredReason::DiscoveryModelInvalid,
+                            );
                             warn!(
                                 "e290-node stage=rmap-discovery status=DISABLED reason=model-{reason:?} lora_routing=continue"
                             );
@@ -1538,6 +1567,10 @@ async fn product_main(spawner: Spawner) -> ! {
                     }
                 }
                 Err(reason) => {
+                    rmap_discovery_status.publish_activation_failure(
+                        rmap_publication_policy,
+                        RmapDeferredReason::DestinationActivationFailed,
+                    );
                     warn!(
                         "e290-node stage=rmap-discovery status=DISABLED reason=destination-{reason:?} lora_routing=continue"
                     );
@@ -1839,7 +1872,11 @@ async fn product_main(spawner: Spawner) -> ! {
         let node_task = match node_task::run(
             supervisor,
             storage_coordinator,
-            node_task::NodeDiagnosticsOwners::new(radio_diagnostics, route_diagnostics),
+            node_task::NodeDiagnosticsOwners::new(
+                radio_diagnostics,
+                route_diagnostics,
+                radio_configuration.profile(),
+            ),
             application_events,
             delayed_proofs,
             application_volatile,

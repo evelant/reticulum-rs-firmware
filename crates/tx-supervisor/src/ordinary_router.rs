@@ -267,6 +267,24 @@ pub struct OrdinaryRouterOfferFailure {
     admission: OrdinaryRouterAdmission,
 }
 
+/// An earlier not-yet-admitted envelope displaced by a priority offer.
+///
+/// The displaced envelope never entered the packet-owner pool. A product must
+/// retain and retry these exact owners; admitted batches and staged or active
+/// packets are deliberately outside this preemption boundary.
+#[must_use = "a displaced ordinary envelope must be retained and retried"]
+pub struct OrdinaryRouterDisplacedActions {
+    actions: NodeActions,
+    admission: OrdinaryRouterAdmission,
+}
+
+impl OrdinaryRouterDisplacedActions {
+    /// Recover the unchanged envelope and deadline policy.
+    pub fn into_parts(self) -> (NodeActions, OrdinaryRouterAdmission) {
+        (self.actions, self.admission)
+    }
+}
+
 impl OrdinaryRouterOfferFailure {
     /// Scalar reason the action envelope was not accepted.
     pub const fn reason(&self) -> OrdinaryRouterOfferError {
@@ -679,6 +697,69 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
         }
         self.pending_actions = Some((actions, admission));
         Ok(())
+    }
+
+    /// Offer one priority envelope ahead of an earlier unadmitted input.
+    ///
+    /// Only [`Self::pending_actions`] can be displaced. Once an envelope has
+    /// entered an admitted batch, stable packet slot, or interface actor, the
+    /// normal Busy result preserves that ownership boundary. The caller must
+    /// have reserved exact storage for the optional displaced envelope before
+    /// invoking this operation.
+    #[allow(
+        clippy::result_large_err,
+        reason = "offer failure must preserve the exact action envelope and admission owner"
+    )]
+    pub fn try_offer_priority_actions(
+        &mut self,
+        actions: NodeActions,
+        admission: OrdinaryRouterAdmission,
+    ) -> Result<Option<OrdinaryRouterDisplacedActions>, OrdinaryRouterOfferFailure> {
+        if let Some(fault) = self.fault {
+            return Err(OrdinaryRouterOfferFailure {
+                reason: OrdinaryRouterOfferError::Disabled(fault),
+                actions,
+                admission,
+            });
+        }
+        let packet_count = actions.packets.len();
+        if packet_count > PACKET_BUFFERS {
+            return Err(OrdinaryRouterOfferFailure {
+                reason: OrdinaryRouterOfferError::EnvelopeExceedsPool {
+                    packet_count,
+                    limit: PACKET_BUFFERS,
+                },
+                actions,
+                admission,
+            });
+        }
+        if self.batch.is_some() {
+            return Err(OrdinaryRouterOfferFailure {
+                reason: OrdinaryRouterOfferError::Busy(OrdinaryRouterBusyReason::AdmittedBatch),
+                actions,
+                admission,
+            });
+        }
+        if self.non_packet_actions.is_some() {
+            return Err(OrdinaryRouterOfferFailure {
+                reason: OrdinaryRouterOfferError::Busy(OrdinaryRouterBusyReason::NonPacketActions),
+                actions,
+                admission,
+            });
+        }
+        if self.rejected_actions.is_some() {
+            return Err(OrdinaryRouterOfferFailure {
+                reason: OrdinaryRouterOfferError::Busy(OrdinaryRouterBusyReason::RejectedActions),
+                actions,
+                admission,
+            });
+        }
+
+        let displaced = self
+            .pending_actions
+            .replace((actions, admission))
+            .map(|(actions, admission)| OrdinaryRouterDisplacedActions { actions, admission });
+        Ok(displaced)
     }
 
     /// Accept one ordinary completion already demultiplexed by the shared

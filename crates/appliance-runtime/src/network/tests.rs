@@ -76,7 +76,8 @@ fn projections_preserve_non_utf8_ssids_and_exact_network_state() {
             "rssi_dbm": -81,
             "tcp_peer_state": "waiting_for_network",
             "last_tcp_failure": null,
-            "dns_diagnostics": null
+            "dns_diagnostics": null,
+            "rmap_status": null
         })
     );
 }
@@ -108,7 +109,8 @@ fn tcp_backoff_and_last_failure_remain_typed_at_the_json_boundary() {
             "rssi_dbm": -75,
             "tcp_peer_state": "backoff",
             "last_tcp_failure": "dns_no_ipv4_result",
-            "dns_diagnostics": null
+            "dns_diagnostics": null,
+            "rmap_status": null
         })
     );
 }
@@ -200,7 +202,52 @@ fn dns_diagnostics_preserve_sparse_slots_sources_and_response_codes() {
                     "source": "raw_public",
                     "resolver": "9.9.9.9"
                 }
-            }
+            },
+            "rmap_status": null
+        })
+    );
+}
+
+#[test]
+fn rmap_status_preserves_gate_queue_cadence_and_failure_evidence() {
+    let status = device_api::NetworkRuntimeStatus::new(
+        13,
+        12,
+        device_api::WifiStationState::Connected,
+        None,
+        None,
+        Some([192, 0, 2, 42]),
+        Some(-58),
+        device_api::ReticulumTcpPeerState::Connected,
+    )
+    .unwrap()
+    .with_rmap_status(device_api::RmapRuntimeStatus::new(
+        false,
+        device_api::RmapStampPhase::Ready,
+        8_192,
+        device_api::RmapInitialTcpGateState::Open,
+        1,
+        device_api::RmapQueueOutcome::OrdinaryAdmissionDeferred,
+        Some(77),
+        device_api::RmapEgressConfirmation::NotObserved,
+        Some(60),
+        Some(device_api::RmapDeferredReason::OrdinaryQueueRejected),
+    ));
+
+    let value = serde_json::to_value(NetworkRuntimeStatusView::from(status)).unwrap();
+    assert_eq!(
+        value["rmap_status"],
+        serde_json::json!({
+            "config_applied": false,
+            "stamp_phase": "ready",
+            "stamp_attempts": 8192,
+            "initial_tcp_gate": "open",
+            "queued_count": 1,
+            "last_queue_outcome": "ordinary_admission_deferred",
+            "last_queue_attempt_at_uptime_seconds": 77,
+            "egress_confirmation": "not_observed",
+            "next_due_in_seconds": 60,
+            "deferred_reason": "ordinary_queue_rejected"
         })
     );
 }

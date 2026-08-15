@@ -15,7 +15,7 @@ use crate::delayed_proofs::{
     DelayedProofId, DelayedProofOwner, DelayedProofReservation, DelayedProofReservationError,
     DelayedProofSequence,
 };
-use crate::embedded::RetainedInboundProof;
+use crate::embedded::{InboundProofEvidence, RetainedInboundProof};
 use crate::{ApplicationEvent, ApplicationEventKind, NodeActions};
 
 const fn event_kind_accepts_retained_proof(kind: ApplicationEventKind) -> bool {
@@ -1083,6 +1083,11 @@ impl<'event_owner, 'event_slots, 'proof_owner, 'proof_slots>
         } = self;
         let event_id = lease.id;
         let owned = lease.owner.resolve_slot(event_id);
+        let proof_evidence = owned
+            .retained_proof
+            .as_ref()
+            .expect("a delayed-proof transaction owns one retained proof")
+            .evidence();
         let proof = owned
             .retained_proof
             .expect("a delayed-proof transaction owns one retained proof");
@@ -1098,6 +1103,7 @@ impl<'event_owner, 'event_slots, 'proof_owner, 'proof_slots>
         RetainedProofCommitSuccess {
             event_id,
             proof_id,
+            proof_evidence,
             event: owned.event,
         }
     }
@@ -1122,6 +1128,7 @@ impl fmt::Debug for DelayedProofTransaction<'_, '_, '_, '_> {
 pub struct RetainedProofCommitSuccess {
     event_id: ApplicationEventId,
     proof_id: DelayedProofId,
+    proof_evidence: InboundProofEvidence,
     event: ApplicationEvent,
 }
 
@@ -1134,6 +1141,11 @@ impl RetainedProofCommitSuccess {
     /// Ready delayed-proof identity created by the transition.
     pub const fn proof_id(&self) -> DelayedProofId {
         self.proof_id
+    }
+
+    /// Copy-only covered-DATA and encoded-proof correlation evidence.
+    pub const fn proof_evidence(&self) -> InboundProofEvidence {
+        self.proof_evidence
     }
 
     /// Borrow the acknowledged transport-neutral event.

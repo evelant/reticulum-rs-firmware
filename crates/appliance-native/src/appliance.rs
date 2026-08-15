@@ -613,7 +613,7 @@ mod tests {
             1,
             1,
             false,
-            [None, None, None],
+            [None, None],
             None,
         )
         .unwrap()
@@ -1148,7 +1148,8 @@ mod tests {
                 "rssi_dbm": -81,
                 "tcp_peer_state": "waiting_for_network",
                 "last_tcp_failure": null,
-                "dns_diagnostics": null
+                "dns_diagnostics": null,
+                "rmap_status": null
             })
         );
         assert!(!status.to_string().contains(secret));

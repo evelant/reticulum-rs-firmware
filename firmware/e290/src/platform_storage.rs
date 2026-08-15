@@ -167,6 +167,7 @@ use reticulum_e290_firmware::durability_boot::JournalBootPolicy;
 use reticulum_e290_firmware::network_config_replay::NetworkConfigMutationReceipt;
 use reticulum_e290_firmware::radio_diagnostics::{RadioDiagnosticsCell, RadioRuntimeState};
 use reticulum_e290_firmware::radio_trace::RadioTraceCursor;
+use reticulum_e290_firmware::rmap_discovery::RmapDiscoveryStatusCell;
 #[cfg(feature = "gateway")]
 use reticulum_e290_firmware::wifi_station_profile::{WifiStationPhase, WifiStationStatusCell};
 use reticulum_tx_supervisor::{LxmfMessageLocation, RouteDiagnosticsSnapshot};
@@ -703,6 +704,7 @@ pub(crate) struct ProductStorageCoordinator {
     wifi_station_status: &'static WifiStationStatusCell,
     #[cfg(feature = "gateway")]
     wifi_tcp_status: &'static WifiTcpStatusCell,
+    rmap_status: &'static RmapDiscoveryStatusCell,
     #[cfg(feature = "appliance")]
     ble_bond_store: ProductBleBondStoreState,
     runtime: Option<&'static mut ProductSubmissionRuntime>,
@@ -747,6 +749,7 @@ struct ProductAuthenticatedApiPort<'a> {
     wifi_station_status: &'static WifiStationStatusCell,
     #[cfg(feature = "gateway")]
     wifi_tcp_status: &'static WifiTcpStatusCell,
+    rmap_status: &'static RmapDiscoveryStatusCell,
     lxmf: &'a Option<MountedLxmfStore<'static>>,
     lxmf_mailbox: &'a mut Option<MountedMailboxStore>,
     lxmf_service_enabled: bool,
@@ -831,6 +834,10 @@ pub(crate) enum ProductLinkEstablishmentControlError {
 
 /// Product result of one exact LXMF application-event ownership attempt.
 #[must_use = "a non-durable LXMF result still owns its exact application event"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "every non-durable outcome must retain the exact no-alloc application-event owner"
+)]
 pub(crate) enum ProductLxmfAdmission<'owner, 'slots> {
     /// Credential mutation owns the shared flash device; retry the exact lease.
     DeferredForCredentialMutation(ApplicationEventLease<'owner, 'slots>),
@@ -1237,6 +1244,7 @@ impl ProductFlashOwner {
         device_api_id: DeviceId,
         #[cfg(feature = "gateway")] wifi_station_status: &'static WifiStationStatusCell,
         #[cfg(feature = "gateway")] wifi_tcp_status: &'static WifiTcpStatusCell,
+        rmap_status: &'static RmapDiscoveryStatusCell,
     ) -> ProductStorageCoordinator {
         let lxmf_mailbox = lxmf.as_ref().and_then(|store| {
             mount_or_provision_lxmf_mailbox(&mut *self.flash, self.lxmf_mailbox_binding, store).ok()
@@ -1263,6 +1271,7 @@ impl ProductFlashOwner {
             wifi_station_status,
             #[cfg(feature = "gateway")]
             wifi_tcp_status,
+            rmap_status,
             #[cfg(feature = "appliance")]
             ble_bond_store: self.ble_bond_store,
             runtime,
@@ -1777,6 +1786,7 @@ impl ProductStorageCoordinator {
             wifi_station_status,
             #[cfg(feature = "gateway")]
             wifi_tcp_status,
+            rmap_status,
             #[cfg(feature = "appliance")]
                 ble_bond_store: _,
             runtime,
@@ -1800,6 +1810,7 @@ impl ProductStorageCoordinator {
             wifi_station_status,
             #[cfg(feature = "gateway")]
             wifi_tcp_status,
+            rmap_status,
             lxmf,
             lxmf_mailbox,
             lxmf_service_enabled: *lxmf_service_enabled,
@@ -2900,6 +2911,11 @@ impl NetworkConfigPort for ProductAuthenticatedApiPort<'_> {
 
     fn status(&mut self) -> Result<NetworkRuntimeStatus, NetworkConfigPortError> {
         let configured_revision = self.network_config_revision()?;
+        let applied_revision = self.network_config_applied_revision();
+        let rmap_status = self.rmap_status.snapshot(
+            self.announce_now_seconds,
+            configured_revision == applied_revision,
+        );
         #[cfg(not(feature = "gateway"))]
         let redacted = self.network_config.redacted();
         #[cfg(feature = "gateway")]
@@ -2959,7 +2975,7 @@ impl NetworkConfigPort for ProductAuthenticatedApiPort<'_> {
             let connected_ssid = status.connected_ssid();
             NetworkRuntimeStatus::new_with_tcp_diagnostics(
                 configured_revision,
-                self.network_config_applied_revision(),
+                applied_revision,
                 wifi_state,
                 active_wifi_profile,
                 connected_ssid,
@@ -2969,6 +2985,7 @@ impl NetworkConfigPort for ProductAuthenticatedApiPort<'_> {
                 last_tcp_failure,
                 dns_diagnostics,
             )
+            .map(|status| status.with_rmap_status(rmap_status))
             .map_err(|_| NetworkConfigPortError::Invariant)
         }
 
@@ -2981,7 +2998,7 @@ impl NetworkConfigPort for ProductAuthenticatedApiPort<'_> {
             };
             NetworkRuntimeStatus::new_with_tcp_diagnostics(
                 configured_revision,
-                self.network_config_applied_revision(),
+                applied_revision,
                 wifi_state,
                 None,
                 None,
@@ -2991,6 +3008,7 @@ impl NetworkConfigPort for ProductAuthenticatedApiPort<'_> {
                 last_tcp_failure,
                 dns_diagnostics,
             )
+            .map(|status| status.with_rmap_status(rmap_status))
             .map_err(|_| NetworkConfigPortError::Invariant)
         }
     }

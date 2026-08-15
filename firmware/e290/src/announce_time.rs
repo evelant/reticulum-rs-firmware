@@ -2,6 +2,7 @@
 
 use reticulum_announce_clock::{AnnounceOrdinal, BootEpoch, MAX_ANNOUNCE_ORDINAL};
 use reticulum_node_core::AnnounceEmissionTime;
+use reticulum_radio_interface::LoRaProfile;
 
 use crate::config;
 
@@ -14,6 +15,66 @@ pub enum ScheduledAnnounce {
     LxmfDelivery,
     /// The local `nomadnetwork.node` destination.
     NomadNode,
+}
+
+/// Profile-derived quiet intervals for local service announce cycles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootAnnounceTiming {
+    airtime_slot_seconds: u64,
+    destination_spacing_seconds: u64,
+    first_retry_base_seconds: u64,
+    retry_spacing_seconds: u64,
+}
+
+impl BootAnnounceTiming {
+    /// Derive bootstrap timing from the exact largest local announce airtime.
+    pub fn for_profile(profile: LoRaProfile) -> Self {
+        let airtime_us = profile
+            .rnode_packet_airtime(config::ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES)
+            .expect("the largest bootstrap announce fits the base RNS MTU")
+            .aggregate_time_on_air_us();
+        let airtime_slot_seconds = airtime_us.saturating_add(999_999) / 1_000_000;
+        let airtime_slot_seconds = airtime_slot_seconds.max(1);
+        let profile_extension = airtime_slot_seconds.saturating_sub(1);
+        let destination_spacing_seconds = config::ANNOUNCE_NATIVE_RETRANSMIT_SECONDS
+            .saturating_add(config::ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS)
+            .saturating_add(profile_extension);
+        let first_retry_base_seconds =
+            destination_spacing_seconds.saturating_add(config::ANNOUNCE_NATIVE_RETRANSMIT_SECONDS);
+        // At the baseline one-second slot this preserves the established
+        // 38-second quiet interval: four destination spacings, one native
+        // retransmission window, and one complete announce airtime slot.
+        let retry_spacing_seconds = destination_spacing_seconds
+            .saturating_mul(4)
+            .saturating_add(config::ANNOUNCE_NATIVE_RETRANSMIT_SECONDS)
+            .saturating_add(airtime_slot_seconds);
+        Self {
+            airtime_slot_seconds,
+            destination_spacing_seconds,
+            first_retry_base_seconds,
+            retry_spacing_seconds,
+        }
+    }
+
+    /// Whole-second ceiling of the largest local announce's actual airtime.
+    pub const fn airtime_slot_seconds(self) -> u64 {
+        self.airtime_slot_seconds
+    }
+
+    /// Quiet interval between distinct local destinations.
+    pub const fn destination_spacing_seconds(self) -> u64 {
+        self.destination_spacing_seconds
+    }
+
+    /// Earliest interval before the first post-boot retry cycle.
+    pub const fn first_retry_base_seconds(self) -> u64 {
+        self.first_retry_base_seconds
+    }
+
+    /// Quiet interval before the second post-boot retry cycle.
+    pub const fn retry_spacing_seconds(self) -> u64 {
+        self.retry_spacing_seconds
+    }
 }
 
 /// Coalescing result for one authenticated manual announce request.
@@ -35,15 +96,17 @@ pub struct ManualAnnounceSchedule {
     next: Option<ScheduledAnnounce>,
     next_seconds: u64,
     lxmf_enabled: bool,
+    timing: BootAnnounceTiming,
 }
 
 impl ManualAnnounceSchedule {
     /// Construct an idle manual schedule.
-    pub const fn new(lxmf_enabled: bool) -> Self {
+    pub const fn new(lxmf_enabled: bool, timing: BootAnnounceTiming) -> Self {
         Self {
             next: None,
             next_seconds: 0,
             lxmf_enabled,
+            timing,
         }
     }
 
@@ -87,7 +150,7 @@ impl ManualAnnounceSchedule {
         };
         if self.next.is_some() {
             self.next_seconds =
-                now_seconds.saturating_add(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
+                now_seconds.saturating_add(self.timing.destination_spacing_seconds());
         }
     }
 
@@ -103,32 +166,45 @@ impl ManualAnnounceSchedule {
 /// is half duplex, so sending primary and service announces back-to-back makes
 /// a peer receive the primary, begin its rebroadcast, and miss the service
 /// announce. This scheduler therefore emits at most one local destination per
-/// event and leaves a fixed quiet interval before the optional LXMF service.
-/// The Nomad node follows at the same spacing, whether or not LXMF is enabled.
-/// Two identity-phased retry cycles follow before the 30-minute cadence.
+/// event and leaves a profile-derived quiet interval before the optional LXMF
+/// service. The Nomad node follows at the same spacing, whether or not LXMF is
+/// enabled. Identity-phased initial and retry cycles spread peer bootstrap
+/// traffic by whole slots derived from the largest local announce's airtime.
 pub struct BootAnnounceSchedule {
     next_seconds: u64,
     next: ScheduledAnnounce,
     lxmf_enabled: bool,
     bootstrap_retries_remaining: u8,
     phase_seconds: u64,
+    timing: BootAnnounceTiming,
 }
 
 impl BootAnnounceSchedule {
-    /// Start with one immediately due primary announce.
-    pub fn new(now_seconds: u64, primary_destination: [u8; 16], lxmf_enabled: bool) -> Self {
+    /// Start with an identity-staggered primary announce.
+    pub fn new(
+        now_seconds: u64,
+        primary_destination: [u8; 16],
+        lxmf_enabled: bool,
+        timing: BootAnnounceTiming,
+    ) -> Self {
         let seed = u32::from_le_bytes([
             primary_destination[0],
             primary_destination[1],
             primary_destination[2],
             primary_destination[3],
         ]);
+        let initial_phase_slot = u64::from(seed ^ seed.rotate_right(16))
+            % config::ANNOUNCE_BOOTSTRAP_INITIAL_PHASE_SLOTS;
+        let initial_phase_seconds =
+            initial_phase_slot.saturating_mul(timing.airtime_slot_seconds());
         Self {
-            next_seconds: now_seconds,
+            next_seconds: now_seconds.saturating_add(initial_phase_seconds),
             next: ScheduledAnnounce::Primary,
             lxmf_enabled,
             bootstrap_retries_remaining: config::ANNOUNCE_BOOTSTRAP_RETRIES,
-            phase_seconds: u64::from(seed) % config::ANNOUNCE_BOOTSTRAP_PHASE_SLOTS,
+            phase_seconds: (u64::from(seed) % config::ANNOUNCE_BOOTSTRAP_PHASE_SLOTS)
+                .saturating_mul(timing.airtime_slot_seconds()),
+            timing,
         }
     }
 
@@ -158,13 +234,13 @@ impl BootAnnounceSchedule {
                     ScheduledAnnounce::NomadNode
                 };
                 self.next_seconds =
-                    now_seconds.saturating_add(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
+                    now_seconds.saturating_add(self.timing.destination_spacing_seconds());
                 return;
             }
             ScheduledAnnounce::LxmfDelivery => {
                 self.next = ScheduledAnnounce::NomadNode;
                 self.next_seconds =
-                    now_seconds.saturating_add(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
+                    now_seconds.saturating_add(self.timing.destination_spacing_seconds());
                 return;
             }
             ScheduledAnnounce::NomadNode => {}
@@ -172,10 +248,11 @@ impl BootAnnounceSchedule {
 
         self.next = ScheduledAnnounce::Primary;
         let delay = match self.bootstrap_retries_remaining {
-            remaining if remaining == config::ANNOUNCE_BOOTSTRAP_RETRIES => {
-                config::ANNOUNCE_BOOTSTRAP_BASE_SECONDS.saturating_add(self.phase_seconds)
-            }
-            1.. => config::ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS,
+            remaining if remaining == config::ANNOUNCE_BOOTSTRAP_RETRIES => self
+                .timing
+                .first_retry_base_seconds()
+                .saturating_add(self.phase_seconds),
+            1.. => self.timing.retry_spacing_seconds(),
             0 => config::ANNOUNCE_INTERVAL_SECONDS,
         };
         self.bootstrap_retries_remaining = self.bootstrap_retries_remaining.saturating_sub(1);
@@ -255,15 +332,137 @@ impl BootAnnounceClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand_core::{CryptoRng, RngCore};
     use reticulum_announce_clock::{MAX_ANNOUNCE_EMISSION_TIMESTAMP, MAX_BOOT_EPOCH};
+    use reticulum_board_e290_radio::{
+        E290_NA915_DEFAULT_PROFILE, E290Na915TxPower, E290RadioConfiguration,
+    };
+    use reticulum_node_core::{
+        MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId,
+    };
+
+    use crate::nomad_responder::{
+        NOMAD_NODE_ANNOUNCE_APP_DATA, NOMAD_NODE_APPLICATION_NAME, NOMAD_NODE_ASPECTS,
+    };
+
+    const NODE_A: [u8; 16] = [
+        0xc9, 0x9e, 0x8f, 0xf1, 0xec, 0x86, 0x29, 0xe4, 0xe1, 0x29, 0x0e, 0x14, 0x46, 0x2a, 0xe8,
+        0xaf,
+    ];
+    const NODE_B: [u8; 16] = [
+        0x83, 0xa0, 0x9e, 0xd8, 0x07, 0xa0, 0xa7, 0xc6, 0x31, 0x38, 0x6d, 0xea, 0xa0, 0x44, 0x8f,
+        0xb9,
+    ];
+
+    #[derive(Default)]
+    struct CounterRng(u8);
+
+    impl RngCore for CounterRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut bytes = [0; 4];
+            self.fill_bytes(&mut bytes);
+            u32::from_le_bytes(bytes)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut bytes = [0; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fill_bytes(&mut self, destination: &mut [u8]) {
+            for byte in destination {
+                self.0 = self.0.wrapping_add(1);
+                *byte = self.0;
+            }
+        }
+
+        fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(destination);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for CounterRng {}
 
     fn epoch(value: u32) -> BootEpoch {
         BootEpoch::new(value).expect("test epoch must fit")
     }
 
+    fn default_timing() -> BootAnnounceTiming {
+        BootAnnounceTiming::for_profile(E290_NA915_DEFAULT_PROFILE)
+    }
+
+    fn slow_timing() -> BootAnnounceTiming {
+        let slow = E290RadioConfiguration::try_from_profile(
+            914_875_000,
+            125_000,
+            10,
+            5,
+            E290Na915TxPower::Dbm22,
+        )
+        .expect("the field-test SF10 profile is board-supported");
+        BootAnnounceTiming::for_profile(slow.profile())
+    }
+
+    #[test]
+    fn reviewed_airtime_bound_covers_every_current_boot_announce() {
+        let mut node = NodeCore::<4, 3, 4, 2, 0>::new(
+            NodeIdentity::from_private_key(&[0x51; 64]).expect("test identity"),
+            config::RNS_APPLICATION_NAME,
+            &config::RNS_PRIMARY_ASPECTS,
+            NodeInstanceId::new([0x51; 16]),
+            NodeConfig::transport(),
+        )
+        .expect("test node");
+        let lxmf = node
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .expect("LXMF destination");
+        let nomad = node
+            .register_inbound_single_destination(NOMAD_NODE_APPLICATION_NAME, &NOMAD_NODE_ASPECTS)
+            .expect("Nomad destination");
+        let mut rng = CounterRng::default();
+        node.queue_announce(
+            None,
+            AnnounceEmissionTime::new(1).expect("primary emission"),
+            &mut rng,
+        )
+        .expect("primary announce");
+        node.queue_announce_for(
+            &lxmf,
+            Some(&config::LXMF_DELIVERY_ANNOUNCE_APP_DATA),
+            AnnounceEmissionTime::new(2).expect("LXMF emission"),
+            &mut rng,
+        )
+        .expect("LXMF announce");
+        node.queue_announce_for(
+            &nomad,
+            Some(NOMAD_NODE_ANNOUNCE_APP_DATA.as_bytes()),
+            AnnounceEmissionTime::new(3).expect("Nomad emission"),
+            &mut rng,
+        )
+        .expect("Nomad announce");
+
+        let actions = node.flush_announces(MonotonicSeconds::new(3), &mut rng);
+        assert_eq!(actions.packets.len(), 3);
+        let mut packet_lengths = [0; 3];
+        for (length, packet) in packet_lengths.iter_mut().zip(actions.packets.iter()) {
+            *length = packet.bytes().len();
+            assert!(*length <= config::ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES);
+        }
+        packet_lengths.sort_unstable();
+        assert_eq!(packet_lengths, [167, 171, 177]);
+        assert_eq!(
+            packet_lengths[2],
+            config::ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES,
+            "the timing bound must track the largest current boot announce exactly"
+        );
+    }
+
     #[test]
     fn manual_cycle_coalesces_and_preserves_destination_spacing() {
-        let mut schedule = ManualAnnounceSchedule::new(true);
+        let timing = default_timing();
+        let mut schedule = ManualAnnounceSchedule::new(true, timing);
         assert_eq!(
             schedule.request(100),
             ManualAnnounceRequestDisposition::Queued
@@ -277,12 +476,12 @@ mod tests {
         schedule.mark_attempted(100);
         assert_eq!(schedule.due(100), None);
         assert_eq!(
-            schedule.due(100 + config::ANNOUNCE_DESTINATION_SPACING_SECONDS),
+            schedule.due(100 + timing.destination_spacing_seconds()),
             Some(ScheduledAnnounce::LxmfDelivery)
         );
         schedule.mark_attempted(200);
         assert_eq!(
-            schedule.due(200 + config::ANNOUNCE_DESTINATION_SPACING_SECONDS),
+            schedule.due(200 + timing.destination_spacing_seconds()),
             Some(ScheduledAnnounce::NomadNode)
         );
         schedule.mark_attempted(300);
@@ -291,12 +490,13 @@ mod tests {
 
     #[test]
     fn manual_cycle_skips_disabled_lxmf_but_not_nomad() {
-        let mut schedule = ManualAnnounceSchedule::new(false);
+        let timing = default_timing();
+        let mut schedule = ManualAnnounceSchedule::new(false, timing);
         schedule.request(1);
         assert_eq!(schedule.due(1), Some(ScheduledAnnounce::Primary));
         schedule.mark_attempted(1);
         assert_eq!(
-            schedule.due(1 + config::ANNOUNCE_DESTINATION_SPACING_SECONDS),
+            schedule.due(1 + timing.destination_spacing_seconds()),
             Some(ScheduledAnnounce::NomadNode)
         );
     }
@@ -337,41 +537,45 @@ mod tests {
 
     #[test]
     fn bootstrap_schedule_is_immediate_then_bounded_then_periodic() {
-        let mut schedule = BootAnnounceSchedule::new(100, [0; 16], true);
+        let timing = default_timing();
+        let mut schedule = BootAnnounceSchedule::new(100, [0; 16], true, timing);
         assert_eq!(schedule.due(100), Some(ScheduledAnnounce::Primary));
         schedule.mark_attempted(100);
-        assert_eq!(schedule.next_seconds(), 108);
+        assert_eq!(
+            schedule.next_seconds(),
+            100 + timing.destination_spacing_seconds()
+        );
         assert_eq!(schedule.next(), ScheduledAnnounce::LxmfDelivery);
-        assert_eq!(schedule.due(107), None);
-        schedule.mark_attempted(108);
-        assert_eq!(schedule.next_seconds(), 116);
+        let lxmf_at = schedule.next_seconds();
+        assert_eq!(schedule.due(lxmf_at - 1), None);
+        schedule.mark_attempted(lxmf_at);
+        let nomad_at = lxmf_at + timing.destination_spacing_seconds();
+        assert_eq!(schedule.next_seconds(), nomad_at);
         assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
-        schedule.mark_attempted(116);
-        assert_eq!(schedule.next_seconds(), 129);
+        schedule.mark_attempted(nomad_at);
+        let first_retry = nomad_at + timing.first_retry_base_seconds();
+        assert_eq!(schedule.next_seconds(), first_retry);
         assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
-        schedule.mark_attempted(129);
-        assert_eq!(schedule.next_seconds(), 137);
-        schedule.mark_attempted(137);
-        assert_eq!(schedule.next_seconds(), 145);
-        schedule.mark_attempted(145);
-        assert_eq!(schedule.next_seconds(), 183);
-        schedule.mark_attempted(183);
-        assert_eq!(schedule.next_seconds(), 191);
-        schedule.mark_attempted(191);
-        assert_eq!(schedule.next_seconds(), 199);
-        schedule.mark_attempted(199);
-        assert_eq!(schedule.next_seconds(), 1_999);
-        schedule.mark_attempted(1_999);
-        assert_eq!(schedule.next_seconds(), 2_007);
-        schedule.mark_attempted(2_007);
-        assert_eq!(schedule.next_seconds(), 2_015);
-        schedule.mark_attempted(2_015);
-        assert_eq!(schedule.next_seconds(), 3_815);
+        schedule.mark_attempted(first_retry);
+        let first_retry_lxmf = first_retry + timing.destination_spacing_seconds();
+        schedule.mark_attempted(first_retry_lxmf);
+        let first_retry_nomad = first_retry_lxmf + timing.destination_spacing_seconds();
+        schedule.mark_attempted(first_retry_nomad);
+        let second_retry = first_retry_nomad + timing.retry_spacing_seconds();
+        assert_eq!(schedule.next_seconds(), second_retry);
+        schedule.mark_attempted(second_retry);
+        let second_retry_lxmf = second_retry + timing.destination_spacing_seconds();
+        schedule.mark_attempted(second_retry_lxmf);
+        let second_retry_nomad = second_retry_lxmf + timing.destination_spacing_seconds();
+        schedule.mark_attempted(second_retry_nomad);
+        let periodic = second_retry_nomad + config::ANNOUNCE_INTERVAL_SECONDS;
+        assert_eq!(schedule.next_seconds(), periodic);
     }
 
     #[test]
     fn admission_deferral_retains_destination_and_bootstrap_budget() {
-        let mut schedule = BootAnnounceSchedule::new(100, [0; 16], true);
+        let timing = default_timing();
+        let mut schedule = BootAnnounceSchedule::new(100, [0; 16], true, timing);
 
         schedule.defer_attempt(100);
         assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
@@ -380,133 +584,143 @@ mod tests {
 
         schedule.mark_attempted(101);
         assert_eq!(schedule.next(), ScheduledAnnounce::LxmfDelivery);
-        assert_eq!(schedule.next_seconds(), 109);
-        schedule.defer_attempt(109);
+        let lxmf_at = 101 + timing.destination_spacing_seconds();
+        assert_eq!(schedule.next_seconds(), lxmf_at);
+        schedule.defer_attempt(lxmf_at);
         assert_eq!(schedule.next(), ScheduledAnnounce::LxmfDelivery);
-        assert_eq!(schedule.due(110), Some(ScheduledAnnounce::LxmfDelivery));
+        assert_eq!(
+            schedule.due(lxmf_at + config::ANNOUNCE_ADMISSION_RETRY_SECONDS),
+            Some(ScheduledAnnounce::LxmfDelivery)
+        );
 
-        schedule.mark_attempted(110);
+        let lxmf_retry_at = lxmf_at + config::ANNOUNCE_ADMISSION_RETRY_SECONDS;
+        schedule.mark_attempted(lxmf_retry_at);
         assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
-        assert_eq!(schedule.next_seconds(), 118);
-        schedule.defer_attempt(118);
+        let nomad_at = lxmf_retry_at + timing.destination_spacing_seconds();
+        assert_eq!(schedule.next_seconds(), nomad_at);
+        schedule.defer_attempt(nomad_at);
         assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
-        assert_eq!(schedule.due(119), Some(ScheduledAnnounce::NomadNode));
+        assert_eq!(
+            schedule.due(nomad_at + config::ANNOUNCE_ADMISSION_RETRY_SECONDS),
+            Some(ScheduledAnnounce::NomadNode)
+        );
 
-        schedule.mark_attempted(119);
+        let nomad_retry_at = nomad_at + config::ANNOUNCE_ADMISSION_RETRY_SECONDS;
+        schedule.mark_attempted(nomad_retry_at);
         assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
-        assert_eq!(schedule.next_seconds(), 132);
+        assert_eq!(
+            schedule.next_seconds(),
+            nomad_retry_at + timing.first_retry_base_seconds()
+        );
     }
 
     #[test]
     fn lxmf_disabled_profile_schedules_primary_then_nomad() {
-        let mut schedule = BootAnnounceSchedule::new(100, [0; 16], false);
+        let timing = default_timing();
+        let mut schedule = BootAnnounceSchedule::new(100, [0; 16], false, timing);
         assert_eq!(schedule.due(100), Some(ScheduledAnnounce::Primary));
         schedule.mark_attempted(100);
-        assert_eq!(schedule.next_seconds(), 108);
+        assert_eq!(
+            schedule.next_seconds(),
+            100 + timing.destination_spacing_seconds()
+        );
         assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
-        schedule.mark_attempted(108);
-        assert_eq!(schedule.next_seconds(), 121);
+        let nomad_at = schedule.next_seconds();
+        schedule.mark_attempted(nomad_at);
+        let retry_at = nomad_at + timing.first_retry_base_seconds();
+        assert_eq!(schedule.next_seconds(), retry_at);
         assert_eq!(schedule.next(), ScheduledAnnounce::Primary);
-        schedule.mark_attempted(121);
-        assert_eq!(schedule.next_seconds(), 129);
+        schedule.mark_attempted(retry_at);
+        assert_eq!(
+            schedule.next_seconds(),
+            retry_at + timing.destination_spacing_seconds()
+        );
         assert_eq!(schedule.next(), ScheduledAnnounce::NomadNode);
-        schedule.mark_attempted(129);
-        assert_eq!(schedule.next_seconds(), 167);
-        schedule.mark_attempted(167);
-        assert_eq!(schedule.next_seconds(), 175);
-        schedule.mark_attempted(175);
-        assert_eq!(schedule.next_seconds(), 1_975);
     }
 
     #[test]
-    fn known_e290_nodes_keep_phased_primary_cycles_and_local_destination_spacing() {
-        let mut a = BootAnnounceSchedule::new(
-            0,
-            [
-                0xc9, 0x9e, 0x8f, 0xf1, 0xec, 0x86, 0x29, 0xe4, 0xe1, 0x29, 0x0e, 0x14, 0x46, 0x2a,
-                0xe8, 0xaf,
-            ],
-            true,
+    fn known_e290_nodes_have_identity_staggered_initial_and_retry_cycles() {
+        let timing = default_timing();
+        let mut a = BootAnnounceSchedule::new(0, NODE_A, true, timing);
+        let mut b = BootAnnounceSchedule::new(0, NODE_B, true, timing);
+
+        let a_initial = a.next_seconds();
+        let b_initial = b.next_seconds();
+        assert_ne!(a_initial, b_initial);
+        assert_eq!(a_initial % timing.airtime_slot_seconds(), 0);
+        assert_eq!(b_initial % timing.airtime_slot_seconds(), 0);
+        assert!(a_initial < config::ANNOUNCE_BOOTSTRAP_INITIAL_PHASE_SLOTS);
+        assert!(b_initial < config::ANNOUNCE_BOOTSTRAP_INITIAL_PHASE_SLOTS);
+
+        for (schedule, initial) in [(&mut a, a_initial), (&mut b, b_initial)] {
+            schedule.mark_attempted(initial);
+            let lxmf_at = initial + timing.destination_spacing_seconds();
+            schedule.mark_attempted(lxmf_at);
+            let nomad_at = lxmf_at + timing.destination_spacing_seconds();
+            schedule.mark_attempted(nomad_at);
+        }
+        assert_ne!(a.next_seconds(), b.next_seconds());
+        assert_eq!(
+            a.next_seconds().abs_diff(b.next_seconds()),
+            30 * timing.airtime_slot_seconds()
         );
-        let mut b = BootAnnounceSchedule::new(
-            0,
-            [
-                0x83, 0xa0, 0x9e, 0xd8, 0x07, 0xa0, 0xa7, 0xc6, 0x31, 0x38, 0x6d, 0xea, 0xa0, 0x44,
-                0x8f, 0xb9,
-            ],
-            true,
+    }
+
+    #[test]
+    fn slow_profile_expands_slots_and_every_bootstrap_quiet_interval_from_airtime() {
+        let fast = default_timing();
+        let slow = slow_timing();
+        assert!(slow.airtime_slot_seconds() > fast.airtime_slot_seconds());
+        assert!(slow.destination_spacing_seconds() > fast.destination_spacing_seconds());
+        assert!(slow.first_retry_base_seconds() > fast.first_retry_base_seconds());
+        assert!(slow.retry_spacing_seconds() > fast.retry_spacing_seconds());
+
+        let mut fast_schedule = BootAnnounceSchedule::new(0, NODE_A, true, fast);
+        let mut slow_schedule = BootAnnounceSchedule::new(0, NODE_A, true, slow);
+        assert_eq!(
+            slow_schedule.next_seconds(),
+            fast_schedule.next_seconds() * slow.airtime_slot_seconds()
         );
-        a.mark_attempted(0);
-        b.mark_attempted(0);
-        assert_eq!(a.next_seconds(), 8);
-        assert_eq!(b.next_seconds(), 8);
-        a.mark_attempted(8);
-        b.mark_attempted(8);
-        assert_eq!(a.next(), ScheduledAnnounce::NomadNode);
-        assert_eq!(b.next(), ScheduledAnnounce::NomadNode);
-        assert_eq!(a.next_seconds(), 16);
-        assert_eq!(b.next_seconds(), 16);
-        a.mark_attempted(16);
-        b.mark_attempted(16);
-        assert_eq!(a.next_seconds(), 63);
-        assert_eq!(b.next_seconds(), 34);
-        assert_eq!(a.next_seconds() - b.next_seconds(), 29);
-
-        a.mark_attempted(63);
-        b.mark_attempted(34);
-        assert_eq!(b.next(), ScheduledAnnounce::LxmfDelivery);
-        assert_eq!(a.next(), ScheduledAnnounce::LxmfDelivery);
-        assert_eq!(a.next_seconds(), 71);
-        assert_eq!(b.next_seconds(), 42);
-        a.mark_attempted(71);
-        b.mark_attempted(42);
-        assert_eq!(a.next(), ScheduledAnnounce::NomadNode);
-        assert_eq!(b.next(), ScheduledAnnounce::NomadNode);
-        assert_eq!(a.next_seconds(), 79);
-        assert_eq!(b.next_seconds(), 50);
-
-        // Model the exact immediate/+5-second opportunities produced by pinned
-        // Rete across both nodes' first retry bursts. The selected phases leave
-        // at least the product's three-second guard globally, not only within
-        // one board.
-        let first_retry_opportunities = [34, 39, 42, 47, 50, 55, 63, 68, 71, 76, 79, 84];
-        assert!(first_retry_opportunities.windows(2).all(|pair| {
-            pair[1] - pair[0] >= config::ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS
-        }));
-
-        a.mark_attempted(79);
-        b.mark_attempted(50);
-        assert_eq!(a.next_seconds(), 117);
-        assert_eq!(b.next_seconds(), 88);
-        assert_eq!(a.next_seconds() - b.next_seconds(), 29);
-        let second_retry_opportunities = [88, 93, 96, 101, 104, 109, 117, 122, 125, 130, 133, 138];
-        assert!(second_retry_opportunities.windows(2).all(|pair| {
-            pair[1] - pair[0] >= config::ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS
-        }));
+        let fast_primary = fast_schedule.next_seconds();
+        let slow_primary = slow_schedule.next_seconds();
+        fast_schedule.mark_attempted(fast_primary);
+        slow_schedule.mark_attempted(slow_primary);
+        assert_eq!(
+            fast_schedule.next_seconds() - fast_primary,
+            fast.destination_spacing_seconds()
+        );
+        assert_eq!(
+            slow_schedule.next_seconds() - slow_primary,
+            slow.destination_spacing_seconds()
+        );
     }
 
     #[test]
     fn phase_is_bounded_and_deadlines_saturate() {
+        let timing = default_timing();
         for seed in 0_u32..=1_024 {
             let mut destination = [0; 16];
             destination[..4].copy_from_slice(&seed.to_le_bytes());
-            let mut schedule = BootAnnounceSchedule::new(0, destination, false);
-            schedule.mark_attempted(0);
-            schedule.mark_attempted(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
+            let mut schedule = BootAnnounceSchedule::new(0, destination, false, timing);
+            let primary_at = schedule.next_seconds();
             assert!(
-                schedule.next_seconds()
-                    >= config::ANNOUNCE_DESTINATION_SPACING_SECONDS
-                        + config::ANNOUNCE_BOOTSTRAP_BASE_SECONDS
+                primary_at
+                    < config::ANNOUNCE_BOOTSTRAP_INITIAL_PHASE_SLOTS
+                        * timing.airtime_slot_seconds()
             );
+            schedule.mark_attempted(primary_at);
+            let nomad_at = primary_at + timing.destination_spacing_seconds();
+            schedule.mark_attempted(nomad_at);
+            assert!(schedule.next_seconds() >= nomad_at + timing.first_retry_base_seconds());
             assert!(
                 schedule.next_seconds()
-                    < config::ANNOUNCE_DESTINATION_SPACING_SECONDS
-                        + config::ANNOUNCE_BOOTSTRAP_BASE_SECONDS
-                        + config::ANNOUNCE_BOOTSTRAP_PHASE_SLOTS
+                    < nomad_at
+                        + timing.first_retry_base_seconds()
+                        + config::ANNOUNCE_BOOTSTRAP_PHASE_SLOTS * timing.airtime_slot_seconds()
             );
         }
 
-        let mut saturated = BootAnnounceSchedule::new(u64::MAX, [0; 16], true);
+        let mut saturated = BootAnnounceSchedule::new(u64::MAX, [0; 16], true, timing);
         saturated.mark_attempted(u64::MAX);
         assert_eq!(saturated.next_seconds(), u64::MAX);
         assert_eq!(

@@ -8,10 +8,18 @@
 use reticulum_radio_tx_dispatch::DispatchOutcome;
 
 /// Number of newest radio events retained for one boot.
+///
+/// Inbound durable delivery contributes six correlated stages, so 32 entries
+/// retain several complete exchanges. The ring lives in fixed RAM; keeping the
+/// established bound preserves the gateway's reviewed stack headroom.
 pub const RADIO_TRACE_CAPACITY: usize = 32;
 
 /// Largest number of radio events returned by one bounded page.
-pub const RADIO_TRACE_PAGE_CAPACITY: usize = 3;
+///
+/// Two maximum-size inbound-proof events fit the device API's fixed response
+/// envelope. A third does not, so pagination splits consecutive proof stages
+/// before projection instead of discovering an encoding failure later.
+pub const RADIO_TRACE_PAGE_CAPACITY: usize = 2;
 
 /// Cursor naming the last event already consumed by one reader.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -289,6 +297,108 @@ impl RadioTraceLogicalRx {
     }
 }
 
+/// Receiver-side durable-proof lifecycle for one inbound DATA packet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RadioTraceInboundProofStage {
+    /// A complete DATA packet was reconstructed from LoRa frames.
+    DataLogicalRx,
+    /// The application message became durable in the local LXMF store.
+    DurableCommit,
+    /// The exact proof became ready in the durable delayed-proof owner.
+    ProofRetained,
+    /// The proof moved into the dedicated one-packet admission holder.
+    ProofStaged,
+    /// The ordinary coordinator accepted the proof as its next owned packet.
+    OrdinaryQueued,
+    /// The radio reported physical TxDone for the complete proof packet.
+    PhysicalTxDone,
+    /// The exact proof packet reached a terminal radio result without TxDone.
+    PhysicalTxFailed,
+}
+
+/// One stage in the receiver-side durable DATA-to-proof lifecycle.
+///
+/// `correlation_token` is always the complete hash of the covered inbound DATA
+/// packet. Message identity appears once LXMF validation succeeds; packet and
+/// signal fields are populated only at stages that own that evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RadioTraceInboundProof {
+    correlation_token: [u8; 32],
+    stage: RadioTraceInboundProofStage,
+    message_id: Option<[u8; 32]>,
+    encoded_packet_sha256: Option<[u8; 32]>,
+    packet_len: Option<u16>,
+    interface: Option<u8>,
+    signal: Option<(i16, i16)>,
+    dispatch_outcome: Option<DispatchOutcome>,
+}
+
+impl RadioTraceInboundProof {
+    /// Construct one immutable receiver proof-lifecycle stage.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        correlation_token: [u8; 32],
+        stage: RadioTraceInboundProofStage,
+        message_id: Option<[u8; 32]>,
+        encoded_packet_sha256: Option<[u8; 32]>,
+        packet_len: Option<u16>,
+        interface: Option<u8>,
+        signal: Option<(i16, i16)>,
+        dispatch_outcome: Option<DispatchOutcome>,
+    ) -> Self {
+        Self {
+            correlation_token,
+            stage,
+            message_id,
+            encoded_packet_sha256,
+            packet_len,
+            interface,
+            signal,
+            dispatch_outcome,
+        }
+    }
+
+    /// Complete hash of the inbound DATA packet covered by the proof.
+    pub const fn correlation_token(self) -> [u8; 32] {
+        self.correlation_token
+    }
+
+    /// Durable receiver lifecycle stage.
+    pub const fn stage(self) -> RadioTraceInboundProofStage {
+        self.stage
+    }
+
+    /// Validated LXMF message ID, once known.
+    pub const fn message_id(self) -> Option<[u8; 32]> {
+        self.message_id
+    }
+
+    /// SHA-256 over the encoded DATA or proof packet owned at this stage.
+    pub const fn encoded_packet_sha256(self) -> Option<[u8; 32]> {
+        self.encoded_packet_sha256
+    }
+
+    /// Complete encoded DATA or proof packet length owned at this stage.
+    pub const fn packet_len(self) -> Option<u16> {
+        self.packet_len
+    }
+
+    /// Exact receive or proof-return interface, when known.
+    pub const fn interface(self) -> Option<u8> {
+        self.interface
+    }
+
+    /// Whole-dB `(RSSI, SNR)` for the original DATA receive, when known.
+    pub const fn signal(self) -> Option<(i16, i16)> {
+        self.signal
+    }
+
+    /// Exact radio terminal outcome for a physical proof-TX stage.
+    pub const fn dispatch_outcome(self) -> Option<DispatchOutcome> {
+        self.dispatch_outcome
+    }
+}
+
 /// Application-visible terminal classification for one exact DATA attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RadioTraceAttemptOutcome {
@@ -371,6 +481,8 @@ pub enum RadioTraceEventKind {
     DataTxTerminal(RadioTraceDataTxTerminal),
     /// A complete logical packet was reconstructed from LoRa frames.
     LogicalRx(RadioTraceLogicalRx),
+    /// One correlated receiver-side durable DATA-to-proof stage.
+    InboundProof(RadioTraceInboundProof),
     /// A DATA receipt reached delivered, timeout, or definitely-unsent state.
     AttemptTerminal(RadioTraceAttemptTerminal),
 }
@@ -569,7 +681,7 @@ impl RadioTraceRing {
         Some(event)
     }
 
-    /// Copy at most three events after an optional reader cursor.
+    /// Copy at most two events after an optional reader cursor.
     ///
     /// A cursor from another boot restarts at the oldest current event and is
     /// reported through [`RadioTracePage::boot_changed`]. A same-boot cursor
@@ -689,6 +801,19 @@ mod tests {
         ))
     }
 
+    fn inbound(tag: u8, stage: RadioTraceInboundProofStage) -> RadioTraceEventKind {
+        RadioTraceEventKind::InboundProof(RadioTraceInboundProof::new(
+            [tag; 32],
+            stage,
+            Some([tag.wrapping_add(1); 32]),
+            Some([tag.wrapping_add(2); 32]),
+            Some(113),
+            Some(1),
+            None,
+            None,
+        ))
+    }
+
     fn sequences(page: &RadioTracePage) -> std::vec::Vec<u64> {
         page.events().map(RadioTraceEvent::sequence).collect()
     }
@@ -703,15 +828,33 @@ mod tests {
         }
 
         let first = ring.page(None);
-        assert_eq!(sequences(&first), [1, 2, 3]);
+        assert_eq!(sequences(&first), [1, 2]);
         assert!(first.has_more());
         assert!(!first.history_gap());
         let second = ring.page(first.next_cursor());
-        assert_eq!(sequences(&second), [4, 5, 6]);
+        assert_eq!(sequences(&second), [3, 4]);
         assert!(second.has_more());
         let third = ring.page(second.next_cursor());
-        assert_eq!(sequences(&third), [7]);
-        assert!(!third.has_more());
+        assert_eq!(sequences(&third), [5, 6]);
+        assert!(third.has_more());
+        let fourth = ring.page(third.next_cursor());
+        assert_eq!(sequences(&fourth), [7]);
+        assert!(!fourth.has_more());
+    }
+
+    #[test]
+    fn consecutive_maximum_proof_events_split_before_device_api_projection() {
+        let mut ring = RadioTraceRing::new(78);
+        ring.push(1, inbound(1, RadioTraceInboundProofStage::DurableCommit));
+        ring.push(2, inbound(1, RadioTraceInboundProofStage::ProofRetained));
+        ring.push(3, inbound(1, RadioTraceInboundProofStage::ProofStaged));
+
+        let first = ring.page(None);
+        assert_eq!(first.len(), 2);
+        assert!(first.has_more());
+        let second = ring.page(first.next_cursor());
+        assert_eq!(second.len(), 1);
+        assert!(!second.has_more());
     }
 
     #[test]
@@ -726,12 +869,12 @@ mod tests {
         assert_eq!(retained.oldest_retained_sequence(), Some(4));
         assert_eq!(retained.newest_retained_sequence(), Some(35));
         assert_eq!(retained.overwritten_events(), 3);
-        assert_eq!(sequences(&retained), [4, 5, 6]);
+        assert_eq!(sequences(&retained), [4, 5]);
         assert!(!retained.history_gap());
 
         let stale = ring.page(Some(RadioTraceCursor::new(88, 0)));
         assert!(stale.history_gap());
-        assert_eq!(sequences(&stale), [4, 5, 6]);
+        assert_eq!(sequences(&stale), [4, 5]);
 
         let current = ring.page(Some(RadioTraceCursor::new(88, 33)));
         assert!(!current.history_gap());
@@ -743,7 +886,7 @@ mod tests {
 
         let stale_boot_without_boot_id = ring.page(Some(RadioTraceCursor::new(88, 99)));
         assert!(stale_boot_without_boot_id.history_gap());
-        assert_eq!(sequences(&stale_boot_without_boot_id), [4, 5, 6]);
+        assert_eq!(sequences(&stale_boot_without_boot_id), [4, 5]);
     }
 
     #[test]
@@ -796,14 +939,19 @@ mod tests {
         ring.push(2_000, RadioTraceEventKind::DataTxTerminal(tx));
         ring.push(3_000, RadioTraceEventKind::AttemptTerminal(terminal));
 
-        let events = ring.page(None).events().collect::<std::vec::Vec<_>>();
+        let first = ring.page(None);
+        let events = first.events().collect::<std::vec::Vec<_>>();
         assert_eq!(events[0].kind(), RadioTraceEventKind::RouteSelected(route));
         assert_eq!(route.submission_id(), 7);
         assert_eq!(events[1].kind(), RadioTraceEventKind::DataTxTerminal(tx));
         assert_eq!(events[1].observed_at_us(), 2_000);
         assert_eq!(tx.frame_completed_at_us(0), Some(1_234));
+        let events = ring
+            .page(first.next_cursor())
+            .events()
+            .collect::<std::vec::Vec<_>>();
         assert_eq!(
-            events[2].kind(),
+            events[0].kind(),
             RadioTraceEventKind::AttemptTerminal(terminal)
         );
     }

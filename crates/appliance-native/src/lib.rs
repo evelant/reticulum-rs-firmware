@@ -150,7 +150,7 @@ mod tests {
             NativeBridgeContract {
                 bridge_api_major: 2,
                 bridge_api_minor: 0,
-                device_api_major: 2,
+                device_api_major: 3,
                 device_api_minor: 0,
                 max_message_bytes: 512,
                 max_lxmf_read_chunk_bytes: 416,

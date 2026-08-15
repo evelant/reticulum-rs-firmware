@@ -1472,6 +1472,7 @@ fn mismatched_ordinary_interface_config_returns_exact_owner_without_radio_or_per
     let buffer = Box::leak(Box::new(OrdinaryPacketBuffer::new()));
     let refs = Box::leak(Box::new([buffer]));
     let job = prepare_ordinary(&mut node, &mut owner, refs, 8, 100_000);
+    let expected = job.prepared();
     let data_handoff = Box::leak(Box::new(DataPermitHandoff::<NoopRawMutex>::new()));
     let ordinary_handoff = Box::leak(Box::new(OrdinaryPermitHandoff::<NoopRawMutex>::new()));
     let (_, data_dispatch) = data_handoff.split();
@@ -1495,12 +1496,23 @@ fn mismatched_ordinary_interface_config_returns_exact_owner_without_radio_or_per
 
     assert_eq!(dispatcher.step(1_000_000), RadioTxDispatcherStep::Advanced);
     assert_eq!(dispatcher.radio().receive_session_invalidations, 1);
+    let report = dispatcher.last_report().expect("mismatch report");
     assert_eq!(
-        dispatcher.last_report().map(DispatchReport::outcome),
-        Some(DispatchOutcome::InterfaceConfigurationMismatch {
+        report.outcome(),
+        DispatchOutcome::InterfaceConfigurationMismatch {
             expected: TEST_INTERFACE_CONFIG,
             stamped,
-        })
+        }
+    );
+    let ordinary = report
+        .ordinary_packet()
+        .expect("every ordinary terminal report retains packet identity");
+    assert_eq!(ordinary.token(), expected.dispatch_token());
+    assert_eq!(ordinary.interface(), expected.interface());
+    assert_eq!(ordinary.packet_len(), expected.packet_len());
+    assert_eq!(
+        ordinary.encoded_packet_sha256(),
+        expected.encoded_packet_sha256()
     );
     assert!(ordinary_node.requests().try_receive().is_none());
     assert_eq!(dispatcher.radio().cad.len(), 1);
@@ -1800,6 +1812,7 @@ fn data_and_ordinary_success_share_one_wrapping_sequence_and_exact_permits() {
     let ordinary_buffer = SUCCESS_ORDINARY_BUFFER.take();
     let ordinary_refs = SUCCESS_ORDINARY_REFS.init([ordinary_buffer]);
     let ordinary_job = prepare_ordinary(&mut owner, &mut ordinary_owner, ordinary_refs, 8, 100_000);
+    let expected_ordinary = ordinary_job.prepared();
     let (mut data_node, data_dispatch) = SUCCESS_DATA_HANDOFF.take().split();
     let (mut ordinary_node, ordinary_dispatch) = SUCCESS_ORDINARY_HANDOFF.take().split();
     let radio = MockRadio::new(
@@ -1884,6 +1897,16 @@ fn data_and_ordinary_success_share_one_wrapping_sequence_and_exact_permits() {
     assert_eq!(report.family(), DispatchFamily::Ordinary);
     assert_eq!(report.outcome(), DispatchOutcome::Transmitted);
     assert_eq!(report.authorized_frame(), None);
+    let ordinary = report
+        .ordinary_packet()
+        .expect("successful ordinary report retains exact packet identity");
+    assert_eq!(ordinary.token(), expected_ordinary.dispatch_token());
+    assert_eq!(ordinary.interface(), expected_ordinary.interface());
+    assert_eq!(ordinary.packet_len(), expected_ordinary.packet_len());
+    assert_eq!(
+        ordinary.encoded_packet_sha256(),
+        expected_ordinary.encoded_packet_sha256()
+    );
     assert_eq!(dispatcher.step(2_000_600), RadioTxDispatcherStep::Advanced);
     let completion = take_ordinary_completion(&mut router);
     assert_eq!(

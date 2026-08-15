@@ -10,7 +10,7 @@ import { assertNativeBridgeContract } from "./native-contract.ts";
 const EXPECTED_CONTRACT = {
   bridgeApiMajor: 2,
   bridgeApiMinor: 0,
-  deviceApiMajor: 2,
+  deviceApiMajor: 3,
   deviceApiMinor: 0,
   maxMessageBytes: 512,
   maxLxmfReadChunkBytes: 416,

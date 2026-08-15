@@ -413,6 +413,10 @@ fn contradictions_and_store_faults_fail_closed() {
 }
 
 #[test]
+#[allow(
+    clippy::result_large_err,
+    reason = "holder regression deliberately round-trips the exact no-alloc proof owner"
+)]
 fn one_packet_proof_holder_preserves_supervisor_return_and_rejects_a_second() {
     let mut holder = LxmfProofActionsHolder::new();
     let first = packet_only_announce(0x61);

@@ -12,11 +12,12 @@ carrier retries; an explicit app retry replaces only a retryable terminal
 device submission while preserving the signed LXMF material and message
 identity.
 
-The current SQLite schema is 10 and the test-only portable memory image schema
-is 9. Only the current SQLite schema and an empty, unversioned database are
-accepted; another schema is rejected without mutation. Schema changes must be
-tested across reopen and coordinated with the native profile contract when
-mobile builds persist the affected data.
+The current SQLite schema is 11 and the test-only portable memory image schema
+is 9. SQLite schema 10 is migrated in place to schema 11; an empty,
+unversioned database is initialized at the current schema. Older and future
+schemas are rejected without mutation. Schema changes must be tested across
+reopen and coordinated with the native profile contract when mobile builds
+persist the affected data.
 
 ```sh
 cargo test --locked -p reticulum-appliance-store

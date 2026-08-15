@@ -8,8 +8,9 @@ use crate::{
     DataRouterParkedCounts, DataRouterPrepareRequest, DataRouterPrepareResult, DataRouterStep,
     OrdinaryCompletionAcceptError, OrdinaryPermitServer, OrdinaryPermitServerPhase,
     OrdinaryPermitServerStep, OrdinaryRouterAdmission, OrdinaryRouterCoordinator,
-    OrdinaryRouterFault, OrdinaryRouterFaultResidueKind, OrdinaryRouterOfferError,
-    OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions, OrdinaryRouterStep,
+    OrdinaryRouterDisplacedActions, OrdinaryRouterFault, OrdinaryRouterFaultResidueKind,
+    OrdinaryRouterOfferError, OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions,
+    OrdinaryRouterStep,
 };
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rand_core::{CryptoRng, RngCore};
@@ -27,17 +28,17 @@ use reticulum_node_core::{
     ApplicationEventOfferReport, ApplicationEventOwner, ApplicationLinkBinding, AttemptHandle,
     CapacitySnapshot, DestinationHash, EmbeddedNodeMetrics, IngressAnnounceEgress,
     IngressBroadcastPolicy, IngressBroadcastScope, IngressReport, InitiateLinkError, LinkHandle,
-    LinkState, LxmfMessageLocation, MaintenanceReport, MonotonicInstant, MonotonicMillis,
-    MonotonicSeconds, NodeActions, NodeConfig, NodeConstructionError, NodeCore, NodeIdentity,
-    NodeInstanceId, OrdinaryActionCapacitySnapshot, OrdinaryPreparedPacket,
-    OutboundDispatchInterval, OutboundProtocolToken, PacketIngressObservation, PacketInterfaceId,
-    PacketSignalObservation, PathRequestError, PrepareBasicLxmfError, PrepareRequestError,
-    PrepareResponseError, PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedPacket,
-    PreparedRequestActions, ProofProbeIdentityAliasError, ReceiptCorrelationError,
-    RequestDispatchConfirmation, RequestDispatchError, RequestDispatchReconciliation,
-    RequestHandle, RetainedRouteSnapshot, TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy,
-    TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope, TxRecoveryObservation, TxRoutePlan,
-    TxTarget,
+    LinkState, LocalDestinationAnnounceTargetError, LxmfMessageLocation, MaintenanceReport,
+    MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, NodeConfig,
+    NodeConstructionError, NodeCore, NodeIdentity, NodeInstanceId, OrdinaryActionCapacitySnapshot,
+    OrdinaryPreparedPacket, OutboundDispatchInterval, OutboundProtocolToken,
+    PacketIngressObservation, PacketInterfaceId, PacketSignalObservation, PathRequestError,
+    PrepareBasicLxmfError, PrepareRequestError, PrepareResponseError, PreparedBasicDirectLxmf,
+    PreparedBasicLxmf, PreparedPacket, PreparedRequestActions, ProofProbeIdentityAliasError,
+    ReceiptCorrelationError, RequestDispatchConfirmation, RequestDispatchError,
+    RequestDispatchReconciliation, RequestHandle, RetainedRouteSnapshot, TerminalAttempt,
+    TerminalAttempts, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
+    TxRecoveryObservation, TxRoutePlan, TxTarget,
 };
 use reticulum_tx_handoff::{
     DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
@@ -1677,6 +1678,37 @@ where
         )
     }
 
+    /// Offer one critical ordinary envelope ahead of an earlier unadmitted input.
+    ///
+    /// Admitted batches and actor-owned packets remain non-preemptible. The
+    /// caller must retain the optional exact displaced envelope before
+    /// performing any other coordinator transition.
+    #[allow(clippy::result_large_err)]
+    pub fn try_offer_priority_actions(
+        &mut self,
+        actions: NodeActions,
+        admission: OrdinaryRouterAdmission,
+    ) -> Result<Option<OrdinaryRouterDisplacedActions>, NodeInterfaceOrdinaryOfferFailure> {
+        if let Some(fault) = self.fault() {
+            return Err(NodeInterfaceOrdinaryOfferFailure {
+                reason: NodeInterfaceOrdinaryOfferError::Fault(fault),
+                actions,
+                admission,
+            });
+        }
+        self.ordinary
+            .try_offer_priority_actions(actions, admission)
+            .map_err(|failure: OrdinaryRouterOfferFailure| {
+                let reason = failure.reason();
+                let (actions, admission) = failure.into_parts();
+                NodeInterfaceOrdinaryOfferFailure {
+                    reason: NodeInterfaceOrdinaryOfferError::Coordinator(reason),
+                    actions,
+                    admission,
+                }
+            })
+    }
+
     /// Process at most one router-observed sealed ingress packet.
     ///
     /// A retryable exact buffer-return failure is retried first. A terminal
@@ -2003,6 +2035,16 @@ where
                 })
             }
         }
+    }
+
+    /// Bind one local announce destination and its native retransmits to one interface.
+    pub fn set_local_announce_interface_target(
+        &mut self,
+        destination: &DestinationHash,
+        interface: PacketInterfaceId,
+    ) -> Result<(), LocalDestinationAnnounceTargetError> {
+        self.node
+            .set_local_announce_interface_target(destination, interface)
     }
 
     /// Queue one signed local announce in the owned protocol node.

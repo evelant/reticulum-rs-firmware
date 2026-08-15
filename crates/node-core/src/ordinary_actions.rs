@@ -8,11 +8,13 @@
 use core::fmt;
 
 use reticulum_rns_rete::{NodeActions, OutboundProtocolToken};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    InterfaceSet, MonotonicMillis, PACKET_CAPACITY, PacketInterfaceId, TxAuthorizationCandidate,
-    TxAuthorizationPolicy, TxCompletionCode, TxLeaseDeadline, TxOwnerScope, TxPermitRequirements,
-    TxPermitReservation, TxPolicyDecision, TxPolicyDenial, TxRouteError, TxRoutePlan, TxTarget,
+    EncodedPacketSha256, InterfaceSet, MonotonicMillis, PACKET_CAPACITY, PacketInterfaceId,
+    TxAuthorizationCandidate, TxAuthorizationPolicy, TxCompletionCode, TxLeaseDeadline,
+    TxOwnerScope, TxPermitRequirements, TxPermitReservation, TxPolicyDecision, TxPolicyDenial,
+    TxRouteError, TxRoutePlan, TxTarget,
 };
 
 /// Stable slot assigned to one ordinary-action packet buffer.
@@ -85,6 +87,7 @@ pub struct OrdinaryPreparedPacket {
     slot: OrdinaryPacketSlotId,
     generation: OrdinaryPacketGeneration,
     packet_len: u16,
+    encoded_packet_sha256: EncodedPacketSha256,
     target: TxTarget,
     interface: PacketInterfaceId,
     remaining_interfaces: InterfaceSet,
@@ -114,6 +117,11 @@ impl OrdinaryPreparedPacket {
     /// Complete native Reticulum packet length.
     pub const fn packet_len(self) -> u16 {
         self.packet_len
+    }
+
+    /// SHA-256 over every byte in the complete encoded packet.
+    pub const fn encoded_packet_sha256(self) -> EncodedPacketSha256 {
+        self.encoded_packet_sha256
     }
 
     /// Exact interface target carried by the native protocol action.
@@ -1248,6 +1256,10 @@ impl<'buf, const PACKET_BUFFERS: usize> OrdinaryBufferPool<'buf, PACKET_BUFFERS>
     /// Validation is non-mutating. On every error the failure retains the
     /// complete [`OrdinaryPacketReturn`], including its exact mutable buffer
     /// owner and scalar completion metadata.
+    #[allow(
+        clippy::result_large_err,
+        reason = "parking failure must return the exact buffer owner inline"
+    )]
     pub fn park_return(
         &mut self,
         returned: OrdinaryPacketReturn<'buf>,
@@ -1568,6 +1580,9 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
                 generation,
                 packet_len: u16::try_from(packet.bytes().len())
                     .expect("preflight proved an RNS-MTU packet length fits u16"),
+                encoded_packet_sha256: EncodedPacketSha256::new(
+                    Sha256::digest(packet.bytes()).into(),
+                ),
                 target,
                 interface,
                 remaining_interfaces: route.remaining(),
@@ -1778,6 +1793,9 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
                 generation,
                 packet_len: u16::try_from(packet.bytes().len())
                     .expect("preflight proved an RNS-MTU packet length fits u16"),
+                encoded_packet_sha256: EncodedPacketSha256::new(
+                    Sha256::digest(packet.bytes()).into(),
+                ),
                 target,
                 interface,
                 remaining_interfaces: route.remaining(),
@@ -1939,6 +1957,10 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
     /// deadline. The deadline suppresses only an unattempted remaining hop.
     /// Explicit cancellation suppresses every remaining interface while
     /// preserving whether any earlier or current grant may have transmitted.
+    #[allow(
+        clippy::result_large_err,
+        reason = "completion failure must retain the exact packet owner inline"
+    )]
     pub fn complete_tx<'a>(
         &mut self,
         completion: OrdinaryTxCompletion<'a>,

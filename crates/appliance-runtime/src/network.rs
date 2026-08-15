@@ -10,6 +10,7 @@ use zeroize::Zeroize;
 
 use crate::{
     BytesEncoding, BytesView, JsonSafeInteger, deserialize_json_safe_u64, serialize_json_safe_u64,
+    serialize_optional_json_safe_u64,
 };
 
 /// One saved WPA2-Personal network without its credential bytes.
@@ -645,6 +646,196 @@ impl From<device_api::ReticulumDnsDiagnostics> for ReticulumDnsDiagnosticsView {
     }
 }
 
+/// Cooperative RMAP discovery-stamp lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RmapStampPhaseView {
+    /// Disabled by applied configuration.
+    Disabled,
+    /// Incremental proof-of-work is running.
+    Searching,
+    /// A stamped payload is resident.
+    Ready,
+    /// The candidate space was exhausted.
+    Exhausted,
+    /// Activation failed before search.
+    Faulted,
+}
+
+impl From<device_api::RmapStampPhase> for RmapStampPhaseView {
+    fn from(phase: device_api::RmapStampPhase) -> Self {
+        match phase {
+            device_api::RmapStampPhase::Disabled => Self::Disabled,
+            device_api::RmapStampPhase::Searching => Self::Searching,
+            device_api::RmapStampPhase::Ready => Self::Ready,
+            device_api::RmapStampPhase::Exhausted => Self::Exhausted,
+            device_api::RmapStampPhase::Faulted => Self::Faulted,
+        }
+    }
+}
+
+/// Readiness of the applied public TCP target for RMAP publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RmapInitialTcpGateStateView {
+    /// No exact public TCP target is applied.
+    NotRequired,
+    /// The applied TCP target is offline.
+    Waiting,
+    /// The applied TCP target is ready.
+    Open,
+}
+
+impl From<device_api::RmapInitialTcpGateState> for RmapInitialTcpGateStateView {
+    fn from(state: device_api::RmapInitialTcpGateState) -> Self {
+        match state {
+            device_api::RmapInitialTcpGateState::NotRequired => Self::NotRequired,
+            device_api::RmapInitialTcpGateState::Waiting => Self::Waiting,
+            device_api::RmapInitialTcpGateState::Open => Self::Open,
+        }
+    }
+}
+
+/// Most recent RMAP announce admission outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RmapQueueOutcomeView {
+    /// No attempt reached admission.
+    NotAttempted,
+    /// The ordinary coordinator accepted the action.
+    Accepted,
+    /// Native announce admission deferred the attempt.
+    AnnounceAdmissionDeferred,
+    /// Ordinary coordinator admission deferred the action.
+    OrdinaryAdmissionDeferred,
+}
+
+impl From<device_api::RmapQueueOutcome> for RmapQueueOutcomeView {
+    fn from(outcome: device_api::RmapQueueOutcome) -> Self {
+        match outcome {
+            device_api::RmapQueueOutcome::NotAttempted => Self::NotAttempted,
+            device_api::RmapQueueOutcome::Accepted => Self::Accepted,
+            device_api::RmapQueueOutcome::AnnounceAdmissionDeferred => {
+                Self::AnnounceAdmissionDeferred
+            }
+            device_api::RmapQueueOutcome::OrdinaryAdmissionDeferred => {
+                Self::OrdinaryAdmissionDeferred
+            }
+        }
+    }
+}
+
+/// Physical-egress evidence for the latest accepted RMAP publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RmapEgressConfirmationView {
+    /// No publication has been accepted.
+    NotApplicable,
+    /// This build has no correlated physical completion.
+    NotObserved,
+    /// The selected interface reported physical completion.
+    Confirmed,
+}
+
+impl From<device_api::RmapEgressConfirmation> for RmapEgressConfirmationView {
+    fn from(confirmation: device_api::RmapEgressConfirmation) -> Self {
+        match confirmation {
+            device_api::RmapEgressConfirmation::NotApplicable => Self::NotApplicable,
+            device_api::RmapEgressConfirmation::NotObserved => Self::NotObserved,
+            device_api::RmapEgressConfirmation::Confirmed => Self::Confirmed,
+        }
+    }
+}
+
+/// Stable reason why RMAP activation or publication is deferred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RmapDeferredReasonView {
+    /// Discovery model validation failed.
+    DiscoveryModelInvalid,
+    /// Discovery payload encoding failed.
+    PayloadEncodingFailed,
+    /// Stamp-search construction failed.
+    StampInitializationFailed,
+    /// Local destination activation failed.
+    DestinationActivationFailed,
+    /// The stamp candidate space was exhausted.
+    StampSearchExhausted,
+    /// The exact public TCP target is offline.
+    InitialTcpNotReady,
+    /// Announce application data was too large.
+    AnnouncePayloadTooLarge,
+    /// The native announce queue was full.
+    AnnounceQueueFull,
+    /// Native announce construction or queueing rejected the request.
+    AnnounceConstructionRejected,
+    /// The ordinary coordinator rejected the action owner.
+    OrdinaryQueueRejected,
+}
+
+impl From<device_api::RmapDeferredReason> for RmapDeferredReasonView {
+    fn from(reason: device_api::RmapDeferredReason) -> Self {
+        match reason {
+            device_api::RmapDeferredReason::DiscoveryModelInvalid => Self::DiscoveryModelInvalid,
+            device_api::RmapDeferredReason::PayloadEncodingFailed => Self::PayloadEncodingFailed,
+            device_api::RmapDeferredReason::StampInitializationFailed => {
+                Self::StampInitializationFailed
+            }
+            device_api::RmapDeferredReason::DestinationActivationFailed => {
+                Self::DestinationActivationFailed
+            }
+            device_api::RmapDeferredReason::StampSearchExhausted => Self::StampSearchExhausted,
+            device_api::RmapDeferredReason::InitialTcpNotReady => Self::InitialTcpNotReady,
+            device_api::RmapDeferredReason::AnnouncePayloadTooLarge => {
+                Self::AnnouncePayloadTooLarge
+            }
+            device_api::RmapDeferredReason::AnnounceQueueFull => Self::AnnounceQueueFull,
+            device_api::RmapDeferredReason::AnnounceConstructionRejected => {
+                Self::AnnounceConstructionRejected
+            }
+            device_api::RmapDeferredReason::OrdinaryQueueRejected => Self::OrdinaryQueueRejected,
+        }
+    }
+}
+
+/// Current compact opt-in RMAP publication status.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
+pub struct RmapRuntimeStatusView {
+    config_applied: bool,
+    stamp_phase: RmapStampPhaseView,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    stamp_attempts: u64,
+    initial_tcp_gate: RmapInitialTcpGateStateView,
+    queued_count: u32,
+    last_queue_outcome: RmapQueueOutcomeView,
+    #[serde(serialize_with = "serialize_optional_json_safe_u64")]
+    #[ts(as = "Option<JsonSafeInteger>")]
+    last_queue_attempt_at_uptime_seconds: Option<u64>,
+    egress_confirmation: RmapEgressConfirmationView,
+    #[serde(serialize_with = "serialize_optional_json_safe_u64")]
+    #[ts(as = "Option<JsonSafeInteger>")]
+    next_due_in_seconds: Option<u64>,
+    deferred_reason: Option<RmapDeferredReasonView>,
+}
+
+impl From<device_api::RmapRuntimeStatus> for RmapRuntimeStatusView {
+    fn from(status: device_api::RmapRuntimeStatus) -> Self {
+        Self {
+            config_applied: status.config_applied,
+            stamp_phase: status.stamp_phase.into(),
+            stamp_attempts: status.stamp_attempts,
+            initial_tcp_gate: status.initial_tcp_gate.into(),
+            queued_count: status.queued_count,
+            last_queue_outcome: status.last_queue_outcome.into(),
+            last_queue_attempt_at_uptime_seconds: status.last_queue_attempt_at_uptime_seconds,
+            egress_confirmation: status.egress_confirmation.into(),
+            next_due_in_seconds: status.next_due_in_seconds,
+            deferred_reason: status.deferred_reason.map(RmapDeferredReasonView::from),
+        }
+    }
+}
+
 /// Current secret-free Wi-Fi and Reticulum TCP state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub struct NetworkRuntimeStatusView {
@@ -662,6 +853,7 @@ pub struct NetworkRuntimeStatusView {
     tcp_peer_state: ReticulumTcpPeerStateView,
     last_tcp_failure: Option<ReticulumTcpFailureView>,
     dns_diagnostics: Option<ReticulumDnsDiagnosticsView>,
+    rmap_status: Option<RmapRuntimeStatusView>,
 }
 
 impl NetworkRuntimeStatusView {
@@ -714,6 +906,11 @@ impl NetworkRuntimeStatusView {
     pub const fn dns_diagnostics(&self) -> Option<&ReticulumDnsDiagnosticsView> {
         self.dns_diagnostics.as_ref()
     }
+
+    /// Current opt-in RMAP publication state, when exposed by the firmware.
+    pub const fn rmap_status(&self) -> Option<&RmapRuntimeStatusView> {
+        self.rmap_status.as_ref()
+    }
 }
 
 impl From<device_api::NetworkRuntimeStatus> for NetworkRuntimeStatusView {
@@ -737,6 +934,7 @@ impl From<device_api::NetworkRuntimeStatus> for NetworkRuntimeStatusView {
             dns_diagnostics: status
                 .dns_diagnostics
                 .map(ReticulumDnsDiagnosticsView::from),
+            rmap_status: status.rmap_status.map(RmapRuntimeStatusView::from),
         }
     }
 }

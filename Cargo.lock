@@ -2903,6 +2903,7 @@ name = "reticulum-e290-firmware"
 version = "0.1.0"
 dependencies = [
  "allocator-api2",
+ "bt-hci",
  "critical-section",
  "embassy-executor",
  "embassy-futures",

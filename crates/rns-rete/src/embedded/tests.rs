@@ -6818,6 +6818,50 @@ fn announce_queue_is_owned_and_bounded() {
 }
 
 #[test]
+fn local_announce_target_applies_only_to_destination_and_native_retransmit() {
+    let mut node = node(61);
+    let mut rng = CounterRng::default();
+    let delivery = node
+        .register_destination(
+            "rnstransport",
+            &["discovery", "interface"],
+            DestinationType::Single,
+            Direction::In,
+        )
+        .unwrap();
+    assert_eq!(
+        node.set_local_announce_interface_target(&DestHash::from([0xAA; 16]), InterfaceId(2)),
+        Err(LocalAnnounceTargetError::DestinationNotRegistered)
+    );
+    node.set_local_announce_interface_target(&delivery, InterfaceId(2))
+        .unwrap();
+
+    node.queue_announce(None, 1, &mut rng).unwrap();
+    node.queue_announce_for(&delivery, Some(b"rmap"), 1, &mut rng)
+        .unwrap();
+    let initial = node.flush_announces(1, &mut rng);
+    let primary = node.destination_hash();
+    assert_eq!(initial.len(), 2);
+    assert!(initial.iter().any(|packet| {
+        packet.target() == TxTarget::All
+            && Packet::parse(packet.bytes())
+                .is_ok_and(|parsed| parsed.destination_hash == primary.as_ref())
+    }));
+    assert!(initial.iter().any(|packet| {
+        packet.target() == TxTarget::Only(InterfaceId(2))
+            && Packet::parse(packet.bytes())
+                .is_ok_and(|parsed| parsed.destination_hash == delivery.as_ref())
+    }));
+
+    let retransmits = node.flush_announces(20, &mut rng);
+    assert!(retransmits.iter().any(|packet| {
+        packet.target() == TxTarget::Only(InterfaceId(2))
+            && Packet::parse(packet.bytes())
+                .is_ok_and(|parsed| parsed.destination_hash == delivery.as_ref())
+    }));
+}
+
+#[test]
 fn point_to_point_announce_retargets_only_its_forward_and_drops_only_its_retry() {
     let mut relay = TestNode::new(
         identity(63),

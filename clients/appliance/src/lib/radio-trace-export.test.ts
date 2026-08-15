@@ -31,7 +31,7 @@ function traceEvent(id: number, kind = "data_tx") {
       attempt_number: 2,
       timeline_sequence: 9,
     },
-    observation: {
+    event: {
       kind,
       packet_evidence: {
         encoded_packet_sha256: `hash,"${id}\nline`,
@@ -100,9 +100,24 @@ describe("RF trace export", () => {
   });
 
   test("flattens union-specific fields and applies RFC4180 escaping", () => {
+    const inboundProof = {
+      ...traceEvent(3, "inbound_proof"),
+      correlation: null,
+      event: {
+        correlation_token: "45".repeat(32),
+        dispatch_outcome: "tx_fault",
+        interface_id: 1,
+        kind: "inbound_proof",
+        message_id: "67".repeat(32),
+        packet_evidence: null,
+        rssi_dbm: null,
+        snr_db: null,
+        stage: "physical_tx_failed",
+      },
+    };
     const document = createRadioTraceExportDocument({
       collection: {
-        events: [traceEvent(1, "data_tx"), traceEvent(2, "logical_rx")],
+        events: [traceEvent(1, "data_tx"), traceEvent(2, "logical_rx"), inboundProof],
         historyIncomplete: true,
       },
       exportedAtUnixMs: Date.UTC(2026, 7, 1),
@@ -110,13 +125,17 @@ describe("RF trace export", () => {
       timelineSequence: null,
     });
     const artifact = radioTraceCsvArtifact(document);
-    const [header, first, second] = artifact.contents.trim().split("\r\n");
+    const [header, first, second, third] = artifact.contents.trim().split("\r\n");
 
     expect(artifact.filename).toEndWith("-all-20260801T000000Z.csv");
     expect(header).toContain("event.correlation.attempt_location.latitude_e6");
-    expect(header).toContain("event.observation.packet_evidence.encoded_packet_sha256");
+    expect(header).toContain("event.event.packet_evidence.encoded_packet_sha256");
+    expect(header).toContain("event.event.correlation_token");
+    expect(header).toContain("event.event.stage");
     expect(first).toContain('"hash,""1\nline"');
     expect(second).toContain("logical_rx");
+    expect(third).toContain("physical_tx_failed");
+    expect(third).toContain("tx_fault");
   });
 
   test("rejects unsafe export timestamps", () => {

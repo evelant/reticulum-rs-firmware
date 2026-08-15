@@ -61,9 +61,9 @@ pub use ordinary_router::{
     OrdinaryPermitAuthorizationError, OrdinaryPermitAuthorizationFailure, OrdinaryRouterAdmission,
     OrdinaryRouterBuildError, OrdinaryRouterBuildFailure, OrdinaryRouterBusyReason,
     OrdinaryRouterCompletionObservation, OrdinaryRouterCompletionProgress, OrdinaryRouterConfig,
-    OrdinaryRouterCoordinator, OrdinaryRouterFault, OrdinaryRouterFaultResidueKind,
-    OrdinaryRouterOfferError, OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions,
-    OrdinaryRouterStep,
+    OrdinaryRouterCoordinator, OrdinaryRouterDisplacedActions, OrdinaryRouterFault,
+    OrdinaryRouterFaultResidueKind, OrdinaryRouterOfferError, OrdinaryRouterOfferFailure,
+    OrdinaryRouterRejectedActions, OrdinaryRouterStep,
 };
 
 pub use reticulum_node_core::LxmfMessageLocation;

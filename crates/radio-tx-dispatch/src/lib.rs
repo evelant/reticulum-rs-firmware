@@ -315,7 +315,49 @@ pub struct DispatchReport {
     frame_count: u8,
     progress: Option<PacketTxProgress>,
     data_packet: Option<DataPacketDispatchObservation>,
+    ordinary_packet: Option<OrdinaryPacketDispatchObservation>,
     authorized_frame: Option<AuthorizedFrameObservation>,
+}
+
+/// Copy-only identity of one ordinary packet selected for radio dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrdinaryPacketDispatchObservation {
+    token: reticulum_node_core::OrdinaryDispatchToken,
+    interface: PacketInterfaceId,
+    packet_len: u16,
+    encoded_packet_sha256: EncodedPacketSha256,
+}
+
+impl OrdinaryPacketDispatchObservation {
+    fn from_job(job: &OrdinaryTxJob<'_>) -> Self {
+        let prepared = job.prepared();
+        Self {
+            token: prepared.dispatch_token(),
+            interface: prepared.interface(),
+            packet_len: prepared.packet_len(),
+            encoded_packet_sha256: prepared.encoded_packet_sha256(),
+        }
+    }
+
+    /// Transport-neutral packet-buffer generation.
+    pub const fn token(self) -> reticulum_node_core::OrdinaryDispatchToken {
+        self.token
+    }
+
+    /// Concrete Reticulum interface selected for this hop.
+    pub const fn interface(self) -> PacketInterfaceId {
+        self.interface
+    }
+
+    /// Complete encoded packet length.
+    pub const fn packet_len(self) -> u16 {
+        self.packet_len
+    }
+
+    /// SHA-256 over every byte in the complete encoded packet.
+    pub const fn encoded_packet_sha256(self) -> EncodedPacketSha256 {
+        self.encoded_packet_sha256
+    }
 }
 
 /// Copy-only identity of one prepared DATA packet selected for radio dispatch.
@@ -407,6 +449,7 @@ impl DispatchReport {
             frame_count,
             progress,
             data_packet: None,
+            ordinary_packet: None,
             authorized_frame: None,
         }
     }
@@ -423,8 +466,34 @@ impl DispatchReport {
             frame_count,
             progress,
             data_packet: Some(data_packet),
+            ordinary_packet: None,
             authorized_frame: None,
         }
+    }
+
+    const fn ordinary(
+        outcome: DispatchOutcome,
+        frame_count: u8,
+        progress: Option<PacketTxProgress>,
+        ordinary_packet: OrdinaryPacketDispatchObservation,
+    ) -> Self {
+        Self {
+            family: DispatchFamily::Ordinary,
+            outcome,
+            frame_count,
+            progress,
+            data_packet: None,
+            ordinary_packet: Some(ordinary_packet),
+            authorized_frame: None,
+        }
+    }
+
+    const fn with_ordinary_packet(
+        mut self,
+        ordinary_packet: OrdinaryPacketDispatchObservation,
+    ) -> Self {
+        self.ordinary_packet = Some(ordinary_packet);
+        self
     }
 
     const fn with_authorized_frame(
@@ -464,6 +533,11 @@ impl DispatchReport {
     /// no DATA packet observation.
     pub const fn data_packet(self) -> Option<DataPacketDispatchObservation> {
         self.data_packet
+    }
+
+    /// Exact ordinary packet identity for every ordinary terminal outcome.
+    pub const fn ordinary_packet(self) -> Option<OrdinaryPacketDispatchObservation> {
+        self.ordinary_packet
     }
 
     /// Exact authorized DATA frame observed before interface-specific framing.
@@ -741,9 +815,14 @@ struct DispatchMeta {
     permit_resource: TxPermitResourceId,
     airtime_profile: LoRaProfile,
     data_packet: Option<DataPacketDispatchObservation>,
+    ordinary_packet: Option<OrdinaryPacketDispatchObservation>,
 }
 
 impl DispatchMeta {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "constructor retains the complete scalar scheduling and one-of-family trace facts"
+    )]
     fn try_new(
         deadline_ms: u64,
         grace_us: u64,
@@ -752,6 +831,7 @@ impl DispatchMeta {
         permit_resource: TxPermitResourceId,
         airtime_profile: LoRaProfile,
         data_packet: Option<DataPacketDispatchObservation>,
+        ordinary_packet: Option<OrdinaryPacketDispatchObservation>,
     ) -> Option<Self> {
         let deadline_us = deadline_ms.checked_mul(1_000)?;
         Some(Self {
@@ -762,6 +842,7 @@ impl DispatchMeta {
             permit_resource,
             airtime_profile,
             data_packet,
+            ordinary_packet,
         })
     }
 
@@ -776,6 +857,20 @@ impl DispatchMeta {
             progress,
             self.data_packet
                 .expect("DATA dispatch metadata must retain packet evidence"),
+        )
+    }
+
+    fn ordinary_report(
+        self,
+        outcome: DispatchOutcome,
+        progress: Option<PacketTxProgress>,
+    ) -> DispatchReport {
+        DispatchReport::ordinary(
+            outcome,
+            self.frame_count,
+            progress,
+            self.ordinary_packet
+                .expect("ordinary dispatch metadata must retain packet evidence"),
         )
     }
 }
@@ -899,6 +994,10 @@ enum DataAfterReturn {
     },
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "disablement must retain the exact no-alloc ordinary packet owner for recovery"
+)]
 enum OrdinaryAfterReturn {
     Resume,
     Disable {
@@ -1523,6 +1622,7 @@ where
                     permit_resource,
                     airtime_profile,
                     Some(data_packet),
+                    None,
                 ) {
                     Some(meta) => meta,
                     None => {
@@ -1592,6 +1692,7 @@ where
         now_us: u64,
     ) -> RadioTxDispatcherStep {
         self.active = ActiveFamily::Ordinary;
+        let ordinary_packet = OrdinaryPacketDispatchObservation::from_job(&job);
         let airtime_profile = self.radio.airtime_profile();
         let permit_resource =
             TxPermitResourceId::new(self.radio.configuration_fingerprint().as_bytes());
@@ -1618,6 +1719,7 @@ where
             permit_resource,
             airtime_profile,
             None,
+            Some(ordinary_packet),
         ) {
             Some(meta) => meta,
             None => {
@@ -1960,12 +2062,8 @@ where
                         self.config.completion_codes.control_plane_recovery,
                     ) {
                         Ok(completion) => {
-                            let report = DispatchReport::new(
-                                DispatchFamily::Ordinary,
-                                DispatchOutcome::ControlPlaneRecovery,
-                                meta.frame_count,
-                                None,
-                            );
+                            let report =
+                                meta.ordinary_report(DispatchOutcome::ControlPlaneRecovery, None);
                             self.record_report(report);
                             self.ordinary_state = OrdinaryState::Return {
                                 completion,
@@ -2020,12 +2118,7 @@ where
                     };
                     RadioTxDispatcherStep::Advanced
                 } else if now_us >= meta.grace_deadline_us {
-                    let report = DispatchReport::new(
-                        DispatchFamily::Ordinary,
-                        DispatchOutcome::ControlPlaneRecovery,
-                        meta.frame_count,
-                        None,
-                    );
+                    let report = meta.ordinary_report(DispatchOutcome::ControlPlaneRecovery, None);
                     self.record_report(report);
                     self.ordinary_state = OrdinaryState::Return {
                         completion: pending
@@ -2091,12 +2184,7 @@ where
                 RadioTxDispatcherStep::NeedTransmit(DispatchFamily::Ordinary)
             }
             OrdinaryState::Expired { owner, meta } => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
-                    DispatchOutcome::AuthorizationExpired,
-                    meta.frame_count,
-                    None,
-                );
+                let report = meta.ordinary_report(DispatchOutcome::AuthorizationExpired, None);
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
                     completion: owner.cancel(self.config.completion_codes.expired_authorization),
@@ -2105,12 +2193,7 @@ where
                 RadioTxDispatcherStep::Advanced
             }
             OrdinaryState::Unpermitted { owner, meta } => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
-                    DispatchOutcome::PermitDenied,
-                    meta.frame_count,
-                    None,
-                );
+                let report = meta.ordinary_report(DispatchOutcome::PermitDenied, None);
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
                     completion: owner.complete(self.config.completion_codes.unpermitted),
@@ -2623,13 +2706,11 @@ where
                 }
             }
             Err(fault) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
+                let report = meta.ordinary_report(
                     DispatchOutcome::CadFault {
                         phase: fault.phase(),
                         class: fault.class(),
                     },
-                    meta.frame_count,
                     None,
                 );
                 self.record_report(report);
@@ -2888,12 +2969,8 @@ where
             || self.radio.airtime_profile() != meta.airtime_profile
         {
             self.radio.shutdown();
-            let report = DispatchReport::new(
-                DispatchFamily::Ordinary,
-                DispatchOutcome::RadioConfigurationChangedAfterPermit,
-                meta.frame_count,
-                None,
-            );
+            let report =
+                meta.ordinary_report(DispatchOutcome::RadioConfigurationChangedAfterPermit, None);
             self.record_report(report);
             self.ordinary_state = OrdinaryState::Return {
                 completion: owner.cancel(self.config.completion_codes.post_grant_rejection),
@@ -2908,12 +2985,8 @@ where
         match access.permit_granted(now_us, reserved_us) {
             Ok(LogicalPacketAccessAction::TransmitLogicalPacket { .. }) => {}
             Ok(LogicalPacketAccessAction::Reject(rejection)) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
-                    DispatchOutcome::PostGrantAccessRejected(rejection),
-                    meta.frame_count,
-                    None,
-                );
+                let report =
+                    meta.ordinary_report(DispatchOutcome::PostGrantAccessRejected(rejection), None);
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
                     completion: owner.cancel(self.config.completion_codes.post_grant_rejection),
@@ -2922,12 +2995,7 @@ where
                 return RadioOperationStep::Terminal(report);
             }
             Ok(_) | Err(_) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
-                    DispatchOutcome::FrameInvariantRecovery,
-                    meta.frame_count,
-                    None,
-                );
+                let report = meta.ordinary_report(DispatchOutcome::FrameInvariantRecovery, None);
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
                     completion: owner
@@ -2953,12 +3021,7 @@ where
         let frames = match frames {
             Ok(frames) => frames,
             Err(_) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
-                    DispatchOutcome::FrameInvariantRecovery,
-                    meta.frame_count,
-                    None,
-                );
+                let report = meta.ordinary_report(DispatchOutcome::FrameInvariantRecovery, None);
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
                     completion: owner
@@ -2972,10 +3035,8 @@ where
             }
         };
         if !self.radio.is_active() {
-            let report = DispatchReport::new(
-                DispatchFamily::Ordinary,
+            let report = meta.ordinary_report(
                 DispatchOutcome::RadioInactive,
-                meta.frame_count,
                 Some(PacketTxProgress::none()),
             );
             self.record_report(report);
@@ -3000,12 +3061,8 @@ where
                 let progress = observation.progress();
                 if progress.completed_frame_count() != meta.frame_count {
                     self.radio.shutdown();
-                    let report = DispatchReport::new(
-                        DispatchFamily::Ordinary,
-                        DispatchOutcome::FrameInvariantRecovery,
-                        meta.frame_count,
-                        Some(progress),
-                    );
+                    let report = meta
+                        .ordinary_report(DispatchOutcome::FrameInvariantRecovery, Some(progress));
                     self.record_report(report);
                     self.ordinary_state = OrdinaryState::Return {
                         completion: owner
@@ -3017,12 +3074,7 @@ where
                     };
                     return RadioOperationStep::Terminal(report);
                 }
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
-                    DispatchOutcome::Transmitted,
-                    meta.frame_count,
-                    Some(progress),
-                );
+                let report = meta.ordinary_report(DispatchOutcome::Transmitted, Some(progress));
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
                     completion: owner
@@ -3035,12 +3087,8 @@ where
                 let progress = fault.progress();
                 if progress.completed_frame_count() > meta.frame_count {
                     self.radio.shutdown();
-                    let report = DispatchReport::new(
-                        DispatchFamily::Ordinary,
-                        DispatchOutcome::FrameInvariantRecovery,
-                        meta.frame_count,
-                        Some(progress),
-                    );
+                    let report = meta
+                        .ordinary_report(DispatchOutcome::FrameInvariantRecovery, Some(progress));
                     self.record_report(report);
                     self.ordinary_state = OrdinaryState::Return {
                         completion: owner
@@ -3052,13 +3100,11 @@ where
                     };
                     return RadioOperationStep::Terminal(report);
                 }
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
+                let report = meta.ordinary_report(
                     DispatchOutcome::TxFault {
                         phase: fault.fault().phase(),
                         class: fault.fault().class(),
                     },
-                    meta.frame_count,
                     Some(progress),
                 );
                 self.record_report(report);
@@ -3134,15 +3180,15 @@ where
             }
             ActiveFamily::Ordinary => {
                 let state = mem::replace(&mut self.ordinary_state, OrdinaryState::Transitioning);
-                let (completion, frame_count) = match state {
+                let (completion, meta) = match state {
                     OrdinaryState::CadInFlight { job, meta, .. } => (
                         job.return_unpermitted()
                             .complete(self.config.completion_codes.cancelled_radio_operation),
-                        meta.frame_count,
+                        meta,
                     ),
                     OrdinaryState::TxInFlight { owner, meta } => (
                         owner.cancel(self.config.completion_codes.cancelled_radio_operation),
-                        meta.frame_count,
+                        meta,
                     ),
                     state => {
                         self.ordinary_state = state;
@@ -3150,12 +3196,7 @@ where
                     }
                 };
                 self.radio.shutdown();
-                let report = DispatchReport::new(
-                    DispatchFamily::Ordinary,
-                    DispatchOutcome::CancelledRadioOperation,
-                    frame_count,
-                    None,
-                );
+                let report = meta.ordinary_report(DispatchOutcome::CancelledRadioOperation, None);
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
                     completion,
@@ -3627,6 +3668,7 @@ where
         report: DispatchReport,
         disable_after_return: bool,
     ) -> RadioTxDispatcherStep {
+        let report = report.with_ordinary_packet(OrdinaryPacketDispatchObservation::from_job(&job));
         self.record_report(report);
         self.ordinary_state = OrdinaryState::Return {
             completion: job
@@ -3666,12 +3708,7 @@ where
         job: OrdinaryTxJob<'static>,
         meta: DispatchMeta,
     ) -> RadioTxDispatcherStep {
-        let report = DispatchReport::new(
-            DispatchFamily::Ordinary,
-            DispatchOutcome::FrameInvariantRecovery,
-            meta.frame_count,
-            None,
-        );
+        let report = meta.ordinary_report(DispatchOutcome::FrameInvariantRecovery, None);
         self.record_report(report);
         self.ordinary_state = OrdinaryState::Return {
             completion: job.recovery_fault(self.config.completion_codes.frame_invariant_recovery),
@@ -3707,12 +3744,7 @@ where
         meta: DispatchMeta,
     ) -> RadioTxDispatcherStep {
         let (pending, reply) = mismatch.into_parts();
-        let report = DispatchReport::new(
-            DispatchFamily::Ordinary,
-            DispatchOutcome::ControlPlaneRecovery,
-            meta.frame_count,
-            None,
-        );
+        let report = meta.ordinary_report(DispatchOutcome::ControlPlaneRecovery, None);
         self.record_report(report);
         self.ordinary_state = OrdinaryState::Return {
             completion: pending.recovery_fault(self.config.completion_codes.control_plane_recovery),
@@ -3773,7 +3805,7 @@ where
                 },
             ),
         };
-        let report = DispatchReport::new(DispatchFamily::Ordinary, outcome, meta.frame_count, None);
+        let report = meta.ordinary_report(outcome, None);
         self.record_report(report);
         self.ordinary_state = OrdinaryState::Return { completion, after };
         RadioOperationStep::Terminal(report)

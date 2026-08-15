@@ -11,9 +11,12 @@ use reticulum_device_api::{
     RadioTraceAttemptTerminal as ApiRadioTraceAttemptTerminal,
     RadioTraceAttemptToken as ApiRadioTraceAttemptToken, RadioTraceCursor as ApiRadioTraceCursor,
     RadioTraceDataTx as ApiRadioTraceDataTx, RadioTraceEvent as ApiRadioTraceEvent,
-    RadioTraceEventKind as ApiRadioTraceEventKind, RadioTraceLogicalRx as ApiRadioTraceLogicalRx,
-    RadioTracePacketEvidence, RadioTracePage as ApiRadioTracePage,
-    RadioTraceRouteSelected as ApiRadioTraceRouteSelected,
+    RadioTraceEventKind as ApiRadioTraceEventKind,
+    RadioTraceInboundProof as ApiRadioTraceInboundProof,
+    RadioTraceInboundProofPacket as ApiRadioTraceInboundProofPacket,
+    RadioTraceInboundProofStage as ApiRadioTraceInboundProofStage,
+    RadioTraceLogicalRx as ApiRadioTraceLogicalRx, RadioTracePacketEvidence,
+    RadioTracePage as ApiRadioTracePage, RadioTraceRouteSelected as ApiRadioTraceRouteSelected,
     RadioTraceTxOutcome as ApiRadioTraceTxOutcome, RnsDiagnostics, RouteDiagnosticEntry,
     RouteDiagnosticResolution, RouteDiagnosticsPage, RouteDiagnosticsRequest,
 };
@@ -29,7 +32,8 @@ use crate::radio_diagnostics::{
     RadioTxTerminalOutcome,
 };
 use crate::radio_trace::{
-    RadioTraceAttemptOutcome, RadioTraceEventKind, RadioTracePage, RadioTraceRouteResolution,
+    RadioTraceAttemptOutcome, RadioTraceEventKind, RadioTraceInboundProofStage, RadioTracePage,
+    RadioTraceRouteResolution,
 };
 
 /// Project one current interface-registry descriptor into its stable API record.
@@ -257,6 +261,55 @@ fn api_radio_trace_event(event: crate::radio_trace::RadioTraceEvent) -> ApiRadio
                 },
                 ingress,
             ))
+        }
+        RadioTraceEventKind::InboundProof(proof) => {
+            let packet = match (proof.encoded_packet_sha256(), proof.packet_len()) {
+                (Some(sha256), Some(packet_len)) => Some(
+                    ApiRadioTraceInboundProofPacket::try_new(
+                        packet_len,
+                        ApiEncodedPacketSha256::new(sha256),
+                    )
+                    .expect("firmware proof trace packets are non-empty"),
+                ),
+                (None, None) => None,
+                _ => panic!("firmware proof trace packet evidence is atomic"),
+            };
+            ApiRadioTraceEventKind::InboundProof(
+                ApiRadioTraceInboundProof::try_new(
+                    ApiRadioTraceAttemptToken::new(proof.correlation_token()),
+                    match proof.stage() {
+                        RadioTraceInboundProofStage::DataLogicalRx => {
+                            ApiRadioTraceInboundProofStage::DataLogicalRx
+                        }
+                        RadioTraceInboundProofStage::DurableCommit => {
+                            ApiRadioTraceInboundProofStage::DurableCommit
+                        }
+                        RadioTraceInboundProofStage::ProofRetained => {
+                            ApiRadioTraceInboundProofStage::ProofRetained
+                        }
+                        RadioTraceInboundProofStage::ProofStaged => {
+                            ApiRadioTraceInboundProofStage::ProofStaged
+                        }
+                        RadioTraceInboundProofStage::OrdinaryQueued => {
+                            ApiRadioTraceInboundProofStage::OrdinaryQueued
+                        }
+                        RadioTraceInboundProofStage::PhysicalTxDone => {
+                            ApiRadioTraceInboundProofStage::PhysicalTxDone
+                        }
+                        RadioTraceInboundProofStage::PhysicalTxFailed => {
+                            ApiRadioTraceInboundProofStage::PhysicalTxFailed
+                        }
+                    },
+                    proof.message_id(),
+                    packet,
+                    proof.interface(),
+                    proof.signal().map(|(rssi_dbm, snr_db)| {
+                        reticulum_device_api::IngressSignal::new(rssi_dbm, snr_db)
+                    }),
+                    proof.dispatch_outcome().map(api_radio_trace_tx_outcome),
+                )
+                .expect("firmware proof trace stages preserve physical outcome invariants"),
+            )
         }
     };
     ApiRadioTraceEvent::new(event.sequence(), event.observed_at_us(), kind)
@@ -549,7 +602,6 @@ mod tests {
         let first = radio_trace_page(applied, cell.radio_trace_page(None)).unwrap();
         assert_eq!(first.entries()[0].unwrap().sequence(), 1);
         assert_eq!(first.entries()[1].unwrap().sequence(), 2);
-        assert_eq!(first.entries()[2], None);
         let cursor = first
             .next_cursor()
             .expect("the omitted third route remains");

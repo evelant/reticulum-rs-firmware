@@ -8,7 +8,10 @@ use core::{cell::RefCell, num::NonZeroU64};
 
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use reticulum_board_e290_radio::E290RadioConfiguration;
-use reticulum_node_core::{EncodedPacketSha256, PacketInterfaceId, rns_packet_hash};
+use reticulum_node_core::{
+    EncodedPacketSha256, InboundProofEvidence, PacketInterfaceId, PacketType, rns_packet_hash,
+    rns_packet_type,
+};
 use reticulum_radio_interface::{FrameSignal, RxDiagnostics};
 use reticulum_radio_tx_dispatch::{
     DataPacketDispatchObservation, DispatchFamily, DispatchOutcome, DispatchReport,
@@ -17,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use crate::radio_trace::{
     RadioTraceAttemptTerminal, RadioTraceCursor, RadioTraceDataTxTerminal, RadioTraceEvent,
-    RadioTraceEventKind, RadioTraceLogicalRx, RadioTracePage, RadioTraceRing,
-    RadioTraceRouteSelected,
+    RadioTraceEventKind, RadioTraceInboundProof, RadioTraceInboundProofStage, RadioTraceLogicalRx,
+    RadioTracePage, RadioTraceRing, RadioTraceRouteSelected,
 };
 
 /// Maximum in-memory size admitted for one copyable radio snapshot.
@@ -463,6 +466,8 @@ const _: () = assert!(
 pub struct RadioDiagnosticsCell {
     state: Mutex<CriticalSectionRawMutex, RefCell<RadioDiagnosticsSnapshot>>,
     trace: Mutex<CriticalSectionRawMutex, RefCell<RadioTraceRing>>,
+    pending_inbound_proof_tx:
+        Mutex<CriticalSectionRawMutex, RefCell<Option<RadioTraceInboundProof>>>,
 }
 
 impl RadioDiagnosticsCell {
@@ -473,6 +478,7 @@ impl RadioDiagnosticsCell {
             // Main supplies the persistent boot sequence before tasks start.
             // Zero keeps host construction and pre-initialization explicit.
             trace: Mutex::new(RefCell::new(RadioTraceRing::new(0))),
+            pending_inbound_proof_tx: Mutex::new(RefCell::new(None)),
         }
     }
 
@@ -489,6 +495,8 @@ impl RadioDiagnosticsCell {
     pub fn set_trace_boot_sequence(&self, boot_sequence: u64) {
         self.trace
             .lock(|trace| trace.borrow_mut().reset_boot_sequence(boot_sequence));
+        self.pending_inbound_proof_tx
+            .lock(|pending| *pending.borrow_mut() = None);
     }
 
     /// Copy one bounded ascending page from the boot-scoped radio trace.
@@ -531,17 +539,97 @@ impl RadioDiagnosticsCell {
         let packet_len = u16::try_from(packet.len())
             .expect("the admitted native Reticulum packet length fits u16");
         let encoded_packet_sha256 = Sha256::digest(packet).into();
-        self.record_trace(
+        let packet_hash = rns_packet_hash(packet);
+        let logical_rx = self.record_trace(
             observed_at_us,
             RadioTraceEventKind::LogicalRx(RadioTraceLogicalRx::new(
                 encoded_packet_sha256,
-                rns_packet_hash(packet),
+                packet_hash,
                 packet_len,
                 interface,
                 signal.rssi_dbm,
                 signal.snr_db,
             )),
+        );
+        if rns_packet_type(packet) == Some(PacketType::Data)
+            && let Some(correlation_token) = packet_hash
+        {
+            let _ = self.record_trace(
+                observed_at_us,
+                RadioTraceEventKind::InboundProof(RadioTraceInboundProof::new(
+                    correlation_token,
+                    RadioTraceInboundProofStage::DataLogicalRx,
+                    None,
+                    Some(encoded_packet_sha256),
+                    Some(packet_len),
+                    Some(interface),
+                    Some((signal.rssi_dbm, signal.snr_db)),
+                    None,
+                )),
+            );
+        }
+        logical_rx
+    }
+
+    /// Append one post-parse durable proof stage using exact retained evidence.
+    pub fn record_inbound_proof_stage(
+        &self,
+        observed_at_us: u64,
+        stage: RadioTraceInboundProofStage,
+        message_id: Option<[u8; 32]>,
+        evidence: InboundProofEvidence,
+    ) -> Option<RadioTraceEvent> {
+        debug_assert!(stage != RadioTraceInboundProofStage::DataLogicalRx);
+        self.record_trace(
+            observed_at_us,
+            RadioTraceEventKind::InboundProof(RadioTraceInboundProof::new(
+                evidence.covered_packet_hash(),
+                stage,
+                message_id,
+                Some(evidence.encoded_packet_sha256()),
+                Some(evidence.packet_len()),
+                Some(evidence.interface().0),
+                None,
+                None,
+            )),
         )
+    }
+
+    /// Record ordinary-coordinator ownership and arm exact TxDone correlation.
+    ///
+    /// An existing arm is retained and reported as `false` rather than
+    /// overwritten. Later terminal reports compare the complete packet digest,
+    /// length, and interface, so unrelated ordinary traffic cannot consume the
+    /// proof correlation.
+    pub fn record_inbound_proof_ordinary_queued(
+        &self,
+        observed_at_us: u64,
+        message_id: Option<[u8; 32]>,
+        evidence: InboundProofEvidence,
+    ) -> bool {
+        let queued = RadioTraceInboundProof::new(
+            evidence.covered_packet_hash(),
+            RadioTraceInboundProofStage::OrdinaryQueued,
+            message_id,
+            Some(evidence.encoded_packet_sha256()),
+            Some(evidence.packet_len()),
+            Some(evidence.interface().0),
+            None,
+            None,
+        );
+        let armed = self.pending_inbound_proof_tx.lock(|pending| {
+            let mut pending = pending.borrow_mut();
+            if pending.is_some() {
+                false
+            } else {
+                *pending = Some(queued);
+                true
+            }
+        });
+        if armed {
+            let _ = self.record_trace(observed_at_us, RadioTraceEventKind::InboundProof(queued));
+        }
+        armed
     }
 
     /// Mark the generation-bound LoRa actor online.
@@ -642,6 +730,39 @@ impl RadioDiagnosticsCell {
                 report.authorized_frame().is_some(),
             );
             let _ = self.record_trace(observed_at_us, RadioTraceEventKind::DataTxTerminal(trace));
+        } else if let Some(ordinary_packet) = report.ordinary_packet() {
+            let matching = self.pending_inbound_proof_tx.lock(|pending| {
+                let mut pending = pending.borrow_mut();
+                take_matching_inbound_proof(
+                    &mut pending,
+                    ordinary_packet.encoded_packet_sha256(),
+                    ordinary_packet.packet_len(),
+                    ordinary_packet.interface(),
+                )
+            });
+            if let Some(queued) = matching {
+                let progress = report.progress();
+                let last_frame = report.frame_count().saturating_sub(1) as usize;
+                let transmitted = report.outcome() == DispatchOutcome::Transmitted;
+                let terminal_at_us = if transmitted {
+                    progress
+                        .and_then(|progress| progress.frame_completed_at_us(last_frame))
+                        .unwrap_or(observed_at_us)
+                } else {
+                    observed_at_us
+                };
+                let done = RadioTraceInboundProof::new(
+                    queued.correlation_token(),
+                    inbound_proof_terminal_stage(report.outcome()),
+                    queued.message_id(),
+                    queued.encoded_packet_sha256(),
+                    queued.packet_len(),
+                    queued.interface(),
+                    None,
+                    Some(report.outcome()),
+                );
+                let _ = self.record_trace(terminal_at_us, RadioTraceEventKind::InboundProof(done));
+            }
         }
     }
 
@@ -656,6 +777,31 @@ impl RadioDiagnosticsCell {
 
     fn update(&self, update: impl FnOnce(&mut RadioDiagnosticsSnapshot)) {
         self.state.lock(|state| update(&mut state.borrow_mut()));
+    }
+}
+
+fn take_matching_inbound_proof(
+    pending: &mut Option<RadioTraceInboundProof>,
+    encoded_packet_sha256: EncodedPacketSha256,
+    packet_len: u16,
+    interface: PacketInterfaceId,
+) -> Option<RadioTraceInboundProof> {
+    let exact = pending.as_ref().is_some_and(|queued| {
+        queued.encoded_packet_sha256() == Some(*encoded_packet_sha256.as_bytes())
+            && queued.packet_len() == Some(packet_len)
+            && queued.interface() == Some(interface.get())
+    });
+    exact.then(|| pending.take().expect("an exact pending proof exists"))
+}
+
+fn inbound_proof_terminal_stage(outcome: DispatchOutcome) -> RadioTraceInboundProofStage {
+    if outcome == DispatchOutcome::Transmitted {
+        RadioTraceInboundProofStage::PhysicalTxDone
+    } else {
+        // A DispatchReport is emitted only after the exact concrete-interface
+        // job becomes an owning completion. CAD/backoff and channel-pressure
+        // retries remain internal dispatcher states and never reach here.
+        RadioTraceInboundProofStage::PhysicalTxFailed
     }
 }
 

@@ -587,6 +587,55 @@ pub struct TxPacket {
     protocol_token: Option<OutboundProtocolToken>,
 }
 
+/// Copy-only correlation evidence for one retained inbound delivery proof.
+///
+/// The covered packet hash is the hop-invariant token shared with the inbound
+/// DATA packet. The remaining fields identify the exact proof packet that will
+/// later re-enter the ordinary transmission path after durable application
+/// ownership has been established.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundProofEvidence {
+    covered_packet_hash: [u8; 32],
+    encoded_packet_sha256: [u8; 32],
+    packet_len: u16,
+    interface: InterfaceId,
+}
+
+impl InboundProofEvidence {
+    fn from_packet(covered_packet_hash: [u8; 32], packet: &TxPacket) -> Self {
+        let TxTarget::Only(interface) = packet.target else {
+            unreachable!("a retained inbound proof targets its exact ingress interface")
+        };
+        Self {
+            covered_packet_hash,
+            encoded_packet_sha256: Sha256::digest(&packet.bytes).into(),
+            packet_len: u16::try_from(packet.bytes.len())
+                .expect("a retained Reticulum proof packet fits the base u16 MTU"),
+            interface,
+        }
+    }
+
+    /// Complete hash of the inbound DATA packet covered by this proof.
+    pub const fn covered_packet_hash(self) -> [u8; 32] {
+        self.covered_packet_hash
+    }
+
+    /// SHA-256 over every byte in the encoded proof packet.
+    pub const fn encoded_packet_sha256(self) -> [u8; 32] {
+        self.encoded_packet_sha256
+    }
+
+    /// Complete encoded proof-packet length.
+    pub const fn packet_len(self) -> u16 {
+        self.packet_len
+    }
+
+    /// Exact ingress interface on which the proof must be returned.
+    pub const fn interface(self) -> InterfaceId {
+        self.interface
+    }
+}
+
 /// Exact application delivery proof withheld from ordinary ingress transmission.
 ///
 /// The proof remains a single move-only owner until application policy allows
@@ -595,6 +644,7 @@ pub struct TxPacket {
 #[must_use = "a retained inbound proof must be released or explicitly discarded"]
 pub(crate) struct RetainedInboundProof {
     packet: TxPacket,
+    evidence: InboundProofEvidence,
 }
 
 impl core::fmt::Debug for RetainedInboundProof {
@@ -607,6 +657,15 @@ impl core::fmt::Debug for RetainedInboundProof {
 }
 
 impl RetainedInboundProof {
+    fn new(packet: TxPacket, covered_packet_hash: [u8; 32]) -> Self {
+        let evidence = InboundProofEvidence::from_packet(covered_packet_hash, &packet);
+        Self { packet, evidence }
+    }
+
+    pub(crate) const fn evidence(&self) -> InboundProofEvidence {
+        self.evidence
+    }
+
     pub(crate) fn into_packet(self) -> TxPacket {
         self.packet
     }
@@ -617,13 +676,14 @@ pub(crate) fn retained_proof_for_owner_test(marker: u8) -> (RetainedInboundProof
     let bytes = alloc::vec![marker; 37];
     let pointer = bytes.as_ptr();
     (
-        RetainedInboundProof {
-            packet: TxPacket {
+        RetainedInboundProof::new(
+            TxPacket {
                 bytes,
                 target: TxTarget::Only(InterfaceId(marker)),
                 protocol_token: None,
             },
-        },
+            [marker; 32],
+        ),
         pointer,
     )
 }
@@ -2798,6 +2858,13 @@ pub enum AnnounceAdmissionError {
     NativeRejected,
 }
 
+/// Failure to bind one registered local announce destination to an interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalAnnounceTargetError {
+    /// The named destination is not registered on this node.
+    DestinationNotRegistered,
+}
+
 impl core::fmt::Display for AnnounceAdmissionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -3366,6 +3433,7 @@ pub struct EmbeddedNode<
     admission: AdmissionCounters,
     receipt_terminals: ReceiptTerminalCounters,
     request_dispatches: [Option<RequestDispatchEntry>; PATHS],
+    local_announce_target: Option<(DestHash, InterfaceId)>,
 }
 
 impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, const LINKS: usize>
@@ -3392,6 +3460,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             admission: AdmissionCounters::default(),
             receipt_terminals: ReceiptTerminalCounters::default(),
             request_dispatches: core::array::from_fn(|_| None),
+            local_announce_target: None,
         })
     }
 
@@ -3452,6 +3521,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             for index in 0..PATHS {
                 request_dispatches.add(index).write(None);
             }
+            addr_of_mut!((*destination_ptr).local_announce_target).write(None);
 
             Ok(destination.assume_init_mut())
         }
@@ -3667,6 +3737,22 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             .get_destination_mut(destination)
             .ok_or(AnnounceAppDataError::DestinationNotRegistered)?;
         native.set_default_app_data(owned);
+        Ok(())
+    }
+
+    /// Bind one local announce destination and every native retransmit to an exact interface.
+    ///
+    /// The override is destination-scoped. Other local announcements and
+    /// ingress-derived broadcasts retain their native routing policy.
+    pub fn set_local_announce_interface_target(
+        &mut self,
+        destination: &DestHash,
+        interface: InterfaceId,
+    ) -> Result<(), LocalAnnounceTargetError> {
+        if self.core.get_destination_mut(destination).is_none() {
+            return Err(LocalAnnounceTargetError::DestinationNotRegistered);
+        }
+        self.local_announce_target = Some((*destination, interface));
         Ok(())
     }
 
@@ -4759,16 +4845,32 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 return self.reject(IngressDropReason::LinkStateNotRetained, metadata);
             }
         };
+        let mut actions =
+            resolve_ingest_actions(native, events, interface, retained_proof, derived_override);
+        self.apply_local_announce_target(&mut actions);
         IngressReport {
             disposition,
             metadata,
-            actions: resolve_ingest_actions(
-                native,
-                events,
-                interface,
-                retained_proof,
-                derived_override,
-            ),
+            actions,
+        }
+    }
+
+    fn apply_local_announce_target(&self, actions: &mut NodeActions) {
+        let Some((destination, interface)) = self.local_announce_target else {
+            return;
+        };
+        for packet in &mut actions.packets {
+            if packet.target != TxTarget::All || packet.protocol_token.is_some() {
+                continue;
+            }
+            let matches = Packet::parse(&packet.bytes).is_ok_and(|parsed| {
+                parsed.packet_type == PacketType::Announce
+                    && parsed.dest_type == DestType::Single
+                    && parsed.destination_hash == destination.as_ref()
+            });
+            if matches {
+                packet.target = TxTarget::Only(interface);
+            }
         }
     }
 
@@ -6410,11 +6512,17 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
 
     /// Flush queued announces into broadcast transmission actions.
     pub fn flush_announces<R: RngCore>(&mut self, now: u64, rng: &mut R) -> Vec<TxPacket> {
-        self.core
-            .flush_announces(now, rng)
-            .into_iter()
-            .map(|packet| TxPacket::broadcast(packet.data))
-            .collect()
+        let mut actions = NodeActions::without_retained_proofs(
+            Default::default(),
+            self.core
+                .flush_announces(now, rng)
+                .into_iter()
+                .map(|packet| TxPacket::broadcast(packet.data))
+                .collect(),
+            0,
+        );
+        self.apply_local_announce_target(&mut actions);
+        actions.packets
     }
 
     /// Close a locally owned Link and return the packet/event actions.
@@ -6516,7 +6624,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 }
             }
         }
-        let actions = resolve_tick_actions(native, events);
+        let mut actions = resolve_tick_actions(native, events);
+        self.apply_local_announce_target(&mut actions);
         self.ingress.routing_invariant_drops = self
             .ingress
             .routing_invariant_drops
@@ -6778,9 +6887,7 @@ fn intercept_retained_destination_proof(
 
     Ok(Some(RetainedApplicationProof {
         event_index,
-        proof: RetainedInboundProof {
-            packet: resolve_packet(packet, source),
-        },
+        proof: RetainedInboundProof::new(resolve_packet(packet, source), expected.packet_hash),
     }))
 }
 
@@ -6870,13 +6977,14 @@ fn bind_responder_link_proof<
             &expected.link_id,
         )
         .ok_or(RetainedProofInvariant::LinkProofBuild)?;
-    let proof = RetainedInboundProof {
-        packet: TxPacket {
+    let proof = RetainedInboundProof::new(
+        TxPacket {
             bytes,
             target: TxTarget::Only(source),
             protocol_token: None,
         },
-    };
+        expected.packet_hash,
+    );
     if !responder_link_proof_is_exact(
         &proof,
         expected.link_id,

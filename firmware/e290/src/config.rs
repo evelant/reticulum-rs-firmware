@@ -12,7 +12,8 @@ use reticulum_interface_router::{
     InterfaceProperties, LogicalMtu,
 };
 use reticulum_node_core::{
-    MonotonicMillis, OrdinaryActionAdmissionError, TxCompletionCode, TxLeaseDeadline,
+    MonotonicMillis, OrdinaryActionAdmissionError, PacketInterfaceId, TxCompletionCode,
+    TxLeaseDeadline,
 };
 use reticulum_radio_interface::{LoRaProfile, LogicalPacketAccessConfig};
 use reticulum_radio_tx_dispatch::{RadioTxCompletionCodes, RadioTxDispatcherConfig};
@@ -410,6 +411,45 @@ pub const fn next_fresh_nomad_turn_armed(
         && !ordinary_owners_quiescent
 }
 
+/// Whether a durable inbound proof still needs ordinary-coordinator admission.
+///
+/// A proof in the dedicated holder has already left the delayed queue but is
+/// not actor-owned. A ready delayed proof has completed durable application
+/// ownership but has not yet reached that holder. Either state blocks fresh
+/// ordinary producers; an already actor-owned packet continues normally until
+/// the coordinator can accept the proof unchanged.
+pub const fn lxmf_proof_admission_pending(
+    proof_holder_occupied: bool,
+    ready_delayed_proofs: usize,
+) -> bool {
+    proof_holder_occupied || ready_delayed_proofs != 0
+}
+
+/// Whether a proof may displace one unadmitted ordinary envelope.
+///
+/// The caller needs one exact retry slot for the displaced action owner. An
+/// externally retained protocol-dispatch owner (Path, Nomad, or probe work)
+/// also forbids displacement because its scalar correlation cannot be moved
+/// independently from the envelope.
+pub const fn lxmf_proof_displacement_allowed(
+    retry_slot_available: bool,
+    protocol_dispatch_pending: bool,
+) -> bool {
+    retry_slot_available && !protocol_dispatch_pending
+}
+
+/// Whether receiver-side RF proof tracing applies to this ingress interface.
+///
+/// TCP proofs still use the same durable and priority admission path, but they
+/// never arm a LoRa physical-TX correlation that only the radio dispatcher can
+/// complete.
+pub const fn inbound_proof_uses_lora_trace(
+    proof_interface: u8,
+    lora_interface: PacketInterfaceId,
+) -> bool {
+    proof_interface == lora_interface.get()
+}
+
 /// Reviewed upper bound for the PSRAM-resident outbound Nomad owner.
 pub const MAXIMUM_NOMAD_RUNTIME_BYTES: usize = 1_024;
 /// Fixed-RAM ceiling for the static authenticated request/reply channels.
@@ -425,15 +465,15 @@ pub const ANNOUNCE_NATIVE_RETRANSMIT_SECONDS: u64 =
     reticulum_node_core::RNS_ANNOUNCE_RETRANSMIT_SECONDS;
 /// Minimum nominal separation between scheduled or native announce emissions.
 pub const ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS: u64 = 3;
-/// Quiet time between distinct local destinations on the half-duplex radio.
+/// Largest current local bootstrap announce packet in complete RNS bytes.
 ///
-/// A transport peer may immediately rebroadcast the first announce it accepts;
-/// the native retransmission delay plus this product guard keeps the following
-/// service announce out of the same nominal emission opportunity.
-pub const ANNOUNCE_DESTINATION_SPACING_SECONDS: u64 =
-    ANNOUNCE_NATIVE_RETRANSMIT_SECONDS + ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS;
-/// Earliest delay before the first post-boot announce retry.
-pub const ANNOUNCE_BOOTSTRAP_BASE_SECONDS: u64 = 13;
+/// This is the 167-byte fixed signed announce plus the ten-byte UTF-8 Nomad
+/// application payload. LXMF's four-byte payload and the primary destination
+/// are smaller. Timing code feeds this exact maximum through the selected
+/// [`LoRaProfile`] rather than classifying profiles by spreading factor.
+pub const ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES: usize = 177;
+/// Identity phase buckets before a node's first boot announce cycle.
+pub const ANNOUNCE_BOOTSTRAP_INITIAL_PHASE_SLOTS: u64 = 8;
 /// Primary-destination-derived phase buckets for the first bootstrap retry.
 ///
 /// The prime bucket count makes the full little-endian identity seed
@@ -441,19 +481,14 @@ pub const ANNOUNCE_BOOTSTRAP_BASE_SECONDS: u64 = 13;
 pub const ANNOUNCE_BOOTSTRAP_PHASE_SLOTS: u64 = 43;
 /// Bounded delay before retrying the same destination after protocol rejection.
 pub const ANNOUNCE_ADMISSION_RETRY_SECONDS: u64 = 1;
-/// Delay from the first bootstrap retry's final destination to the second.
-///
-/// This leaves a prior three-destination burst and its native retransmissions
-/// enough time to clear the half-duplex radio.
-pub const ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS: u64 = 38;
 /// Periodic local transport announce cadence after bootstrap discovery.
 pub const ANNOUNCE_INTERVAL_SECONDS: u64 = 30 * 60;
 const _: () = assert!(ANNOUNCE_BOOTSTRAP_RETRIES > 0);
-const _: () = assert!(ANNOUNCE_DESTINATION_SPACING_SECONDS > ANNOUNCE_NATIVE_RETRANSMIT_SECONDS);
+const _: () =
+    assert!(ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES <= reticulum_node_core::PACKET_CAPACITY);
+const _: () = assert!(ANNOUNCE_BOOTSTRAP_INITIAL_PHASE_SLOTS > 0);
 const _: () = assert!(ANNOUNCE_BOOTSTRAP_PHASE_SLOTS > 0);
 const _: () = assert!(ANNOUNCE_ADMISSION_RETRY_SECONDS > 0);
-const _: () = assert!(ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS > 0);
-const _: () = assert!(ANNOUNCE_INTERVAL_SECONDS > ANNOUNCE_BOOTSTRAP_RETRY_SPACING_SECONDS);
 /// Deadline assigned to one admitted ordinary-action envelope.
 pub const ORDINARY_OWNER_LEASE_MS: u64 = 30_000;
 /// Deadline assigned to one durable DATA packet-owner attempt.
@@ -916,6 +951,17 @@ mod tests {
     }
 
     #[test]
+    fn tcp_proof_skips_rf_trace_and_following_lora_proof_remains_traceable() {
+        let lora = PacketInterfaceId::new(1);
+        assert!(!inbound_proof_uses_lora_trace(2, lora));
+        assert!(inbound_proof_uses_lora_trace(1, lora));
+        // RF diagnostics are not an input to durable proof admission. A TCP
+        // proof therefore neither arms LoRa correlation nor blocks the next
+        // LoRa proof from the priority lane.
+        assert!(lxmf_proof_displacement_allowed(true, false));
+    }
+
+    #[test]
     #[cfg(feature = "gateway")]
     fn border_interfaces_distinguish_shared_lora_from_point_to_point_tcp() {
         assert_eq!(
@@ -1171,6 +1217,19 @@ mod tests {
                 },
             )),
             OrdinaryOfferDisposition::QuarantineAndDrain
+        );
+    }
+
+    #[test]
+    fn proof_displacement_requires_an_owner_slot_and_no_path_or_nomad_correlation() {
+        assert!(lxmf_proof_displacement_allowed(true, false));
+        assert!(
+            !lxmf_proof_displacement_allowed(false, false),
+            "without an exact retry slot the pending envelope stays coordinator-owned"
+        );
+        assert!(
+            !lxmf_proof_displacement_allowed(true, true),
+            "a pending Path or Nomad protocol owner must remain bound to its envelope"
         );
     }
 

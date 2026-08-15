@@ -8,7 +8,7 @@ use core::num::NonZeroU8;
 use core::num::NonZeroU64;
 
 /// Current incompatible device API generation.
-pub const API_VERSION_MAJOR: u16 = 2;
+pub const API_VERSION_MAJOR: u16 = 3;
 /// Current compatible feature revision within the API generation.
 pub const API_VERSION_MINOR: u16 = 0;
 
@@ -46,7 +46,7 @@ pub const MAX_DIAGNOSTIC_INTERFACES: usize = 4;
 /// Maximum route records returned by one diagnostics page.
 pub const MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES: usize = 4;
 /// Maximum radio-trace events returned by one diagnostics page.
-pub const MAX_RADIO_TRACE_PAGE_ENTRIES: usize = 3;
+pub const MAX_RADIO_TRACE_PAGE_ENTRIES: usize = 2;
 /// Maximum ASCII DNS hostname length for one outbound Reticulum TCP peer.
 pub const MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES: usize = 96;
 /// Minimum WPA2-Personal passphrase length in bytes.
@@ -2320,6 +2320,180 @@ impl RadioTraceAttemptTerminal {
     }
 }
 
+/// Receiver-side durable DATA-to-proof lifecycle stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RadioTraceInboundProofStage {
+    /// A complete DATA packet was reconstructed by the receiving interface.
+    DataLogicalRx,
+    /// The LXMF message became durable in the receiver mailbox.
+    DurableCommit,
+    /// The exact Reticulum proof became durable in its delayed-proof owner.
+    ProofRetained,
+    /// The proof moved into the dedicated admission holder.
+    ProofStaged,
+    /// The ordinary transmit coordinator accepted the proof packet.
+    OrdinaryQueued,
+    /// The selected interface reported physical proof TxDone.
+    PhysicalTxDone,
+    /// The selected interface returned a terminal result without TxDone.
+    PhysicalTxFailed,
+}
+
+impl RadioTraceInboundProofStage {
+    /// Stable numeric representation within this operation.
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::DataLogicalRx => 0,
+            Self::DurableCommit => 1,
+            Self::ProofRetained => 2,
+            Self::ProofStaged => 3,
+            Self::OrdinaryQueued => 4,
+            Self::PhysicalTxDone => 5,
+            Self::PhysicalTxFailed => 6,
+        }
+    }
+}
+
+/// Packet identity retained for a receiver-side proof stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RadioTraceInboundProofPacket {
+    packet_len: NonZeroU16,
+    encoded_packet_sha256: EncodedPacketSha256,
+}
+
+impl RadioTraceInboundProofPacket {
+    /// Construct non-empty complete packet evidence.
+    pub const fn try_new(
+        packet_len: u16,
+        encoded_packet_sha256: EncodedPacketSha256,
+    ) -> Option<Self> {
+        let Some(packet_len) = NonZeroU16::new(packet_len) else {
+            return None;
+        };
+        Some(Self {
+            packet_len,
+            encoded_packet_sha256,
+        })
+    }
+
+    /// Complete encoded packet length.
+    pub const fn packet_len(self) -> u16 {
+        self.packet_len.get()
+    }
+
+    /// SHA-256 over all encoded packet bytes.
+    pub const fn encoded_packet_sha256(self) -> EncodedPacketSha256 {
+        self.encoded_packet_sha256
+    }
+}
+
+/// One correlated receiver-side DATA-to-proof lifecycle observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RadioTraceInboundProof {
+    correlation_token: RadioTraceAttemptToken,
+    stage: RadioTraceInboundProofStage,
+    message_id: Option<[u8; 32]>,
+    packet: Option<RadioTraceInboundProofPacket>,
+    interface_id: Option<u8>,
+    signal: Option<IngressSignal>,
+    dispatch_outcome: Option<RadioTraceTxOutcome>,
+}
+
+impl RadioTraceInboundProof {
+    /// Validate and construct one immutable proof-lifecycle observation.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn try_new(
+        correlation_token: RadioTraceAttemptToken,
+        stage: RadioTraceInboundProofStage,
+        message_id: Option<[u8; 32]>,
+        packet: Option<RadioTraceInboundProofPacket>,
+        interface_id: Option<u8>,
+        signal: Option<IngressSignal>,
+        dispatch_outcome: Option<RadioTraceTxOutcome>,
+    ) -> Result<Self, InvalidRadioTraceInboundProof> {
+        if signal.is_some() && interface_id.is_none() {
+            return Err(InvalidRadioTraceInboundProof::SignalWithoutInterface);
+        }
+        match (stage, dispatch_outcome) {
+            (
+                RadioTraceInboundProofStage::PhysicalTxDone,
+                Some(RadioTraceTxOutcome::Transmitted),
+            ) => {}
+            (RadioTraceInboundProofStage::PhysicalTxDone, _) => {
+                return Err(InvalidRadioTraceInboundProof::InvalidPhysicalTxDoneOutcome);
+            }
+            (
+                RadioTraceInboundProofStage::PhysicalTxFailed,
+                None | Some(RadioTraceTxOutcome::Transmitted),
+            ) => {
+                return Err(InvalidRadioTraceInboundProof::InvalidPhysicalTxFailedOutcome);
+            }
+            (RadioTraceInboundProofStage::PhysicalTxFailed, Some(_)) => {}
+            (_, Some(_)) => {
+                return Err(InvalidRadioTraceInboundProof::UnexpectedDispatchOutcome);
+            }
+            (_, None) => {}
+        }
+        Ok(Self {
+            correlation_token,
+            stage,
+            message_id,
+            packet,
+            interface_id,
+            signal,
+            dispatch_outcome,
+        })
+    }
+
+    /// Complete hash of the covered inbound DATA packet.
+    pub const fn correlation_token(self) -> RadioTraceAttemptToken {
+        self.correlation_token
+    }
+
+    /// Durable receiver lifecycle stage.
+    pub const fn stage(self) -> RadioTraceInboundProofStage {
+        self.stage
+    }
+
+    /// Validated LXMF message identifier, once known.
+    pub const fn message_id(self) -> Option<[u8; 32]> {
+        self.message_id
+    }
+
+    /// DATA or proof packet identity owned at this stage, when retained.
+    pub const fn packet(self) -> Option<RadioTraceInboundProofPacket> {
+        self.packet
+    }
+
+    /// Exact receive or proof-return interface, when known.
+    pub const fn interface_id(self) -> Option<u8> {
+        self.interface_id
+    }
+
+    /// Receiver-local DATA signal, when retained.
+    pub const fn signal(self) -> Option<IngressSignal> {
+        self.signal
+    }
+
+    /// Exact terminal dispatcher result for physical proof-TX stages.
+    pub const fn dispatch_outcome(self) -> Option<RadioTraceTxOutcome> {
+        self.dispatch_outcome
+    }
+}
+
+/// A receiver proof-lifecycle observation contradicted its stage or evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidRadioTraceInboundProof {
+    /// Signal values require a concrete receive interface.
+    SignalWithoutInterface,
+    /// TxDone requires the transmitted dispatcher outcome.
+    InvalidPhysicalTxDoneOutcome,
+    /// Physical failure requires a non-transmitted terminal outcome.
+    InvalidPhysicalTxFailedOutcome,
+    /// A non-physical stage cannot carry a dispatcher terminal outcome.
+    UnexpectedDispatchOutcome,
+}
+
 /// Event-specific payload for one radio trace record.
 ///
 /// Additional bounded event families can be introduced by later protocol
@@ -2335,6 +2509,8 @@ pub enum RadioTraceEventKind {
     RouteSelected(RadioTraceRouteSelected),
     /// One proof-correlated DATA attempt reaching terminal state.
     AttemptTerminal(RadioTraceAttemptTerminal),
+    /// One receiver-side durable DATA-to-proof lifecycle stage.
+    InboundProof(RadioTraceInboundProof),
 }
 
 impl RadioTraceEventKind {
@@ -2345,6 +2521,7 @@ impl RadioTraceEventKind {
             Self::LogicalRx(_) => 1,
             Self::RouteSelected(_) => 2,
             Self::AttemptTerminal(_) => 3,
+            Self::InboundProof(_) => 4,
         }
     }
 }
@@ -2436,6 +2613,7 @@ impl RadioTracePage {
                         RadioTraceEventKind::LogicalRx(_) => 100,
                         RadioTraceEventKind::RouteSelected(_) => 140,
                         RadioTraceEventKind::AttemptTerminal(_) => 68,
+                        RadioTraceEventKind::InboundProof(_) => 137,
                     };
                     previous = Some(entry.sequence);
                 }
@@ -5811,6 +5989,192 @@ impl ReticulumDnsDiagnostics {
     }
 }
 
+/// Cooperative proof-of-work state for the opt-in RMAP discovery payload.
+#[cfg(feature = "network-config")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RmapStampPhase {
+    /// RMAP publication is disabled by the applied configuration.
+    Disabled = 0,
+    /// The board is incrementally searching for the required discovery stamp.
+    Searching = 1,
+    /// A complete stamped discovery payload is resident and reusable.
+    Ready = 2,
+    /// The deterministic stamp candidate space was exhausted.
+    Exhausted = 3,
+    /// RMAP activation failed before a stamp search could run.
+    Faulted = 4,
+}
+
+#[cfg(feature = "network-config")]
+impl RmapStampPhase {
+    /// Stable numeric wire representation.
+    pub const fn wire_code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// State of the TCP readiness gate for an RMAP publication target.
+#[cfg(feature = "network-config")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RmapInitialTcpGateState {
+    /// No public TCP peer was applied, so publication uses ordinary broadcast policy.
+    NotRequired = 0,
+    /// A public TCP peer was applied but its packet interface is not ready.
+    Waiting = 1,
+    /// The applied public TCP interface is ready for an exact-interface publication.
+    Open = 2,
+}
+
+#[cfg(feature = "network-config")]
+impl RmapInitialTcpGateState {
+    /// Stable numeric wire representation.
+    pub const fn wire_code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Most recent RMAP announce admission outcome.
+#[cfg(feature = "network-config")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RmapQueueOutcome {
+    /// No publication attempt has reached announce admission this boot.
+    NotAttempted = 0,
+    /// The complete announce action entered the ordinary transmission coordinator.
+    Accepted = 1,
+    /// Native announce construction or its bounded queue deferred the attempt.
+    AnnounceAdmissionDeferred = 2,
+    /// The ordinary transmission coordinator deferred the complete action owner.
+    OrdinaryAdmissionDeferred = 3,
+}
+
+#[cfg(feature = "network-config")]
+impl RmapQueueOutcome {
+    /// Stable numeric wire representation.
+    pub const fn wire_code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Physical-egress evidence retained for the latest accepted RMAP publication.
+#[cfg(feature = "network-config")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RmapEgressConfirmation {
+    /// No RMAP publication has been accepted this boot.
+    NotApplicable = 0,
+    /// Queue admission is authoritative, but this build cannot correlate its physical completion.
+    NotObserved = 1,
+    /// The selected interface reported physical completion for the publication.
+    Confirmed = 2,
+}
+
+#[cfg(feature = "network-config")]
+impl RmapEgressConfirmation {
+    /// Stable numeric wire representation.
+    pub const fn wire_code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Stable, secret-free reason why RMAP activation or publication is deferred.
+#[cfg(feature = "network-config")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RmapDeferredReason {
+    /// Discovery payload validation rejected the applied configuration.
+    DiscoveryModelInvalid = 0,
+    /// The discovery payload could not be encoded.
+    PayloadEncodingFailed = 1,
+    /// The compact stamp search could not be initialized.
+    StampInitializationFailed = 2,
+    /// The local discovery destination could not be activated.
+    DestinationActivationFailed = 3,
+    /// The deterministic stamp candidate space was exhausted.
+    StampSearchExhausted = 4,
+    /// The exact public TCP publication target is not ready.
+    InitialTcpNotReady = 5,
+    /// Discovery application data exceeded announce admission limits.
+    AnnouncePayloadTooLarge = 6,
+    /// The bounded native announce queue was full.
+    AnnounceQueueFull = 7,
+    /// Native announce construction or queueing rejected the request.
+    AnnounceConstructionRejected = 8,
+    /// The ordinary transmission coordinator rejected the complete action owner.
+    OrdinaryQueueRejected = 9,
+}
+
+#[cfg(feature = "network-config")]
+impl RmapDeferredReason {
+    /// Stable numeric wire representation.
+    pub const fn wire_code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Compact current state of opt-in RMAP discovery publication.
+///
+/// Uptime values are board-local monotonic seconds and intentionally cannot be
+/// compared across reboots. `next_due_in_seconds` is relative to the status
+/// snapshot so the app never has to infer the board's current uptime.
+#[cfg(feature = "network-config")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RmapRuntimeStatus {
+    /// Whether the desired configuration revision is the revision running this boot.
+    pub config_applied: bool,
+    /// Current discovery-stamp lifecycle.
+    pub stamp_phase: RmapStampPhase,
+    /// Total deterministic stamp candidates tested this boot.
+    pub stamp_attempts: u64,
+    /// Readiness of the applied public TCP publication gate.
+    pub initial_tcp_gate: RmapInitialTcpGateState,
+    /// Publications accepted by the ordinary transmission coordinator this boot.
+    pub queued_count: u32,
+    /// Outcome of the most recent queue attempt.
+    pub last_queue_outcome: RmapQueueOutcome,
+    /// Board uptime when the most recent queue attempt ran.
+    pub last_queue_attempt_at_uptime_seconds: Option<u64>,
+    /// Physical completion evidence for the latest accepted publication.
+    pub egress_confirmation: RmapEgressConfirmation,
+    /// Relative delay until the next eligible publication attempt.
+    pub next_due_in_seconds: Option<u64>,
+    /// Current activation failure or publication deferral, when present.
+    pub deferred_reason: Option<RmapDeferredReason>,
+}
+
+#[cfg(feature = "network-config")]
+impl RmapRuntimeStatus {
+    /// Construct one complete current RMAP projection.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        config_applied: bool,
+        stamp_phase: RmapStampPhase,
+        stamp_attempts: u64,
+        initial_tcp_gate: RmapInitialTcpGateState,
+        queued_count: u32,
+        last_queue_outcome: RmapQueueOutcome,
+        last_queue_attempt_at_uptime_seconds: Option<u64>,
+        egress_confirmation: RmapEgressConfirmation,
+        next_due_in_seconds: Option<u64>,
+        deferred_reason: Option<RmapDeferredReason>,
+    ) -> Self {
+        Self {
+            config_applied,
+            stamp_phase,
+            stamp_attempts,
+            initial_tcp_gate,
+            queued_count,
+            last_queue_outcome,
+            last_queue_attempt_at_uptime_seconds,
+            egress_confirmation,
+            next_due_in_seconds,
+            deferred_reason,
+        }
+    }
+}
+
 /// Live, secret-free Wi-Fi and Reticulum TCP state.
 #[cfg(feature = "network-config")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5834,6 +6198,8 @@ pub struct NetworkRuntimeStatus {
     pub last_tcp_failure: Option<ReticulumTcpFailure>,
     /// Bounded hostname-resolution diagnostics, when a DNS peer is active.
     pub dns_diagnostics: Option<ReticulumDnsDiagnostics>,
+    /// Current opt-in RMAP publication diagnostics, when this firmware exposes them.
+    pub rmap_status: Option<RmapRuntimeStatus>,
 }
 
 #[cfg(feature = "network-config")]
@@ -5918,7 +6284,14 @@ impl NetworkRuntimeStatus {
             tcp_peer_state,
             last_tcp_failure,
             dns_diagnostics,
+            rmap_status: None,
         })
+    }
+
+    /// Attach the current RMAP publication projection.
+    pub const fn with_rmap_status(mut self, status: RmapRuntimeStatus) -> Self {
+        self.rmap_status = Some(status);
+        self
     }
 
     /// Associated SSID, when available.

@@ -4,7 +4,7 @@
 // Every JsonSafeInteger is encoded as a JSON number in the inclusive range
 // 0..=Number.MAX_SAFE_INTEGER. Rust validates this contract at the wire boundary.
 
-export const DEVICE_API_VERSION_MAJOR = 2 as const;
+export const DEVICE_API_VERSION_MAJOR = 3 as const;
 export const DEVICE_API_VERSION_MINOR = 0 as const;
 export const MAX_MESSAGE_BYTES = 512 as const;
 export const MAX_LXMF_READ_CHUNK_BYTES = 416 as const;
@@ -328,9 +328,39 @@ export type ReticulumDnsResolutionView = { address: string, source: ReticulumDns
 export type ReticulumDnsDiagnosticsView = { gateway_ipv4: string | null, dhcp_servers: Array<string | null>, primary_outcome: ReticulumDnsPrimaryOutcomeView, raw_setup_state: ReticulumDnsRawSetupStateView, raw_attempts: Array<ReticulumDnsRawAttemptView | null>, resolution: ReticulumDnsResolutionView | null, };
 
 /**
+ * Cooperative RMAP discovery-stamp lifecycle.
+ */
+export type RmapStampPhaseView = "disabled" | "searching" | "ready" | "exhausted" | "faulted";
+
+/**
+ * Readiness of the applied public TCP target for RMAP publication.
+ */
+export type RmapInitialTcpGateStateView = "not_required" | "waiting" | "open";
+
+/**
+ * Most recent RMAP announce admission outcome.
+ */
+export type RmapQueueOutcomeView = "not_attempted" | "accepted" | "announce_admission_deferred" | "ordinary_admission_deferred";
+
+/**
+ * Physical-egress evidence for the latest accepted RMAP publication.
+ */
+export type RmapEgressConfirmationView = "not_applicable" | "not_observed" | "confirmed";
+
+/**
+ * Stable reason why RMAP activation or publication is deferred.
+ */
+export type RmapDeferredReasonView = "discovery_model_invalid" | "payload_encoding_failed" | "stamp_initialization_failed" | "destination_activation_failed" | "stamp_search_exhausted" | "initial_tcp_not_ready" | "announce_payload_too_large" | "announce_queue_full" | "announce_construction_rejected" | "ordinary_queue_rejected";
+
+/**
+ * Current compact opt-in RMAP publication status.
+ */
+export type RmapRuntimeStatusView = { config_applied: boolean, stamp_phase: RmapStampPhaseView, stamp_attempts: JsonSafeInteger, initial_tcp_gate: RmapInitialTcpGateStateView, queued_count: number, last_queue_outcome: RmapQueueOutcomeView, last_queue_attempt_at_uptime_seconds: JsonSafeInteger | null, egress_confirmation: RmapEgressConfirmationView, next_due_in_seconds: JsonSafeInteger | null, deferred_reason: RmapDeferredReasonView | null, };
+
+/**
  * Current secret-free Wi-Fi and Reticulum TCP state.
  */
-export type NetworkRuntimeStatusView = { configured_revision: JsonSafeInteger, applied_revision: JsonSafeInteger, wifi_state: WifiStationStateView, active_wifi_profile: string | null, connected_ssid: BytesView | null, ipv4_address: string | null, rssi_dbm: number | null, tcp_peer_state: ReticulumTcpPeerStateView, last_tcp_failure: ReticulumTcpFailureView | null, dns_diagnostics: ReticulumDnsDiagnosticsView | null, };
+export type NetworkRuntimeStatusView = { configured_revision: JsonSafeInteger, applied_revision: JsonSafeInteger, wifi_state: WifiStationStateView, active_wifi_profile: string | null, connected_ssid: BytesView | null, ipv4_address: string | null, rssi_dbm: number | null, tcp_peer_state: ReticulumTcpPeerStateView, last_tcp_failure: ReticulumTcpFailureView | null, dns_diagnostics: ReticulumDnsDiagnosticsView | null, rmap_status: RmapRuntimeStatusView | null, };
 
 /**
  * Secret update for one saved WPA2-Personal profile.
@@ -579,9 +609,14 @@ export type RadioTraceTxOutcomeView = "transmitted" | "access_rejected" | "permi
 export type RadioTraceAttemptOutcomeView = "delivered" | "delivery_timeout" | "unsent";
 
 /**
+ * Receiver-side durable DATA-to-proof lifecycle stage.
+ */
+export type RadioTraceInboundProofStageView = "data_logical_rx" | "durable_commit" | "proof_retained" | "proof_staged" | "ordinary_queued" | "physical_tx_done" | "physical_tx_failed";
+
+/**
  * Typed event-specific RF trace evidence.
  */
-export type RadioTraceEventKindView = { "kind": "route_selected", submission_id: JsonSafeInteger, destination: string, next_hop_identity: string | null, hops: number, interface_id: number, resolution: RadioTraceRouteResolutionView, packet_evidence: PacketEvidenceView, rns_attempt_token: string, } | { "kind": "data_tx", interface_id: number, packet_evidence: PacketEvidenceView, rns_attempt_token: string, outcome: RadioTraceTxOutcomeView, planned_physical_frames: number, completed_physical_frames: number, frame_0_completed_at_us: JsonSafeInteger | null, frame_1_completed_at_us: JsonSafeInteger | null, authorized_frame_observed: boolean, } | { "kind": "logical_rx", interface_id: number, packet_evidence: PacketEvidenceView, rns_packet_hash: string | null, rssi_dbm: number, snr_db: number, } | { "kind": "attempt_terminal", rns_attempt_token: string, outcome: RadioTraceAttemptOutcomeView, proof_interface_id: number | null, proof_rssi_dbm: number | null, proof_snr_db: number | null, };
+export type RadioTraceEventKindView = { "kind": "route_selected", submission_id: JsonSafeInteger, destination: string, next_hop_identity: string | null, hops: number, interface_id: number, resolution: RadioTraceRouteResolutionView, packet_evidence: PacketEvidenceView, rns_attempt_token: string, } | { "kind": "data_tx", interface_id: number, packet_evidence: PacketEvidenceView, rns_attempt_token: string, outcome: RadioTraceTxOutcomeView, planned_physical_frames: number, completed_physical_frames: number, frame_0_completed_at_us: JsonSafeInteger | null, frame_1_completed_at_us: JsonSafeInteger | null, authorized_frame_observed: boolean, } | { "kind": "logical_rx", interface_id: number, packet_evidence: PacketEvidenceView, rns_packet_hash: string | null, rssi_dbm: number, snr_db: number, } | { "kind": "attempt_terminal", rns_attempt_token: string, outcome: RadioTraceAttemptOutcomeView, proof_interface_id: number | null, proof_rssi_dbm: number | null, proof_snr_db: number | null, } | { "kind": "inbound_proof", correlation_token: string, stage: RadioTraceInboundProofStageView, message_id: string | null, packet_evidence: PacketEvidenceView | null, interface_id: number | null, rssi_dbm: number | null, snr_db: number | null, dispatch_outcome: RadioTraceTxOutcomeView | null, };
 
 /**
  * Durable message-attempt association for a traced RF event.

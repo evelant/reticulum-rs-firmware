@@ -1368,6 +1368,110 @@ impl RfTraceAttemptObservation {
     }
 }
 
+/// Receiver-side durable DATA-to-proof lifecycle stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RfTraceInboundProofStage {
+    /// A complete DATA packet was reconstructed by the receiving interface.
+    DataLogicalRx,
+    /// The LXMF message became durable in the receiver mailbox.
+    DurableCommit,
+    /// The exact proof became durable in its delayed-proof owner.
+    ProofRetained,
+    /// The proof moved into the dedicated admission holder.
+    ProofStaged,
+    /// The ordinary transmit coordinator accepted the proof.
+    OrdinaryQueued,
+    /// The selected interface reported physical proof TxDone.
+    PhysicalTxDone,
+    /// The selected interface returned a terminal result without TxDone.
+    PhysicalTxFailed,
+}
+
+/// One correlated receiver-side DATA-to-proof lifecycle observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RfTraceInboundProofObservation {
+    rns_attempt_token: RnsAttemptToken,
+    stage: RfTraceInboundProofStage,
+    message_id: Option<MessageId>,
+    packet_evidence: Option<PacketEvidence>,
+    interface: Option<RfTraceInterfaceId>,
+    signal: Option<(i16, i16)>,
+    dispatch_outcome: Option<RfTraceTxOutcome>,
+}
+
+impl RfTraceInboundProofObservation {
+    /// Validate and preserve one proof-lifecycle observation.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        rns_attempt_token: RnsAttemptToken,
+        stage: RfTraceInboundProofStage,
+        message_id: Option<MessageId>,
+        packet_evidence: Option<PacketEvidence>,
+        interface: Option<RfTraceInterfaceId>,
+        signal: Option<(i16, i16)>,
+        dispatch_outcome: Option<RfTraceTxOutcome>,
+    ) -> Option<Self> {
+        if signal.is_some() && interface.is_none() {
+            return None;
+        }
+        match (stage, dispatch_outcome) {
+            (RfTraceInboundProofStage::PhysicalTxDone, Some(RfTraceTxOutcome::Transmitted)) => {}
+            (RfTraceInboundProofStage::PhysicalTxDone, _) => return None,
+            (
+                RfTraceInboundProofStage::PhysicalTxFailed,
+                None | Some(RfTraceTxOutcome::Transmitted),
+            ) => return None,
+            (RfTraceInboundProofStage::PhysicalTxFailed, Some(_)) => {}
+            (_, Some(_)) => return None,
+            (_, None) => {}
+        }
+        Some(Self {
+            rns_attempt_token,
+            stage,
+            message_id,
+            packet_evidence,
+            interface,
+            signal,
+            dispatch_outcome,
+        })
+    }
+
+    /// Complete hash of the covered inbound DATA packet.
+    pub const fn rns_attempt_token(self) -> RnsAttemptToken {
+        self.rns_attempt_token
+    }
+
+    /// Durable receiver lifecycle stage.
+    pub const fn stage(self) -> RfTraceInboundProofStage {
+        self.stage
+    }
+
+    /// Validated LXMF message identifier, once known.
+    pub const fn message_id(self) -> Option<MessageId> {
+        self.message_id
+    }
+
+    /// DATA or proof packet identity retained at this stage.
+    pub const fn packet_evidence(self) -> Option<PacketEvidence> {
+        self.packet_evidence
+    }
+
+    /// Exact receive or proof-return interface, when known.
+    pub const fn interface(self) -> Option<RfTraceInterfaceId> {
+        self.interface
+    }
+
+    /// Receiver-local DATA signal, when retained.
+    pub const fn signal(self) -> Option<(i16, i16)> {
+        self.signal
+    }
+
+    /// Exact terminal dispatcher result for physical proof-TX stages.
+    pub const fn dispatch_outcome(self) -> Option<RfTraceTxOutcome> {
+        self.dispatch_outcome
+    }
+}
+
 /// Direction-specific payload of one raw board RF trace observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RfTraceObservationKind {
@@ -1379,6 +1483,8 @@ pub enum RfTraceObservationKind {
     LogicalRx(RfTraceRxObservation),
     /// Terminal delivery-receipt state for one exact DATA attempt.
     AttemptTerminal(RfTraceAttemptObservation),
+    /// One receiver-side durable DATA-to-proof lifecycle stage.
+    InboundProof(RfTraceInboundProofObservation),
 }
 
 /// One scalar immutable observation supplied by the board.
@@ -1423,9 +1529,9 @@ impl RfTraceObservation {
         match self.kind {
             RfTraceObservationKind::RouteSelected(route) => Some(route.submission_id()),
             RfTraceObservationKind::DataTx(tx) => tx.submission_id(),
-            RfTraceObservationKind::LogicalRx(_) | RfTraceObservationKind::AttemptTerminal(_) => {
-                None
-            }
+            RfTraceObservationKind::LogicalRx(_)
+            | RfTraceObservationKind::AttemptTerminal(_)
+            | RfTraceObservationKind::InboundProof(_) => None,
         }
     }
 
@@ -1436,6 +1542,7 @@ impl RfTraceObservation {
             RfTraceObservationKind::DataTx(tx) => Some(tx.rns_attempt_token()),
             RfTraceObservationKind::LogicalRx(rx) => rx.rns_packet_hash(),
             RfTraceObservationKind::AttemptTerminal(terminal) => Some(terminal.rns_attempt_token()),
+            RfTraceObservationKind::InboundProof(proof) => Some(proof.rns_attempt_token()),
         }
     }
 }

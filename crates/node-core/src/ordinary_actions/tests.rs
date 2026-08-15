@@ -112,6 +112,10 @@ const fn request(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "test helper preserves the production exact-owner failure shape"
+)]
 fn complete_unpermitted<'a, const BUFFERS: usize>(
     owner: &mut OrdinaryActionOwner<BUFFERS>,
     job: OrdinaryTxJob<'a>,

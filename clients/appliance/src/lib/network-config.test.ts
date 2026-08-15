@@ -71,6 +71,7 @@ function runtime(
     dns_diagnostics: null,
     ipv4_address: null,
     last_tcp_failure: null,
+    rmap_status: null,
     rssi_dbm: null,
     tcp_peer_state: "disabled",
     wifi_state: "disabled",

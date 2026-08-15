@@ -29,15 +29,42 @@ pub const PRE_AUTHENTICATION_TIMEOUT_MS: u64 = 300_000;
 pub const BLE_SECURITY_PAIRING_TIMEOUT_MS: u64 = 30_000;
 /// Milliseconds between idle authenticated-session progress turns.
 pub const API_POLL_INTERVAL_MS: u64 = 1;
+/// Minimum supervision timeout accepted from a BLE central.
+///
+/// Apple centrals can request a sub-second timeout even though this appliance
+/// shares one ESP32-S3 radio between Bluetooth and Wi-Fi. Six seconds is the
+/// lower bound in Apple's current accessory guidance and tolerates a short
+/// coexistence or executor scheduling interruption. Longer valid requests are
+/// retained unchanged.
+pub const MINIMUM_SUPERVISION_TIMEOUT_MS: u64 = 6_000;
+/// Maximum time allowed for the proactive connection-parameter HCI command.
+///
+/// Trouble's external-controller command slot is released by its drop guard if
+/// this future is cancelled. The controller's later command-status event still
+/// restores HCI command credit, so bounding the request does not strand the
+/// host command queue or delay GATT service indefinitely.
+pub const PROACTIVE_CONNECTION_PARAMETER_REQUEST_TIMEOUT_MS: u64 = 2_000;
 /// Milliseconds between fail-closed BLE disconnect-drain observations.
 pub const DISCONNECT_DRAIN_RECHECK_INTERVAL_MS: u64 = 25;
-/// Milliseconds before, and between, warnings for a stalled disconnect drain.
+/// Maximum time allowed for Trouble and the controller to finish disconnect.
 ///
-/// This is a logging interval, not a teardown deadline. A warning never permits
-/// the next advertiser to start. Releasing the last Trouble connection owner
-/// before its exact `Disconnected` event can race controller teardown with the
-/// next advertiser.
-pub const DISCONNECT_DRAIN_PROLONGED_LOG_MS: u64 = 5_000;
+/// The next advertiser never starts after this deadline. The binary instead
+/// performs its bounded host-recovery fallback because Trouble exposes neither
+/// the manager's exact state nor a public in-place host/controller reset.
+pub const DISCONNECT_DRAIN_TIMEOUT_MS: u64 = 5_000;
+/// Minimum healthy boot uptime before a second BLE recovery reset is allowed.
+///
+/// A recovery-reset marker survives a software reset in RTC fast memory. A
+/// second drain failure inside this window disables BLE until a power cycle,
+/// preventing a damaged controller/host lifecycle from reboot-looping the
+/// independent Reticulum appliance.
+pub const BLE_RECOVERY_RESET_REARM_UPTIME_MS: u64 = 600_000;
+/// Complete RTC marker written immediately before a BLE recovery reset.
+///
+/// The checksum word makes a torn write distinguishable from the clean
+/// power-on value. Both armed and corrupt values fail closed during the rearm
+/// window.
+pub const BLE_RECOVERY_RESET_MARKER_WORDS: [u32; 2] = [0x424c_4552, !0x424c_4552];
 /// Maximum time the bearer waits for one node-side control, live-pairing, or
 /// bond-commit exchange.
 ///
@@ -71,6 +98,265 @@ pub const CONNECTIONS_MAX: usize = reticulum_device_api_ble::MAX_CONNECTIONS;
 pub const CONTROLLER_ACTIVITY_MAX: usize = 2;
 /// L2CAP channels retained for signaling and ATT.
 pub const L2CAP_CHANNELS_MAX: usize = 2;
+
+/// Action taken after the bounded disconnect drain cannot complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleHostRecoveryDisposition {
+    /// One full-chip software reset is admitted to rebuild controller and host
+    /// state from their ordinary boot path.
+    SoftwareReset,
+    /// A recent recovery reset (or uncertain retained marker) suppresses
+    /// another reset so the appliance cannot enter a reboot loop.
+    DisableBleUntilPowerCycle,
+}
+
+/// Validated state of the RTC-retained BLE recovery marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleRecoveryResetMarkerState {
+    /// Power-on initialization left the marker fully clear.
+    Clean,
+    /// Both marker words are complete and complementary.
+    Armed,
+    /// At least one word is nonzero but the pair is incomplete or corrupt.
+    Corrupt,
+}
+
+/// BLE-valid parameters derived from one link's current negotiated state.
+///
+/// The interval and latency are retained exactly. Callers use the interval as
+/// both request bounds and use zero for both connection-event length hints.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BleConnectionUpdateParameters {
+    interval_us: u64,
+    latency: u16,
+    supervision_timeout_ms: u64,
+}
+
+impl BleConnectionUpdateParameters {
+    /// Exact current interval to use as both the minimum and maximum request.
+    pub const fn interval_us(self) -> u64 {
+        self.interval_us
+    }
+
+    /// Exact current peripheral latency to retain.
+    pub const fn latency(self) -> u16 {
+        self.latency
+    }
+
+    /// Safe supervision timeout rounded to Bluetooth's 10 ms HCI unit.
+    pub const fn supervision_timeout_ms(self) -> u64 {
+        self.supervision_timeout_ms
+    }
+}
+
+/// Why current/peer BLE parameters cannot produce a valid safe-timeout
+/// request without also changing interval or latency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleConnectionUpdateDerivationError {
+    /// Interval is outside Trouble/Bluetooth's 7.5 ms through 4 s bounds.
+    InvalidInterval,
+    /// Peripheral latency is outside Trouble/Bluetooth's `0..500` bound.
+    InvalidLatency,
+    /// The relationship-derived timeout exceeds Bluetooth's 32-second bound.
+    TimeoutOutOfRange,
+}
+
+impl BleRecoveryResetMarkerState {
+    /// Stable diagnostic label for USB production logs.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Armed => "armed",
+            Self::Corrupt => "corrupt",
+        }
+    }
+
+    /// Whether a recovery reset has definitely not been attempted since the
+    /// RTC region was initialized.
+    pub const fn is_clean(self) -> bool {
+        matches!(self, Self::Clean)
+    }
+}
+
+/// Bearer action after one periodic observation of Trouble's public manager
+/// predicate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleManagerStateDisposition {
+    /// The manager still owns a connected link; continue serving GATT.
+    ContinueServing,
+    /// The manager no longer reports `Connected`, so stop serving and
+    /// reconcile the final connection owner even if its event was lost.
+    ReconcileDisconnect,
+}
+
+/// Bearer action after one disconnect-drain timer observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleDisconnectDrainDisposition {
+    /// Continue waiting for the exact `Disconnected` event.
+    ContinueDraining,
+    /// The exact event did not arrive before the deadline; recover the host.
+    RecoverHost,
+}
+
+/// Evidence that caused the GATT service loop to stop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleDisconnectEvidence {
+    /// No disconnect transition was observed; the bearer chose to close the
+    /// still-live link for another bounded session reason.
+    None,
+    /// The exact `Disconnected` event was received by the GATT service.
+    ServeEvent,
+    /// Trouble's manager stopped reporting `Connected`, but the exact event
+    /// was absent from its bounded connection-event queue.
+    ManagerStateFallback,
+}
+
+/// Initial action for the final Trouble connection-owner drain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleDisconnectDrainEntryDisposition {
+    /// The manager confirms the already-observed disconnect; release the final
+    /// connection reference without waiting for a duplicate event.
+    Drained,
+    /// Disconnect is not yet authoritative; request it and wait up to the
+    /// bounded drain deadline.
+    RequestAndWait,
+}
+
+/// Raise a peer's supervision timeout to the product safety floor.
+///
+/// Callers clone the complete Trouble request and replace only its supervision
+/// timeout with this result. Valid interval, latency, and event-length values
+/// therefore remain exactly as requested by the central.
+pub const fn safe_supervision_timeout_ms(requested_ms: u64) -> u64 {
+    if requested_ms < MINIMUM_SUPERVISION_TIMEOUT_MS {
+        MINIMUM_SUPERVISION_TIMEOUT_MS
+    } else {
+        requested_ms
+    }
+}
+
+/// Derive a valid safe-timeout request while retaining interval and latency.
+///
+/// The timeout is at least six seconds, never shortens the current/requested
+/// value, and satisfies Apple's stricter `3 * interval * (latency + 1)`
+/// relationship. One additional 10 ms HCI unit makes the strict inequality
+/// exact after wire quantization.
+#[allow(
+    clippy::manual_range_contains,
+    reason = "RangeInclusive::contains is not available in this const policy on the supported compiler"
+)]
+pub const fn derive_ble_connection_update_parameters(
+    interval_us: u64,
+    latency: u16,
+    current_timeout_ms: u64,
+) -> Result<BleConnectionUpdateParameters, BleConnectionUpdateDerivationError> {
+    if interval_us < 7_500 || interval_us > 4_000_000 {
+        return Err(BleConnectionUpdateDerivationError::InvalidInterval);
+    }
+    if latency >= 500 {
+        return Err(BleConnectionUpdateDerivationError::InvalidLatency);
+    }
+    if current_timeout_ms > 32_000 {
+        return Err(BleConnectionUpdateDerivationError::TimeoutOutOfRange);
+    }
+    let relationship_us = 3 * interval_us * (latency as u64 + 1);
+    let relationship_timeout_ms = (relationship_us / 10_000 + 1) * 10;
+    let current_timeout_ms = current_timeout_ms.div_ceil(10) * 10;
+    let timeout_ms = if current_timeout_ms > MINIMUM_SUPERVISION_TIMEOUT_MS {
+        current_timeout_ms
+    } else {
+        MINIMUM_SUPERVISION_TIMEOUT_MS
+    };
+    let timeout_ms = if relationship_timeout_ms > timeout_ms {
+        relationship_timeout_ms
+    } else {
+        timeout_ms
+    };
+    if timeout_ms < 100 || timeout_ms > 32_000 {
+        return Err(BleConnectionUpdateDerivationError::TimeoutOutOfRange);
+    }
+    Ok(BleConnectionUpdateParameters {
+        interval_us,
+        latency,
+        supervision_timeout_ms: timeout_ms,
+    })
+}
+
+/// Validate the two-word RTC recovery marker without trusting partial writes.
+pub const fn classify_ble_recovery_reset_marker(marker: [u32; 2]) -> BleRecoveryResetMarkerState {
+    if marker[0] == 0 && marker[1] == 0 {
+        BleRecoveryResetMarkerState::Clean
+    } else if marker[0] == BLE_RECOVERY_RESET_MARKER_WORDS[0]
+        && marker[1] == BLE_RECOVERY_RESET_MARKER_WORDS[1]
+    {
+        BleRecoveryResetMarkerState::Armed
+    } else {
+        BleRecoveryResetMarkerState::Corrupt
+    }
+}
+
+/// Convert Trouble's public connected predicate into the GATT-service action.
+///
+/// This is a host/HIL seam for the failure mode where Trouble transitions its
+/// private manager state but its bounded event queue drops `Disconnected`.
+pub const fn ble_manager_state_disposition(
+    manager_reports_connected: bool,
+) -> BleManagerStateDisposition {
+    if manager_reports_connected {
+        BleManagerStateDisposition::ContinueServing
+    } else {
+        BleManagerStateDisposition::ReconcileDisconnect
+    }
+}
+
+/// Decide whether the exact-event disconnect drain has reached its deadline.
+pub const fn ble_disconnect_drain_disposition(elapsed_ms: u64) -> BleDisconnectDrainDisposition {
+    if elapsed_ms >= DISCONNECT_DRAIN_TIMEOUT_MS {
+        BleDisconnectDrainDisposition::RecoverHost
+    } else {
+        BleDisconnectDrainDisposition::ContinueDraining
+    }
+}
+
+/// Reconcile service-loop evidence with Trouble's current public state.
+///
+/// A false manager predicate is authoritative only when observed before this
+/// task issues a local disconnect: either the exact event was consumed or the
+/// manager transition occurred while that event was dropped. After a local
+/// request, the same predicate also represents Trouble's intermediate
+/// `DisconnectRequest`, so the bounded event drain remains required.
+pub const fn ble_disconnect_drain_entry_disposition(
+    evidence: BleDisconnectEvidence,
+    manager_reports_connected: bool,
+) -> BleDisconnectDrainEntryDisposition {
+    if !manager_reports_connected
+        && matches!(
+            evidence,
+            BleDisconnectEvidence::ServeEvent | BleDisconnectEvidence::ManagerStateFallback
+        )
+    {
+        BleDisconnectDrainEntryDisposition::Drained
+    } else {
+        BleDisconnectDrainEntryDisposition::RequestAndWait
+    }
+}
+
+/// Decide whether one bounded BLE host-recovery reset is safe this boot.
+///
+/// `retained_marker_clean` is true only when RTC recovery storage is all zero.
+/// A valid prior marker and any torn or corrupt marker are both treated as a
+/// previous attempt. Stable uptime rearms recovery; an early repeat fails
+/// closed and leaves LoRa/node tasks running.
+pub const fn ble_host_recovery_disposition(
+    retained_marker_clean: bool,
+    boot_uptime_ms: u64,
+) -> BleHostRecoveryDisposition {
+    if retained_marker_clean || boot_uptime_ms >= BLE_RECOVERY_RESET_REARM_UPTIME_MS {
+        BleHostRecoveryDisposition::SoftwareReset
+    } else {
+        BleHostRecoveryDisposition::DisableBleUntilPowerCycle
+    }
+}
 
 /// Result of one boot-time BLE bond recovery gesture observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -517,8 +803,15 @@ const _: () = assert!(INDICATION_CONFIRM_TIMEOUT_MS > 0);
 const _: () = assert!(CCCD_SUBSCRIBE_TIMEOUT_MS > INDICATION_CONFIRM_TIMEOUT_MS);
 const _: () = assert!(PRE_AUTHENTICATION_TIMEOUT_MS > CCCD_SUBSCRIBE_TIMEOUT_MS);
 const _: () = assert!(BLE_SECURITY_PAIRING_TIMEOUT_MS > 0);
+const _: () = assert!(MINIMUM_SUPERVISION_TIMEOUT_MS >= 1_000);
+const _: () = assert!(MINIMUM_SUPERVISION_TIMEOUT_MS <= 18_000);
+const _: () = assert!(MINIMUM_SUPERVISION_TIMEOUT_MS.is_multiple_of(10));
+const _: () = assert!(PROACTIVE_CONNECTION_PARAMETER_REQUEST_TIMEOUT_MS > 0);
+const _: () =
+    assert!(PROACTIVE_CONNECTION_PARAMETER_REQUEST_TIMEOUT_MS < MINIMUM_SUPERVISION_TIMEOUT_MS);
 const _: () = assert!(DISCONNECT_DRAIN_RECHECK_INTERVAL_MS > 0);
-const _: () = assert!(DISCONNECT_DRAIN_PROLONGED_LOG_MS > DISCONNECT_DRAIN_RECHECK_INTERVAL_MS);
+const _: () = assert!(DISCONNECT_DRAIN_TIMEOUT_MS > DISCONNECT_DRAIN_RECHECK_INTERVAL_MS);
+const _: () = assert!(BLE_RECOVERY_RESET_REARM_UPTIME_MS > DISCONNECT_DRAIN_TIMEOUT_MS);
 const _: () = assert!(HANDOFF_EXCHANGE_TIMEOUT_MS > API_POLL_INTERVAL_MS);
 const _: () = assert!(BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS > HANDOFF_EXCHANGE_TIMEOUT_MS);
 const _: () = assert!(APPLICATION_PAIRING_IDLE_TIMEOUT_MS > HANDOFF_EXCHANGE_TIMEOUT_MS);
@@ -528,14 +821,22 @@ const _: () = assert!(BLE_BOND_BOOT_RECOVERY_HOLD_MS > 0);
 mod tests {
     use super::{
         APPLICATION_PAIRING_IDLE_TIMEOUT_MS, ApplicationPairingIdleDeadline,
-        BLE_BOND_BOOT_RECOVERY_HOLD_MS, BLE_SECURITY_PAIRING_TIMEOUT_MS,
+        BLE_BOND_BOOT_RECOVERY_HOLD_MS, BLE_RECOVERY_RESET_MARKER_WORDS,
+        BLE_RECOVERY_RESET_REARM_UPTIME_MS, BLE_SECURITY_PAIRING_TIMEOUT_MS,
         BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS, BleAdvertisingIdentityState,
-        BleAdvertisingParameters, BleBondExchangeResult, BootBleBondRecoveryGesture,
-        BootBleBondRecoveryProgress, CCCD_SUBSCRIBE_TIMEOUT_MS, CONNECTIONS_MAX,
-        CONTROLLER_ACTIVITY_MAX, FreshSecurityDisposition, HANDOFF_EXCHANGE_TIMEOUT_MS,
-        IndicationGate, IndicationGateError, PRE_AUTHENTICATION_TIMEOUT_MS,
-        PreAuthenticationDeadline, PreAuthenticationDeadlineStatus, negotiated_att_value_bytes,
-        static_random_address,
+        BleAdvertisingParameters, BleBondExchangeResult, BleConnectionUpdateDerivationError,
+        BleDisconnectDrainDisposition, BleDisconnectDrainEntryDisposition, BleDisconnectEvidence,
+        BleHostRecoveryDisposition, BleManagerStateDisposition, BleRecoveryResetMarkerState,
+        BootBleBondRecoveryGesture, BootBleBondRecoveryProgress, CCCD_SUBSCRIBE_TIMEOUT_MS,
+        CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, DISCONNECT_DRAIN_TIMEOUT_MS,
+        FreshSecurityDisposition, HANDOFF_EXCHANGE_TIMEOUT_MS, IndicationGate, IndicationGateError,
+        MINIMUM_SUPERVISION_TIMEOUT_MS, PRE_AUTHENTICATION_TIMEOUT_MS,
+        PROACTIVE_CONNECTION_PARAMETER_REQUEST_TIMEOUT_MS, PreAuthenticationDeadline,
+        PreAuthenticationDeadlineStatus, ble_disconnect_drain_disposition,
+        ble_disconnect_drain_entry_disposition, ble_host_recovery_disposition,
+        ble_manager_state_disposition, classify_ble_recovery_reset_marker,
+        derive_ble_connection_update_parameters, negotiated_att_value_bytes,
+        safe_supervision_timeout_ms, static_random_address,
     };
     use crate::authenticated_session::AuthenticatedSessionPhase;
 
@@ -543,6 +844,150 @@ mod tests {
     fn controller_activity_budget_keeps_one_advertiser_separate_from_one_link() {
         assert_eq!(CONNECTIONS_MAX, 1);
         assert_eq!(CONTROLLER_ACTIVITY_MAX, 2);
+    }
+
+    #[test]
+    fn supervision_timeout_policy_raises_only_short_requests() {
+        assert_eq!(safe_supervision_timeout_ms(720), 6_000);
+        assert_eq!(
+            safe_supervision_timeout_ms(MINIMUM_SUPERVISION_TIMEOUT_MS),
+            MINIMUM_SUPERVISION_TIMEOUT_MS
+        );
+        assert_eq!(safe_supervision_timeout_ms(8_000), 8_000);
+
+        // The incident request was 30 ms, latency zero, and 720 ms timeout.
+        // Six seconds is exactly representable in Bluetooth's 10 ms HCI unit,
+        // remains inside Trouble's 100 ms..=32 s range, and clears Apple's
+        // strict 3 * interval * (latency + 1) relationship.
+        let applied_ms = safe_supervision_timeout_ms(720);
+        assert_eq!(applied_ms / 10, 600);
+        assert!((100..=32_000).contains(&applied_ms));
+        assert!(applied_ms * 1_000 > 3 * 30_000);
+    }
+
+    #[test]
+    fn proactive_update_retains_actual_interval_and_latency() {
+        assert_eq!(PROACTIVE_CONNECTION_PARAMETER_REQUEST_TIMEOUT_MS, 2_000);
+        let update = derive_ble_connection_update_parameters(30_000, 0, 720)
+            .expect("the observed iOS parameters derive a valid request");
+        assert_eq!(update.interval_us(), 30_000);
+        assert_eq!(update.latency(), 0);
+        assert_eq!(update.supervision_timeout_ms(), 6_000);
+
+        let already_safe = derive_ble_connection_update_parameters(45_000, 4, 8_000)
+            .expect("a longer current timeout remains valid");
+        assert_eq!(already_safe.interval_us(), 45_000);
+        assert_eq!(already_safe.latency(), 4);
+        assert_eq!(already_safe.supervision_timeout_ms(), 8_000);
+
+        let rounded = derive_ble_connection_update_parameters(30_000, 0, 6_001)
+            .expect("timeout rounds upward to an exact HCI unit");
+        assert_eq!(rounded.supervision_timeout_ms(), 6_010);
+    }
+
+    #[test]
+    fn proactive_update_rejects_values_that_cannot_be_preserved_safely() {
+        assert_eq!(
+            derive_ble_connection_update_parameters(7_499, 0, 720),
+            Err(BleConnectionUpdateDerivationError::InvalidInterval)
+        );
+        assert_eq!(
+            derive_ble_connection_update_parameters(30_000, 500, 720),
+            Err(BleConnectionUpdateDerivationError::InvalidLatency)
+        );
+        assert_eq!(
+            derive_ble_connection_update_parameters(4_000_000, 499, 720),
+            Err(BleConnectionUpdateDerivationError::TimeoutOutOfRange)
+        );
+    }
+
+    #[test]
+    fn ble_host_recovery_reset_is_rate_limited_across_software_resets() {
+        assert_eq!(
+            ble_host_recovery_disposition(true, 1),
+            BleHostRecoveryDisposition::SoftwareReset
+        );
+        assert_eq!(
+            ble_host_recovery_disposition(
+                false,
+                BLE_RECOVERY_RESET_REARM_UPTIME_MS.saturating_sub(1)
+            ),
+            BleHostRecoveryDisposition::DisableBleUntilPowerCycle
+        );
+        assert_eq!(
+            ble_host_recovery_disposition(false, BLE_RECOVERY_RESET_REARM_UPTIME_MS),
+            BleHostRecoveryDisposition::SoftwareReset
+        );
+    }
+
+    #[test]
+    fn rtc_recovery_marker_torn_writes_fail_closed() {
+        assert_eq!(
+            classify_ble_recovery_reset_marker([0, 0]),
+            BleRecoveryResetMarkerState::Clean
+        );
+        assert_eq!(
+            classify_ble_recovery_reset_marker(BLE_RECOVERY_RESET_MARKER_WORDS),
+            BleRecoveryResetMarkerState::Armed
+        );
+        for torn in [
+            [BLE_RECOVERY_RESET_MARKER_WORDS[0], 0],
+            [0, BLE_RECOVERY_RESET_MARKER_WORDS[1]],
+            [
+                BLE_RECOVERY_RESET_MARKER_WORDS[0] ^ 1,
+                BLE_RECOVERY_RESET_MARKER_WORDS[1],
+            ],
+        ] {
+            let marker = classify_ble_recovery_reset_marker(torn);
+            assert_eq!(marker, BleRecoveryResetMarkerState::Corrupt);
+            assert_eq!(
+                ble_host_recovery_disposition(marker.is_clean(), 1),
+                BleHostRecoveryDisposition::DisableBleUntilPowerCycle
+            );
+        }
+    }
+
+    #[test]
+    fn manager_poll_and_drain_deadline_cover_dropped_disconnect_events() {
+        assert_eq!(
+            ble_manager_state_disposition(true),
+            BleManagerStateDisposition::ContinueServing
+        );
+        assert_eq!(
+            ble_manager_state_disposition(false),
+            BleManagerStateDisposition::ReconcileDisconnect
+        );
+        assert_eq!(
+            ble_disconnect_drain_disposition(DISCONNECT_DRAIN_TIMEOUT_MS - 1),
+            BleDisconnectDrainDisposition::ContinueDraining
+        );
+        assert_eq!(
+            ble_disconnect_drain_disposition(DISCONNECT_DRAIN_TIMEOUT_MS),
+            BleDisconnectDrainDisposition::RecoverHost
+        );
+    }
+
+    #[test]
+    fn disconnect_evidence_requires_consistent_manager_state() {
+        assert_eq!(
+            ble_disconnect_drain_entry_disposition(
+                BleDisconnectEvidence::ManagerStateFallback,
+                false
+            ),
+            BleDisconnectDrainEntryDisposition::Drained
+        );
+        assert_eq!(
+            ble_disconnect_drain_entry_disposition(BleDisconnectEvidence::ServeEvent, false),
+            BleDisconnectDrainEntryDisposition::Drained
+        );
+        assert_eq!(
+            ble_disconnect_drain_entry_disposition(BleDisconnectEvidence::ServeEvent, true),
+            BleDisconnectDrainEntryDisposition::RequestAndWait
+        );
+        assert_eq!(
+            ble_disconnect_drain_entry_disposition(BleDisconnectEvidence::None, false),
+            BleDisconnectDrainEntryDisposition::RequestAndWait
+        );
     }
 
     #[test]

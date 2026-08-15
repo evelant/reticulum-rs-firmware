@@ -605,6 +605,128 @@ fn busy_offer_and_incomplete_build_return_every_input_unchanged() {
 }
 
 #[test]
+fn priority_offer_displaces_unadmitted_announce_and_original_resumes_unchanged() {
+    let mut node = node(34);
+    let mut coordinator = coordinator::<2>(&mut node);
+    let (mut router, _actors, _) = configure_router::<1>();
+    let mut rng = CounterRng::default();
+    let original = announce_actions(&mut node, 10, &mut rng);
+    let original_pointer = original.packets.as_ptr();
+    let original_admission = admission(10);
+    coordinator
+        .try_offer_actions(original, original_admission)
+        .unwrap_or_else(|failure| panic!("original announce failed: {:?}", failure.reason()));
+
+    let priority = standalone_announce_actions(35, &mut rng);
+    let displaced = coordinator
+        .try_offer_priority_actions(priority, admission(20))
+        .unwrap_or_else(|failure| panic!("priority offer failed: {:?}", failure.reason()))
+        .expect("the unadmitted original must be displaced");
+    let (original, returned_admission) = displaced.into_parts();
+    assert_eq!(original.packets.as_ptr(), original_pointer);
+    assert_eq!(returned_admission, original_admission);
+
+    assert_eq!(
+        coordinator.step(&mut router, MonotonicMillis::new(20)),
+        OrdinaryRouterStep::ActionsAdmitted { packet_count: 1 },
+        "the priority envelope must occupy the next admission turn"
+    );
+    let failure = coordinator
+        .try_offer_actions(original, returned_admission)
+        .expect_err("the active priority batch keeps the displaced owner external");
+    assert_eq!(
+        failure.reason(),
+        OrdinaryRouterOfferError::Busy(OrdinaryRouterBusyReason::AdmittedBatch)
+    );
+    let (original, returned_admission) = failure.into_parts();
+    assert_eq!(original.packets.as_ptr(), original_pointer);
+
+    assert_eq!(
+        coordinator.step(&mut router, MonotonicMillis::new(20)),
+        OrdinaryRouterStep::NonPacketActionsReady
+    );
+    let _ = coordinator
+        .take_non_packet_actions()
+        .expect("priority non-packet output remains explicit");
+    assert!(matches!(
+        coordinator.step(&mut router, MonotonicMillis::new(20)),
+        OrdinaryRouterStep::PacketStaged { .. }
+    ));
+    assert!(matches!(
+        coordinator.step(&mut router, MonotonicMillis::new(20)),
+        OrdinaryRouterStep::Routed { .. }
+    ));
+    coordinator
+        .try_offer_actions(original, returned_admission)
+        .unwrap_or_else(|failure| {
+            panic!(
+                "displaced original did not resume after priority routing: {:?}",
+                failure.reason()
+            )
+        });
+}
+
+#[test]
+fn priority_offer_does_not_preempt_an_admitted_batch_and_is_next_after_staging() {
+    let mut node = node(36);
+    let mut coordinator = coordinator::<2>(&mut node);
+    let (mut router, _actors, _) = configure_router::<1>();
+    let mut rng = CounterRng::default();
+    let original = announce_actions(&mut node, 10, &mut rng);
+    coordinator
+        .try_offer_actions(original, admission(10))
+        .unwrap_or_else(|failure| panic!("original announce failed: {:?}", failure.reason()));
+    assert_eq!(
+        coordinator.step(&mut router, MonotonicMillis::new(10)),
+        OrdinaryRouterStep::ActionsAdmitted { packet_count: 1 }
+    );
+
+    let priority = standalone_announce_actions(37, &mut rng);
+    let priority_pointer = priority.packets.as_ptr();
+    let failure = match coordinator.try_offer_priority_actions(priority, admission(20)) {
+        Err(failure) => failure,
+        Ok(_) => panic!("an admitted batch is the non-preemptible boundary"),
+    };
+    assert_eq!(
+        failure.reason(),
+        OrdinaryRouterOfferError::Busy(OrdinaryRouterBusyReason::AdmittedBatch)
+    );
+    let (priority, priority_admission) = failure.into_parts();
+    assert_eq!(priority.packets.as_ptr(), priority_pointer);
+
+    assert_eq!(
+        coordinator.step(&mut router, MonotonicMillis::new(10)),
+        OrdinaryRouterStep::NonPacketActionsReady
+    );
+    let _ = coordinator
+        .take_non_packet_actions()
+        .expect("original non-packet output remains explicit");
+    assert!(matches!(
+        coordinator.step(&mut router, MonotonicMillis::new(10)),
+        OrdinaryRouterStep::PacketStaged { .. }
+    ));
+    assert!(matches!(
+        coordinator.step(&mut router, MonotonicMillis::new(10)),
+        OrdinaryRouterStep::Routed { .. }
+    ));
+
+    assert!(
+        coordinator
+            .try_offer_priority_actions(priority, priority_admission)
+            .unwrap_or_else(|failure| panic!(
+                "priority did not take the next input turn: {:?}",
+                failure.reason()
+            ))
+            .is_none(),
+        "the admitted original left no unadmitted envelope to displace"
+    );
+    assert_eq!(
+        coordinator.step(&mut router, MonotonicMillis::new(20)),
+        OrdinaryRouterStep::ActionsAdmitted { packet_count: 1 }
+    );
+}
+
+#[test]
 fn full_actor_queue_retains_the_second_job_until_capacity_returns() {
     let mut node = node(41);
     let mut coordinator = coordinator::<2>(&mut node);

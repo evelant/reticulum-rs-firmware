@@ -9,14 +9,29 @@ use reticulum_radio_tx_dispatch::DispatchOutcome;
 
 use crate::radio_trace::{
     RadioTraceAttemptOutcome, RadioTraceAttemptTerminal, RadioTraceEventKind,
-    RadioTraceProofIngress, RadioTraceRouteResolution, RadioTraceRouteSelected,
+    RadioTraceInboundProof, RadioTraceInboundProofStage, RadioTraceProofIngress,
+    RadioTraceRouteResolution, RadioTraceRouteSelected,
 };
 
 use super::{
     AcceptedLoRaPacketObservation, LastDataTxObservation, MAXIMUM_RADIO_DIAGNOSTICS_SNAPSHOT_BYTES,
     RadioDiagnosticsCell, RadioDiagnosticsSnapshot, RadioRuntimeState, RadioTxDispatchFamily,
-    RadioTxTerminalOutcome, classify_dispatch_outcome,
+    RadioTxTerminalOutcome, classify_dispatch_outcome, inbound_proof_terminal_stage,
+    take_matching_inbound_proof,
 };
+
+fn queued_proof(sha256: [u8; 32], packet_len: u16, interface: u8) -> RadioTraceInboundProof {
+    RadioTraceInboundProof::new(
+        [0x42; 32],
+        RadioTraceInboundProofStage::OrdinaryQueued,
+        Some([0x24; 32]),
+        Some(sha256),
+        Some(packet_len),
+        Some(interface),
+        None,
+        None,
+    )
+}
 
 #[test]
 fn construction_captures_the_exact_applied_profile_and_power() {
@@ -120,20 +135,34 @@ fn shared_cell_records_packet_correlated_rx_route_and_terminal_events() {
 
     assert_eq!(
         (rx.sequence(), selected.sequence(), completed.sequence()),
-        (1, 2, 3)
+        (1, 3, 4)
     );
-    let page = cell.radio_trace_page(None);
-    assert_eq!(page.boot_sequence(), 41);
-    let events = page.events().collect::<std::vec::Vec<_>>();
+    let first = cell.radio_trace_page(None);
+    assert_eq!(first.boot_sequence(), 41);
+    let events = first.events().collect::<std::vec::Vec<_>>();
     let RadioTraceEventKind::LogicalRx(rx) = events[0].kind() else {
         panic!("first event must be logical RX")
     };
     assert_eq!(rx.packet_len(), 19);
     assert!(rx.rns_packet_hash().is_some());
     assert_eq!(rx.rssi_dbm(), -98);
-    assert_eq!(events[1].kind(), RadioTraceEventKind::RouteSelected(route));
+    let RadioTraceEventKind::InboundProof(inbound) = events[1].kind() else {
+        panic!("DATA logical RX must emit its proof correlation stage")
+    };
     assert_eq!(
-        events[2].kind(),
+        inbound.stage(),
+        crate::radio_trace::RadioTraceInboundProofStage::DataLogicalRx
+    );
+    assert_eq!(inbound.correlation_token(), rx.rns_packet_hash().unwrap());
+    assert_eq!(inbound.signal(), Some((-98, 4)));
+
+    let events = cell
+        .radio_trace_page(first.next_cursor())
+        .events()
+        .collect::<std::vec::Vec<_>>();
+    assert_eq!(events[0].kind(), RadioTraceEventKind::RouteSelected(route));
+    assert_eq!(
+        events[1].kind(),
         RadioTraceEventKind::AttemptTerminal(terminal)
     );
 }
@@ -156,6 +185,63 @@ fn terminal_classification_separates_access_rejection_from_failures() {
     assert_eq!(
         classify_dispatch_outcome(DispatchOutcome::PermitDenied),
         RadioTxTerminalOutcome::PermitDenied
+    );
+}
+
+#[test]
+fn unrelated_ordinary_terminal_cannot_steal_armed_proof_correlation() {
+    let proof = queued_proof([0xaa; 32], 113, 1);
+    let mut pending = Some(proof);
+
+    assert_eq!(
+        take_matching_inbound_proof(
+            &mut pending,
+            EncodedPacketSha256::new([0xbb; 32]),
+            113,
+            PacketInterfaceId::new(1),
+        ),
+        None
+    );
+    assert_eq!(pending, Some(proof));
+    assert_eq!(
+        take_matching_inbound_proof(
+            &mut pending,
+            EncodedPacketSha256::new([0xaa; 32]),
+            113,
+            PacketInterfaceId::new(1),
+        ),
+        Some(proof)
+    );
+    assert_eq!(pending, None);
+}
+
+#[test]
+fn proof_correlation_requires_digest_length_and_interface_to_match() {
+    let proof = queued_proof([0xcc; 32], 113, 1);
+    for (packet_len, interface) in [(112, 1), (113, 2)] {
+        let mut pending = Some(proof);
+        assert_eq!(
+            take_matching_inbound_proof(
+                &mut pending,
+                EncodedPacketSha256::new([0xcc; 32]),
+                packet_len,
+                PacketInterfaceId::new(interface),
+            ),
+            None
+        );
+        assert_eq!(pending, Some(proof));
+    }
+}
+
+#[test]
+fn exact_non_transmitted_report_is_an_explicit_terminal_proof_failure() {
+    assert_eq!(
+        inbound_proof_terminal_stage(DispatchOutcome::Transmitted),
+        RadioTraceInboundProofStage::PhysicalTxDone
+    );
+    assert_eq!(
+        inbound_proof_terminal_stage(DispatchOutcome::PermitDenied),
+        RadioTraceInboundProofStage::PhysicalTxFailed
     );
 }
 

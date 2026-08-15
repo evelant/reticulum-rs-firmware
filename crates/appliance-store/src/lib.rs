@@ -31,12 +31,13 @@ pub use model::{
     PhoneLocationAuthorization, PhoneLocationSample, PhoneLocationSource,
     PhoneLocationUnavailableReason, ReconcileWork, RfTraceAttemptObservation,
     RfTraceAttemptOutcome, RfTraceBootId, RfTraceEvent, RfTraceEventId, RfTraceEventSequence,
-    RfTraceIdentityHash, RfTraceImportBatch, RfTraceInterfaceId, RfTraceMessageCorrelation,
-    RfTraceObservation, RfTraceObservationKind, RfTracePage, RfTracePageRequest,
-    RfTraceProofIngress, RfTraceRadioProfile, RfTraceRouteObservation, RfTraceRouteResolution,
-    RfTraceRxObservation, RfTraceScope, RfTraceTxObservation, RfTraceTxOutcome, RnsAttemptToken,
-    SubmissionFailure, SubmissionId, SubmissionState, TimelineDirection, TimelineEntry,
-    TimelineSequence, UnixTimestampMillis,
+    RfTraceIdentityHash, RfTraceImportBatch, RfTraceInboundProofObservation,
+    RfTraceInboundProofStage, RfTraceInterfaceId, RfTraceMessageCorrelation, RfTraceObservation,
+    RfTraceObservationKind, RfTracePage, RfTracePageRequest, RfTraceProofIngress,
+    RfTraceRadioProfile, RfTraceRouteObservation, RfTraceRouteResolution, RfTraceRxObservation,
+    RfTraceScope, RfTraceTxObservation, RfTraceTxOutcome, RnsAttemptToken, SubmissionFailure,
+    SubmissionId, SubmissionState, TimelineDirection, TimelineEntry, TimelineSequence,
+    UnixTimestampMillis,
 };
 #[cfg(feature = "sqlite")]
 pub use sqlite::{SQLITE_SCHEMA_VERSION, SqliteChatStore, SqliteStoreError};

@@ -1,5 +1,12 @@
 //! Cooperative runtime policy for opt-in RMAP interface discovery.
 
+use core::cell::RefCell;
+
+use embassy_sync::{blocking_mutex::Mutex, blocking_mutex::raw::CriticalSectionRawMutex};
+use reticulum_device_api::{
+    RmapDeferredReason, RmapEgressConfirmation, RmapInitialTcpGateState, RmapQueueOutcome,
+    RmapRuntimeStatus, RmapStampPhase,
+};
 use reticulum_node_core::{
     DestinationHash, InboundProofPolicy, LocalDestinationLinkPolicyError,
     LocalDestinationProofPolicyError, LocalDestinationRegistrationError, NodeCore,
@@ -17,19 +24,19 @@ pub const RMAP_DISCOVERY_RETRY_SECONDS: u64 = 60;
 /// Proof-of-work candidates tested per cooperative node turn.
 pub const RMAP_STAMP_ATTEMPTS_PER_TURN: u32 = 8;
 
-/// Transport-neutral policy for the first RMAP discovery publication.
+/// Transport policy for every RMAP discovery publication.
 ///
-/// A node with only local transports can publish as soon as its stamp is
-/// ready. A node configured with a public uplink can instead retain that first
-/// due publication until the selected interface becomes authoritative and
-/// online. Once one publication has been queued, the ordinary six-hour cadence
-/// is no longer gated by this boot-time policy.
+/// A node with only local transports broadcasts when its stamp is ready. A
+/// node configured with a public uplink retains every due publication until
+/// that exact interface is authoritative and online. The exact target also
+/// applies to RNS's native announce retransmit, preventing discovery traffic
+/// from spilling onto LoRa after the initial TCP send.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RmapPublicationPolicy {
-    /// Publish the first stamped payload on any currently eligible transport.
+    /// Publish the stamped payload on every ordinarily eligible transport.
     Immediate,
-    /// Retain the first due payload until this interface is online.
-    AwaitInitialInterface(PacketInterfaceId),
+    /// Retain and then send only on this exact interface.
+    RequireInterface(PacketInterfaceId),
 }
 
 impl RmapPublicationPolicy {
@@ -38,25 +45,29 @@ impl RmapPublicationPolicy {
         Self::Immediate
     }
 
-    /// Gate only the first publication on one transport-neutral interface ID.
-    pub const fn await_initial_interface(interface: PacketInterfaceId) -> Self {
-        Self::AwaitInitialInterface(interface)
+    /// Gate every publication on one transport-neutral interface ID.
+    pub const fn require_interface(interface: PacketInterfaceId) -> Self {
+        Self::RequireInterface(interface)
     }
 
     /// Interface whose Ready lifecycle state gates the first publication.
     pub const fn initial_interface(self) -> Option<PacketInterfaceId> {
         match self {
             Self::Immediate => None,
-            Self::AwaitInitialInterface(interface) => Some(interface),
+            Self::RequireInterface(interface) => Some(interface),
         }
     }
 
-    const fn permits_publication(
-        self,
-        published_count: u32,
-        initial_interface_ready: bool,
-    ) -> bool {
-        published_count != 0 || matches!(self, Self::Immediate) || initial_interface_ready
+    const fn permits_publication(self, interface_ready: bool) -> bool {
+        matches!(self, Self::Immediate) || interface_ready
+    }
+
+    const fn gate_state(self, interface_ready: bool) -> RmapInitialTcpGateState {
+        match self {
+            Self::Immediate => RmapInitialTcpGateState::NotRequired,
+            Self::RequireInterface(_) if interface_ready => RmapInitialTcpGateState::Open,
+            Self::RequireInterface(_) => RmapInitialTcpGateState::Waiting,
+        }
     }
 }
 
@@ -94,6 +105,103 @@ pub fn activate_rmap_discovery_destination<
     Ok(destination)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RmapDiscoveryStatusState {
+    stamp_phase: RmapStampPhase,
+    stamp_attempts: u64,
+    initial_tcp_gate: RmapInitialTcpGateState,
+    queued_count: u32,
+    last_queue_outcome: RmapQueueOutcome,
+    last_queue_attempt_at_uptime_seconds: Option<u64>,
+    egress_confirmation: RmapEgressConfirmation,
+    next_due_at_uptime_seconds: Option<u64>,
+    deferred_reason: Option<RmapDeferredReason>,
+}
+
+impl RmapDiscoveryStatusState {
+    const DISABLED: Self = Self {
+        stamp_phase: RmapStampPhase::Disabled,
+        stamp_attempts: 0,
+        initial_tcp_gate: RmapInitialTcpGateState::NotRequired,
+        queued_count: 0,
+        last_queue_outcome: RmapQueueOutcome::NotAttempted,
+        last_queue_attempt_at_uptime_seconds: None,
+        egress_confirmation: RmapEgressConfirmation::NotApplicable,
+        next_due_at_uptime_seconds: None,
+        deferred_reason: None,
+    };
+
+    const fn searching(policy: RmapPublicationPolicy) -> Self {
+        Self {
+            stamp_phase: RmapStampPhase::Searching,
+            initial_tcp_gate: policy.gate_state(false),
+            ..Self::DISABLED
+        }
+    }
+
+    fn projection(self, now_seconds: u64, config_applied: bool) -> RmapRuntimeStatus {
+        RmapRuntimeStatus::new(
+            config_applied,
+            self.stamp_phase,
+            self.stamp_attempts,
+            self.initial_tcp_gate,
+            self.queued_count,
+            self.last_queue_outcome,
+            self.last_queue_attempt_at_uptime_seconds,
+            self.egress_confirmation,
+            self.next_due_at_uptime_seconds
+                .map(|due| due.saturating_sub(now_seconds)),
+            self.deferred_reason,
+        )
+    }
+}
+
+/// Blocking latest-value cell shared by the node and authenticated API owners.
+pub struct RmapDiscoveryStatusCell {
+    state: Mutex<CriticalSectionRawMutex, RefCell<RmapDiscoveryStatusState>>,
+}
+
+impl RmapDiscoveryStatusCell {
+    /// Construct a disabled status cell before boot applies network configuration.
+    pub const fn new() -> Self {
+        Self {
+            state: Mutex::new(RefCell::new(RmapDiscoveryStatusState::DISABLED)),
+        }
+    }
+
+    fn publish(&self, state: RmapDiscoveryStatusState) {
+        self.state.lock(|cell| *cell.borrow_mut() = state);
+    }
+
+    fn update(&self, update: impl FnOnce(&mut RmapDiscoveryStatusState)) {
+        self.state.lock(|cell| update(&mut cell.borrow_mut()));
+    }
+
+    /// Publish an activation failure that prevented a usable stamp search.
+    pub fn publish_activation_failure(
+        &self,
+        policy: RmapPublicationPolicy,
+        reason: RmapDeferredReason,
+    ) {
+        let mut state = RmapDiscoveryStatusState::searching(policy);
+        state.stamp_phase = RmapStampPhase::Faulted;
+        state.deferred_reason = Some(reason);
+        self.publish(state);
+    }
+
+    /// Snapshot a secret-free API projection at the caller's monotonic time.
+    pub fn snapshot(&self, now_seconds: u64, config_applied: bool) -> RmapRuntimeStatus {
+        self.state
+            .lock(|cell| cell.borrow().projection(now_seconds, config_applied))
+    }
+}
+
+impl Default for RmapDiscoveryStatusCell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Compact proof search plus one small resident scheduling projection.
 ///
 /// The search retains a pre-seeded SHA-256 state instead of the expanded
@@ -105,6 +213,8 @@ pub struct RmapDiscoveryRuntime {
     app_data: Option<DiscoveryAppData>,
     next_announce_seconds: u64,
     published_count: u32,
+    status: Option<&'static RmapDiscoveryStatusCell>,
+    publication_policy: RmapPublicationPolicy,
 }
 
 impl RmapDiscoveryRuntime {
@@ -116,16 +226,27 @@ impl RmapDiscoveryRuntime {
             app_data: None,
             next_announce_seconds: 0,
             published_count: 0,
+            status: None,
+            publication_policy: RmapPublicationPolicy::Immediate,
         }
     }
 
     /// Install one immutable packed map and compact incremental stamp search.
-    pub fn configure(&mut self, packed: PackedDiscoveryInfo, search: DiscoveryStampSearch) {
+    pub fn configure(
+        &mut self,
+        packed: PackedDiscoveryInfo,
+        search: DiscoveryStampSearch,
+        status: &'static RmapDiscoveryStatusCell,
+        publication_policy: RmapPublicationPolicy,
+    ) {
         self.packed = Some(packed);
         self.search = Some(search);
         self.app_data = None;
         self.next_announce_seconds = 0;
         self.published_count = 0;
+        self.status = Some(status);
+        self.publication_policy = publication_policy;
+        status.publish(RmapDiscoveryStatusState::searching(publication_policy));
     }
 
     /// Advance a bounded number of proof-of-work candidates.
@@ -142,9 +263,16 @@ impl RmapDiscoveryRuntime {
             };
         };
         match search.step(RMAP_STAMP_ATTEMPTS_PER_TURN) {
-            DiscoveryStampProgress::Pending => RmapStampStep::Progressed {
-                attempts: search.attempts(),
-            },
+            DiscoveryStampProgress::Pending => {
+                let attempts = search.attempts();
+                if let Some(status) = self.status {
+                    status.update(|state| {
+                        state.stamp_phase = RmapStampPhase::Searching;
+                        state.stamp_attempts = attempts;
+                    });
+                }
+                RmapStampStep::Progressed { attempts }
+            }
             DiscoveryStampProgress::Found(stamp) => {
                 let packed = self
                     .packed
@@ -153,10 +281,26 @@ impl RmapDiscoveryRuntime {
                 self.app_data = Some(packed.with_stamp(stamp));
                 self.search = None;
                 self.next_announce_seconds = now_seconds;
+                if let Some(status) = self.status {
+                    status.update(|state| {
+                        state.stamp_phase = RmapStampPhase::Ready;
+                        state.stamp_attempts = attempts;
+                        state.next_due_at_uptime_seconds = Some(now_seconds);
+                    });
+                }
                 RmapStampStep::Completed { attempts }
             }
             DiscoveryStampProgress::Exhausted => {
+                let attempts = search.attempts();
                 self.search = None;
+                if let Some(status) = self.status {
+                    status.update(|state| {
+                        state.stamp_phase = RmapStampPhase::Exhausted;
+                        state.stamp_attempts = attempts;
+                        state.next_due_at_uptime_seconds = None;
+                        state.deferred_reason = Some(RmapDeferredReason::StampSearchExhausted);
+                    });
+                }
                 RmapStampStep::Exhausted
             }
         }
@@ -181,20 +325,74 @@ impl RmapDiscoveryRuntime {
         initial_interface_ready: bool,
     ) -> Option<&DiscoveryAppData> {
         policy
-            .permits_publication(self.published_count, initial_interface_ready)
+            .permits_publication(initial_interface_ready)
             .then(|| self.due_app_data(now_seconds))
             .flatten()
     }
 
-    /// Schedule the next six-hour publication after one announce was queued.
-    pub fn mark_announced(&mut self, now_seconds: u64) {
+    /// Record current readiness of the exact publication target.
+    pub fn observe_publication_gate(&mut self, interface_ready: bool) {
+        let gate = self.publication_policy.gate_state(interface_ready);
+        if let Some(status) = self.status {
+            status.update(|state| {
+                state.initial_tcp_gate = gate;
+                if gate == RmapInitialTcpGateState::Waiting {
+                    state.deferred_reason = Some(RmapDeferredReason::InitialTcpNotReady);
+                } else if state.deferred_reason == Some(RmapDeferredReason::InitialTcpNotReady) {
+                    state.deferred_reason = None;
+                }
+            });
+        }
+    }
+
+    /// Schedule the next six-hour publication after complete coordinator acceptance.
+    pub fn mark_queue_accepted(&mut self, now_seconds: u64) {
         self.next_announce_seconds = now_seconds.saturating_add(RMAP_DISCOVERY_INTERVAL_SECONDS);
         self.published_count = self.published_count.saturating_add(1);
+        if let Some(status) = self.status {
+            status.update(|state| {
+                state.queued_count = self.published_count;
+                state.last_queue_outcome = RmapQueueOutcome::Accepted;
+                state.last_queue_attempt_at_uptime_seconds = Some(now_seconds);
+                state.egress_confirmation = RmapEgressConfirmation::NotObserved;
+                state.next_due_at_uptime_seconds = Some(self.next_announce_seconds);
+                state.deferred_reason = None;
+            });
+        }
     }
 
     /// Retain the stamped payload and retry after bounded queue pressure.
-    pub fn defer_announce(&mut self, now_seconds: u64) {
+    pub fn defer_announce(&mut self, now_seconds: u64, reason: RmapDeferredReason) {
         self.next_announce_seconds = now_seconds.saturating_add(RMAP_DISCOVERY_RETRY_SECONDS);
+        if let Some(status) = self.status {
+            status.update(|state| {
+                state.last_queue_outcome = RmapQueueOutcome::AnnounceAdmissionDeferred;
+                state.last_queue_attempt_at_uptime_seconds = Some(now_seconds);
+                state.next_due_at_uptime_seconds = Some(self.next_announce_seconds);
+                state.deferred_reason = Some(reason);
+            });
+        }
+    }
+
+    /// Retain a due publication while its complete ordinary action owner retries admission.
+    pub fn mark_ordinary_admission_deferred(&mut self, now_seconds: u64) {
+        if let Some(status) = self.status {
+            status.update(|state| {
+                state.last_queue_outcome = RmapQueueOutcome::OrdinaryAdmissionDeferred;
+                state.last_queue_attempt_at_uptime_seconds = Some(now_seconds);
+                state.next_due_at_uptime_seconds = Some(self.next_announce_seconds);
+                state.deferred_reason = Some(RmapDeferredReason::OrdinaryQueueRejected);
+            });
+        }
+    }
+
+    /// Record physical completion when an interface-specific correlation is available.
+    pub fn mark_physical_egress_confirmed(&mut self) {
+        if let Some(status) = self.status {
+            status.update(|state| {
+                state.egress_confirmation = RmapEgressConfirmation::Confirmed;
+            });
+        }
     }
 
     /// Make the cached stamped payload immediately due, if available.
@@ -203,6 +401,11 @@ impl RmapDiscoveryRuntime {
             return false;
         }
         self.next_announce_seconds = now_seconds;
+        if let Some(status) = self.status {
+            status.update(|state| {
+                state.next_due_at_uptime_seconds = Some(now_seconds);
+            });
+        }
         true
     }
 
@@ -248,6 +451,8 @@ pub enum RmapStampStep {
 mod tests {
     extern crate std;
 
+    use std::boxed::Box;
+
     use reticulum_rns_interface_discovery::{
         DiscoveryStampSearch, RnodeDiscoveryInfo, encode_rnode_info,
     };
@@ -271,19 +476,25 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn completed_stamp_is_immediately_due_then_uses_six_hour_cadence() {
+    fn configured_runtime(policy: RmapPublicationPolicy) -> RmapDiscoveryRuntime {
         let packed = packed();
         let search = DiscoveryStampSearch::new(&packed, 0).unwrap();
+        let status = Box::leak(Box::new(RmapDiscoveryStatusCell::new()));
         let mut runtime = RmapDiscoveryRuntime::disabled();
-        runtime.configure(packed, search);
+        runtime.configure(packed, search, status, policy);
+        runtime
+    }
+
+    #[test]
+    fn completed_stamp_is_immediately_due_then_uses_six_hour_cadence() {
+        let mut runtime = configured_runtime(RmapPublicationPolicy::immediate());
 
         assert!(matches!(
             runtime.step_stamp_search(10),
             RmapStampStep::Completed { .. }
         ));
         assert!(runtime.due_app_data(10).is_some());
-        runtime.mark_announced(10);
+        runtime.mark_queue_accepted(10);
         assert!(runtime.due_app_data(10).is_none());
         assert!(
             runtime
@@ -295,16 +506,12 @@ mod tests {
 
     #[test]
     fn public_uplink_gate_retains_initial_due_event_without_consuming_cadence() {
-        let packed = packed();
-        let search = DiscoveryStampSearch::new(&packed, 0).unwrap();
-        let mut runtime = RmapDiscoveryRuntime::disabled();
-        runtime.configure(packed, search);
+        let policy = RmapPublicationPolicy::require_interface(PacketInterfaceId::new(2));
+        let mut runtime = configured_runtime(policy);
         assert!(matches!(
             runtime.step_stamp_search(10),
             RmapStampStep::Completed { .. }
         ));
-        let policy = RmapPublicationPolicy::await_initial_interface(PacketInterfaceId::new(2));
-
         assert!(runtime.due_app_data_for_policy(10, policy, false).is_none());
         assert!(runtime.due_app_data(10).is_some());
         assert_eq!(runtime.published_count(), 0);
@@ -319,21 +526,23 @@ mod tests {
                 .is_some()
         );
 
-        runtime.mark_announced(10 + RMAP_DISCOVERY_INTERVAL_SECONDS);
+        runtime.mark_queue_accepted(10 + RMAP_DISCOVERY_INTERVAL_SECONDS);
         assert_eq!(runtime.published_count(), 1);
         assert!(
             runtime
-                .due_app_data_for_policy(10 + (2 * RMAP_DISCOVERY_INTERVAL_SECONDS), policy, false,)
+                .due_app_data_for_policy(10 + (2 * RMAP_DISCOVERY_INTERVAL_SECONDS), policy, true,)
                 .is_some()
+        );
+        assert!(
+            runtime
+                .due_app_data_for_policy(10 + (2 * RMAP_DISCOVERY_INTERVAL_SECONDS), policy, false,)
+                .is_none()
         );
     }
 
     #[test]
     fn immediate_policy_preserves_lora_only_initial_publication() {
-        let packed = packed();
-        let search = DiscoveryStampSearch::new(&packed, 0).unwrap();
-        let mut runtime = RmapDiscoveryRuntime::disabled();
-        runtime.configure(packed, search);
+        let mut runtime = configured_runtime(RmapPublicationPolicy::immediate());
         runtime.step_stamp_search(3);
 
         assert!(
@@ -345,14 +554,57 @@ mod tests {
 
     #[test]
     fn manual_service_announce_reuses_cached_stamp_and_makes_rmap_due() {
-        let packed = packed();
-        let search = DiscoveryStampSearch::new(&packed, 0).unwrap();
-        let mut runtime = RmapDiscoveryRuntime::disabled();
-        runtime.configure(packed, search);
+        let mut runtime = configured_runtime(RmapPublicationPolicy::immediate());
         runtime.step_stamp_search(1);
-        runtime.mark_announced(1);
+        runtime.mark_queue_accepted(1);
 
         assert!(runtime.request_manual_publication(2));
         assert!(runtime.due_app_data(2).is_some());
+    }
+
+    #[test]
+    fn status_distinguishes_tcp_gate_deferral_and_accepted_cadence() {
+        let packed = packed();
+        let search = DiscoveryStampSearch::new(&packed, 0).unwrap();
+        let status = Box::leak(Box::new(RmapDiscoveryStatusCell::new()));
+        let policy = RmapPublicationPolicy::require_interface(PacketInterfaceId::new(2));
+        let mut runtime = RmapDiscoveryRuntime::disabled();
+        runtime.configure(packed, search, status, policy);
+        runtime.step_stamp_search(10);
+        runtime.observe_publication_gate(false);
+
+        let waiting = status.snapshot(10, true);
+        assert_eq!(waiting.stamp_phase, RmapStampPhase::Ready);
+        assert_eq!(waiting.initial_tcp_gate, RmapInitialTcpGateState::Waiting);
+        assert_eq!(waiting.next_due_in_seconds, Some(0));
+        assert_eq!(
+            waiting.deferred_reason,
+            Some(RmapDeferredReason::InitialTcpNotReady)
+        );
+
+        runtime.observe_publication_gate(true);
+        runtime.mark_ordinary_admission_deferred(11);
+        let deferred = status.snapshot(11, true);
+        assert_eq!(
+            deferred.last_queue_outcome,
+            RmapQueueOutcome::OrdinaryAdmissionDeferred
+        );
+        assert_eq!(deferred.queued_count, 0);
+        assert_eq!(deferred.next_due_in_seconds, Some(0));
+
+        runtime.mark_queue_accepted(12);
+        let accepted = status.snapshot(12, false);
+        assert!(!accepted.config_applied);
+        assert_eq!(accepted.last_queue_outcome, RmapQueueOutcome::Accepted);
+        assert_eq!(accepted.queued_count, 1);
+        assert_eq!(
+            accepted.next_due_in_seconds,
+            Some(RMAP_DISCOVERY_INTERVAL_SECONDS)
+        );
+        assert_eq!(
+            accepted.egress_confirmation,
+            RmapEgressConfirmation::NotObserved
+        );
+        assert_eq!(accepted.deferred_reason, None);
     }
 }
