@@ -5,9 +5,9 @@
   durable one-bond storage, the Expo BLE central/UI, Rust-native fileless
   credential publication, retained reconnect, and two-profile add/switch flows
   are implemented and powered-qualified on the two E290s. Fault-injected
-  negative cases, factory-reset/recovery UX, independently revocable
-  multi-phone authority, Android hardware, and background mobile lifecycle
-  qualification remain pending
+  negative cases, powered qualification of board-only bond recovery,
+  factory-reset UX, independently revocable multi-phone authority, Android
+  hardware, and background mobile lifecycle qualification remain pending
 - **Date:** 2026-07-25
 - **Extends:** [ADR 0009](0009-device-api-credential-store-and-pairing.md),
   [ADR 0010](0010-device-api-live-pairing-protocol.md), and
@@ -203,6 +203,28 @@ while LoRa and other independent transports continue. A restored authenticated
 bond can reconnect without repeating SMP, then use a fresh GPIO21 hold to open
 the separate five-minute application-pairing window when it needs to initialize
 or add an appliance credential.
+
+### Board-only bond recovery has a separate advertising identity
+
+The one-bond profile must remain recoverable when the previous phone is
+unavailable. Holding GPIO21 continuously across reset authorizes a one-shot
+clear of only the BLE bond store; node identity, application credentials,
+network configuration, and message state remain intact. This transport repair
+is deliberately separate from application-credential takeover or revocation.
+
+A bondless E290 advertises the same service UUID and static device address under
+`reticulum-pair-<suffix>`. Ordinary saved profiles continue to target only
+`reticulum-e290-<suffix>`, while the explicit Repair flow receives both names
+from the Rust credential contract. Repair uses the recovery name for SMP and
+again for the replacement phone's first authenticated RDA1 session. Firmware
+returns to the normal name only after that application authentication succeeds,
+so a stale normal-name reconnect loop cannot consume the sole BLE slot between
+bond commit and proof of usable access.
+
+The current transition is resident for one boot. If power is lost after bond
+commit but before the first authenticated RDA1 session, boot restores the bond
+and normal name. A later bond-store revision should persist this bounded
+recovery-pending state for crash-complete semantics.
 
 Trouble `0.6.0` does not treat key material as a secret Rust type:
 `LongTermKey` is copyable and debuggable, `BondInformation` is debuggable, and

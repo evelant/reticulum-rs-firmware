@@ -27,12 +27,23 @@ const config: ExpoConfig = {
   },
   plugins: [
     "expo-router",
+    "expo-notifications",
+    "expo-sharing",
+    "expo-splash-screen",
+    "@maplibre/maplibre-react-native",
     [
       "react-native-ble-manager",
       {
         bluetoothAlwaysPermission: "Connect to your Reticulum appliance over Bluetooth Low Energy.",
         isBleRequired: false,
         neverForLocation: true,
+      },
+    ],
+    [
+      "expo-location",
+      {
+        locationWhenInUsePermission:
+          "Use your location when you choose to publish an approximate Reticulum map marker or privately record field-test message attempts.",
       },
     ],
   ],

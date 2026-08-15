@@ -20,6 +20,90 @@ pub(crate) const XTENSA_OBJDUMP_VERSION: &str =
     "GNU objdump (crosstool-NG esp-15.2.0_20250920) 2.45";
 pub(crate) const XTENSA_STRINGS_VERSION: &str =
     "GNU strings (crosstool-NG esp-15.2.0_20250920) 2.45";
+pub(crate) const XTENSA_FINAL_LINK_RUSTFLAGS: &str =
+    "-C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes";
+pub(crate) const XTENSA_FINAL_LINK_RUSTFLAG_ARGUMENTS: &[&str] = &[
+    "-C",
+    "link-arg=-nostartfiles",
+    "-C",
+    "code-model=large",
+    "-Z",
+    "emit-stack-sizes",
+];
+
+pub(crate) fn validate_xtensa_final_link_policy_sources(
+    cargo_config: &str,
+    ci_workflow: &str,
+) -> Result<(), String> {
+    const TARGET_HEADER: &str = "[target.xtensa-esp32s3-none-elf]";
+    if cargo_config.matches(TARGET_HEADER).count() != 1 {
+        return Err(format!(
+            "workspace Cargo config must contain exactly one {TARGET_HEADER} section"
+        ));
+    }
+    let target_section = cargo_config
+        .split_once(TARGET_HEADER)
+        .expect("the exact target header count was checked")
+        .1
+        .split("\n[")
+        .next()
+        .expect("split always yields the target section");
+    let rustflags = target_section
+        .split_once("rustflags = [")
+        .ok_or_else(|| "Xtensa target config has no rustflags array".to_owned())?
+        .1
+        .split_once(']')
+        .ok_or_else(|| "Xtensa target rustflags array is not closed".to_owned())?
+        .0
+        .lines()
+        .filter_map(|line| {
+            let value = line.trim().trim_end_matches(',');
+            (!value.is_empty()).then_some(value)
+        })
+        .map(|value| {
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .ok_or_else(|| format!("Xtensa target rustflag is not a quoted string: {value}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !rustflags
+        .windows(XTENSA_FINAL_LINK_RUSTFLAG_ARGUMENTS.len())
+        .any(|window| window == XTENSA_FINAL_LINK_RUSTFLAG_ARGUMENTS)
+    {
+        return Err(format!(
+            "Xtensa target rustflags must contain {XTENSA_FINAL_LINK_RUSTFLAG_ARGUMENTS:?} in order, observed {rustflags:?}"
+        ));
+    }
+
+    let explicit_overrides = ci_workflow
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.contains("RUSTFLAGS")
+                && [
+                    "link-arg=-nostartfiles",
+                    "code-model=large",
+                    "emit-stack-sizes",
+                ]
+                .iter()
+                .any(|flag| line.contains(flag))
+        })
+        .collect::<Vec<_>>();
+    if explicit_overrides.is_empty() {
+        return Err("CI contains no explicit final-link RUSTFLAGS override to audit".to_owned());
+    }
+    for (line_index, line) in explicit_overrides {
+        if !line.contains(XTENSA_FINAL_LINK_RUSTFLAGS) {
+            return Err(format!(
+                "CI final-link RUSTFLAGS on line {} must contain {XTENSA_FINAL_LINK_RUSTFLAGS:?}: {}",
+                line_index + 1,
+                line.trim()
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The only values copied from the invoking process into qualification build
 /// commands. Everything else is supplied explicitly after `Command::env_clear`.
@@ -453,5 +537,18 @@ mod tests {
         assert!(fields[5].ends_with(&format!("={RUSTUP_HOME_REMAP}")));
         assert!(!flags.contains("nonce-build=/reticulum-phase1/build/nonce-build"));
         fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn workspace_xtensa_final_link_policy_requires_the_large_code_model() {
+        let cargo_config = include_str!("../../.cargo/config.toml");
+        let ci_workflow = include_str!("../../.github/workflows/ci.yml");
+        validate_xtensa_final_link_policy_sources(cargo_config, ci_workflow).unwrap();
+
+        let small_config = cargo_config.replace("    \"-C\",\n    \"code-model=large\",\n", "");
+        assert!(validate_xtensa_final_link_policy_sources(&small_config, ci_workflow).is_err());
+
+        let small_ci = ci_workflow.replacen(" -C code-model=large", "", 1);
+        assert!(validate_xtensa_final_link_policy_sources(cargo_config, &small_ci).is_err());
     }
 }

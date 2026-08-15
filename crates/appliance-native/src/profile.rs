@@ -20,6 +20,8 @@ const UNCONFIGURED_DIRECTORY: &str = "unconfigured";
 const CREDENTIAL_FILE: &str = "credential.rdpkey";
 const ONBOARDING_CREDENTIAL_FILE: &str = "ble-onboarding.rdpkey";
 const DATABASE_FILE: &str = "chat.sqlite3";
+const DATABASE_WAL_FILE: &str = "chat.sqlite3-wal";
+const DATABASE_SHM_FILE: &str = "chat.sqlite3-shm";
 const ACTIVE_PROFILE_FILE: &str = "active-profile-v1";
 const ACTIVE_PROFILE_MAGIC: &[u8] = b"RETICULUM-APPLIANCE-ACTIVE-PROFILE-1\n";
 const METADATA_STAGING_ATTEMPTS: usize = 16;
@@ -279,6 +281,22 @@ impl NativeProfileStore {
             }
         }
     }
+
+    /// Delete one validated inactive profile and return the authoritative catalog.
+    ///
+    /// This deliberately cannot remove the active profile: its SQLite actor and
+    /// credential may still be owned by a [`crate::NativeAppliance`]. The caller
+    /// must first activate another profile and close every owner of this target.
+    ///
+    /// The complete directory is preflighted before the first removal. Only the
+    /// canonical credential, database, and SQLite WAL/SHM sidecars are accepted;
+    /// symlinks, subdirectories, and unknown artifacts fail closed.
+    pub fn delete_inactive_profile(
+        &self,
+        device_id: String,
+    ) -> Result<NativeProfileStoreSnapshot, NativeApplianceError> {
+        self.delete_inactive_profile_impl(device_id)
+    }
 }
 
 impl NativeProfileStore {
@@ -352,6 +370,82 @@ impl NativeProfileStore {
             database: self.root.join(UNCONFIGURED_DIRECTORY).join(DATABASE_FILE),
             credential: self.root.join(UNCONFIGURED_DIRECTORY).join(CREDENTIAL_FILE),
         })
+    }
+
+    fn delete_inactive_profile_impl(
+        &self,
+        device_id: String,
+    ) -> Result<NativeProfileStoreSnapshot, NativeApplianceError> {
+        let profile_key = validate_profile_key(&device_id)?;
+        let _guard = self.lock_gate()?;
+        if read_active_profile(&self.root)?.as_deref() == Some(profile_key.as_str()) {
+            return Err(NativeApplianceError::InvalidArgument {
+                reason: "the active appliance profile cannot be deleted".to_owned(),
+            });
+        }
+
+        self.profile_summary_locked(&profile_key)?;
+        let profiles_root = self.root.join(PROFILES_DIRECTORY);
+        let profile_directory = profiles_root.join(&profile_key);
+        let mut present = [false; 4];
+        for entry in fs::read_dir(&profile_directory)
+            .map_err(storage_error("read profile directory before deletion"))?
+        {
+            let entry = entry.map_err(storage_error(
+                "read profile directory entry before deletion",
+            ))?;
+            let name =
+                entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| NativeApplianceError::Storage {
+                        reason: format!("profile {profile_key} contains a non-UTF-8 artifact name"),
+                    })?;
+            let index = match name.as_str() {
+                CREDENTIAL_FILE => 0,
+                DATABASE_FILE => 1,
+                DATABASE_WAL_FILE => 2,
+                DATABASE_SHM_FILE => 3,
+                _ => {
+                    return Err(NativeApplianceError::Storage {
+                        reason: format!(
+                            "profile {profile_key} contains unsupported artifact {name}"
+                        ),
+                    });
+                }
+            };
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(storage_error("inspect profile artifact before deletion"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(NativeApplianceError::Storage {
+                    reason: format!(
+                        "profile {profile_key} artifact {name} must be a regular non-symlink file"
+                    ),
+                });
+            }
+            present[index] = true;
+        }
+
+        // Keep the canonical credential until every optional database artifact
+        // has been removed. A pre-credential failure therefore leaves a
+        // validated, listable profile rather than an unidentifiable directory.
+        for index in [2_usize, 3, 1, 0] {
+            if !present[index] {
+                continue;
+            }
+            let name = [
+                CREDENTIAL_FILE,
+                DATABASE_FILE,
+                DATABASE_WAL_FILE,
+                DATABASE_SHM_FILE,
+            ][index];
+            fs::remove_file(profile_directory.join(name))
+                .map_err(storage_error("remove inactive profile artifact"))?;
+        }
+        fs::remove_dir(&profile_directory)
+            .map_err(storage_error("remove empty inactive profile directory"))?;
+        sync_directory(&profiles_root, "profiles directory")?;
+        self.snapshot_locked()
     }
 
     pub(crate) fn import_activated_credential(
@@ -1090,6 +1184,189 @@ mod tests {
             Some(first.device_id.as_str())
         );
 
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn inactive_profile_deletion_removes_only_the_preflighted_profile_family() {
+        let directory = TestDirectory::new("delete-inactive");
+        let store = open_store(&directory);
+        let first_path = directory.0.join("first-delete-import.rdpkey");
+        let second_path = directory.0.join("second-delete-import.rdpkey");
+        fs::write(
+            &first_path,
+            activated_credential_bytes(*b"delete-device-01", 0x34),
+        )
+        .unwrap();
+        fs::write(
+            &second_path,
+            activated_credential_bytes(*b"delete-device-02", 0x35),
+        )
+        .unwrap();
+
+        let first = store
+            .import_activated_credential(&first_path, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+        let first_paths = store.runtime_paths().unwrap();
+        fs::write(&first_paths.database, b"database").unwrap();
+        fs::write(
+            PathBuf::from(format!("{}-wal", first_paths.database.display())),
+            b"wal",
+        )
+        .unwrap();
+        fs::write(
+            PathBuf::from(format!("{}-shm", first_paths.database.display())),
+            b"shm",
+        )
+        .unwrap();
+        let second = store
+            .import_activated_credential(&second_path, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+
+        let snapshot = store
+            .delete_inactive_profile(first.device_id.clone())
+            .unwrap();
+
+        assert_eq!(snapshot.active_profile_key, Some(second.device_id.clone()));
+        assert_eq!(snapshot.profiles.len(), 1);
+        assert_eq!(snapshot.profiles[0].profile_key, second.device_id);
+        assert!(!first_paths.credential.exists());
+        assert!(!first_paths.database.exists());
+        assert!(!PathBuf::from(format!("{}-wal", first_paths.database.display())).exists());
+        assert!(!PathBuf::from(format!("{}-shm", first_paths.database.display())).exists());
+        assert!(
+            !first_paths
+                .credential
+                .parent()
+                .expect("profile credential has a directory")
+                .exists()
+        );
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn inactive_profile_deletion_rejects_active_noncanonical_and_unknown_targets() {
+        let directory = TestDirectory::new("delete-rejections");
+        let store = open_store(&directory);
+        let staging = directory.0.join("delete-rejection-import.rdpkey");
+        fs::write(
+            &staging,
+            activated_credential_bytes(*b"delete-reject-01", 0x44),
+        )
+        .unwrap();
+        let profile = store
+            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+        let before = store.snapshot().unwrap();
+
+        assert!(matches!(
+            store.delete_inactive_profile(profile.device_id.clone()),
+            Err(NativeApplianceError::InvalidArgument { reason })
+                if reason.contains("active appliance profile")
+        ));
+        assert!(matches!(
+            store.delete_inactive_profile(profile.device_id.to_uppercase()),
+            Err(NativeApplianceError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            store.delete_inactive_profile("ab".repeat(16)),
+            Err(NativeApplianceError::Storage { .. })
+        ));
+        assert_eq!(store.snapshot().unwrap(), before);
+        assert!(store.runtime_paths().unwrap().credential.exists());
+        fs::remove_file(staging).unwrap();
+    }
+
+    #[test]
+    fn inactive_profile_deletion_preflights_every_artifact_before_removing_anything() {
+        let directory = TestDirectory::new("delete-preflight");
+        let store = open_store(&directory);
+        let first_path = directory.0.join("first-preflight-import.rdpkey");
+        let second_path = directory.0.join("second-preflight-import.rdpkey");
+        fs::write(
+            &first_path,
+            activated_credential_bytes(*b"delete-extra-001", 0x54),
+        )
+        .unwrap();
+        fs::write(
+            &second_path,
+            activated_credential_bytes(*b"delete-extra-002", 0x55),
+        )
+        .unwrap();
+        let first = store
+            .import_activated_credential(&first_path, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+        let first_paths = store.runtime_paths().unwrap();
+        fs::write(&first_paths.database, b"database").unwrap();
+        let unexpected = first_paths
+            .credential
+            .parent()
+            .expect("profile credential has a directory")
+            .join("unexpected.bin");
+        fs::write(&unexpected, b"unexpected").unwrap();
+        let second = store
+            .import_activated_credential(&second_path, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+
+        assert!(matches!(
+            store.delete_inactive_profile(first.device_id.clone()),
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("unsupported artifact unexpected.bin")
+        ));
+        assert!(first_paths.credential.exists());
+        assert!(first_paths.database.exists());
+        assert!(unexpected.exists());
+        assert_eq!(
+            store.snapshot().unwrap().active_profile_key,
+            Some(second.device_id)
+        );
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inactive_profile_deletion_rejects_an_allowed_name_when_it_is_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new("delete-symlink");
+        let store = open_store(&directory);
+        let first_path = directory.0.join("first-symlink-import.rdpkey");
+        let second_path = directory.0.join("second-symlink-import.rdpkey");
+        fs::write(
+            &first_path,
+            activated_credential_bytes(*b"delete-link-0001", 0x64),
+        )
+        .unwrap();
+        fs::write(
+            &second_path,
+            activated_credential_bytes(*b"delete-link-0002", 0x65),
+        )
+        .unwrap();
+        let first = store
+            .import_activated_credential(&first_path, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+        let first_paths = store.runtime_paths().unwrap();
+        fs::write(&first_paths.database, b"database").unwrap();
+        let external = directory.0.join("external-wal");
+        fs::write(&external, b"outside profile").unwrap();
+        let linked_wal = PathBuf::from(format!("{}-wal", first_paths.database.display()));
+        symlink(&external, &linked_wal).unwrap();
+        store
+            .import_activated_credential(&second_path, CredentialImportPolicy::AnyDevice)
+            .unwrap();
+
+        assert!(matches!(
+            store.delete_inactive_profile(first.device_id),
+            Err(NativeApplianceError::Storage { reason })
+                if reason.contains("regular non-symlink file")
+        ));
+        assert!(first_paths.credential.exists());
+        assert!(first_paths.database.exists());
+        assert!(linked_wal.exists());
+        assert_eq!(fs::read(external).unwrap(), b"outside profile");
         fs::remove_file(first_path).unwrap();
         fs::remove_file(second_path).unwrap();
     }

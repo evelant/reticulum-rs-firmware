@@ -8,8 +8,10 @@
 //!
 //! 1. persist `Queued -> Preparing` before asking the node to allocate entropy
 //!    or create a packet attempt; and
-//! 2. persist frame, terminal, and recovery observations before acknowledging
-//!    the exact upstream owner.
+//! 2. establish durable coverage for frame, terminal, and recovery
+//!    observations before acknowledging the exact upstream owner. For LXMF,
+//!    the durable `Preparing` delivery loop already covers attempt frames;
+//!    winning delivery evidence is still persisted before acknowledgement.
 
 #![no_std]
 #![deny(unsafe_code)]
@@ -110,6 +112,13 @@ pub trait SubmissionNodePort {
     /// Whether the node currently retains an RNS path whose bound interface is
     /// eligible for a new outbound Link request.
     fn has_usable_path(&self, destination: &DestinationHash) -> bool;
+
+    /// Remove one exact retained destination path after a non-Link delivery
+    /// timeout.
+    ///
+    /// Returns whether a route existed. Identity and Link state must remain
+    /// untouched so direct-Link retirement stays an independent transaction.
+    fn remove_retained_path(&mut self, destination: &DestinationHash) -> bool;
 
     /// Hop count of the currently retained path, when known.
     ///
@@ -266,6 +275,10 @@ where
 
     fn has_usable_path(&self, destination: &DestinationHash) -> bool {
         NodeInterfaceSupervisor::has_usable_path(self, destination)
+    }
+
+    fn remove_retained_path(&mut self, destination: &DestinationHash) -> bool {
+        NodeInterfaceSupervisor::remove_retained_path(self, destination)
     }
 
     fn retained_path_hops(&self, destination: &DestinationHash) -> Option<u8> {
@@ -469,9 +482,22 @@ pub const PATH_DISCOVERY_RESPONSE_WAIT_MS: u64 = 7_000;
 /// seconds, so the sender waits one additional second before its retry.
 pub const PATH_DISCOVERY_RETRY_INTERVAL_MS: u64 = 21_000;
 
-/// Maximum number of tagged path requests emitted for one submission in a
-/// single boot before `NoPath` becomes terminal.
+/// Maximum number of closely spaced tagged path requests emitted in one
+/// discovery cycle before the runtime enters its longer retry interval.
 pub const PATH_DISCOVERY_MAX_REQUESTS: u8 = 2;
+
+/// Delay between exhausted path-discovery cycles.
+///
+/// An absent route is an expected mesh condition rather than a permanent
+/// message failure. The exact durable submission therefore remains pending
+/// and resumes discovery periodically for as long as the node stays powered.
+pub const PATH_DISCOVERY_RETRY_CYCLE_MS: u64 = 60_000;
+
+// One RNS receipt timeout ends a carrier attempt, not the durable LXMF
+// delivery obligation. These boot-relative delays keep the first retries
+// responsive and then cap background airtime for an unreachable destination.
+const LXMF_RETRY_DELAYS_MS: [u64; 5] = [5_000, 15_000, 60_000, 300_000, 900_000];
+const LXMF_BOOT_RETRY_DELAY_MS: u64 = 15_000;
 
 /// Product-owned minimum deadline for one outbound Link to become active.
 ///
@@ -519,12 +545,37 @@ const fn direct_link_establishment_timeout(
     }
 }
 
-/// Exact transport-neutral path-request offer awaiting first router dispatch.
+fn lxmf_retry_delay_ms(id: SubmissionId, attempts_started: u32, after_boot: bool) -> u64 {
+    let base = if after_boot {
+        LXMF_BOOT_RETRY_DELAY_MS
+    } else {
+        let index = usize::try_from(attempts_started.saturating_sub(1))
+            .unwrap_or(usize::MAX)
+            .min(LXMF_RETRY_DELAYS_MS.len() - 1);
+        LXMF_RETRY_DELAYS_MS[index]
+    };
+    // Stable boot-local distribution without consuming packet-preparation RNG.
+    // The added jitter is bounded to twenty percent of the selected delay.
+    let mut mixed = id
+        .get()
+        .wrapping_add(u64::from(attempts_started).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    let jitter_limit = base / 5;
+    base.saturating_add(mixed % jitter_limit.saturating_add(1))
+}
+
+/// Exact transport-neutral path-request offer awaiting complete transmission.
 ///
 /// The runtime does not start response or retry clocks when this value is
 /// created. The product owner must return the unchanged offer through
-/// [`SubmissionRuntime::acknowledge_path_request_dispatched`] only after one
-/// eligible interface has accepted the corresponding packet.
+/// [`SubmissionRuntime::acknowledge_path_request_dispatched`] only after the
+/// complete request has physically transmitted: LoRa `TxDone` for every frame
+/// or a complete TCP frame write. If that does not happen, it must instead use
+/// [`SubmissionRuntime::retry_path_request_dispatch`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PathDiscoveryOffer {
     id: SubmissionId,
@@ -543,13 +594,14 @@ impl PathDiscoveryOffer {
         self.destination
     }
 
-    /// One-based request ordinal for this destination in the current boot.
+    /// One-based request ordinal for this destination in the current
+    /// discovery cycle.
     pub const fn ordinal(self) -> u8 {
         self.ordinal
     }
 }
 
-/// A router-dispatch acknowledgement did not match the exact pending offer.
+/// A transmission acknowledgement did not match the exact pending offer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathDiscoveryAcknowledgeError {
     /// No discovery is currently retained for the offered destination.
@@ -636,21 +688,24 @@ pub enum RuntimeStep {
         /// Projector disposition.
         progress: ProjectionProgress,
     },
-    /// A direct Link-DATA timeout is durable and its reusable session was
-    /// evicted.
+    /// A direct Link-DATA attempt timed out and its reusable session was
+    /// evicted while the durable LXMF delivery obligation remains owned.
     ///
     /// The product must synchronously close this exact Link through the normal
     /// authenticated teardown lifecycle and secure every resulting ordinary
     /// action in an owning lane before the next runtime drive. This signal is
-    /// withheld until the failed submission's final journal record is known
-    /// durable.
+    /// withheld until the timeout is covered by the already-durable LXMF
+    /// delivery loop and correlated to its exact upstream acknowledgement.
     DirectLinkDeliveryTimedOut {
         /// Exact node terminal observation.
         terminal: TerminalAttempt,
         /// Exact locally retained Link that must be closed.
         link: LinkHandle,
     },
-    /// One recovered owner was offered to durable transport audit.
+    /// One recovered owner was offered to projection.
+    ///
+    /// Generic work may require a durable transport audit; a durable LXMF
+    /// delivery loop can cover its volatile carrier owner directly.
     Recovered {
         /// Exact recovered-owner observation.
         observation: TxRecoveryObservation,
@@ -750,6 +805,14 @@ enum PathDiscoveryPhase {
         offer: PathDiscoveryOffer,
         first_request_ms: Option<u64>,
     },
+    RetryDispatch {
+        offer: PathDiscoveryOffer,
+        retry_not_before_ms: u64,
+        first_request_ms: Option<u64>,
+    },
+    CycleBackoff {
+        retry_not_before_ms: u64,
+    },
     Waiting {
         first_request_ms: u64,
         next_probe_ms: u64,
@@ -776,6 +839,27 @@ enum DirectLinkWaitReason {
     None,
     RegistryCapacity,
     MatchingLinkBusy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LxmfDeliveryLoop {
+    attempts_started: u32,
+    retry_pending: bool,
+    retry_not_before_ms: Option<u64>,
+    arm_after_boot: bool,
+    last_path_usable: bool,
+}
+
+impl LxmfDeliveryLoop {
+    const fn empty() -> Self {
+        Self {
+            attempts_started: 0,
+            retry_pending: false,
+            retry_not_before_ms: None,
+            arm_after_boot: false,
+            last_path_usable: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -838,6 +922,9 @@ pub struct SubmissionRuntime<
     direct_link_retirement: Option<DirectLinkRetirement>,
     reusable_direct_links: [Option<ReusableDirectLink>; DIRECT_LINKS],
     direct_link_waiting: [DirectLinkWaitReason; SUBMISSIONS],
+    lxmf_delivery_loops: [LxmfDeliveryLoop; SUBMISSIONS],
+    active_lxmf_retry_submission: Option<SubmissionId>,
+    retry_cursor: usize,
     next_link_offer_generation: u64,
     resource_waiting: [SubmissionId; SUBMISSIONS],
     resource_waiting_len: usize,
@@ -870,6 +957,9 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             direct_link_retirement: None,
             reusable_direct_links: [None; DIRECT_LINKS],
             direct_link_waiting: [DirectLinkWaitReason::None; SUBMISSIONS],
+            lxmf_delivery_loops: [LxmfDeliveryLoop::empty(); SUBMISSIONS],
+            active_lxmf_retry_submission: None,
+            retry_cursor: 0,
             next_link_offer_generation: 1,
             resource_waiting: [SubmissionId::new(0); SUBMISSIONS],
             resource_waiting_len: 0,
@@ -958,6 +1048,15 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                     .add(slot)
                     .write(DirectLinkWaitReason::None);
             }
+            let lxmf_delivery_loops =
+                core::ptr::addr_of_mut!((*runtime).lxmf_delivery_loops).cast::<LxmfDeliveryLoop>();
+            for slot in 0..SUBMISSIONS {
+                lxmf_delivery_loops
+                    .add(slot)
+                    .write(LxmfDeliveryLoop::empty());
+            }
+            core::ptr::addr_of_mut!((*runtime).active_lxmf_retry_submission).write(None);
+            core::ptr::addr_of_mut!((*runtime).retry_cursor).write(0);
             core::ptr::addr_of_mut!((*runtime).next_link_offer_generation).write(1);
             let resource_waiting =
                 core::ptr::addr_of_mut!((*runtime).resource_waiting).cast::<SubmissionId>();
@@ -1038,6 +1137,10 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         let progress = self
             .storage
             .finalize_boot_recovery(access, id, self.boot_sequence)?;
+        if progress == BootRecoveryProgress::ReplayPendingLxmf {
+            self.storage.resume_lxmf_delivery_loop(id)?;
+            self.mark_lxmf_boot_retry(id);
+        }
         if id.get() == u64::MAX {
             self.recovery_exhausted = true;
         } else {
@@ -1092,7 +1195,11 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                 .pending_persistence()
                 .next()
                 .is_some();
-        if progress == ProjectionProgress::AlreadyObserved && !persistence_pending {
+        if matches!(
+            progress,
+            ProjectionProgress::AlreadyObserved | ProjectionProgress::AttemptDurablyCovered
+        ) && !persistence_pending
+        {
             Ok(FrameOfferProgress::Durable)
         } else {
             Ok(FrameOfferProgress::Retain)
@@ -1241,6 +1348,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         self.storage
             .validate_access(access)
             .map_err(|error| RuntimeError::Storage(DriveError::Binding(error)))?;
+        self.release_finalized_lxmf_retry_owner();
 
         if self.storage.pending_kind().is_some() {
             let pending_projector = self.storage.pending_projector_handle();
@@ -1308,12 +1416,56 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         if let Some(action) = pending_acknowledgement {
             let reply = node.acknowledge(action);
             self.storage.report_acknowledgement(action, reply)?;
+            if reply == AcknowledgementReply::Completed
+                && let AcknowledgementKind::Terminal(terminal) = action.kind()
+            {
+                self.note_lxmf_terminal_acknowledged(action.submission(), terminal.outcome());
+            }
             return Ok(RuntimeStep::Acknowledgement { action, reply });
         }
 
         let terminal = node.terminal_attempts().next();
+        if let Some(terminal) = terminal
+            && let Some(observation) = node.recovered_observations().find(|observation| {
+                observation.attempt_handle() == terminal.handle()
+                    && observation.attempt() == terminal.token()
+            })
+        {
+            // A receipt terminal can coexist with a recovered packet owner
+            // that has not yet been released. Project that exact owner first
+            // so terminal acknowledgement cannot clear attempt correlation or
+            // admit a replacement while the packet owner is still retained.
+            let progress = self.storage.observe_recovered(observation)?;
+            return Ok(RuntimeStep::Recovered {
+                observation,
+                progress,
+            });
+        }
         if let Some(terminal) = terminal {
+            let submission = self
+                .storage
+                .projector()
+                .submission_for_terminal(terminal)
+                .expect("a node terminal must retain its exact projector binding");
+            let indexed = self
+                .storage
+                .index()
+                .get(submission)
+                .expect("a projected terminal's submission remains durably indexed");
+            let intent = indexed.accepted().intent();
+            let destination = DestinationHash::new(*intent.destination().as_bytes());
             let progress = self.storage.observe_terminal(terminal)?;
+            let retryable_lxmf_attempt = progress == ProjectionProgress::RetryableAttemptTerminal;
+            if terminal.outcome() == AttemptOutcome::DeliveryTimeout && terminal.link().is_none() {
+                let _ = node.remove_retained_path(&destination);
+            }
+            if retryable_lxmf_attempt {
+                self.schedule_lxmf_retry(
+                    submission,
+                    owner_now.get(),
+                    node.has_usable_path(&destination),
+                );
+            }
             if terminal.outcome() == AttemptOutcome::DeliveryTimeout
                 && let Some(link) = terminal.link()
             {
@@ -1338,7 +1490,19 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                         self.direct_link_retirement =
                             Some(DirectLinkRetirement::Ready { terminal, link });
                     }
-                    ProjectionProgress::AttemptBound | ProjectionProgress::NoAction => {
+                    ProjectionProgress::RetryableAttemptTerminal => {
+                        assert!(
+                            self.direct_link_retirement.is_none(),
+                            "a retryable direct terminal cannot replace an owned Link retirement"
+                        );
+                        self.direct_link_retirement =
+                            Some(DirectLinkRetirement::Ready { terminal, link });
+                    }
+                    ProjectionProgress::AttemptBound
+                    | ProjectionProgress::AttemptDurablyCovered
+                    | ProjectionProgress::RecoveryDurablyCovered
+                    | ProjectionProgress::DeliveryLoopResumed
+                    | ProjectionProgress::NoAction => {
                         unreachable!("terminal projection cannot return nonterminal progress");
                     }
                 }
@@ -1403,7 +1567,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                     match state {
                         Some(LinkState::Active) => {
                             if !self.retain_reusable_direct_link(offer.destination, link) {
-                                let progress = self.storage.observe_preparation(
+                                let progress = self.project_preparation(
                                     offer.id,
                                     SubmissionPreparationObservation::InternalFailure,
                                 )?;
@@ -1442,8 +1606,13 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                                 node.prepare_rehydrated_direct_lxmf_submission(link, request, rng);
                             let observation =
                                 self.classify_direct_preparation(offer.id, link, observation);
-                            let progress =
-                                self.storage.observe_preparation(offer.id, observation)?;
+                            let observation = self.classify_lxmf_interface_availability(
+                                offer.id,
+                                observation,
+                                owner_now.get(),
+                                node.has_usable_path(&offer.destination),
+                            );
+                            let progress = self.project_preparation(offer.id, observation)?;
                             return Ok(RuntimeStep::Preparation {
                                 id: offer.id,
                                 progress,
@@ -1485,24 +1654,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         }
 
         self.refresh_direct_link_waiting(node);
-        let ready =
-            self.storage
-                .index()
-                .iter()
-                .enumerate()
-                .find_map(|(submission_slot, submission)| {
-                    if self.direct_link_waiting[submission_slot] != DirectLinkWaitReason::None {
-                        return None;
-                    }
-                    let id = submission.accepted().id();
-                    let intent = self.storage.ready_intent(id)?;
-                    if self.resource_is_waiting(id) {
-                        return None;
-                    }
-                    let destination = DestinationHash::new(*intent.destination().as_bytes());
-                    self.path_discovery_due(destination, owner_now.get())
-                        .then_some((submission_slot, id, intent, destination))
-                });
+        let ready = self.select_ready_submission(node, owner_now.get());
         if let Some((submission_slot, id, intent, destination)) = ready {
             let request = SubmissionPrepareRequest {
                 destination,
@@ -1524,7 +1676,13 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                                 node.prepare_rehydrated_direct_lxmf_submission(link, request, rng);
                             let observation =
                                 self.classify_direct_preparation(id, link, observation);
-                            let progress = self.storage.observe_preparation(id, observation)?;
+                            let observation = self.classify_lxmf_interface_availability(
+                                id,
+                                observation,
+                                owner_now.get(),
+                                node.has_usable_path(&destination),
+                            );
+                            let progress = self.project_preparation(id, observation)?;
                             return Ok(RuntimeStep::Preparation { id, progress });
                         }
                         ReusableDirectLinkSelection::Busy(link) => Some(link),
@@ -1537,7 +1695,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                         if let Some(link) = busy_direct_link {
                             self.direct_link_waiting[submission_slot] =
                                 DirectLinkWaitReason::MatchingLinkBusy;
-                            let progress = self.storage.observe_preparation(
+                            let progress = self.project_preparation(
                                 id,
                                 SubmissionPreparationObservation::RetrySameBoot,
                             )?;
@@ -1553,7 +1711,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                                 ),
                                 owner_now.get(),
                             );
-                            let progress = self.storage.observe_preparation(id, observation)?;
+                            let progress = self.project_preparation(id, observation)?;
                             if let Some(offer) = path_offer {
                                 return Ok(RuntimeStep::PathDiscoveryRequest { offer, progress });
                             }
@@ -1562,7 +1720,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                         if !self.direct_link_admission_available(node) {
                             self.direct_link_waiting[submission_slot] =
                                 DirectLinkWaitReason::RegistryCapacity;
-                            let progress = self.storage.observe_preparation(
+                            let progress = self.project_preparation(
                                 id,
                                 SubmissionPreparationObservation::RetrySameBoot,
                             )?;
@@ -1578,27 +1736,35 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                             node.retained_path_hops(&destination),
                             node.retained_path_first_hop_serialization_ms(&destination),
                         ) else {
-                            let progress = self.storage.observe_preparation(
+                            let progress = self.project_preparation(
                                 id,
                                 SubmissionPreparationObservation::InternalFailure,
                             )?;
                             return Ok(RuntimeStep::Preparation { id, progress });
                         };
-                        let progress = self.storage.observe_preparation(
+                        let progress = self.project_preparation(
                             id,
                             SubmissionPreparationObservation::RetrySameBoot,
                         )?;
                         return Ok(RuntimeStep::LinkEstablishment { offer, progress });
                     }
 
-                    match node.prepare_rehydrated_opportunistic_lxmf_submission(request, rng) {
+                    let observation =
+                        node.prepare_rehydrated_opportunistic_lxmf_submission(request, rng);
+                    let observation = self.classify_lxmf_interface_availability(
+                        id,
+                        observation,
+                        owner_now.get(),
+                        node.has_usable_path(&destination),
+                    );
+                    match observation {
                         SubmissionPreparationObservation::Rejected(
                             SubmitError::PayloadTooLarge { .. },
                         ) => {
                             if let Some(link) = busy_direct_link {
                                 self.direct_link_waiting[submission_slot] =
                                     DirectLinkWaitReason::MatchingLinkBusy;
-                                let progress = self.storage.observe_preparation(
+                                let progress = self.project_preparation(
                                     id,
                                     SubmissionPreparationObservation::RetrySameBoot,
                                 )?;
@@ -1617,7 +1783,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                                     ),
                                     owner_now.get(),
                                 );
-                                let progress = self.storage.observe_preparation(id, observation)?;
+                                let progress = self.project_preparation(id, observation)?;
                                 if let Some(offer) = path_offer {
                                     return Ok(RuntimeStep::PathDiscoveryRequest {
                                         offer,
@@ -1629,7 +1795,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                             if !self.direct_link_admission_available(node) {
                                 self.direct_link_waiting[submission_slot] =
                                     DirectLinkWaitReason::RegistryCapacity;
-                                let progress = self.storage.observe_preparation(
+                                let progress = self.project_preparation(
                                     id,
                                     SubmissionPreparationObservation::RetrySameBoot,
                                 )?;
@@ -1645,13 +1811,13 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                                 node.retained_path_hops(&destination),
                                 node.retained_path_first_hop_serialization_ms(&destination),
                             ) else {
-                                let progress = self.storage.observe_preparation(
+                                let progress = self.project_preparation(
                                     id,
                                     SubmissionPreparationObservation::InternalFailure,
                                 )?;
                                 return Ok(RuntimeStep::Preparation { id, progress });
                             };
-                            let progress = self.storage.observe_preparation(
+                            let progress = self.project_preparation(
                                 id,
                                 SubmissionPreparationObservation::RetrySameBoot,
                             )?;
@@ -1663,7 +1829,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             };
             let (observation, path_offer) =
                 self.classify_path_discovery(id, destination, observation, owner_now.get());
-            let progress = self.storage.observe_preparation(id, observation)?;
+            let progress = self.project_preparation(id, observation)?;
             if let Some(offer) = path_offer {
                 return Ok(RuntimeStep::PathDiscoveryRequest { offer, progress });
             }
@@ -1779,14 +1945,221 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
     }
 
     fn mark_direct_link_waiting(&mut self, id: SubmissionId, reason: DirectLinkWaitReason) {
-        if let Some(submission_slot) = self
-            .storage
+        if let Some(submission_slot) = self.submission_slot(id) {
+            self.direct_link_waiting[submission_slot] = reason;
+        }
+    }
+
+    fn submission_slot(&self, id: SubmissionId) -> Option<usize> {
+        self.storage
             .index()
             .iter()
             .position(|submission| submission.accepted().id() == id)
-        {
-            self.direct_link_waiting[submission_slot] = reason;
+    }
+
+    fn mark_lxmf_boot_retry(&mut self, id: SubmissionId) {
+        let Some(slot) = self.submission_slot(id) else {
+            return;
+        };
+        let delivery = &mut self.lxmf_delivery_loops[slot];
+        delivery.retry_pending = true;
+        delivery.retry_not_before_ms = None;
+        delivery.arm_after_boot = true;
+        delivery.last_path_usable = false;
+    }
+
+    fn schedule_lxmf_retry(&mut self, id: SubmissionId, now_ms: u64, path_usable: bool) {
+        let Some(slot) = self.submission_slot(id) else {
+            return;
+        };
+        let delivery = &mut self.lxmf_delivery_loops[slot];
+        let delay = lxmf_retry_delay_ms(id, delivery.attempts_started, false);
+        delivery.retry_pending = true;
+        delivery.retry_not_before_ms = Some(now_ms.saturating_add(delay));
+        delivery.arm_after_boot = false;
+        delivery.last_path_usable = path_usable;
+    }
+
+    fn classify_lxmf_interface_availability(
+        &mut self,
+        id: SubmissionId,
+        observation: SubmissionPreparationObservation,
+        now_ms: u64,
+        path_usable: bool,
+    ) -> SubmissionPreparationObservation {
+        if matches!(
+            observation,
+            SubmissionPreparationObservation::Rejected(SubmitError::NoEligibleInterface { .. })
+        ) {
+            // Interface loss before packet admission is a transient appliance
+            // condition, not a terminal LXMF message failure. Reuse the
+            // board-owned retry scheduler without pretending an RNS attempt
+            // was created.
+            self.schedule_lxmf_retry(id, now_ms, path_usable);
+            SubmissionPreparationObservation::RetrySameBoot
+        } else {
+            observation
         }
+    }
+
+    fn lxmf_retry_is_eligible(
+        &mut self,
+        slot: usize,
+        id: SubmissionId,
+        now_ms: u64,
+        path_usable: bool,
+    ) -> bool {
+        let delivery = &mut self.lxmf_delivery_loops[slot];
+        if !delivery.retry_pending {
+            return true;
+        }
+        if delivery.arm_after_boot {
+            let delay = lxmf_retry_delay_ms(id, delivery.attempts_started, true);
+            delivery.retry_not_before_ms = Some(now_ms.saturating_add(delay));
+            delivery.arm_after_boot = false;
+            delivery.last_path_usable = path_usable;
+            return false;
+        }
+        let path_became_usable = !delivery.last_path_usable && path_usable;
+        if !path_usable {
+            delivery.last_path_usable = false;
+        }
+        path_became_usable
+            || delivery
+                .retry_not_before_ms
+                .is_some_and(|deadline| now_ms >= deadline)
+    }
+
+    fn note_lxmf_attempt_started(&mut self, slot: usize, id: SubmissionId) {
+        let delivery = &mut self.lxmf_delivery_loops[slot];
+        if delivery.retry_pending {
+            debug_assert!(
+                self.active_lxmf_retry_submission
+                    .is_none_or(|active| active == id),
+                "serialized LXMF retry owner changed before terminal acknowledgement"
+            );
+            self.active_lxmf_retry_submission = Some(id);
+        }
+        delivery.attempts_started = delivery.attempts_started.saturating_add(1);
+        delivery.retry_pending = false;
+        delivery.retry_not_before_ms = None;
+        delivery.arm_after_boot = false;
+    }
+
+    fn note_lxmf_terminal_acknowledged(&mut self, id: SubmissionId, outcome: AttemptOutcome) {
+        if self.active_lxmf_retry_submission == Some(id) {
+            self.active_lxmf_retry_submission = None;
+        }
+        if outcome == AttemptOutcome::Delivered
+            && let Some(slot) = self.submission_slot(id)
+        {
+            self.lxmf_delivery_loops[slot] = LxmfDeliveryLoop::empty();
+        }
+    }
+
+    fn release_finalized_lxmf_retry_owner(&mut self) {
+        if self.active_lxmf_retry_submission.is_some_and(|id| {
+            self.storage
+                .index()
+                .get(id)
+                .is_some_and(|submission| submission.state().is_final())
+        }) {
+            // A fail-closed quarantine or other non-receipt terminal can
+            // finalize an attempt without producing the ordinary terminal
+            // acknowledgement edge above. Once that final state is durable,
+            // it must not strand the global automatic-retry admission gate.
+            self.active_lxmf_retry_submission = None;
+        }
+    }
+
+    fn project_preparation(
+        &mut self,
+        id: SubmissionId,
+        observation: SubmissionPreparationObservation,
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        let is_lxmf = self.storage.index().get(id).is_some_and(|submission| {
+            matches!(
+                submission.accepted().intent(),
+                SubmissionIntent::LxmfMessage(_)
+            )
+        });
+        let starts_attempt = matches!(observation, SubmissionPreparationObservation::Prepared(_));
+        let progress = self.storage.observe_preparation(id, observation)?;
+        if is_lxmf && starts_attempt {
+            let slot = self
+                .submission_slot(id)
+                .expect("a projected preparation retains its durable submission");
+            self.note_lxmf_attempt_started(slot, id);
+        }
+        Ok(progress)
+    }
+
+    fn select_ready_submission<N>(
+        &mut self,
+        node: &N,
+        now_ms: u64,
+    ) -> Option<(usize, SubmissionId, SubmissionIntent, DestinationHash)>
+    where
+        N: SubmissionNodePort,
+    {
+        if SUBMISSIONS == 0 {
+            return None;
+        }
+        let queued_waiting = self
+            .storage
+            .index()
+            .iter()
+            .any(|submission| submission.state() == LifecycleState::Queued);
+        // Fresh work wins over a due background retry. Within each class the
+        // cursor rotates so one destination cannot monopolize preparation. A
+        // newly accepted queued submission must first cross its durable
+        // preparation barrier, so suppress retries for this turn and let the
+        // caller advance that barrier below.
+        for select_retry in [false, true] {
+            if select_retry && queued_waiting {
+                break;
+            }
+            for offset in 0..SUBMISSIONS {
+                let slot = (self.retry_cursor + offset) % SUBMISSIONS;
+                let Some(id) = self
+                    .storage
+                    .index()
+                    .iter()
+                    .nth(slot)
+                    .map(|submission| submission.accepted().id())
+                else {
+                    continue;
+                };
+                if self.direct_link_waiting[slot] != DirectLinkWaitReason::None {
+                    continue;
+                }
+                let Some(intent) = self.storage.ready_intent(id) else {
+                    continue;
+                };
+                if self.resource_is_waiting(id) {
+                    continue;
+                }
+                let destination = DestinationHash::new(*intent.destination().as_bytes());
+                let is_lxmf = matches!(intent, SubmissionIntent::LxmfMessage(_));
+                let is_retry = is_lxmf && self.lxmf_delivery_loops[slot].retry_pending;
+                if is_retry != select_retry {
+                    continue;
+                }
+                if is_retry && self.active_lxmf_retry_submission.is_some() {
+                    continue;
+                }
+                let has_usable_path = node.has_usable_path(&destination);
+                if is_retry && !self.lxmf_retry_is_eligible(slot, id, now_ms, has_usable_path) {
+                    continue;
+                }
+                if !self.path_discovery_ready(destination, now_ms, has_usable_path, is_lxmf) {
+                    continue;
+                }
+                self.retry_cursor = (slot + 1) % SUBMISSIONS;
+                return Some((slot, id, intent, destination));
+            }
+        }
+        None
     }
 
     fn prune_reusable_direct_links<N>(&mut self, node: &N)
@@ -1913,6 +2286,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         true
     }
 
+    #[cfg(test)]
     fn path_discovery_due(&self, destination: DestinationHash, now_ms: u64) -> bool {
         self.path_discoveries
             .iter()
@@ -1920,7 +2294,51 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             .find(|discovery| discovery.destination == destination)
             .is_none_or(|discovery| match discovery.phase {
                 PathDiscoveryPhase::AwaitingDispatch { .. } => false,
+                PathDiscoveryPhase::RetryDispatch {
+                    retry_not_before_ms,
+                    ..
+                } => now_ms >= retry_not_before_ms,
+                PathDiscoveryPhase::CycleBackoff {
+                    retry_not_before_ms,
+                } => now_ms >= retry_not_before_ms,
                 PathDiscoveryPhase::Waiting { next_probe_ms, .. } => now_ms >= next_probe_ms,
+            })
+    }
+
+    fn path_discovery_ready(
+        &self,
+        destination: DestinationHash,
+        now_ms: u64,
+        has_usable_path: bool,
+        retain_after_exhaustion: bool,
+    ) -> bool {
+        if !has_usable_path {
+            return self
+                .path_discoveries
+                .iter()
+                .flatten()
+                .find(|discovery| discovery.destination == destination)
+                .is_none_or(|discovery| match discovery.phase {
+                    PathDiscoveryPhase::AwaitingDispatch { .. } => false,
+                    PathDiscoveryPhase::RetryDispatch {
+                        retry_not_before_ms,
+                        ..
+                    } => now_ms >= retry_not_before_ms,
+                    PathDiscoveryPhase::CycleBackoff {
+                        retry_not_before_ms,
+                    } => !retain_after_exhaustion || now_ms >= retry_not_before_ms,
+                    PathDiscoveryPhase::Waiting { next_probe_ms, .. } => now_ms >= next_probe_ms,
+                });
+        }
+        self.path_discoveries
+            .iter()
+            .flatten()
+            .find(|discovery| discovery.destination == destination)
+            .is_none_or(|discovery| match discovery.phase {
+                PathDiscoveryPhase::AwaitingDispatch { .. } => false,
+                PathDiscoveryPhase::RetryDispatch { .. } => true,
+                PathDiscoveryPhase::CycleBackoff { .. } => true,
+                PathDiscoveryPhase::Waiting { .. } => true,
             })
     }
 
@@ -1947,6 +2365,16 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             }
             return (observation, None);
         }
+        let retain_after_exhaustion = self
+            .storage
+            .index()
+            .get(id)
+            .is_some_and(|submission| submission.accepted().intent().lxmf_message().is_some());
+        let has_other_pending_waiter = self.storage.index().iter().any(|submission| {
+            submission.accepted().id() != id
+                && !submission.state().is_final()
+                && submission.accepted().intent().destination().as_bytes() == destination.as_bytes()
+        });
 
         let existing = self
             .path_discoveries
@@ -1978,6 +2406,46 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             PathDiscoveryPhase::AwaitingDispatch { .. } => {
                 (SubmissionPreparationObservation::RetrySameBoot, None)
             }
+            PathDiscoveryPhase::RetryDispatch {
+                offer,
+                retry_not_before_ms,
+                first_request_ms,
+            } => {
+                if now_ms < retry_not_before_ms {
+                    return (SubmissionPreparationObservation::RetrySameBoot, None);
+                }
+                discovery.phase = PathDiscoveryPhase::AwaitingDispatch {
+                    offer,
+                    first_request_ms,
+                };
+                (SubmissionPreparationObservation::RetrySameBoot, Some(offer))
+            }
+            PathDiscoveryPhase::CycleBackoff {
+                retry_not_before_ms,
+            } => {
+                if !retain_after_exhaustion {
+                    if !has_other_pending_waiter {
+                        self.path_discoveries[index] = None;
+                    }
+                    return (observation, None);
+                }
+                if now_ms < retry_not_before_ms {
+                    return (SubmissionPreparationObservation::RetrySameBoot, None);
+                }
+                let offer = PathDiscoveryOffer {
+                    id,
+                    destination,
+                    ordinal: 1,
+                };
+                self.path_discoveries[index] = Some(PathDiscovery {
+                    destination,
+                    phase: PathDiscoveryPhase::AwaitingDispatch {
+                        offer,
+                        first_request_ms: None,
+                    },
+                });
+                (SubmissionPreparationObservation::RetrySameBoot, Some(offer))
+            }
             PathDiscoveryPhase::Waiting {
                 first_request_ms,
                 requests_sent,
@@ -2006,8 +2474,27 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                 (SubmissionPreparationObservation::RetrySameBoot, Some(offer))
             }
             PathDiscoveryPhase::Waiting { .. } => {
-                self.path_discoveries[index] = None;
-                (observation, None)
+                if !retain_after_exhaustion {
+                    if has_other_pending_waiter {
+                        self.path_discoveries[index] = Some(PathDiscovery {
+                            destination,
+                            phase: PathDiscoveryPhase::CycleBackoff {
+                                retry_not_before_ms: now_ms
+                                    .saturating_add(PATH_DISCOVERY_RETRY_CYCLE_MS),
+                            },
+                        });
+                    } else {
+                        self.path_discoveries[index] = None;
+                    }
+                    return (observation, None);
+                }
+                self.path_discoveries[index] = Some(PathDiscovery {
+                    destination,
+                    phase: PathDiscoveryPhase::CycleBackoff {
+                        retry_not_before_ms: now_ms.saturating_add(PATH_DISCOVERY_RETRY_CYCLE_MS),
+                    },
+                });
+                (SubmissionPreparationObservation::RetrySameBoot, None)
             }
         }
     }
@@ -2022,8 +2509,12 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
         }
     }
 
-    /// Start response and retry clocks after the request's first real router
-    /// dispatch onto an eligible interface.
+    /// Start response and retry clocks after complete physical transmission.
+    ///
+    /// A LoRa caller must wait for `TxDone` for every frame in the path
+    /// request. A TCP caller must wait for the full frame write. Merely
+    /// enqueueing or accepting work at a router or interface actor is not a
+    /// transmission acknowledgement.
     ///
     /// This operation is backend-free. The exact offer remains pending on any
     /// mismatch so a caller can fail closed without losing correlation.
@@ -2055,6 +2546,47 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             first_request_ms: first_request_ms.unwrap_or(dispatched_at),
             next_probe_ms: dispatched_at.saturating_add(PATH_DISCOVERY_RESPONSE_WAIT_MS),
             requests_sent: offer.ordinal,
+        };
+        Ok(())
+    }
+
+    /// Return an exact path-request offer that no eligible interface
+    /// physically transmitted.
+    ///
+    /// The unchanged offer becomes available again at `retry_not_before`.
+    /// Because no dispatch occurred, this does not start response clocks or
+    /// consume the offer's request ordinal. A learned usable path may still
+    /// wake the retained submission before that deadline.
+    ///
+    /// This operation is backend-free. Any mismatch leaves the exact pending
+    /// offer unchanged so callers can fail closed without losing correlation.
+    pub fn retry_path_request_dispatch(
+        &mut self,
+        offer: PathDiscoveryOffer,
+        retry_not_before: MonotonicMillis,
+    ) -> Result<(), PathDiscoveryAcknowledgeError> {
+        let Some(discovery) = self
+            .path_discoveries
+            .iter_mut()
+            .flatten()
+            .find(|discovery| discovery.destination == offer.destination)
+        else {
+            return Err(PathDiscoveryAcknowledgeError::DestinationNotPending);
+        };
+        let PathDiscoveryPhase::AwaitingDispatch {
+            offer: expected,
+            first_request_ms,
+        } = discovery.phase
+        else {
+            return Err(PathDiscoveryAcknowledgeError::OfferMismatch);
+        };
+        if expected != offer {
+            return Err(PathDiscoveryAcknowledgeError::OfferMismatch);
+        }
+        discovery.phase = PathDiscoveryPhase::RetryDispatch {
+            offer,
+            retry_not_before_ms: retry_not_before.get(),
+            first_request_ms,
         };
         Ok(())
     }

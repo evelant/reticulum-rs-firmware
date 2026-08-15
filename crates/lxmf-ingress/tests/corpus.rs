@@ -123,6 +123,7 @@ fn opportunistic_event(fixture: &MessageFixture) -> ApplicationEvent {
     ApplicationEvent::DataReceived {
         destination: array(&fixture.destination_hash_hex),
         payload: decode(&fixture.ingress.payload_hex),
+        ingress: None,
     }
 }
 
@@ -275,10 +276,16 @@ fn linked_event(fixture: &MessageFixture) -> ApplicationEvent {
 
 fn with_link_context(event: ApplicationEvent, context: u8) -> ApplicationEvent {
     match event {
-        ApplicationEvent::LinkData { binding, data, .. } => ApplicationEvent::LinkData {
+        ApplicationEvent::LinkData {
+            binding,
+            data,
+            ingress,
+            ..
+        } => ApplicationEvent::LinkData {
             binding,
             data,
             context,
+            ingress,
         },
         _ => panic!("fixture event must be Link DATA"),
     }
@@ -624,6 +631,7 @@ fn wire_signature_and_stamp_rejections_remain_distinct() {
     let truncated_event = ApplicationEvent::DataReceived {
         destination: *local.as_bytes(),
         payload: truncated_wire[16..].to_vec(),
+        ingress: None,
     };
     let resolver = fixture_resolver(fixture);
     assert!(matches!(
@@ -643,6 +651,7 @@ fn wire_signature_and_stamp_rejections_remain_distinct() {
     let signature_event = ApplicationEvent::DataReceived {
         destination: *local.as_bytes(),
         payload: signature_wire[16..].to_vec(),
+        ingress: None,
     };
     let resolver = fixture_resolver(fixture);
     assert!(matches!(

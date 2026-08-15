@@ -53,17 +53,106 @@ pub const HANDOFF_EXCHANGE_TIMEOUT_MS: u64 = 60_000;
 pub const BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS: u64 = 120_000;
 /// Milliseconds of application-pairing idle time admitted per connection.
 pub const APPLICATION_PAIRING_IDLE_TIMEOUT_MS: u64 = 300_000;
+/// Continuous boot-time GPIO21 hold required to authorize one BLE bond reset.
+///
+/// The caller must construct the gesture from its first boot observation of
+/// the active-low user key. A released first observation, any later release,
+/// or a clock regression permanently rejects recovery for that boot. This
+/// policy emits authorization exactly once and does not itself mutate storage.
+pub const BLE_BOND_BOOT_RECOVERY_HOLD_MS: u64 = 2_000;
 /// Number of BLE links admitted by this proof.
 pub const CONNECTIONS_MAX: usize = reticulum_device_api_ble::MAX_CONNECTIONS;
 /// Controller activity slots reserved for one advertiser and one ACL link.
 ///
-/// The pinned esp-radio 0.18 `Config::with_max_connections` API is a misnomer:
-/// it writes Espressif's `ble_max_act`, whose unit is concurrent BLE
-/// activities rather than established connections. Advertising consumes one
-/// activity and the eventual sole connection consumes another.
+/// The pinned esp-radio `Config::with_max_connections` API is a misnomer: it
+/// writes Espressif's `ble_max_act`, whose unit is concurrent BLE activities
+/// rather than established connections. Advertising consumes one activity and
+/// the eventual sole connection consumes another.
 pub const CONTROLLER_ACTIVITY_MAX: usize = 2;
 /// L2CAP channels retained for signaling and ATT.
 pub const L2CAP_CHANNELS_MAX: usize = 2;
+
+/// Result of one boot-time BLE bond recovery gesture observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootBleBondRecoveryProgress {
+    /// GPIO21 has remained asserted since boot but has not reached the hold
+    /// duration.
+    Pending,
+    /// The continuous boot hold reached its duration and authorizes exactly one
+    /// BLE bond reset.
+    Authorized,
+    /// The gesture was invalidated before authorization and cannot be retried
+    /// without rebooting.
+    Rejected,
+    /// The sole authorization was already emitted.
+    Consumed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BootBleBondRecoveryState {
+    Pending,
+    Rejected,
+    Consumed,
+}
+
+/// Pure owner of the one-shot GPIO21-at-boot BLE bond recovery gesture.
+///
+/// `button_asserted` means the active-low GPIO21 input is electrically low.
+/// Recovery is eligible only when the first boot sample is asserted and every
+/// later sample remains asserted until [`BLE_BOND_BOOT_RECOVERY_HOLD_MS`].
+/// Releasing and pressing again never repairs the gesture in the same boot.
+#[must_use = "boot recovery authorization must be deliberately observed or rejected"]
+pub struct BootBleBondRecoveryGesture {
+    started_at_ms: u64,
+    last_observed_at_ms: u64,
+    state: BootBleBondRecoveryState,
+}
+
+impl BootBleBondRecoveryGesture {
+    /// Begin from the caller's first GPIO21 observation of this boot.
+    pub const fn new(now_ms: u64, button_asserted: bool) -> Self {
+        Self {
+            started_at_ms: now_ms,
+            last_observed_at_ms: now_ms,
+            state: if button_asserted {
+                BootBleBondRecoveryState::Pending
+            } else {
+                BootBleBondRecoveryState::Rejected
+            },
+        }
+    }
+
+    /// Observe one later raw level at a monotonic millisecond timestamp.
+    ///
+    /// [`BootBleBondRecoveryProgress::Authorized`] is returned exactly once.
+    /// Any release or clock regression fails closed for the remainder of the
+    /// boot, so a short press or bounce cannot become a recovery gesture by
+    /// accumulating asserted intervals.
+    pub fn observe(&mut self, now_ms: u64, button_asserted: bool) -> BootBleBondRecoveryProgress {
+        match self.state {
+            BootBleBondRecoveryState::Rejected => {
+                return BootBleBondRecoveryProgress::Rejected;
+            }
+            BootBleBondRecoveryState::Consumed => {
+                return BootBleBondRecoveryProgress::Consumed;
+            }
+            BootBleBondRecoveryState::Pending => {}
+        }
+
+        if now_ms < self.last_observed_at_ms || !button_asserted {
+            self.state = BootBleBondRecoveryState::Rejected;
+            return BootBleBondRecoveryProgress::Rejected;
+        }
+        self.last_observed_at_ms = now_ms;
+
+        if now_ms - self.started_at_ms < BLE_BOND_BOOT_RECOVERY_HOLD_MS {
+            return BootBleBondRecoveryProgress::Pending;
+        }
+
+        self.state = BootBleBondRecoveryState::Consumed;
+        BootBleBondRecoveryProgress::Authorized
+    }
+}
 
 /// Post-connection cleanup for one attempted fresh SMP ceremony.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +274,59 @@ impl BleAdvertisingParameters {
     }
 }
 
+/// Which public local name owns the next BLE advertisement.
+///
+/// Recovery deliberately remains distinct from whether an authenticated bond
+/// has just become durable. A replacement central must first prove that it can
+/// use that bond for the application session before stale normal-name clients
+/// are allowed to contend for the sole controller slot again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleAdvertisingIdentityState {
+    /// Advertise the stable name used by ordinary saved profiles.
+    Normal,
+    /// Advertise the recovery-only name ignored by ordinary saved profiles.
+    Recovery,
+}
+
+impl BleAdvertisingIdentityState {
+    /// Select the boot advertisement from the restored authoritative bond.
+    pub const fn from_restored_bond(restored_bond_present: bool) -> Self {
+        if restored_bond_present {
+            Self::Normal
+        } else {
+            Self::Recovery
+        }
+    }
+
+    /// Whether the next advertisement must use the recovery-only local name.
+    pub const fn uses_recovery_name(self) -> bool {
+        matches!(self, Self::Recovery)
+    }
+
+    /// Apply proof that recovery reached a usable application owner.
+    ///
+    /// A durable bond alone is insufficient: immediately revealing the normal
+    /// name would let the stale saved profile that caused recovery reclaim the
+    /// sole link before the replacement central authenticates. Fresh first-run
+    /// onboarding may instead complete by durably activating its application
+    /// credential on the retained pairing link.
+    pub const fn after_connection(
+        self,
+        authoritative_bond_present: bool,
+        ordinary_session_established: bool,
+        application_credential_activated: bool,
+    ) -> Self {
+        if matches!(self, Self::Recovery)
+            && authoritative_bond_present
+            && (ordinary_session_established || application_credential_activated)
+        {
+            Self::Normal
+        } else {
+            self
+        }
+    }
+}
+
 /// Failure to preserve the one-confirmation/one-fragment ownership rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndicationGateError {
@@ -194,7 +336,7 @@ pub enum IndicationGateError {
     UnexpectedConfirmation,
     /// A zero-byte fragment cannot own an indication.
     EmptyFragment,
-    /// A fragment exceeded the fixed initial ATT value bound.
+    /// A fragment exceeded the profile's maximum ATT value bound.
     OversizedFragment,
 }
 
@@ -328,7 +470,7 @@ impl IndicationGate {
         if bytes == 0 {
             return Err(IndicationGateError::EmptyFragment);
         }
-        if bytes > reticulum_device_api_ble::INITIAL_ATT_VALUE_BYTES {
+        if bytes > reticulum_device_api_ble::MAXIMUM_ATT_VALUE_BYTES {
             return Err(IndicationGateError::OversizedFragment);
         }
         if self.pending_bytes.is_some() {
@@ -351,6 +493,23 @@ impl IndicationGate {
     }
 }
 
+/// Derive the usable characteristic-value payload from a connection's ATT MTU.
+///
+/// ATT reserves three bytes for the operation and attribute handle. Trouble
+/// begins each connection at the mandatory 23-byte MTU and updates it after an
+/// exchange. A malformed sub-minimum observation therefore falls back to the
+/// universally safe 20-byte value instead of producing an empty fragment.
+pub const fn negotiated_att_value_bytes(att_mtu: u16) -> usize {
+    let payload = (att_mtu as usize).saturating_sub(3);
+    if payload < reticulum_device_api_ble::MINIMUM_ATT_VALUE_BYTES {
+        reticulum_device_api_ble::MINIMUM_ATT_VALUE_BYTES
+    } else if payload > reticulum_device_api_ble::MAXIMUM_ATT_VALUE_BYTES {
+        reticulum_device_api_ble::MAXIMUM_ATT_VALUE_BYTES
+    } else {
+        payload
+    }
+}
+
 const _: () = assert!(CONNECTIONS_MAX == 1);
 const _: () = assert!(CONTROLLER_ACTIVITY_MAX == CONNECTIONS_MAX + 1);
 const _: () = assert!(L2CAP_CHANNELS_MAX == 2);
@@ -363,16 +522,19 @@ const _: () = assert!(DISCONNECT_DRAIN_PROLONGED_LOG_MS > DISCONNECT_DRAIN_RECHE
 const _: () = assert!(HANDOFF_EXCHANGE_TIMEOUT_MS > API_POLL_INTERVAL_MS);
 const _: () = assert!(BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS > HANDOFF_EXCHANGE_TIMEOUT_MS);
 const _: () = assert!(APPLICATION_PAIRING_IDLE_TIMEOUT_MS > HANDOFF_EXCHANGE_TIMEOUT_MS);
+const _: () = assert!(BLE_BOND_BOOT_RECOVERY_HOLD_MS > 0);
 
 #[cfg(test)]
 mod tests {
     use super::{
         APPLICATION_PAIRING_IDLE_TIMEOUT_MS, ApplicationPairingIdleDeadline,
-        BLE_SECURITY_PAIRING_TIMEOUT_MS, BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS,
-        BleAdvertisingParameters, BleBondExchangeResult, CCCD_SUBSCRIBE_TIMEOUT_MS,
-        CONNECTIONS_MAX, CONTROLLER_ACTIVITY_MAX, FreshSecurityDisposition,
-        HANDOFF_EXCHANGE_TIMEOUT_MS, IndicationGate, IndicationGateError,
-        PRE_AUTHENTICATION_TIMEOUT_MS, PreAuthenticationDeadline, PreAuthenticationDeadlineStatus,
+        BLE_BOND_BOOT_RECOVERY_HOLD_MS, BLE_SECURITY_PAIRING_TIMEOUT_MS,
+        BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS, BleAdvertisingIdentityState,
+        BleAdvertisingParameters, BleBondExchangeResult, BootBleBondRecoveryGesture,
+        BootBleBondRecoveryProgress, CCCD_SUBSCRIBE_TIMEOUT_MS, CONNECTIONS_MAX,
+        CONTROLLER_ACTIVITY_MAX, FreshSecurityDisposition, HANDOFF_EXCHANGE_TIMEOUT_MS,
+        IndicationGate, IndicationGateError, PRE_AUTHENTICATION_TIMEOUT_MS,
+        PreAuthenticationDeadline, PreAuthenticationDeadlineStatus, negotiated_att_value_bytes,
         static_random_address,
     };
     use crate::usb_authenticated_session::UsbAuthenticatedSessionPhase;
@@ -392,6 +554,95 @@ mod tests {
         assert_eq!(HANDOFF_EXCHANGE_TIMEOUT_MS, 60_000);
         assert_eq!(BUTTON_OBSERVATION_HANDOFF_TIMEOUT_MS, 120_000);
         assert_eq!(APPLICATION_PAIRING_IDLE_TIMEOUT_MS, 300_000);
+    }
+
+    #[test]
+    fn continuous_boot_hold_authorizes_exactly_once() {
+        let mut gesture = BootBleBondRecoveryGesture::new(40, true);
+        assert_eq!(
+            gesture.observe(40, true),
+            BootBleBondRecoveryProgress::Pending
+        );
+        assert_eq!(
+            gesture.observe(40 + BLE_BOND_BOOT_RECOVERY_HOLD_MS - 1, true),
+            BootBleBondRecoveryProgress::Pending
+        );
+        assert_eq!(
+            gesture.observe(40 + BLE_BOND_BOOT_RECOVERY_HOLD_MS, true),
+            BootBleBondRecoveryProgress::Authorized
+        );
+        assert_eq!(
+            gesture.observe(40 + BLE_BOND_BOOT_RECOVERY_HOLD_MS + 1, true),
+            BootBleBondRecoveryProgress::Consumed
+        );
+        assert_eq!(
+            gesture.observe(40 + BLE_BOND_BOOT_RECOVERY_HOLD_MS + 2, false),
+            BootBleBondRecoveryProgress::Consumed
+        );
+    }
+
+    #[test]
+    fn released_boot_sample_cannot_be_repaired_by_a_later_hold() {
+        let mut gesture = BootBleBondRecoveryGesture::new(0, false);
+        assert_eq!(
+            gesture.observe(BLE_BOND_BOOT_RECOVERY_HOLD_MS + 1, true),
+            BootBleBondRecoveryProgress::Rejected
+        );
+    }
+
+    #[test]
+    fn short_boot_hold_is_rejected_on_release() {
+        let mut gesture = BootBleBondRecoveryGesture::new(0, true);
+        assert_eq!(
+            gesture.observe(BLE_BOND_BOOT_RECOVERY_HOLD_MS - 1, true),
+            BootBleBondRecoveryProgress::Pending
+        );
+        assert_eq!(
+            gesture.observe(BLE_BOND_BOOT_RECOVERY_HOLD_MS - 1, false),
+            BootBleBondRecoveryProgress::Rejected
+        );
+        assert_eq!(
+            gesture.observe(2 * BLE_BOND_BOOT_RECOVERY_HOLD_MS, true),
+            BootBleBondRecoveryProgress::Rejected
+        );
+    }
+
+    #[test]
+    fn observed_bounce_permanently_rejects_boot_recovery() {
+        let mut gesture = BootBleBondRecoveryGesture::new(100, true);
+        assert_eq!(
+            gesture.observe(600, true),
+            BootBleBondRecoveryProgress::Pending
+        );
+        assert_eq!(
+            gesture.observe(601, false),
+            BootBleBondRecoveryProgress::Rejected
+        );
+        assert_eq!(
+            gesture.observe(602, true),
+            BootBleBondRecoveryProgress::Rejected
+        );
+        assert_eq!(
+            gesture.observe(100 + BLE_BOND_BOOT_RECOVERY_HOLD_MS + 1, true),
+            BootBleBondRecoveryProgress::Rejected
+        );
+    }
+
+    #[test]
+    fn clock_regression_fails_boot_recovery_closed() {
+        let mut gesture = BootBleBondRecoveryGesture::new(500, true);
+        assert_eq!(
+            gesture.observe(700, true),
+            BootBleBondRecoveryProgress::Pending
+        );
+        assert_eq!(
+            gesture.observe(699, true),
+            BootBleBondRecoveryProgress::Rejected
+        );
+        assert_eq!(
+            gesture.observe(500 + BLE_BOND_BOOT_RECOVERY_HOLD_MS, true),
+            BootBleBondRecoveryProgress::Rejected
+        );
     }
 
     #[test]
@@ -434,6 +685,40 @@ mod tests {
             static_random_address(identity_hash)
         );
         assert_eq!(parameters.local_name_mac(), physical_mac);
+    }
+
+    #[test]
+    fn bondless_boot_keeps_recovery_identity_until_application_access_is_proven() {
+        let recovery = BleAdvertisingIdentityState::from_restored_bond(false);
+        assert!(recovery.uses_recovery_name());
+        assert_eq!(
+            recovery.after_connection(true, false, false),
+            BleAdvertisingIdentityState::Recovery,
+            "a durable bond alone must not expose the stale profile's normal target"
+        );
+        assert_eq!(
+            recovery.after_connection(true, true, false),
+            BleAdvertisingIdentityState::Normal
+        );
+        assert_eq!(
+            recovery.after_connection(true, false, true),
+            BleAdvertisingIdentityState::Normal
+        );
+        assert_eq!(
+            recovery.after_connection(false, true, true),
+            BleAdvertisingIdentityState::Recovery,
+            "no application proof can substitute for a durable authoritative bond"
+        );
+    }
+
+    #[test]
+    fn restored_bond_uses_and_retains_the_normal_identity() {
+        let normal = BleAdvertisingIdentityState::from_restored_bond(true);
+        assert!(!normal.uses_recovery_name());
+        assert_eq!(
+            normal.after_connection(false, false, false),
+            BleAdvertisingIdentityState::Normal
+        );
     }
 
     #[test]
@@ -494,7 +779,7 @@ mod tests {
         );
         assert_eq!(gate.arm(0), Err(IndicationGateError::EmptyFragment));
         assert_eq!(
-            gate.arm(reticulum_device_api_ble::INITIAL_ATT_VALUE_BYTES + 1),
+            gate.arm(reticulum_device_api_ble::MAXIMUM_ATT_VALUE_BYTES + 1),
             Err(IndicationGateError::OversizedFragment)
         );
         gate.arm(20).unwrap();
@@ -506,6 +791,15 @@ mod tests {
             gate.confirm(),
             Err(IndicationGateError::UnexpectedConfirmation)
         );
+    }
+
+    #[test]
+    fn negotiated_att_payload_uses_the_safe_fallback_and_profile_ceiling() {
+        assert_eq!(negotiated_att_value_bytes(0), 20);
+        assert_eq!(negotiated_att_value_bytes(23), 20);
+        assert_eq!(negotiated_att_value_bytes(64), 61);
+        assert_eq!(negotiated_att_value_bytes(251), 248);
+        assert_eq!(negotiated_att_value_bytes(255), 248);
     }
 
     #[test]

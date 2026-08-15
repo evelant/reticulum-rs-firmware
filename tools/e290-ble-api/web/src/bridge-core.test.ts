@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BRIDGE_PROTOCOL_VERSION,
   FRAME_INDICATION,
+  MAXIMUM_PROFILE_FRAGMENT_BYTES,
   MAX_PRE_READY_INDICATION_FRAMES,
   PreReadyIndicationBuffer,
   decodeWriteFrame,
@@ -16,7 +17,7 @@ import {
 const profile = {
   bridgeProtocol: BRIDGE_PROTOCOL_VERSION,
   gattProfileMajor: 2,
-  gattProfileMinor: 0,
+  gattProfileMinor: 3,
   serviceUuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02",
   rxUuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02",
   txUuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02",
@@ -36,10 +37,16 @@ function writeFrame(id: number, value: number[]): ArrayBuffer {
 }
 
 describe("browser bridge protocol", () => {
-  test("accepts only the generated profile shape and finite 20-byte bound", () => {
+  test("accepts a safe write bound up to the generated profile ceiling", () => {
     expect(parseBridgeProfile(profile).maximumFragmentBytes).toBe(20);
+    expect(
+      parseBridgeProfile({
+        ...profile,
+        maximumFragmentBytes: MAXIMUM_PROFILE_FRAGMENT_BYTES,
+      }).maximumFragmentBytes,
+    ).toBe(248);
     expect(() =>
-      parseBridgeProfile({ ...profile, maximumFragmentBytes: 21 }),
+      parseBridgeProfile({ ...profile, maximumFragmentBytes: 249 }),
     ).toThrow();
     expect(() =>
       parseBridgeProfile({ ...profile, writeType: "without_response" }),

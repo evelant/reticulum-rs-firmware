@@ -8,6 +8,10 @@ license.workspace = true
 publish.workspace = true
 readme = "README.md"
 
+[features]
+default = []
+experimental-network-config = ["reticulum-device-api/experimental-network-config"]
+
 [dependencies]
 rand_core.workspace = true
 reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }

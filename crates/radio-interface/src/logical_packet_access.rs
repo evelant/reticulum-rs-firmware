@@ -175,6 +175,7 @@ pub struct LogicalPacketAccessConfig {
     maximum_cad_attempts: u8,
     minimum_backoff_us: u64,
     maximum_backoff_us: u64,
+    busy_retry_holdoff_us: u64,
     maximum_clear_to_first_rf_age_us: u64,
     maximum_pre_first_rf_setup_us: u64,
     maximum_inter_frame_turnaround_us: u64,
@@ -207,6 +208,36 @@ impl LogicalPacketAccessConfig {
         maximum_inter_frame_turnaround_us: u64,
         post_tx_reconciliation_guard_us: u64,
     ) -> Result<Self, LogicalPacketAccessConfigError> {
+        Self::try_new_with_busy_retry_holdoff(
+            maximum_cad_attempts,
+            minimum_backoff_us,
+            maximum_backoff_us,
+            0,
+            maximum_clear_to_first_rf_age_us,
+            maximum_pre_first_rf_setup_us,
+            maximum_inter_frame_turnaround_us,
+            post_tx_reconciliation_guard_us,
+        )
+    }
+
+    /// Validate a channel-access policy with a distinct post-busy holdoff.
+    ///
+    /// `busy_retry_holdoff_us` is added before the normal randomized backoff
+    /// after each non-final busy CAD. It does not delay the initial CAD. A
+    /// radio profile can therefore require every retry to wait out one maximum
+    /// physical frame while retaining the short randomized RNode contention
+    /// envelope for initial access and collision de-synchronization.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn try_new_with_busy_retry_holdoff(
+        maximum_cad_attempts: u8,
+        minimum_backoff_us: u64,
+        maximum_backoff_us: u64,
+        busy_retry_holdoff_us: u64,
+        maximum_clear_to_first_rf_age_us: u64,
+        maximum_pre_first_rf_setup_us: u64,
+        maximum_inter_frame_turnaround_us: u64,
+        post_tx_reconciliation_guard_us: u64,
+    ) -> Result<Self, LogicalPacketAccessConfigError> {
         if maximum_cad_attempts == 0 {
             return Err(LogicalPacketAccessConfigError::ZeroCadAttempts);
         }
@@ -219,6 +250,15 @@ impl LogicalPacketAccessConfig {
         if minimum_backoff_us == maximum_backoff_us {
             return Err(LogicalPacketAccessConfigError::DegenerateBackoffRange {
                 backoff_us: minimum_backoff_us,
+            });
+        }
+        if busy_retry_holdoff_us
+            .checked_add(maximum_backoff_us)
+            .is_none()
+        {
+            return Err(LogicalPacketAccessConfigError::BusyRetryBackoffOverflow {
+                busy_retry_holdoff_us,
+                maximum_backoff_us,
             });
         }
         if maximum_clear_to_first_rf_age_us == 0 {
@@ -248,6 +288,7 @@ impl LogicalPacketAccessConfig {
             maximum_cad_attempts,
             minimum_backoff_us,
             maximum_backoff_us,
+            busy_retry_holdoff_us,
             maximum_clear_to_first_rf_age_us,
             maximum_pre_first_rf_setup_us,
             maximum_inter_frame_turnaround_us,
@@ -268,6 +309,21 @@ impl LogicalPacketAccessConfig {
     /// Largest inclusive random backoff in microseconds.
     pub const fn maximum_backoff_us(self) -> u64 {
         self.maximum_backoff_us
+    }
+
+    /// Fixed holdoff added before randomized backoff after a busy CAD.
+    pub const fn busy_retry_holdoff_us(self) -> u64 {
+        self.busy_retry_holdoff_us
+    }
+
+    /// Earliest possible retry interval after a busy CAD.
+    pub const fn minimum_busy_retry_interval_us(self) -> u64 {
+        self.busy_retry_holdoff_us + self.minimum_backoff_us
+    }
+
+    /// Latest possible retry interval after a busy CAD.
+    pub const fn maximum_busy_retry_interval_us(self) -> u64 {
+        self.busy_retry_holdoff_us + self.maximum_backoff_us
     }
 
     /// Maximum inclusive age of clear CAD at predicted first RF emission.
@@ -307,6 +363,13 @@ pub enum LogicalPacketAccessConfigError {
     DegenerateBackoffRange {
         /// Sole delay supplied as both inclusive bounds.
         backoff_us: u64,
+    },
+    /// The fixed busy holdoff plus the largest random backoff would overflow.
+    BusyRetryBackoffOverflow {
+        /// Fixed interval applied only after a busy CAD.
+        busy_retry_holdoff_us: u64,
+        /// Largest randomized contention backoff.
+        maximum_backoff_us: u64,
     },
     /// A zero freshness bound would make every later permit ambiguous.
     ZeroClearToFirstRfAge,
@@ -666,7 +729,7 @@ impl LogicalPacketChannelAccess {
             return Ok(LogicalPacketAccessAction::Reject(rejection));
         }
 
-        let backoff_us = random_backoff_us(self.config, random_sample);
+        let backoff_us = busy_retry_backoff_us(self.config, random_sample);
         let retry_at_us = match observed_at_us.checked_add(backoff_us) {
             Some(retry_at_us) => retry_at_us,
             None => {
@@ -973,6 +1036,11 @@ const fn random_backoff_us(config: LogicalPacketAccessConfig, random_sample: u64
     let span = (config.maximum_backoff_us - config.minimum_backoff_us) as u128 + 1;
     let offset = ((random_sample as u128 * span) >> 64) as u64;
     config.minimum_backoff_us + offset
+}
+
+const fn busy_retry_backoff_us(config: LogicalPacketAccessConfig, random_sample: u64) -> u64 {
+    // Construction proves this addition cannot overflow.
+    config.busy_retry_holdoff_us + random_backoff_us(config, random_sample)
 }
 
 #[cfg(test)]
@@ -1316,6 +1384,64 @@ mod tests {
     }
 
     #[test]
+    fn busy_retry_holdoff_does_not_delay_initial_access_or_repeat_inside_a_frame() {
+        let maximum_frame_us = profile().maximum_frame_time_on_air_us();
+        let policy = LogicalPacketAccessConfig::try_new_with_busy_retry_holdoff(
+            3,
+            100,
+            200,
+            maximum_frame_us,
+            50,
+            5,
+            7,
+            10,
+        )
+        .unwrap();
+        let airtime = profile().rnode_packet_airtime(1).unwrap();
+        let mut access =
+            LogicalPacketChannelAccess::try_start(policy, airtime, 10_000, 2_000_000, 0).unwrap();
+
+        assert_eq!(policy.busy_retry_holdoff_us(), maximum_frame_us);
+        assert_eq!(
+            policy.minimum_busy_retry_interval_us(),
+            maximum_frame_us + 100
+        );
+        assert_eq!(
+            access.initial_action(),
+            LogicalPacketAccessAction::WaitUntil {
+                retry_at_us: 10_100,
+                next_attempt: 1,
+            }
+        );
+        assert_eq!(
+            access.poll_backoff(10_100).unwrap(),
+            LogicalPacketAccessAction::PerformCad { attempt: 1 }
+        );
+
+        let busy_observed_at_us = 10_110;
+        let retry_at_us = busy_observed_at_us + maximum_frame_us + 100;
+        assert_eq!(
+            access.observe_cad(busy_observed_at_us, true, 0).unwrap(),
+            LogicalPacketAccessAction::WaitUntil {
+                retry_at_us,
+                next_attempt: 2,
+            }
+        );
+        assert!(retry_at_us > busy_observed_at_us + maximum_frame_us);
+        assert_eq!(
+            access.poll_backoff(retry_at_us).unwrap(),
+            LogicalPacketAccessAction::PerformCad { attempt: 2 }
+        );
+        assert!(matches!(
+            access.observe_cad(retry_at_us, false, 0).unwrap(),
+            LogicalPacketAccessAction::ChannelClear {
+                cad_attempts: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn busy_exhaustion_is_terminal_and_never_forces_transmit() {
         let airtime = profile().rnode_packet_airtime(1).unwrap();
         let mut access = LogicalPacketChannelAccess::try_start(
@@ -1614,6 +1740,22 @@ mod tests {
             Err(LogicalPacketAccessConfigError::DegenerateBackoffRange { backoff_us: 7 })
         );
         assert_eq!(
+            LogicalPacketAccessConfig::try_new_with_busy_retry_holdoff(
+                1,
+                0,
+                2,
+                u64::MAX - 1,
+                1,
+                1,
+                1,
+                1,
+            ),
+            Err(LogicalPacketAccessConfigError::BusyRetryBackoffOverflow {
+                busy_retry_holdoff_us: u64::MAX - 1,
+                maximum_backoff_us: 2,
+            })
+        );
+        assert_eq!(
             LogicalPacketAccessConfig::try_new(1, 0, 1, 0, 1, 1, 1),
             Err(LogicalPacketAccessConfigError::ZeroClearToFirstRfAge)
         );
@@ -1645,6 +1787,9 @@ mod tests {
         let minimum_random_range = LogicalPacketAccessConfig::try_new(1, 7, 8, 1, 1, 1, 1).unwrap();
         assert_eq!(minimum_random_range.minimum_backoff_us(), 7);
         assert_eq!(minimum_random_range.maximum_backoff_us(), 8);
+        assert_eq!(minimum_random_range.busy_retry_holdoff_us(), 0);
+        assert_eq!(minimum_random_range.minimum_busy_retry_interval_us(), 7);
+        assert_eq!(minimum_random_range.maximum_busy_retry_interval_us(), 8);
         assert_eq!(minimum_random_range.maximum_clear_to_first_rf_age_us(), 1);
         assert_eq!(minimum_random_range.maximum_pre_first_rf_setup_us(), 1);
         assert_eq!(minimum_random_range.maximum_inter_frame_turnaround_us(), 1);

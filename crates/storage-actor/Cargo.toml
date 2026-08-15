@@ -19,6 +19,7 @@ reticulum-submission-projector = { path = "../submission-projector", default-fea
 
 [dev-dependencies]
 rand_core.workspace = true
+reticulum-rns-rete = { path = "../rns-rete", default-features = false }
 
 [lib]
 path = "src/lib.rs"

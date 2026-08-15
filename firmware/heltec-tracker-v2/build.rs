@@ -18,10 +18,10 @@ const LAB_RX_RETURNED_FAULT_POLICY_ENV: &str = "RETICULUM_LAB_RX_RETURNED_FAULT_
 const RESET_JOURNAL_SLOT_ENV: &str = "RETICULUM_LAB_RX_RESET_JOURNAL_SLOT";
 const RESET_JOURNAL_WORD_ENV: &str = "RETICULUM_LAB_RX_RESET_JOURNAL_WORD";
 const RESET_JOURNAL_WRITE_ORDINAL_ENV: &str = "RETICULUM_LAB_RX_RESET_JOURNAL_WRITE_ORDINAL";
-const ESP_RTOS_MAIN_STACK_PATCH_ID: &str = "esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2";
+const ESP_RTOS_UPSTREAM_IDENTITY: &str = "esp-rtos-upstream-b50efcb-stack-words-v1";
 
 fn main() {
-    require_esp_rtos_main_stack_patch();
+    emit_esp_rtos_upstream_identity();
 
     // esp-hal supplies linkall.x for the selected ESP32-S3 runtime.
     println!("cargo:rustc-link-arg=-Tlinkall.x");
@@ -78,34 +78,8 @@ fn main() {
     }
 }
 
-fn require_esp_rtos_main_stack_patch() {
-    let source = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
-        .join("../../vendor/esp-rtos-0.3.0/src/lib.rs");
-    println!("cargo:rerun-if-changed={}", source.display());
-    let contents = fs::read_to_string(&source)
-        .unwrap_or_else(|error| panic!("could not read vendored esp-rtos source: {error}"));
-    let compact = contents.split_whitespace().collect::<Vec<_>>().join(" ");
-    let corrected_cpu0 = "stack_bottom.cast_mut(), (stack_top as usize - stack_bottom as usize) / core::mem::size_of::<MaybeUninit<u32>>(),";
-    let uncorrected_cpu0 = "stack_bottom.cast_mut(), stack_top as usize - stack_bottom as usize,";
-    let corrected_cpu1 = "stack.bottom().cast::<MaybeUninit<u32>>(), STACK_SIZE / core::mem::size_of::<MaybeUninit<u32>>(),";
-    let uncorrected_cpu1 = "stack.bottom().cast::<MaybeUninit<u32>>(), STACK_SIZE,";
-    assert!(
-        compact.contains(corrected_cpu0),
-        "vendored esp-rtos CPU0 main-stack word-count patch is absent or changed"
-    );
-    assert!(
-        !compact.contains(uncorrected_cpu0),
-        "vendored esp-rtos still constructs the CPU0 main-stack slice with a byte count"
-    );
-    assert!(
-        compact.contains(corrected_cpu1),
-        "vendored esp-rtos CPU1 main-stack word-count patch is absent or changed"
-    );
-    assert!(
-        !compact.contains(uncorrected_cpu1),
-        "vendored esp-rtos still constructs the CPU1 main-stack slice with a byte count"
-    );
-    println!("cargo:rustc-env=RETICULUM_ESP_RTOS_MAIN_STACK_PATCH={ESP_RTOS_MAIN_STACK_PATCH_ID}");
+fn emit_esp_rtos_upstream_identity() {
+    println!("cargo:rustc-env=RETICULUM_ESP_RTOS_UPSTREAM_IDENTITY={ESP_RTOS_UPSTREAM_IDENTITY}");
 }
 
 fn require_reset_journal_environment(corrupt: bool) {

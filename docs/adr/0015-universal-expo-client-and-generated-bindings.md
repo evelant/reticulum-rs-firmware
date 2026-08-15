@@ -105,9 +105,13 @@ raw-TCP Wi-Fi connector and a foreground BLE central/Rust command pump.
 Direct macOS CoreBluetooth sessions qualify the BLE firmware carrier on both
 E290s; generated iOS/Android builds and Expo source tests qualify the native
 composition. A create-only native credential import now gates BLE and derives
-the exact E290 advertising name without exposing PSK bytes to TypeScript.
-Physical-phone file picking, permissions, TurboModule transport calls,
-foreground/background behavior, reconnect, and authenticated LXMF remain
+the exact normal and recovery E290 advertising names without exposing PSK
+bytes to TypeScript. The
+subsequent physical iOS work qualified fileless foreground BLE onboarding,
+passkey entry, Rust-owned credential publication, bonded reconnect,
+multi-appliance profile switching, opportunistic and direct LXMF messaging,
+Reticulum Nearby, and one static Nomad page. Android hardware, background
+restoration, the full disconnect/resume matrix, pressure, and soak remain
 unqualified. Direct handwritten Turbo Modules remain a fallback. Nitro
 Modules remain deferred until profiling shows that the control/message
 interface needs a lower-overhead JSI boundary; selecting them pre-emptively
@@ -168,9 +172,11 @@ The first native gate regenerates both platform bindings, checks only their
 tracked generated surfaces for drift, and tests and lints the source Rust
 crate. Android and iOS development builds and the immutable binding round trip
 have passed manually and are recorded in the
-[native bridge proof](../expo-native-rust-bridge-proof.md). Platform CI,
-cancellation/panic behavior, cleanup and Fast Refresh idempotence, background
-lifecycle, and physical BLE hardware remain gates for their owning phases.
+[native bridge proof](../expo-native-rust-bridge-proof.md). Later physical iOS
+proofs cover foreground BLE onboarding, reconnect, messaging, and switching;
+platform CI, cancellation/panic behavior, cleanup and Fast Refresh
+idempotence, background lifecycle, and Android physical BLE remain gates for
+their owning phases.
 
 ## References
 

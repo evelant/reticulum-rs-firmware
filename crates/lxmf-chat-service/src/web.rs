@@ -24,7 +24,9 @@ use ts_rs::TS;
 use crate::onboarding::{OnboardingError, OnboardingHandle, OnboardingSnapshot};
 use reticulum_lxmf_chat_runtime::{
     ApplianceHandle, ApplianceSnapshot, ClientRequestError, ConnectionState, ContactRequest,
-    DeviceView, JsonSafeInteger, MutationResponse, NomadFetchPollRequest, NomadFetchStartRequest,
+    DeviceView, JsonSafeInteger, MessageActivityPageRequest, MutationResponse,
+    NomadFetchPollRequest, NomadFetchStartRequest, RadioTracePageRequest,
+    ReticulumProbePollRequest, ReticulumProbeStartRequest, RetrySendRequest, RetrySendResponse,
     SendRequest, SendResponse, ServiceError, parse_destination, serialize_json_safe_u64,
 };
 
@@ -163,12 +165,19 @@ fn router(state: WebState) -> Router {
         .route("/api/v1/onboarding/recover", post(recover_onboarding))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/contacts", get(contacts))
+        .route("/api/v1/conversations", get(conversation_peers))
         .route("/api/v1/nearby", get(nearby_peers))
+        .route("/api/v1/radio-routes", get(radio_routes_status))
         .route("/api/v1/contacts/{destination}", put(upsert_contact))
         .route("/api/v1/conversations/{destination}", get(conversation))
         .route("/api/v1/messages", post(send_message))
+        .route("/api/v1/messages/retry", post(retry_message))
+        .route("/api/v1/activity/query", post(message_activity))
+        .route("/api/v1/radio-trace/query", post(radio_trace))
         .route("/api/v1/nomad/fetches", post(start_nomad_fetch))
         .route("/api/v1/nomad/fetches/poll", post(poll_nomad_fetch))
+        .route("/api/v1/reticulum/probes", post(start_reticulum_probe))
+        .route("/api/v1/reticulum/probes/poll", post(poll_reticulum_probe))
         .route("/api/v1/sync", post(sync_now))
         .route("/api/v1/reconnect", post(reconnect))
         .route("/api/v1/events", get(events))
@@ -286,7 +295,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert(
         CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self' https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; worker-src 'self' blob:",
         ),
     );
     response
@@ -438,6 +447,19 @@ async fn contacts(
     Ok(Json(contacts).into_response())
 }
 
+async fn conversation_peers(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, false)?;
+    let peers = state
+        .appliance
+        .conversation_peers()
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok(Json(peers).into_response())
+}
+
 async fn nearby_peers(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -449,6 +471,19 @@ async fn nearby_peers(
         .await
         .map_err(HttpError::from_service)?;
     Ok(Json(peers).into_response())
+}
+
+async fn radio_routes_status(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, false)?;
+    let status = state
+        .appliance
+        .radio_routes_status()
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok(Json(status).into_response())
 }
 
 async fn upsert_contact(
@@ -501,6 +536,57 @@ async fn send_message(
     Ok((StatusCode::ACCEPTED, Json(SendResponse::from(outcome))).into_response())
 }
 
+async fn retry_message(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<RetrySendRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, true)?;
+    let (outbox_id, idempotency_key) = request
+        .into_retry()
+        .map_err(HttpError::from_client_request)?;
+    let outcome = state
+        .appliance
+        .retry_send(outbox_id, idempotency_key)
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok((StatusCode::ACCEPTED, Json(RetrySendResponse::from(outcome))).into_response())
+}
+
+async fn message_activity(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<MessageActivityPageRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, false)?;
+    request
+        .validate()
+        .map_err(|error| HttpError::bad_request(error.to_string()))?;
+    let page = state
+        .appliance
+        .message_activity(request)
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok(Json(page).into_response())
+}
+
+async fn radio_trace(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<RadioTracePageRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, false)?;
+    request
+        .validate()
+        .map_err(|error| HttpError::bad_request(error.to_string()))?;
+    let page = state
+        .appliance
+        .radio_trace(request)
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok(Json(page).into_response())
+}
+
 async fn start_nomad_fetch(
     State(state): State<WebState>,
     headers: HeaderMap,
@@ -526,6 +612,36 @@ async fn poll_nomad_fetch(
     let response = state
         .appliance
         .nomad_fetch_poll(request)
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok(Json(response).into_response())
+}
+
+async fn start_reticulum_probe(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<ReticulumProbeStartRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, true)?;
+    request.validate().map_err(HttpError::from_client_request)?;
+    let response = state
+        .appliance
+        .reticulum_probe_start(request)
+        .await
+        .map_err(HttpError::from_service)?;
+    Ok((StatusCode::ACCEPTED, Json(response)).into_response())
+}
+
+async fn poll_reticulum_probe(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+    Json(request): Json<ReticulumProbePollRequest>,
+) -> Result<Response, HttpError> {
+    require_api(&state, &headers, false)?;
+    request.validate().map_err(HttpError::from_client_request)?;
+    let response = state
+        .appliance
+        .reticulum_probe_poll(request)
         .await
         .map_err(HttpError::from_service)?;
     Ok(Json(response).into_response())
@@ -754,17 +870,45 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::http::Request as HttpRequest;
+    use reticulum_lxmf_chat_runtime::{
+        ApplianceConfig, ConnectFailure, ConnectedSession, ConnectionTransport, Connector,
+        start_appliance,
+    };
     use tower::ServiceExt;
 
-    fn test_state() -> WebState {
+    fn test_state_with_appliance(appliance: ApplianceHandle) -> WebState {
         WebState {
-            appliance: ApplianceHandle::for_web_test(),
+            appliance,
             onboarding: None,
             expected_host: "127.0.0.1:43123".to_owned(),
             expected_origin: "http://127.0.0.1:43123".to_owned(),
             capability: Arc::new("ab".repeat(32)),
             sse_slots: Arc::new(Semaphore::new(MAX_SSE_CLIENTS)),
         }
+    }
+
+    fn test_state() -> WebState {
+        test_state_with_appliance(ApplianceHandle::for_web_test())
+    }
+
+    struct UnavailableTestConnector;
+
+    impl Connector for UnavailableTestConnector {
+        fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
+            Err(ConnectFailure::unavailable(
+                ConnectionTransport::UsbSerial,
+                "device sessions are unavailable in web adapter tests",
+            ))
+        }
+    }
+
+    fn local_actor_test_state() -> WebState {
+        let appliance = start_appliance(
+            ApplianceConfig::new(":memory:".into()),
+            UnavailableTestConnector,
+        )
+        .expect("local web test actor starts");
+        test_state_with_appliance(appliance)
     }
 
     #[test]
@@ -854,7 +998,8 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(policy.contains("style-src 'self' 'unsafe-inline'"));
-        assert!(policy.contains("img-src 'self' data:"));
+        assert!(policy.contains("img-src 'self' data: blob: https:"));
+        assert!(policy.contains("worker-src 'self' blob:"));
     }
 
     #[tokio::test]
@@ -899,6 +1044,113 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .uri("/api/v1/nearby")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn conversation_peer_route_surfaces_local_history_without_a_device_session() {
+        let app = router(local_actor_test_state());
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/conversations")
+                    .header(HOST, "127.0.0.1:43123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/conversations")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), BODY_LIMIT).await.unwrap();
+        assert_eq!(body.as_ref(), b"[]");
+    }
+
+    #[tokio::test]
+    async fn activity_query_is_authenticated_validated_and_actor_owned() {
+        let app = router(local_actor_test_state());
+        let request = |limit| {
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/v1/activity/query")
+                .header(HOST, "127.0.0.1:43123")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "before_event_id": null,
+                        "limit": limit,
+                        "timeline_sequence": null,
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let unauthenticated = app.clone().oneshot(request(20)).await.unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let mut invalid = request(0);
+        invalid.headers_mut().insert(
+            COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={}", "ab".repeat(32))).unwrap(),
+        );
+        let invalid = app.clone().oneshot(invalid).await.unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let mut valid = request(20);
+        valid.headers_mut().insert(
+            COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={}", "ab".repeat(32))).unwrap(),
+        );
+        let response = app.oneshot(valid).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), BODY_LIMIT).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["events"], serde_json::json!([]));
+        assert_eq!(json["next_before_event_id"], serde_json::Value::Null);
+        assert_eq!(json["history_incomplete"], false);
+    }
+
+    #[tokio::test]
+    async fn radio_routes_status_requires_the_loopback_session_and_actor_device_session() {
+        let app = router(test_state());
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/radio-routes")
+                    .header(HOST, "127.0.0.1:43123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let unavailable = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/radio-routes")
                     .header(HOST, "127.0.0.1:43123")
                     .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
                     .body(Body::empty())
@@ -1013,6 +1265,71 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({ "id": format!("{}0000000000000001", "33".repeat(8)) })
                             .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable_poll.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn reticulum_probe_start_is_mutating_while_poll_is_authenticated_read_only() {
+        let app = router(test_state());
+        let start_body = || {
+            Body::from(
+                serde_json::json!({
+                    "destination": "11".repeat(16),
+                    "idempotency_key": "22".repeat(16),
+                })
+                .to_string(),
+            )
+        };
+
+        let missing_mutation_proof = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/reticulum/probes")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(start_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_mutation_proof.status(), StatusCode::FORBIDDEN);
+
+        let unavailable_start = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/reticulum/probes")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(ORIGIN, "http://127.0.0.1:43123")
+                    .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(start_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable_start.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let unavailable_poll = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/v1/reticulum/probes/poll")
+                    .header(HOST, "127.0.0.1:43123")
+                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "id": "33".repeat(16) }).to_string(),
                     ))
                     .unwrap(),
             )

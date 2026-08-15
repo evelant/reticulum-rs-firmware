@@ -8,15 +8,18 @@
 //! radio, raw-flash, or session-key access.
 
 use reticulum_device_api::{
-    ApiErrorCode, ApiErrorResponse, ApiVersion, DeviceResponse, IdentitySummary, ResponseEnvelope,
-    decode_request, encode_response,
+    ApiErrorCode, ApiErrorResponse, ApiVersion, DeviceRequest, DeviceResponse, DispatchContext,
+    IdentitySummary, Permissions, ResponseEnvelope, decode_request, encode_response,
 };
 use reticulum_device_api_adapter::{
-    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, NomadFetchPort, PeerDiscoveryPort,
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, ManualServiceAnnouncePort,
+    NetworkConfigPort, NodeDiagnosticsPort, NomadFetchPort, PeerDiscoveryPort, ReticulumProbePort,
     SubmissionPort, dispatch, dispatch_with_inbox,
     dispatch_with_inbox_lxmf_peer_discovery_and_nomad,
+    dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config,
+    dispatch_with_inbox_lxmf_peer_discovery_nomad_network_config_and_probe,
 };
-use reticulum_device_api_credentials::CredentialAuthority;
+use reticulum_device_api_credentials::{CredentialAuthority, DispatchLease, PairingOrigin};
 use reticulum_device_api_handoff::{
     LocalApiReply, LocalApiRequest, MESSAGE_CAPACITY, MessageLength, OwnedMessage,
 };
@@ -40,6 +43,48 @@ pub enum AuthenticatedApiDispatchFailureKind {
 pub struct AuthenticatedApiDispatchFailure {
     kind: AuthenticatedApiDispatchFailureKind,
     request: LocalApiRequest<AuthenticatedGrant>,
+}
+
+const LEGACY_E290_DEVELOPER_PERMISSIONS: u32 =
+    Permissions::READ_SUBMISSION_STATUS.bits() | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits();
+const E290_ALPHA_NETWORK_CONFIG_POLICY_VERSION: u32 = 1;
+
+/// Apply the narrow alpha compatibility rule for credentials paired before
+/// network configuration gained its dedicated permission bit.
+///
+/// The old product pairing policy emitted exactly bits 0 and 1, policy version
+/// 1, and the `UsbPhysicalPresence` origin. Only that complete immutable
+/// fingerprint receives bit 2 in the ephemeral dispatch context. The durable
+/// credential record and provenance remain unchanged; restricted credentials
+/// with any other mask, origin, or policy version are dispatched verbatim.
+fn with_e290_alpha_network_config_compatibility<const CREDENTIALS: usize, R>(
+    lease: &DispatchLease<'_, CREDENTIALS>,
+    dispatch: impl for<'context> FnOnce(&'context DispatchContext) -> R,
+) -> R {
+    lease.with_dispatch_context(|context| {
+        let legacy_developer_credential = context.permissions().bits()
+            == LEGACY_E290_DEVELOPER_PERMISSIONS
+            && lease.pairing_origin() == PairingOrigin::UsbPhysicalPresence
+            && lease.policy_version().get() == E290_ALPHA_NETWORK_CONFIG_POLICY_VERSION;
+        if !legacy_developer_credential {
+            return dispatch(context);
+        }
+
+        let permissions = Permissions::from_bits(
+            LEGACY_E290_DEVELOPER_PERMISSIONS | Permissions::MANAGE_NETWORK_CONFIG.bits(),
+        )
+        .expect("the alpha compatibility rule contains only stable permission bits");
+        let upgraded = DispatchContext::authenticated(
+            context
+                .principal()
+                .expect("a credential authority lease always has one principal"),
+            permissions,
+            context
+                .provenance()
+                .expect("a credential authority lease always has provenance"),
+        );
+        dispatch(&upgraded)
+    })
 }
 
 impl AuthenticatedApiDispatchFailure {
@@ -258,24 +303,209 @@ where
     ))
 }
 
+/// Revalidate and dispatch the complete appliance request surface through one
+/// flash-owning product port plus the independent volatile NomadNet port.
+///
+/// Network configuration deliberately joins the existing appliance port
+/// instead of crossing this boundary as a second mutable alias. Authentication
+/// failure invokes neither owner.
+#[allow(
+    clippy::result_large_err,
+    reason = "terminal failure must retain the exact allocation-free request owner"
+)]
+pub fn dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config<
+    const CREDENTIALS: usize,
+    P,
+    N,
+>(
+    request: LocalApiRequest<AuthenticatedGrant>,
+    authority: Option<&CredentialAuthority<CREDENTIALS>>,
+    identity: IdentitySummary,
+    port: &mut P,
+    nomad_port: &mut N,
+) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NetworkConfigPort
+        + ManualServiceAnnouncePort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+{
+    let envelope = match decode_request(request.message().encoded()) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::MalformedRequest,
+                request,
+            });
+        }
+    };
+    let operation = envelope.request.operation();
+    let is_network_config_mutation =
+        matches!(&envelope.request, DeviceRequest::NetworkConfigMutate(_));
+    let response = match authority.and_then(|authority| request.grant().revalidate(authority).ok())
+    {
+        Some(lease) if is_network_config_mutation => {
+            with_e290_alpha_network_config_compatibility(&lease, |context| {
+                dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config(
+                    port, nomad_port, identity, context, envelope,
+                )
+            })
+        }
+        Some(lease) => lease.with_dispatch_context(|context| {
+            dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config(
+                port, nomad_port, identity, context, envelope,
+            )
+        }),
+        None => ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: envelope.request_id,
+            response: DeviceResponse::Error(ApiErrorResponse {
+                code: ApiErrorCode::AuthenticationRequired,
+                operation: Some(operation),
+            }),
+        },
+    };
+
+    let mut encoded = [0_u8; MESSAGE_CAPACITY];
+    let length = match encode_response(&response, &mut encoded) {
+        Ok(length) => length,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::ResponseEncoding,
+                request,
+            });
+        }
+    };
+    let key = request.key();
+    drop(request);
+    Ok(LocalApiReply::new(
+        key,
+        OwnedMessage::new(
+            MessageLength::new(length).expect("device API and handoff share one capacity"),
+            encoded,
+        ),
+    ))
+}
+
+/// Revalidate and dispatch the complete appliance request surface plus one
+/// independent boot-scoped Reticulum proof-probe owner.
+///
+/// The probe owner is volatile and disjoint from the flash-owning product
+/// façade. Authentication failure invokes neither owner.
+#[allow(
+    clippy::result_large_err,
+    reason = "terminal failure must retain the exact allocation-free request owner"
+)]
+pub fn dispatch_authenticated_request_with_inbox_lxmf_nomad_network_config_and_probe<
+    const CREDENTIALS: usize,
+    P,
+    N,
+    Q,
+>(
+    request: LocalApiRequest<AuthenticatedGrant>,
+    authority: Option<&CredentialAuthority<CREDENTIALS>>,
+    identity: IdentitySummary,
+    port: &mut P,
+    nomad_port: &mut N,
+    probe_port: &mut Q,
+) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NetworkConfigPort
+        + ManualServiceAnnouncePort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+    Q: ReticulumProbePort,
+{
+    let envelope = match decode_request(request.message().encoded()) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::MalformedRequest,
+                request,
+            });
+        }
+    };
+    let operation = envelope.request.operation();
+    let is_network_config_mutation =
+        matches!(&envelope.request, DeviceRequest::NetworkConfigMutate(_));
+    let response = match authority.and_then(|authority| request.grant().revalidate(authority).ok())
+    {
+        Some(lease) if is_network_config_mutation => {
+            with_e290_alpha_network_config_compatibility(&lease, |context| {
+                dispatch_with_inbox_lxmf_peer_discovery_nomad_network_config_and_probe(
+                    port, nomad_port, probe_port, identity, context, envelope,
+                )
+            })
+        }
+        Some(lease) => lease.with_dispatch_context(|context| {
+            dispatch_with_inbox_lxmf_peer_discovery_nomad_network_config_and_probe(
+                port, nomad_port, probe_port, identity, context, envelope,
+            )
+        }),
+        None => ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: envelope.request_id,
+            response: DeviceResponse::Error(ApiErrorResponse {
+                code: ApiErrorCode::AuthenticationRequired,
+                operation: Some(operation),
+            }),
+        },
+    };
+
+    let mut encoded = [0_u8; MESSAGE_CAPACITY];
+    let length = match encode_response(&response, &mut encoded) {
+        Ok(length) => length,
+        Err(_) => {
+            return Err(AuthenticatedApiDispatchFailure {
+                kind: AuthenticatedApiDispatchFailureKind::ResponseEncoding,
+                request,
+            });
+        }
+    };
+    let key = request.key();
+    drop(request);
+    Ok(LocalApiReply::new(
+        key,
+        OwnedMessage::new(
+            MessageLength::new(length).expect("device API and handoff share one capacity"),
+            encoded,
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use rand_core::{CryptoRng, RngCore};
     use reticulum_device_api::{
         ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability, CapabilitySnapshot,
         DestinationHash, DeviceRequest, DeviceResponse, IdempotencyKey, IdentitySummary,
-        NomadFetchId, NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse,
-        NomadFetchStartAccepted, NomadFetchStartOutcome, NomadFetchStartRequest, NomadPagePath,
-        NomadRequestTimestampUnixMs, OP_EXPERIMENTAL_RNS_INBOX_STATUS, OP_SYSTEM_CAPABILITIES,
-        Permissions, PrincipalId, RequestEnvelope, RequestId, ResponseEnvelope, RnsInboxStatus,
-        decode_response, encode_request,
+        ManualServiceAnnounceDisposition, NetworkConfigMutation, NetworkConfigMutationOutcome,
+        NetworkConfigMutationRequest, NetworkConfigSnapshot, NetworkRuntimeStatus,
+        NodeDiagnosticsSnapshot, NomadFetchId, NomadFetchPhase, NomadFetchPollRequest,
+        NomadFetchPollResponse, NomadFetchStartAccepted, NomadFetchStartOutcome,
+        NomadFetchStartRequest, NomadPagePath, NomadRequestTimestampUnixMs,
+        OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE, OP_EXPERIMENTAL_RNS_INBOX_STATUS,
+        OP_SYSTEM_CAPABILITIES, Permissions, PrincipalId, RequestEnvelope, RequestId,
+        ResponseEnvelope, RnsDiagnostics, RnsInboxStatus, RouteDiagnosticsPage,
+        RouteDiagnosticsRequest, WifiNetworkProfileId, decode_response, encode_request,
     };
     use reticulum_device_api_adapter::{
         InboundMailboxItem, InboundMailboxPort, InboundMailboxPortError, LxmfComposeAcceptance,
         LxmfComposePort, LxmfComposePortError, LxmfComposeRequest, LxmfInboxPort,
-        LxmfInboxPortError, NomadFetchPort, NomadFetchPortError, NomadFetchStartDisposition,
-        PeerDiscoveryPort, PeerDiscoveryPortError, SubmissionAcceptance, SubmissionPort,
-        SubmissionPortError,
+        LxmfInboxPortError, ManualServiceAnnouncePort, NetworkConfigPort, NetworkConfigPortError,
+        NodeDiagnosticsPort, NodeDiagnosticsPortError, NomadFetchPort, NomadFetchPortError,
+        NomadFetchStartDisposition, PeerDiscoveryPort, PeerDiscoveryPortError,
+        SubmissionAcceptance, SubmissionPort, SubmissionPortError,
     };
     use reticulum_device_api_credentials::{
         AuthorityRevision, AuthorizationPolicyVersion, CredentialAudit, CredentialAuthority,
@@ -301,6 +531,7 @@ mod tests {
         AuthenticatedApiDispatchFailureKind, dispatch_authenticated_request,
         dispatch_authenticated_request_with_inbox,
         dispatch_authenticated_request_with_inbox_lxmf_and_nomad,
+        dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config,
     };
 
     const CREDENTIAL_ID: CredentialId = CredentialId::new([
@@ -442,6 +673,7 @@ mod tests {
         submission_availability_calls: usize,
         submission_status_calls: usize,
         submission_accept_calls: usize,
+        observed_submission_permission_bits: Option<u32>,
         inbox_availability_calls: usize,
         inbox_status_calls: usize,
         inbox_peek_calls: usize,
@@ -453,6 +685,15 @@ mod tests {
         peer_availability_calls: usize,
         peer_max_app_data_calls: usize,
         peer_next_calls: usize,
+        network_availability_calls: usize,
+        network_configuration_calls: usize,
+        network_mutation_calls: usize,
+        network_status_calls: usize,
+        manual_announce_availability_calls: usize,
+        manual_announce_queue_calls: usize,
+        node_diagnostics_calls: usize,
+        route_diagnostics_calls: usize,
+        radio_trace_calls: usize,
     }
 
     impl CountingCompletePort {
@@ -471,6 +712,15 @@ mod tests {
                 + self.peer_availability_calls
                 + self.peer_max_app_data_calls
                 + self.peer_next_calls
+                + self.network_availability_calls
+                + self.network_configuration_calls
+                + self.network_mutation_calls
+                + self.network_status_calls
+                + self.manual_announce_availability_calls
+                + self.manual_announce_queue_calls
+                + self.node_diagnostics_calls
+                + self.route_diagnostics_calls
+                + self.radio_trace_calls
         }
     }
 
@@ -491,10 +741,24 @@ mod tests {
 
         fn accept(
             &mut self,
-            _candidate: AcceptanceCandidate,
+            candidate: AcceptanceCandidate,
         ) -> Result<SubmissionAcceptance, SubmissionPortError> {
             self.submission_accept_calls += 1;
+            self.observed_submission_permission_bits =
+                Some(candidate.authorization().granted_permission_bits());
             Ok(SubmissionAcceptance::CapacityExhausted)
+        }
+    }
+
+    impl ManualServiceAnnouncePort for CountingCompletePort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.manual_announce_availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn queue_service_announce(&mut self) -> ManualServiceAnnounceDisposition {
+            self.manual_announce_queue_calls += 1;
+            ManualServiceAnnounceDisposition::Queued
         }
     }
 
@@ -572,6 +836,92 @@ mod tests {
         ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, PeerDiscoveryPortError> {
             self.peer_next_calls += 1;
             Err(PeerDiscoveryPortError::Unavailable)
+        }
+    }
+
+    impl NetworkConfigPort for CountingCompletePort {
+        fn availability(&mut self) -> CapabilityAvailability {
+            self.network_availability_calls += 1;
+            CapabilityAvailability::Available
+        }
+
+        fn configuration(&mut self) -> Result<NetworkConfigSnapshot, NetworkConfigPortError> {
+            self.network_configuration_calls += 1;
+            NetworkConfigSnapshot::new(0, [None; 4], None)
+                .map_err(|_| NetworkConfigPortError::Invariant)
+        }
+
+        fn mutate(
+            &mut self,
+            _principal: PrincipalId,
+            _request: NetworkConfigMutationRequest<'_>,
+        ) -> Result<NetworkConfigMutationOutcome, NetworkConfigPortError> {
+            self.network_mutation_calls += 1;
+            Err(NetworkConfigPortError::InvalidRequest)
+        }
+
+        fn status(&mut self) -> Result<NetworkRuntimeStatus, NetworkConfigPortError> {
+            self.network_status_calls += 1;
+            Err(NetworkConfigPortError::Unavailable)
+        }
+    }
+
+    impl NodeDiagnosticsPort for CountingCompletePort {
+        fn node_diagnostics(
+            &mut self,
+        ) -> Result<NodeDiagnosticsSnapshot, NodeDiagnosticsPortError> {
+            self.node_diagnostics_calls += 1;
+            Ok(NodeDiagnosticsSnapshot::new(
+                0,
+                [None; reticulum_device_api::MAX_DIAGNOSTIC_INTERFACES],
+                None,
+                RnsDiagnostics::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                0,
+                0,
+                0,
+            ))
+        }
+
+        fn route_diagnostics_page(
+            &mut self,
+            _request: RouteDiagnosticsRequest,
+        ) -> Result<RouteDiagnosticsPage, NodeDiagnosticsPortError> {
+            self.route_diagnostics_calls += 1;
+            RouteDiagnosticsPage::new(
+                0,
+                0,
+                [None; reticulum_device_api::MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES],
+                None,
+            )
+            .map_err(|_| NodeDiagnosticsPortError::Invariant)
+        }
+
+        fn radio_trace_page(
+            &mut self,
+            _request: reticulum_device_api::RadioTracePageRequest,
+        ) -> Result<reticulum_device_api::RadioTracePage, NodeDiagnosticsPortError> {
+            self.radio_trace_calls += 1;
+            reticulum_device_api::RadioTracePage::new(
+                1,
+                reticulum_device_api::RadioTraceAppliedLoraProfile::new(
+                    [0x51; 16],
+                    915_000_000,
+                    125_000,
+                    8,
+                    22,
+                    10,
+                    5,
+                    true,
+                    true,
+                    false,
+                ),
+                1,
+                1,
+                false,
+                [None; reticulum_device_api::MAX_RADIO_TRACE_PAGE_ENTRIES],
+                None,
+            )
+            .map_err(|_| NodeDiagnosticsPortError::Invariant)
         }
     }
 
@@ -658,6 +1008,20 @@ mod tests {
     }
 
     fn active_authority(generation: CredentialGeneration) -> CredentialAuthority<1> {
+        active_authority_with_facts(
+            generation,
+            Permissions::NONE,
+            PairingOrigin::UsbPhysicalPresence,
+            AuthorizationPolicyVersion::new(1),
+        )
+    }
+
+    fn active_authority_with_facts(
+        generation: CredentialGeneration,
+        permissions: Permissions,
+        pairing_origin: PairingOrigin,
+        policy_version: AuthorizationPolicyVersion,
+    ) -> CredentialAuthority<1> {
         let revision = AuthorityRevision::new(generation.get());
         let builder = CredentialAuthorityBuilder::new(revision)
             .unwrap_or_else(|fault| panic!("authority revision rejected: {:?}", fault.kind()));
@@ -666,14 +1030,9 @@ mod tests {
                 CREDENTIAL_ID,
                 generation,
                 PRINCIPAL,
-                Permissions::NONE,
+                permissions,
                 CredentialStatus::Active,
-                CredentialAudit::new(
-                    revision,
-                    revision,
-                    PairingOrigin::UsbPhysicalPresence,
-                    AuthorizationPolicyVersion::new(1),
-                ),
+                CredentialAudit::new(revision, revision, pairing_origin, policy_version),
                 PSK,
             ))
             .unwrap_or_else(|fault| panic!("active credential rejected: {:?}", fault.kind()))
@@ -858,6 +1217,64 @@ mod tests {
         let mut encoded = [0_u8; MESSAGE_CAPACITY];
         let length = encode_request(&envelope, &mut encoded)
             .unwrap_or_else(|error| panic!("Nomad poll request encoding failed: {error:?}"));
+        authenticated_request(OwnedMessage::new(
+            MessageLength::new(length).expect("canonical request fits the handoff capacity"),
+            encoded,
+        ))
+    }
+
+    fn rns_data_request(request_id: RequestId) -> LocalApiRequest<AuthenticatedGrant> {
+        let envelope = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id,
+            request: DeviceRequest::SubmitRnsData {
+                destination: DestinationHash([0xd6; 16]),
+                payload: b"legacy-permission-snapshot",
+                idempotency_key: IdempotencyKey([0xe7; 16]),
+            },
+        };
+        let mut encoded = [0_u8; MESSAGE_CAPACITY];
+        let length = encode_request(&envelope, &mut encoded)
+            .unwrap_or_else(|error| panic!("RNS DATA request encoding failed: {error:?}"));
+        authenticated_request(OwnedMessage::new(
+            MessageLength::new(length).expect("canonical request fits the handoff capacity"),
+            encoded,
+        ))
+    }
+
+    fn network_config_request(request_id: RequestId) -> LocalApiRequest<AuthenticatedGrant> {
+        let envelope = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id,
+            request: DeviceRequest::NetworkConfigGet,
+        };
+        let mut encoded = [0_u8; MESSAGE_CAPACITY];
+        let length = encode_request(&envelope, &mut encoded)
+            .unwrap_or_else(|error| panic!("network config request encoding failed: {error:?}"));
+        authenticated_request(OwnedMessage::new(
+            MessageLength::new(length).expect("canonical request fits the handoff capacity"),
+            encoded,
+        ))
+    }
+
+    fn network_config_mutation_request(
+        request_id: RequestId,
+    ) -> LocalApiRequest<AuthenticatedGrant> {
+        let envelope = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id,
+            request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+                NetworkConfigMutation::RemoveWifi {
+                    profile_id: WifiNetworkProfileId::new([0xa4; 16])
+                        .expect("the fixed profile ID is nonzero"),
+                },
+                0,
+                IdempotencyKey([0xb5; 16]),
+            )),
+        };
+        let mut encoded = [0_u8; MESSAGE_CAPACITY];
+        let length = encode_request(&envelope, &mut encoded)
+            .unwrap_or_else(|error| panic!("network mutation request encoding failed: {error:?}"));
         authenticated_request(OwnedMessage::new(
             MessageLength::new(length).expect("canonical request fits the handoff capacity"),
             encoded,
@@ -1147,6 +1564,191 @@ mod tests {
         assert_eq!(nomad.start_calls, 0);
         assert_eq!(nomad.poll_calls, 0);
         assert_eq!(nomad.total_calls(), 1);
+    }
+
+    #[test]
+    fn network_wrapper_reads_configuration_through_the_same_appliance_owner() {
+        let request_id = RequestId(46);
+        let authority = active_authority(GENERATION);
+        let mut appliance = CountingCompletePort::default();
+        let mut nomad = CountingNomadPort::new();
+
+        let reply = dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config(
+            network_config_request(request_id),
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| {
+            panic!(
+                "valid network configuration dispatch failed: {:?}",
+                fault.kind()
+            )
+        });
+
+        assert_eq!(reply.key(), EXPECTED_KEY);
+        let response = decode_response(reply.message().encoded()).unwrap_or_else(|error| {
+            panic!("network configuration response was not canonical: {error:?}")
+        });
+        assert_eq!(
+            response,
+            ResponseEnvelope {
+                version: ApiVersion::CURRENT,
+                request_id,
+                response: DeviceResponse::NetworkConfig(
+                    NetworkConfigSnapshot::new(0, [None; 4], None)
+                        .expect("empty erased snapshot is valid"),
+                ),
+            }
+        );
+        assert_eq!(appliance.network_availability_calls, 1);
+        assert_eq!(appliance.network_configuration_calls, 1);
+        assert_eq!(appliance.network_mutation_calls, 0);
+        assert_eq!(appliance.network_status_calls, 0);
+        assert_eq!(appliance.total_calls(), 2);
+        assert_eq!(nomad.total_calls(), 0);
+    }
+
+    #[test]
+    fn legacy_e290_developer_credential_can_mutate_network_configuration() {
+        let request_id = RequestId(47);
+        let legacy_permissions = Permissions::from_bits(
+            Permissions::READ_SUBMISSION_STATUS.bits()
+                | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits(),
+        )
+        .expect("the legacy developer mask contains only stable bits");
+        let authority = active_authority_with_facts(
+            GENERATION,
+            legacy_permissions,
+            PairingOrigin::UsbPhysicalPresence,
+            AuthorizationPolicyVersion::new(1),
+        );
+        let mut appliance = CountingCompletePort::default();
+        let mut nomad = CountingNomadPort::new();
+
+        let reply = dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config(
+            network_config_mutation_request(request_id),
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| panic!("legacy compatibility dispatch failed: {:?}", fault.kind()));
+        let response = decode_response(reply.message().encoded()).unwrap_or_else(|error| {
+            panic!("network mutation response was not canonical: {error:?}")
+        });
+
+        assert_eq!(
+            response,
+            ResponseEnvelope {
+                version: ApiVersion::CURRENT,
+                request_id,
+                response: DeviceResponse::Error(ApiErrorResponse {
+                    code: ApiErrorCode::InvalidRequest,
+                    operation: Some(OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE),
+                }),
+            }
+        );
+        assert_eq!(appliance.network_mutation_calls, 1);
+        assert_eq!(nomad.total_calls(), 0);
+    }
+
+    #[test]
+    fn legacy_network_compatibility_does_not_change_submission_provenance() {
+        let request_id = RequestId(48);
+        let legacy_permissions = Permissions::from_bits(
+            Permissions::READ_SUBMISSION_STATUS.bits()
+                | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits(),
+        )
+        .expect("the legacy developer mask contains only stable bits");
+        let authority = active_authority_with_facts(
+            GENERATION,
+            legacy_permissions,
+            PairingOrigin::UsbPhysicalPresence,
+            AuthorizationPolicyVersion::new(1),
+        );
+        let mut appliance = CountingCompletePort::default();
+        let mut nomad = CountingNomadPort::new();
+
+        let _reply = dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config(
+            rns_data_request(request_id),
+            Some(&authority),
+            IDENTITY_SUMMARY,
+            &mut appliance,
+            &mut nomad,
+        )
+        .unwrap_or_else(|fault| panic!("legacy submission dispatch failed: {:?}", fault.kind()));
+
+        assert_eq!(appliance.submission_accept_calls, 1);
+        assert_eq!(
+            appliance.observed_submission_permission_bits,
+            Some(legacy_permissions.bits())
+        );
+        assert_eq!(appliance.network_mutation_calls, 0);
+        assert_eq!(nomad.total_calls(), 0);
+    }
+
+    #[test]
+    fn alpha_network_compatibility_does_not_widen_near_match_credentials() {
+        let legacy_permissions = Permissions::from_bits(
+            Permissions::READ_SUBMISSION_STATUS.bits()
+                | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits(),
+        )
+        .expect("the legacy developer mask contains only stable bits");
+        let cases = [
+            (
+                Permissions::READ_SUBMISSION_STATUS,
+                PairingOrigin::UsbPhysicalPresence,
+                AuthorizationPolicyVersion::new(1),
+            ),
+            (
+                legacy_permissions,
+                PairingOrigin::ConfirmedOutOfBand,
+                AuthorizationPolicyVersion::new(1),
+            ),
+            (
+                legacy_permissions,
+                PairingOrigin::UsbPhysicalPresence,
+                AuthorizationPolicyVersion::new(2),
+            ),
+        ];
+
+        for (index, (permissions, origin, policy_version)) in cases.into_iter().enumerate() {
+            let request_id =
+                RequestId(49 + u64::try_from(index).expect("bounded case index fits in u64"));
+            let authority =
+                active_authority_with_facts(GENERATION, permissions, origin, policy_version);
+            let mut appliance = CountingCompletePort::default();
+            let mut nomad = CountingNomadPort::new();
+            let reply = dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config(
+                network_config_mutation_request(request_id),
+                Some(&authority),
+                IDENTITY_SUMMARY,
+                &mut appliance,
+                &mut nomad,
+            )
+            .unwrap_or_else(|fault| {
+                panic!("near-match credential dispatch failed: {:?}", fault.kind())
+            });
+            let response = decode_response(reply.message().encoded()).unwrap_or_else(|error| {
+                panic!("permission-denied response was not canonical: {error:?}")
+            });
+
+            assert_eq!(
+                response,
+                ResponseEnvelope {
+                    version: ApiVersion::CURRENT,
+                    request_id,
+                    response: DeviceResponse::Error(ApiErrorResponse {
+                        code: ApiErrorCode::PermissionDenied,
+                        operation: Some(OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE),
+                    }),
+                }
+            );
+            assert_eq!(appliance.total_calls(), 0);
+            assert_eq!(nomad.total_calls(), 0);
+        }
     }
 
     #[test]

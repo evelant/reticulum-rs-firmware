@@ -20,8 +20,20 @@ pub use profile::{DeviceProfile, ProfileRoot};
 pub use reticulum_lxmf_chat_runtime::{
     ApplianceConfig, ApplianceHandle, ApplianceSnapshot, BytesEncoding, BytesView,
     ConnectedSession, ConnectionMetadata, ConnectionState, ConnectionTransport, Connector,
-    ContactView, DeviceView, MAX_JSON_SAFE_INTEGER, NearbyPeerView, ServiceError,
-    TimelineDirection, TimelineStatus, TimelineView, start_appliance,
+    ContactView, ConversationPeerView, DeviceView, DiagnosticInterfaceKindView,
+    DiagnosticInterfaceStateView, DiagnosticInterfaceView, DiagnosticLoraDataTxEvidenceView,
+    DiagnosticLoraLastRxView, DiagnosticLoraLastTxView, DiagnosticLoraTxFamilyView,
+    DiagnosticLoraTxOutcomeView, LoraDiagnosticsView, MAX_JSON_SAFE_INTEGER,
+    MessageActivityEventView, MessageActivityKindView, MessageActivityPageRequest,
+    MessageActivityPageView, MessageActivityRequestError, MessageActivityRetryTriggerView,
+    NearbyPeerView, PacketEvidenceView, PhoneLocationAuthorizationView,
+    PhoneLocationObservationError, PhoneLocationObservationView, PhoneLocationSourceView,
+    PhoneLocationUnavailableReasonView, RadioRoutesStatusView, RadioTraceAttemptOutcomeView,
+    RadioTraceEventKindView, RadioTraceEventView, RadioTraceMessageCorrelationView,
+    RadioTracePageRequest, RadioTracePageView, RadioTraceProfileView, RadioTraceRequestError,
+    RadioTraceRouteResolutionView, RadioTraceTxOutcomeView, RetainedRouteView, RnsDiagnosticsView,
+    RouteDiagnosticResolutionView, ServiceError, TimelineDirection, TimelineStatus, TimelineView,
+    start_appliance,
 };
 pub use serial::{
     SerialConnectionGate, SerialConnector, SerialConnectorConfig, discover_usb_serials,

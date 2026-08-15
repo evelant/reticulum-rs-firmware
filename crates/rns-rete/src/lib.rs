@@ -6,7 +6,7 @@
 //! `conformance` feature and crate tests.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 extern crate alloc;
 
@@ -48,16 +48,18 @@ pub use embedded::{
     ApplicationRequestFailReason, CanceledRequestDispatch, DestinationRegistrationError,
     DiscardedNodeActionCounts, EmbeddedNode, EmbeddedNodeConfig, EmbeddedNodeMetrics,
     EmbeddedSendError, InboundData, InboundDataProjection, InboundProofPolicy,
-    InboundProofPolicyError, IngressCounters, IngressDisposition, IngressDropReason,
-    IngressMetadata, IngressReport, InterfaceId, LINK_DATA_CONTEXT_NONE, MAX_CHANNEL_PAYLOAD,
-    MAX_DATA_PAYLOAD, MAX_DIRECT_LXMF_CONTENT_SIZE, MAX_DIRECT_LXMF_WIRE,
+    InboundProofPolicyError, IngressAnnounceEgress, IngressBroadcastPolicy, IngressBroadcastScope,
+    IngressCounters, IngressDisposition, IngressDropReason, IngressMetadata, IngressObservation,
+    IngressOrigin, IngressReport, IngressSignalObservation, InterfaceId, LINK_DATA_CONTEXT_NONE,
+    MAX_CHANNEL_PAYLOAD, MAX_DATA_PAYLOAD, MAX_DIRECT_LXMF_CONTENT_SIZE, MAX_DIRECT_LXMF_WIRE,
     MAX_LXMF_TIMESTAMP_UNIX_MS, MAX_OPPORTUNISTIC_LXMF_CARRIER,
     MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE, NodeActions, NodeRole, PathRequestBuildError,
     PrepareBasicLxmfError, PrepareDataError, PrepareDirectLxmfLinkDataError,
     PrepareDirectRequestError, PrepareOpportunisticLxmfDataError, PrepareResponseError,
     PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedData, PreparedDirectRequest,
-    PreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptId, ReceiptKind,
-    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
+    PreparedLinkData, ProofProbeIdentityAliasError, RNS_MTU, RNSTRANSPORT_PROBE_APPLICATION_NAME,
+    RNSTRANSPORT_PROBE_ASPECT, RNSTRANSPORT_PROBE_EXPANDED_NAME, ReceiptCandidate, ReceiptId,
+    ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalCounters,
     ReceiptTerminalReservation, ReceiptTerminalSink, ReceiptTickReport,
     RequestDispatchConfirmation, RequestDispatchError, RequestDispatchReconciliation,
     RequestHandle, RetainedProofInvariant, RouteSnapshot, TransportCounters, TxPacket, TxTarget,
@@ -70,6 +72,7 @@ pub use rete_core::{
 pub use rete_stack::node_core::{OutboundDispatchInterval, OutboundProtocolToken};
 pub use rete_stack::{DestinationType, Direction};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
+pub use reticulum_lxmf_wire::SidebandLocationTelemetry as LxmfMessageLocation;
 
 /// Reviewed Rete integration-fork source revision.
 pub const SOURCE_REVISION: &str = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08";

@@ -138,6 +138,7 @@ fn only_active_records_select_and_device_owned_facts_mint_the_lease() {
     assert_eq!(lease.generation(), CredentialGeneration::new(1));
     assert_eq!(lease.authority_revision(), AuthorityRevision::new(3));
     assert_eq!(lease.policy_version(), AuthorizationPolicyVersion::new(1));
+    assert_eq!(lease.pairing_origin(), PairingOrigin::UsbPhysicalPresence);
 }
 
 #[test]

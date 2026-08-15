@@ -139,6 +139,9 @@ async function normalizeExport(
   const bundlePaths = files.filter((path) =>
     /^_expo\/static\/js\/web\/entry-[a-f0-9]+\.js$/.test(path),
   );
+  const stylesheetPaths = files.filter((path) =>
+    /^_expo\/static\/css\/[A-Za-z0-9_.@+-]+-[a-f0-9]+\.css$/.test(path),
+  );
   if (bundlePaths.length !== 1 || bundlePaths[0] === undefined) {
     throw new Error(`expected one Metro web entry bundle, observed ${bundlePaths.length}`);
   }
@@ -160,13 +163,21 @@ async function normalizeExport(
   if (scriptMatch[1] !== `/${bundlePaths[0]}`) {
     throw new Error(`index.html references unexpected Metro entry ${scriptMatch[1]}`);
   }
+  for (const stylesheetPath of stylesheetPaths) {
+    if (!sourceHtml.includes(`href="/${stylesheetPath}"`)) {
+      throw new Error(`index.html does not reference exported stylesheet /${stylesheetPath}`);
+    }
+  }
   if (
     (sourceHtml.match(/<script\b/g) ?? []).length !== 1 ||
     (sourceHtml.match(/<style\b/g) ?? []).length !== 1
   ) {
     throw new Error("Expo single-page shell contains an unexpected script or stylesheet");
   }
-  const style = dedent(styleMatch[1] ?? "");
+  const exportedStyles = await Promise.all(
+    stylesheetPaths.map((path) => Bun.file(join(exportDirectory, path)).text()),
+  );
+  const style = [dedent(styleMatch[1] ?? "").trimEnd(), ...exportedStyles].join("\n").concat("\n");
   const html = `<!doctype html>
 <html lang="en">
   <head>
@@ -196,6 +207,7 @@ async function normalizeExport(
     "index.html",
     "metadata.json",
     bundlePaths[0],
+    ...stylesheetPaths,
     ...bundle.assetPaths,
   ]);
   const unexpectedFiles = files.filter(
@@ -237,8 +249,8 @@ function manifestFor(
         source: "clients/appliance",
         generator: {
           bun: { revision: EXPECTED_BUN_REVISION, version: EXPECTED_BUN_VERSION },
-          expo: "57.0.8",
-          expo_router: "57.0.8",
+          expo: "57.0.13",
+          expo_router: "57.0.13",
           mode: "single",
         },
         assets: manifestAssets,

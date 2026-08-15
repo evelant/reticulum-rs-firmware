@@ -12,9 +12,15 @@ import type {
   BleScanOptions,
 } from "./ble-central-types.ts";
 import {
+  ensureForegroundConnection,
+  ForegroundReconnect,
+  type RetryScheduler,
+} from "./foreground-reconnect.ts";
+import {
   type DecodedNativeBlePlatformCommand,
   NativeBleOnboardingTransport,
   NativeBleTransport,
+  PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS,
 } from "./native-ble-transport.ts";
 
 const PROFILE: BleGattProfile = {
@@ -244,6 +250,7 @@ function transport(
   central: FakeBleCentral,
   writeTimeoutMs = 100,
   peripheralName?: string,
+  recoveryPeripheralName?: string,
 ): NativeBleTransport {
   return new NativeBleTransport(
     appliance,
@@ -252,6 +259,7 @@ function transport(
       decodeCommand: (command) => command as unknown as DecodedNativeBlePlatformCommand,
       peripheralName,
       profile: PROFILE,
+      recoveryPeripheralName,
     },
     writeTimeoutMs,
   );
@@ -601,6 +609,202 @@ describe("native BLE transport orchestration", () => {
     await owner.dispose();
   });
 
+  test("repairs a stale bond before registering or sending authenticated protocol bytes", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const securityConnection = new FakeBleConnection("bond-repair-board");
+    const authenticatedConnection = new FakeBleConnection("bond-repair-board");
+    const authenticated = deferred<Uint8Array>();
+    securityConnection.readBehaviors.push(() => authenticated.promise);
+    central.results.push(
+      () => Promise.resolve(securityConnection),
+      () => Promise.resolve(authenticatedConnection),
+    );
+    const owner = transport(
+      appliance,
+      central,
+      100,
+      "reticulum-e290-e13f88",
+      "recovery-name-from-rust",
+    );
+
+    const repairStages: string[] = [];
+    const repair = owner.repairBond((stage) => repairStages.push(stage));
+    await waitFor(
+      () => securityConnection.reads.length === 1,
+      "public BLE security confirmation read",
+    );
+
+    expect(repairStages).toEqual([
+      "searching_recovery_advertisement",
+      "waiting_for_physical_presence",
+    ]);
+    expect(securityConnection.reads).toEqual([PROFILE.securityConfirmationCharacteristicUuid]);
+    expect(appliance.events).toEqual(["reconnect"]);
+    authenticated.resolve(new Uint8Array(PROFILE.securityConfirmationReadyValue));
+    await repair;
+
+    expect(repairStages).toEqual([
+      "searching_recovery_advertisement",
+      "waiting_for_physical_presence",
+      "reopening_authenticated_link",
+    ]);
+    expect(securityConnection.closeCount).toBe(1);
+    expect(appliance.events).toEqual([
+      "reconnect",
+      "link 1 bond-repair-board 20",
+      "ensure connected",
+    ]);
+    expect(central.connectOptions).toHaveLength(2);
+    expect(central.connectOptions.map(({ peripheralName }) => peripheralName)).toEqual([
+      "recovery-name-from-rust",
+      "recovery-name-from-rust",
+    ]);
+    expect(central.connectOptions[0]?.scanTimeoutMs).toBe(PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS);
+    expect(central.connectOptions[0]?.peripheralId).toBeUndefined();
+    expect(central.connectOptions[0]?.peripheralNameAliases).toEqual(["reticulum-e290-e13f88"]);
+    expect(central.connectOptions[0]?.reclaimConnectedPeripheral).toBeFalse();
+    expect(central.connectOptions[1]?.connectionTimeoutMs).toBe(
+      PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS,
+    );
+    expect(central.connectOptions[1]?.peripheralId).toBe("bond-repair-board");
+    await owner.dispose();
+  });
+
+  test("explicit bond repair supersedes an in-flight ordinary reconnect", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const securityConnection = new FakeBleConnection("repair-security-link");
+    const repairedConnection = new FakeBleConnection("repair-after-background-attempt");
+    central.results.push(
+      (options) =>
+        new Promise<BleConnection>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+            once: true,
+          });
+        }),
+      () => Promise.resolve(securityConnection),
+      () => Promise.resolve(repairedConnection),
+    );
+    const owner = transport(
+      appliance,
+      central,
+      100,
+      "reticulum-e290-e13f88",
+      "recovery-name-from-rust",
+    );
+
+    owner.start();
+    await waitFor(() => central.connectCount === 1, "ordinary background BLE attempt");
+    await owner.repairBond();
+
+    expect(central.connectCount).toBe(3);
+    expect(central.connectOptions[0]?.scanTimeoutMs).toBeUndefined();
+    expect(central.connectOptions[1]?.scanTimeoutMs).toBe(PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS);
+    expect(central.connectOptions[2]?.scanTimeoutMs).toBe(PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS);
+    expect(central.connectOptions.map(({ peripheralName }) => peripheralName)).toEqual([
+      "reticulum-e290-e13f88",
+      "recovery-name-from-rust",
+      "recovery-name-from-rust",
+    ]);
+    expect(central.connectOptions[1]?.peripheralId).toBeUndefined();
+    expect(central.connectOptions[2]?.peripheralId).toBe("repair-security-link");
+    expect(securityConnection.reads).toEqual([PROFILE.securityConfirmationCharacteristicUuid]);
+    expect(securityConnection.closeCount).toBe(1);
+    expect(appliance.events).toEqual([
+      "reconnect",
+      "link 1 repair-after-background-attempt 20",
+      "ensure connected",
+    ]);
+    await owner.dispose();
+  });
+
+  test("repairs through a fresh platform identifier instead of reusing the previous iOS identifier", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const previous = new FakeBleConnection("stale-ios-peripheral-id");
+    const securityConnection = new FakeBleConnection("fresh-ios-peripheral-id");
+    const repairedConnection = new FakeBleConnection("fresh-ios-peripheral-id");
+    central.results.push(
+      () => Promise.resolve(previous),
+      () => Promise.resolve(securityConnection),
+      () => Promise.resolve(repairedConnection),
+    );
+    const owner = transport(
+      appliance,
+      central,
+      100,
+      "reticulum-e290-e13f88",
+      "recovery-name-from-rust",
+    );
+
+    owner.start();
+    await waitFor(() => appliance.events.includes("ensure connected"), "initial BLE link");
+    await owner.repairBond();
+
+    expect(previous.closeCount).toBe(1);
+    expect(securityConnection.closeCount).toBe(1);
+    expect(central.connectOptions[1]?.peripheralName).toBe("recovery-name-from-rust");
+    expect(central.connectOptions[1]?.peripheralId).toBeUndefined();
+    expect(central.connectOptions[2]?.peripheralName).toBe("recovery-name-from-rust");
+    expect(central.connectOptions[2]?.peripheralId).toBe("fresh-ios-peripheral-id");
+    expect(appliance.events).toEqual([
+      "link 1 stale-ios-peripheral-id 20",
+      "ensure connected",
+      "disconnected 1",
+      "reconnect",
+      "link 2 fresh-ios-peripheral-id 20",
+      "ensure connected",
+    ]);
+    await owner.dispose();
+  });
+
+  test("requires explicit distinct recovery targeting before disrupting an ordinary owner", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    expect(() => transport(appliance, central, 100, "same-advertiser", "same-advertiser")).toThrow(
+      "normal and recovery BLE peripheral names must be distinct",
+    );
+    const owner = transport(appliance, central, 100, "reticulum-e290-e13f88");
+
+    await expect(owner.repairBond()).rejects.toThrow(
+      "requires exact normal and recovery BLE advertising names",
+    );
+
+    expect(central.connectCount).toBe(0);
+    expect(appliance.events).toEqual([]);
+    await owner.dispose();
+  });
+
+  test("configures explicit normal and recovery names without deriving either in TypeScript", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const ordinary = new FakeBleConnection("ordinary-board");
+    const security = new FakeBleConnection("recovery-board");
+    const repaired = new FakeBleConnection("ordinary-board-after-repair");
+    central.results.push(
+      () => Promise.resolve(ordinary),
+      () => Promise.resolve(security),
+      () => Promise.resolve(repaired),
+    );
+    const owner = transport(appliance, central);
+
+    owner.configurePeripheralNames("normal-name-from-rust", "recovery-name-from-rust");
+    owner.start();
+    await waitFor(() => appliance.events.includes("ensure connected"), "ordinary named link");
+    await owner.repairBond();
+
+    expect(central.connectOptions.map(({ peripheralName }) => peripheralName)).toEqual([
+      "normal-name-from-rust",
+      "recovery-name-from-rust",
+      "recovery-name-from-rust",
+    ]);
+    expect(() => owner.configurePeripheralNames("other-normal", "other-recovery")).toThrow(
+      "must be selected before the transport starts",
+    );
+    await owner.dispose();
+  });
+
   test("explicit reconnect closes and reports the old generation before registering a replacement", async () => {
     const appliance = new FakeNativeBleAppliance();
     const central = new FakeBleCentral();
@@ -709,6 +913,68 @@ describe("native BLE transport orchestration", () => {
     await waitFor(() => appliance.events.includes("ensure connected"), "initial actor wake");
 
     expect(appliance.events).toEqual(["link 1 peripheral-1 20", "ensure connected"]);
+    await owner.dispose();
+  });
+
+  test("retains one GATT generation while automatic ensures outpace a delayed client handshake", async () => {
+    const appliance = new FakeNativeBleAppliance();
+    const central = new FakeBleCentral();
+    const connection = new FakeBleConnection("delayed-client-hello");
+    const physicalSetup = deferred<BleConnection>();
+    central.results.push(() => physicalSetup.promise);
+    const owner = transport(appliance, central);
+    const scheduled: Array<{ readonly callback: () => void; readonly delayMs: number }> = [];
+    const scheduler: RetryScheduler = (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return () => undefined;
+    };
+    let request = 0;
+    const retries = new ForegroundReconnect(
+      () => {
+        request += 1;
+      },
+      2_000,
+      scheduler,
+    );
+    const foregroundClient = {
+      ensureConnected: () => owner.ensureLink(),
+      reconnect: () => owner.reconnect(),
+    };
+    const runAutomaticAttempt = async (): Promise<void> => {
+      expect(retries.begin(request)).toBeTrue();
+      try {
+        await ensureForegroundConnection(foregroundClient);
+      } finally {
+        retries.settle();
+      }
+    };
+
+    // Native ensureConnected only wakes the actor; ClientHello can arrive well
+    // after the foreground scheduler's two-second retry cadence. Repeated
+    // automatic ensures must leave the subscribed physical generation intact.
+    const initial = runAutomaticAttempt();
+    await waitFor(() => central.connectCount === 1, "initial automatic BLE setup");
+    const overlapping = ensureForegroundConnection(foregroundClient);
+    expect(central.connectCount).toBe(1);
+    physicalSetup.resolve(connection);
+    await Promise.all([initial, overlapping]);
+    for (let index = 0; index < 2; index += 1) {
+      expect(scheduled[index]?.delayMs).toBe(2_000);
+      scheduled[index]?.callback();
+      await runAutomaticAttempt();
+    }
+    retries.suspend();
+
+    expect(central.connectCount).toBe(1);
+    expect(connection.closeCount).toBe(0);
+    expect(appliance.nextGeneration).toBe(2n);
+    expect(appliance.events).toEqual([
+      "link 1 delayed-client-hello 20",
+      "ensure connected",
+      "ensure connected",
+      "ensure connected",
+    ]);
+    expect(appliance.events).not.toContain("reconnect");
     await owner.dispose();
   });
 

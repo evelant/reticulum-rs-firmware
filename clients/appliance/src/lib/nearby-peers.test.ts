@@ -3,10 +3,14 @@ import { describe, expect, test } from "bun:test";
 import type { NearbyPeerView } from "./nearby-peers.ts";
 import {
   associatedNomadDestinationForLxmf,
+  nearbyInterfaceLabel,
+  nearbyInterfaceSummaryHint,
+  nearbyNetworkSummary,
   nearbyPeerAge,
   nearbyPeerFingerprint,
   nearbyPeerRouteHint,
   nearbyPeerSuggestedName,
+  nearbySnapshotElapsedMs,
 } from "./nearby-peers.ts";
 
 function peer(overrides: Partial<NearbyPeerView> = {}): NearbyPeerView {
@@ -26,6 +30,92 @@ function peer(overrides: Partial<NearbyPeerView> = {}): NearbyPeerView {
 }
 
 describe("nearby peer presentation", () => {
+  test("summarizes unadded peers and observing interfaces without inventing route state", () => {
+    const summary = nearbyNetworkSummary(
+      [
+        peer({ destination: "aa".repeat(16), hops: 1, observed_age_ms: 21_000 }),
+        peer({
+          destination: "bb".repeat(16),
+          hops: 2,
+          interface_id: 3,
+          interface_name: null,
+          observed_age_ms: 7_000,
+          rssi_dbm: null,
+          snr_db: null,
+        }),
+        peer({
+          destination: "cc".repeat(16),
+          hops: 3,
+          interface_id: 0,
+          interface_name: " LoRa ",
+          observed_age_ms: 2_000,
+        }),
+      ],
+      [{ destination: ` ${"AA".repeat(16)} ` }],
+    );
+
+    expect(summary).toEqual({
+      peerCount: 3,
+      unaddedPeerCount: 2,
+      interfaceCount: 2,
+      interfaces: [
+        {
+          interfaceId: 0,
+          interfaceName: "LoRa",
+          peerCount: 2,
+          unaddedPeerCount: 1,
+          directPeerCount: 1,
+          freshestObservedAgeMs: 2_000,
+        },
+        {
+          interfaceId: 3,
+          interfaceName: null,
+          peerCount: 1,
+          unaddedPeerCount: 1,
+          directPeerCount: 0,
+          freshestObservedAgeMs: 7_000,
+        },
+      ],
+    });
+  });
+
+  test("returns an empty bounded summary before any authenticated announce is retained", () => {
+    expect(nearbyNetworkSummary([], [{ destination: "aa".repeat(16) }])).toEqual({
+      peerCount: 0,
+      unaddedPeerCount: 0,
+      interfaceCount: 0,
+      interfaces: [],
+    });
+  });
+
+  test("labels known and future interface slots without assuming a transport", () => {
+    const [known, future] = nearbyNetworkSummary(
+      [
+        peer({ hops: 1, interface_id: 1, interface_name: "LoRa", observed_age_ms: 2_000 }),
+        peer({
+          destination: "ef".repeat(16),
+          hops: 2,
+          interface_id: 7,
+          interface_name: null,
+          observed_age_ms: 63_000,
+        }),
+      ],
+      [],
+    ).interfaces;
+
+    if (known === undefined || future === undefined) {
+      throw new Error("the fixture must project both observing interfaces");
+    }
+    expect(nearbyInterfaceLabel(known)).toBe("LoRa · interface 1");
+    expect(nearbyInterfaceSummaryHint(known)).toBe(
+      "1 peer · 1 not in contacts · 1 direct peer · last announce just now",
+    );
+    expect(nearbyInterfaceLabel(future)).toBe("Interface 7");
+    expect(nearbyInterfaceSummaryHint(future)).toBe(
+      "1 peer · 1 not in contacts · 0 direct peers · last announce 1m ago",
+    );
+  });
+
   test("uses the Rust-decoded display name for one-tap contact creation", () => {
     expect(nearbyPeerSuggestedName(peer())).toBe("Field node");
     expect(nearbyPeerSuggestedName(peer({ display_name: "  Ridge relay  " }))).toBe("Ridge relay");
@@ -77,11 +167,13 @@ describe("nearby peer presentation", () => {
   });
 
   test("presents transport-neutral route and optional signal hints", () => {
-    expect(nearbyPeerRouteHint(peer())).toBe("1 hop · LoRa · 12s ago · -91 dBm · 7 dB SNR");
+    expect(nearbyPeerRouteHint(peer())).toBe(
+      "direct · LoRa · announced 12s ago · RX -91 dBm · SNR 7 dB",
+    );
     expect(
       nearbyPeerRouteHint(
         peer({
-          hops: 0,
+          hops: 2,
           interface_id: 3,
           interface_name: null,
           observed_age_ms: 0,
@@ -89,6 +181,29 @@ describe("nearby peer presentation", () => {
           snr_db: null,
         }),
       ),
-    ).toBe("direct · interface 3 · just now");
+    ).toBe("2 hops · interface 3 · announced just now");
+  });
+
+  test("ages a retained snapshot without losing its transport-neutral interface summary", () => {
+    const summary = nearbyNetworkSummary(
+      [peer({ interface_id: 2, interface_name: "Reticulum TCP", observed_age_ms: 3_000 })],
+      [],
+      61_000,
+    );
+
+    const [observedInterface] = summary.interfaces;
+    if (observedInterface === undefined) throw new Error("the fixture must expose one interface");
+    expect(observedInterface.freshestObservedAgeMs).toBe(64_000);
+    expect(nearbyInterfaceSummaryHint(observedInterface)).toContain("last announce 1m ago");
+    expect(nearbyPeerRouteHint(peer({ observed_age_ms: 3_000 }), 61_000)).toContain(
+      "announced 1m ago",
+    );
+  });
+
+  test("derives only forward elapsed time from the successful snapshot fetch", () => {
+    expect(nearbySnapshotElapsedMs(1_000, 4_250)).toBe(3_250);
+    expect(nearbySnapshotElapsedMs(5_000, 4_000)).toBe(0);
+    expect(nearbySnapshotElapsedMs(null, 4_000)).toBe(0);
+    expect(nearbySnapshotElapsedMs(Number.NaN, 4_000)).toBe(0);
   });
 });

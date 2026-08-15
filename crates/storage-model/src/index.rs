@@ -73,11 +73,12 @@ impl IndexedSubmission {
         self.rns_attempt_token
     }
 
-    /// Sole durable transport audit accepted for this submission attempt.
+    /// Sole durable transport audit accepted for this submission.
     ///
-    /// A submission has one packet attempt, so a second recovered or
-    /// quarantined observation would either duplicate a released owner or
-    /// contradict the first fail-closed classification. Replay rejects it.
+    /// Generic submissions have one packet attempt. Coherent recovered carrier
+    /// owners inside a durable LXMF `Preparing` loop are attempt-volatile and do
+    /// not consume this record; quarantine remains durable and fail-closed.
+    /// Replay rejects a second persisted transport audit.
     pub const fn transport_audit(self) -> Option<AuditEvent> {
         self.transport_audit
     }
@@ -239,6 +240,13 @@ pub enum ApplyError {
 pub enum BootRecoveryDecision {
     /// Queued intent remains replay-safe and should be submitted again.
     ReplayQueued,
+    /// An exact durable LXMF message remains a continuing delivery obligation.
+    ///
+    /// Individual Reticulum packet attempts are boot-volatile. Recovery
+    /// prepares a fresh packet for the unchanged signed LXMF wire instead of
+    /// terminalizing the logical message because an earlier attempt may have
+    /// been interrupted.
+    ReplayPendingLxmf,
     /// Replay-unsafe unfinished work must commit this conservative final record.
     FinalizeInterrupted(StateTransition),
     /// Submission was already final before this boot.
@@ -663,6 +671,15 @@ impl<const SUBMISSIONS: usize> SubmissionIndex<SUBMISSIONS> {
         let current = self.get(id).ok_or(ApplyError::UnknownSubmission)?;
         match current.state {
             LifecycleState::Queued => Ok(BootRecoveryDecision::ReplayQueued),
+            LifecycleState::Preparing
+                if matches!(current.accepted.intent(), SubmissionIntent::LxmfMessage(_))
+                    && !matches!(
+                        current.transport_audit,
+                        Some(AuditEvent::TransportQuarantined { .. })
+                    ) =>
+            {
+                Ok(BootRecoveryDecision::ReplayPendingLxmf)
+            }
             LifecycleState::Preparing | LifecycleState::AwaitingDelivery(_) => {
                 let interrupted_state = match current.state {
                     LifecycleState::Preparing => InterruptedState::Preparing,

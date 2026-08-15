@@ -15,9 +15,18 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 mod msgpack;
+mod sideband_location;
 mod stamp;
 
 pub use msgpack::{Canonicality, MessagePackKind, MessagePackValue, validate_messagepack_value};
+pub use sideband_location::{
+    FIELD_TELEMETRY, MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES,
+    MAX_ENCODED_SIDEBAND_LOCATION_TELEMETRY_BYTES, SIDEBAND_SENSOR_LOCATION, SIDEBAND_SENSOR_TIME,
+    SidebandLocationElement, SidebandLocationTelemetry, SidebandLocationTelemetryDecodeError,
+    decode_sideband_location_fields, encode_sideband_location_fields,
+    encode_sideband_location_telemetry, encoded_sideband_location_fields_len,
+    encoded_sideband_location_telemetry_len,
+};
 pub use stamp::{
     POW_EXPAND_ROUNDS, PowBudget, PowStampValidation, StampError, validate_pow_stamp,
     validate_ticket_stamp,
@@ -47,8 +56,74 @@ pub const TICKET_LENGTH: usize = 16;
 pub const ENCRYPTED_PACKET_MAX_CONTENT: usize = 295;
 /// Largest direct Link packet content size selected by Python LXMF 1.0.1.
 pub const LINK_PACKET_MAX_CONTENT: usize = 319;
+/// Bytes subtracted from an encoded basic LXMF payload when selecting its
+/// opportunistic or direct delivery lane.
+///
+/// This is Python LXMF's destination hash and signature accounting term. It is
+/// intentionally separate from the complete normalized wire header length.
+pub const BASIC_LXMF_SELECTION_OVERHEAD_BYTES: usize = 16;
+/// Encoded MessagePack length of an empty LXMF fields map.
+pub const EMPTY_LXMF_FIELDS_ENCODED_BYTES: usize = 1;
 /// Hard recursion bound independent of a board profile's configured limit.
 pub const ABSOLUTE_MAX_NESTING_DEPTH: usize = 32;
+
+/// Return the encoded MessagePack size of one binary value.
+///
+/// `None` means the input exceeds MessagePack's unsigned 32-bit binary length.
+#[must_use]
+pub fn encoded_messagepack_binary_len(value_bytes: usize) -> Option<usize> {
+    let header_bytes: usize = if value_bytes <= u8::MAX as usize {
+        2
+    } else if value_bytes <= u16::MAX as usize {
+        3
+    } else if value_bytes <= u32::MAX as usize {
+        5
+    } else {
+        return None;
+    };
+    header_bytes.checked_add(value_bytes)
+}
+
+/// Return the encoded four-item basic LXMF payload length.
+///
+/// `fields_encoded_bytes` is the complete encoded MessagePack fields map, not
+/// only its contents. The fixed ten bytes are the array marker and float64
+/// timestamp. `None` reports arithmetic or MessagePack-length overflow.
+#[must_use]
+pub fn encoded_basic_lxmf_payload_len(
+    title_bytes: usize,
+    content_bytes: usize,
+    fields_encoded_bytes: usize,
+) -> Option<usize> {
+    10_usize
+        .checked_add(encoded_messagepack_binary_len(title_bytes)?)?
+        .checked_add(encoded_messagepack_binary_len(content_bytes)?)?
+        .checked_add(fields_encoded_bytes)
+}
+
+/// Whether one basic LXMF payload fits a delivery lane's content ceiling.
+///
+/// This mirrors LXMF's signed `payload_len - 16` selection comparison without
+/// unsigned underflow for the canonical empty payload.
+#[must_use]
+pub fn basic_lxmf_payload_fits_content_limit(
+    title_bytes: usize,
+    content_bytes: usize,
+    fields_encoded_bytes: usize,
+    maximum_content_bytes: usize,
+) -> bool {
+    let Some(payload_len) =
+        encoded_basic_lxmf_payload_len(title_bytes, content_bytes, fields_encoded_bytes)
+    else {
+        return false;
+    };
+    let Some(maximum_payload_len) =
+        BASIC_LXMF_SELECTION_OVERHEAD_BYTES.checked_add(maximum_content_bytes)
+    else {
+        return false;
+    };
+    payload_len <= maximum_payload_len
+}
 
 const PAYLOAD_ARRAY_4: u8 = 0x94;
 const PAYLOAD_ARRAY_5: u8 = 0x95;

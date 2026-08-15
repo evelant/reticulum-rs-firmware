@@ -25,9 +25,10 @@ use reticulum_lxmf_ingress::{
 };
 use reticulum_lxmf_model::{
     AuthenticatedMaterialFingerprint, CandidateError, CarrierLengthMismatch, CarrierProvenance,
-    DestinationHash, DurableMessageReceipt, InboundMessageCandidate, InboundMessageLengths,
-    InboundMessageMetadata, InvalidStampCost, MessageId, MessageLengthOverflow, NormalizedWire,
-    RequiredStampCost, SourceHash, StampAdmissionProvenance,
+    DestinationHash, DurableMessageReceipt, InboundInterfaceId, InboundMessageCandidate,
+    InboundMessageLengths, InboundMessageMetadata, InboundSignalObservation,
+    InboundTransportObservation, InvalidStampCost, MessageId, MessageLengthOverflow,
+    NormalizedWire, RequiredStampCost, SourceHash, StampAdmissionProvenance,
 };
 use reticulum_lxmf_store::{
     BoundLxmfStoreAccess, LxmfCommitError, LxmfCommitOutcome, MountedLxmfStore,
@@ -301,7 +302,8 @@ where
     };
 
     let evidence = validated.evidence();
-    let metadata = match metadata_from_evidence(evidence) {
+    let ingress = ingress_observation(lease.event());
+    let metadata = match metadata_from_evidence(evidence, ingress) {
         Ok(metadata) => metadata,
         Err(error) => {
             drop(validated);
@@ -454,6 +456,7 @@ fn rebind_candidate<'event>(
             ApplicationEvent::DataReceived {
                 destination,
                 payload,
+                ..
             },
         ) => {
             if destination != evidence.destination() {
@@ -480,6 +483,7 @@ fn rebind_candidate<'event>(
                 binding,
                 data,
                 context,
+                ..
             },
         ) => {
             if binding.role() != ApplicationLinkRole::Responder {
@@ -527,6 +531,7 @@ fn rebind_candidate<'event>(
 
 fn metadata_from_evidence(
     evidence: ValidatedIngressEvidence,
+    ingress: Option<InboundTransportObservation>,
 ) -> Result<InboundMessageMetadata, DurableCandidateError> {
     let carrier = match evidence.carrier() {
         CarrierKind::Complete => CarrierProvenance::Complete,
@@ -566,5 +571,21 @@ fn metadata_from_evidence(
         stamp_admission,
         lengths,
     )
+    .map(|metadata| metadata.with_ingress_observation(ingress))
     .map_err(DurableCandidateError::CarrierLength)
+}
+
+fn ingress_observation(event: &ApplicationEvent) -> Option<InboundTransportObservation> {
+    let ingress = match event {
+        ApplicationEvent::DataReceived { ingress, .. }
+        | ApplicationEvent::LinkData { ingress, .. } => *ingress,
+        _ => None,
+    }?;
+    let signal = ingress
+        .signal()
+        .map(|signal| InboundSignalObservation::new(signal.rssi_dbm(), signal.snr_db()));
+    Some(InboundTransportObservation::new(
+        InboundInterfaceId::new(ingress.interface().0),
+        signal,
+    ))
 }

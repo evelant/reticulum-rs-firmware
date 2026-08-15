@@ -8,7 +8,8 @@ use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::rng::Trng;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
+use rand_core::RngCore;
 use reticulum_announce_clock::BootEpoch;
 use reticulum_device_api::{
     DestinationHash as ApiDestinationHash, IdentitySummary, LxmfPeerDiscoveryIncarnation,
@@ -36,7 +37,9 @@ use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
     RuntimeProofTracePacketType,
 };
 use reticulum_heltec_vision_master_e290_node::{
-    announce_time::{BootAnnounceClock, BootAnnounceSchedule, ScheduledAnnounce},
+    announce_time::{
+        BootAnnounceClock, BootAnnounceSchedule, ManualAnnounceSchedule, ScheduledAnnounce,
+    },
     authenticated_api_node::AuthenticatedApiDispatchFailureKind,
     causal_pairing_frontier::{PairingCommandLane, select_pairing_command_lane},
     credential_pairing::{CredentialPairingStatus, PairingMutation},
@@ -47,8 +50,8 @@ use reticulum_heltec_vision_master_e290_node::{
     lxmf_delivery::{
         LXMF_RETRY_QUARANTINE, LxmfAuthorityFault, LxmfProofActionsHolder, LxmfProofSinkFailure,
         LxmfRetentionAction, LxmfRetryClass, LxmfRetryEntry, LxmfRetrySet, LxmfTerminalReject,
-        retention_action, retry_after_pre_io_deferral, should_relieve_lxmf_retry, stamp_policy,
-        wire_limits,
+        admission_deferred_source, admission_retry_delay_ms, retention_action,
+        retry_after_pre_io_deferral, should_relieve_lxmf_retry, stamp_policy, wire_limits,
     },
     nomad_api::{NomadFetchApiState, ProductNomadFetchPort},
     nomad_coordinator::{CoordinatorCommand, CoordinatorOperation, NativeRequestPhase},
@@ -63,6 +66,19 @@ use reticulum_heltec_vision_master_e290_node::{
     pairing_control_mapping::{
         public_initialization_drive, public_initialization_refusal, public_initialization_status,
     },
+    radio_diagnostics::RadioDiagnosticsCell,
+    radio_trace::{
+        RadioTraceAttemptOutcome, RadioTraceAttemptTerminal, RadioTraceProofIngress,
+        RadioTraceRouteResolution, RadioTraceRouteSelected,
+    },
+    reticulum_probe::{
+        PROBE_DATA_OWNER_LEASE_MS, PROBE_PAYLOAD_BYTES, ProductReticulumProbePort,
+        ProductReticulumProbeState, ReticulumProbeDrive,
+    },
+    rmap_discovery::{
+        RMAP_DISCOVERY_INTERVAL_SECONDS, RMAP_DISCOVERY_RETRY_SECONDS, RmapDiscoveryRuntime,
+        RmapPublicationPolicy, RmapStampStep,
+    },
     session_admission_handoff::{
         NodeSessionAdmissionHandoff, SessionAdmissionCommand, SessionAdmissionOutcome,
         SessionAdmissionReply,
@@ -76,11 +92,13 @@ use reticulum_lxmf_ingress::LocalDeliveryDestination;
 use reticulum_node_core::{
     APPLICATION_LINK_CONTEXT_NONE, ApplicationEvent, ApplicationEventDiscardReason,
     ApplicationEventLease, ApplicationEventOfferError, ApplicationEventOwner,
-    ApplicationEventQuarantineReason, ApplicationLinkRole, AuthorizedFrameObservation,
-    DelayedProofOwner, DestinationHash, InitiateLinkError, LinkHandle, MonotonicInstant,
-    MonotonicMillis, MonotonicSeconds, NodeActions, OutboundDispatchInterval, PrepareRequestError,
-    PrepareResponseError, ReceiptCorrelationError, RequestDispatchConfirmation,
-    RequestDispatchError, RequestDispatchReconciliation, RequestHandle, TxLeaseDeadline,
+    ApplicationEventQuarantineReason, ApplicationLinkRole, AttemptOutcome,
+    AuthorizedFrameObservation, DelayedProofOwner, DestinationHash, InitiateLinkError, LinkHandle,
+    MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, OrdinaryDispatchToken,
+    OrdinaryTransmissionOutcome, OutboundDispatchInterval, PrepareRequestError,
+    PrepareResponseError, ProofProbeIdentityAliasError, ReceiptCorrelationError,
+    RequestDispatchConfirmation, RequestDispatchError, RequestDispatchReconciliation,
+    RequestHandle, SubmitError, TxLeaseDeadline, TxTarget,
 };
 #[cfg(feature = "runtime-measurement-hil")]
 use reticulum_node_core::{IngressDisposition, IngressMetadata, PacketType};
@@ -94,27 +112,34 @@ use reticulum_peer_discovery::{
     ObservationMetadata, ObservedInterfaceId, SignalObservations,
 };
 use reticulum_rns_inbox_store::{InboxCandidate, InboxDestination};
+use reticulum_rns_interface_discovery::{DiscoveryStampSearch, PackedDiscoveryInfo};
 use reticulum_storage_actor::{DriveError, ProjectorOperationError};
 use reticulum_submission_runtime::{
     FrameOfferProgress, LinkEstablishmentOffer, PathDiscoveryOffer, RuntimeError, RuntimeStep,
 };
 use reticulum_tx_handoff::AuthorizedFrameNodeHandoff;
 use reticulum_tx_supervisor::{
+    DataRouterPrepareRequest, DataRouterPrepareResult, DataRouterStep,
     NodeInterfaceAnnounceFlushResult, NodeInterfaceApplicationEventDrain,
-    NodeInterfaceIngressActionFault, NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep,
-    NodeInterfaceOrdinaryOfferFailure, NodeInterfaceSupervisorTransition, NodeInterfaceTickResult,
-    OrdinaryRouterCompletionProgress, OrdinaryRouterFaultResidueKind, OrdinaryRouterStep,
+    NodeInterfaceDataPrepareResult, NodeInterfaceIngressActionFault,
+    NodeInterfaceIngressRecycleFault, NodeInterfaceIngressStep, NodeInterfaceOrdinaryOfferFailure,
+    NodeInterfaceSupervisorTransition, NodeInterfaceTickResult, OrdinaryRouterCompletionProgress,
+    OrdinaryRouterFaultResidueKind, OrdinaryRouterStep, RouteDiagnosticsSnapshot,
 };
 
 #[cfg(feature = "ble-api-proof")]
 use crate::platform_storage::ProductBleBondCommitOutcome;
 use crate::{
-    LORA_INTERFACE, ProductSupervisor, config,
+    ProductSupervisor, config,
     platform_storage::{
         ProductCredentialInitializationPort, ProductInboundAdmission, ProductInitializationDrive,
         ProductInitializationRequest, ProductLivePairingAdmission, ProductLxmfAdmission,
         ProductStorageCoordinator, ProductSubmissionDrive,
     },
+};
+#[cfg(feature = "display")]
+use reticulum_heltec_vision_master_e290_node::display_handoff::{
+    DisplayHomeTelemetry, DisplayTelemetryPublisher,
 };
 
 struct RetainedActions {
@@ -125,11 +150,20 @@ struct RetainedActions {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SubmissionProtocolDispatch {
-    Path(PathDiscoveryOffer),
+    Path {
+        offer: PathDiscoveryOffer,
+        token: Option<OrdinaryDispatchToken>,
+    },
     Link {
         offer: LinkEstablishmentOffer,
         link: LinkHandle,
     },
+}
+
+impl SubmissionProtocolDispatch {
+    const fn path(offer: PathDiscoveryOffer) -> Self {
+        Self::Path { offer, token: None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -225,6 +259,8 @@ pub(crate) struct ApplicationVolatileState {
     service_fault_observed: bool,
     nomad: ProductNomadRuntimeState,
     nomad_api: NomadFetchApiState,
+    reticulum_probe: ProductReticulumProbeState,
+    rmap: RmapDiscoveryRuntime,
 }
 
 impl ApplicationVolatileState {
@@ -242,6 +278,44 @@ impl ApplicationVolatileState {
             service_fault_observed: false,
             nomad: ProductNomadRuntimeState::new(),
             nomad_api: NomadFetchApiState::new(),
+            reticulum_probe: ProductReticulumProbeState::new(),
+            rmap: RmapDiscoveryRuntime::disabled(),
+        }
+    }
+
+    /// Install one opt-in RMAP payload and compact incremental stamp search.
+    pub(crate) fn configure_rmap(
+        &mut self,
+        packed: PackedDiscoveryInfo,
+        search: DiscoveryStampSearch,
+    ) {
+        self.rmap.configure(packed, search);
+    }
+}
+
+/// Registered application destinations borrowed by the permanent node task.
+#[derive(Clone, Copy)]
+pub(crate) struct NodeApplicationDestinations {
+    lxmf: Option<DestinationHash>,
+    nomad: DestinationHash,
+    proof_probe: DestinationHash,
+    rmap: Option<DestinationHash>,
+}
+
+impl NodeApplicationDestinations {
+    /// Bundle the destination set without increasing the executor task's
+    /// bounded argument tuple.
+    pub(crate) const fn new(
+        lxmf: Option<DestinationHash>,
+        nomad: DestinationHash,
+        proof_probe: DestinationHash,
+        rmap: Option<DestinationHash>,
+    ) -> Self {
+        Self {
+            lxmf,
+            nomad,
+            proof_probe,
+            rmap,
         }
     }
 }
@@ -378,6 +452,8 @@ pub(crate) struct NodeHandoffs {
     session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
     authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
+    #[cfg(feature = "display")]
+    display_telemetry: Option<DisplayTelemetryPublisher<CriticalSectionRawMutex>>,
 }
 
 struct NodeHandoffParts {
@@ -388,6 +464,8 @@ struct NodeHandoffParts {
     session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
     authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
     frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
+    #[cfg(feature = "display")]
+    display_telemetry: Option<DisplayTelemetryPublisher<CriticalSectionRawMutex>>,
 }
 
 impl NodeHandoffs {
@@ -398,6 +476,9 @@ impl NodeHandoffs {
         session_admission: NodeSessionAdmissionHandoff<CriticalSectionRawMutex>,
         authenticated_api: NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
         frame: AuthorizedFrameNodeHandoff<CriticalSectionRawMutex>,
+        #[cfg(feature = "display")] display_telemetry: Option<
+            DisplayTelemetryPublisher<CriticalSectionRawMutex>,
+        >,
     ) -> Self {
         Self {
             control,
@@ -407,6 +488,8 @@ impl NodeHandoffs {
             session_admission,
             authenticated_api,
             frame,
+            #[cfg(feature = "display")]
+            display_telemetry,
         }
     }
 
@@ -419,6 +502,8 @@ impl NodeHandoffs {
             session_admission: self.session_admission,
             authenticated_api: self.authenticated_api,
             frame: self.frame,
+            #[cfg(feature = "display")]
+            display_telemetry: self.display_telemetry,
         }
     }
 }
@@ -445,22 +530,48 @@ impl PairingNodeState {
     }
 }
 
+pub(crate) struct NodeDiagnosticsOwners {
+    radio: &'static RadioDiagnosticsCell,
+    routes: &'static mut RouteDiagnosticsSnapshot<{ config::PATHS }>,
+}
+
+impl NodeDiagnosticsOwners {
+    pub(crate) const fn new(
+        radio: &'static RadioDiagnosticsCell,
+        routes: &'static mut RouteDiagnosticsSnapshot<{ config::PATHS }>,
+    ) -> Self {
+        Self { radio, routes }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[embassy_executor::task]
 pub async fn run(
     supervisor: &'static mut ProductSupervisor,
     storage: &'static mut ProductStorageCoordinator,
+    diagnostics: NodeDiagnosticsOwners,
     mut application_events: ApplicationEventOwner<'static>,
     mut delayed_proofs: DelayedProofOwner<'static>,
     application_volatile: &'static mut ApplicationVolatileState,
-    lxmf_destination: Option<DestinationHash>,
-    nomad_destination: DestinationHash,
+    destinations: NodeApplicationDestinations,
+    rmap_publication_policy: RmapPublicationPolicy,
+    automatic_announces_enabled: bool,
     peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
     handoffs: NodeHandoffs,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
     mut rng: Trng,
 ) {
+    let NodeApplicationDestinations {
+        lxmf: lxmf_destination,
+        nomad: nomad_destination,
+        proof_probe: proof_probe_destination,
+        rmap: rmap_destination,
+    } = destinations;
+    let NodeDiagnosticsOwners {
+        radio: radio_diagnostics,
+        routes: route_diagnostics,
+    } = diagnostics;
     let primary_destination = *supervisor.destination_hash().as_bytes();
     let identity_summary = match lxmf_destination {
         Some(lxmf_destination) => IdentitySummary::with_lxmf_delivery_destination(
@@ -477,6 +588,8 @@ pub async fn run(
         session_admission: mut session_admission_handoff,
         mut authenticated_api,
         frame: mut frame_handoff,
+        #[cfg(feature = "display")]
+        mut display_telemetry,
     } = handoffs.into_parts();
     // The concrete actor now owns Ready/Offline reporting through its fixed
     // interface-fabric lifecycle capability. This descriptor remains only the
@@ -503,6 +616,7 @@ pub async fn run(
         primary_destination,
         lxmf_destination.is_some(),
     );
+    let mut manual_announce_schedule = ManualAnnounceSchedule::new(lxmf_destination.is_some());
     let mut lane = 0_u8;
     let mut fresh_nomad_turn_armed = false;
     let mut observed_recycle_fault: Option<NodeInterfaceIngressRecycleFault> = None;
@@ -510,6 +624,7 @@ pub async fn run(
         DurabilityServiceState::from_runtime_available(storage.submission_service_available());
     let mut retained_frame: Option<AuthorizedFrameObservation> = None;
     let mut pending_frame_acknowledgement: Option<AuthorizedFrameObservation> = None;
+    let mut pending_probe_frame_acknowledgement: Option<AuthorizedFrameObservation> = None;
     let mut pairing = PairingNodeState::new();
     let mut authenticated_api_state = AuthenticatedApiNodeState::new();
     let mut pending_inbound: Option<InboxCandidate> = None;
@@ -523,9 +638,13 @@ pub async fn run(
         service_fault_observed: lxmf_service_fault_observed,
         nomad,
         nomad_api,
+        reticulum_probe,
+        rmap,
     } = application_volatile;
     #[cfg(feature = "runtime-measurement-hil")]
     let mut previous_node_loop_us = now_micros();
+    #[cfg(feature = "display")]
+    let mut displayed_uncollected_messages = None;
 
     loop {
         #[cfg(feature = "runtime-measurement-hil")]
@@ -536,6 +655,34 @@ pub async fn run(
             previous_node_loop_us = loop_started_us;
         }
         let mut progressed = false;
+
+        #[cfg(feature = "display")]
+        {
+            if let Some(status) = storage.lxmf_mailbox_status() {
+                let uncollected_messages = status.uncollected_count();
+                if displayed_uncollected_messages != Some(uncollected_messages) {
+                    if let Some(publisher) = display_telemetry.as_mut() {
+                        publisher.publish_latest(DisplayHomeTelemetry::new(uncollected_messages));
+                        progressed = true;
+                    }
+                    displayed_uncollected_messages = Some(uncollected_messages);
+                }
+            }
+        }
+
+        match rmap.step_stamp_search(now_seconds()) {
+            RmapStampStep::Completed { attempts } => {
+                info!(
+                    "e290-node stage=rmap-discovery-stamp status=READY attempts={attempts} publication=due"
+                );
+            }
+            RmapStampStep::Exhausted => {
+                warn!(
+                    "e290-node stage=rmap-discovery-stamp status=DISABLED reason=counter-exhausted lora_routing=continue"
+                );
+            }
+            RmapStampStep::Disabled | RmapStampStep::Ready | RmapStampStep::Progressed { .. } => {}
+        }
 
         progressed |= step_pairing_frontier(
             storage,
@@ -559,7 +706,24 @@ pub async fn run(
         // already-durable pending echo is deliberately independent of the
         // current service state; a later unrelated fault cannot revoke proof
         // that was established before this acknowledgement was queued.
-        if let Some(observation) = pending_frame_acknowledgement.take() {
+        if let Some(observation) = pending_probe_frame_acknowledgement.take() {
+            match frame_handoff.acknowledgements().try_send(observation) {
+                Ok(()) => {
+                    info!(
+                        "e290-node stage=reticulum-proof-probe-frame status=VOLATILE-ACK interface={} packet_len={} durable_submission_journal=bypassed",
+                        observation.interface().get(),
+                        observation.packet_len(),
+                    );
+                    progressed = true;
+                }
+                Err(full) => {
+                    pending_probe_frame_acknowledgement = Some(full.into_inner());
+                }
+            }
+        }
+        if pending_probe_frame_acknowledgement.is_none()
+            && let Some(observation) = pending_frame_acknowledgement.take()
+        {
             match frame_handoff.acknowledgements().try_send(observation) {
                 Ok(()) => {
                     info!(
@@ -572,24 +736,50 @@ pub async fn run(
                 Err(full) => pending_frame_acknowledgement = Some(full.into_inner()),
             }
         }
-        if pending_frame_acknowledgement.is_none()
+        if pending_probe_frame_acknowledgement.is_none()
+            && pending_frame_acknowledgement.is_none()
             && retained_frame.is_none()
             && let Some(observation) = frame_handoff.requests().try_receive()
         {
-            retained_frame = Some(observation);
-            let previous = durability_service;
-            durability_service = durability_service.observe_authorized_frame_request();
-            if !previous.is_active_owner_fail_stopped()
-                && durability_service.is_active_owner_fail_stopped()
-            {
-                enter_active_owner_durability_fail_stop(
-                    supervisor,
-                    lora_descriptor,
-                    &mut fail_closed_draining,
-                    "frame-arrived-after-durable-service-disabled",
-                );
+            match reticulum_probe.classifies_authorized(observation) {
+                Ok(true) => match reticulum_probe.observe_authorized(observation) {
+                    Ok(()) => {
+                        pending_probe_frame_acknowledgement = Some(observation);
+                        progressed = true;
+                    }
+                    Err(reason) => {
+                        error!(
+                            "e290-node stage=reticulum-proof-probe-frame status=FAIL reason={reason:?} action=fail-closed-drain"
+                        );
+                        fail_closed_draining = true;
+                        progressed = true;
+                    }
+                },
+                Ok(false) => {
+                    retained_frame = Some(observation);
+                    let previous = durability_service;
+                    durability_service = durability_service.observe_authorized_frame_request();
+                    if !previous.is_active_owner_fail_stopped()
+                        && durability_service.is_active_owner_fail_stopped()
+                    {
+                        enter_active_owner_durability_fail_stop(
+                            supervisor,
+                            lora_descriptor,
+                            &mut fail_closed_draining,
+                            "frame-arrived-after-durable-service-disabled",
+                        );
+                    }
+                    progressed = true;
+                }
+                Err(reason) => {
+                    error!(
+                        "e290-node stage=reticulum-proof-probe-frame status=FAIL reason={reason:?} action=retain-unacknowledged-frame-and-fail-closed-drain"
+                    );
+                    retained_frame = Some(observation);
+                    fail_closed_draining = true;
+                    progressed = true;
+                }
             }
-            progressed = true;
         }
         if durability_service.can_offer_authorized_frame()
             && let Some(observation) = retained_frame
@@ -654,6 +844,17 @@ pub async fn run(
 
         let mut storage_step_attempted = false;
         for _ in 0..config::NODE_MAX_IMMEDIATE_PASSES {
+            progressed |= drive_reticulum_probe_recovery(
+                supervisor,
+                reticulum_probe,
+                &mut fail_closed_draining,
+            );
+            progressed |= drive_reticulum_probe_terminal(
+                supervisor,
+                reticulum_probe,
+                &mut fail_closed_draining,
+                now_millis(),
+            );
             let retry_slot_available = retry_actions_a.is_none() || retry_actions_b.is_none();
             if !fail_closed_draining
                 && retry_slot_available
@@ -661,7 +862,21 @@ pub async fn run(
             {
                 let reason = rejected.reason();
                 let (actions, elapsed_admission) = rejected.into_parts();
-                let protocol_dispatch = pending_protocol_dispatch.take();
+                let retain_in_flight_path = matches!(
+                    pending_protocol_dispatch,
+                    Some(OrdinaryProtocolDispatch::Submission(
+                        SubmissionProtocolDispatch::Path {
+                            token: staged_token,
+                            ..
+                        }
+                    )) if config::pending_path_protocol_disposition(staged_token)
+                        == config::PendingPathProtocolDisposition::RetainInFlight
+                );
+                let protocol_dispatch = if retain_in_flight_path {
+                    None
+                } else {
+                    pending_protocol_dispatch.take()
+                };
                 let retained = match config::rejected_action_disposition(reason) {
                     config::RejectedActionDisposition::RefreshDeadline => {
                         warn!(
@@ -777,6 +992,70 @@ pub async fn run(
                     let pass = supervisor.step(MonotonicMillis::new(now_millis()));
                     let dispatch_completed_at = MonotonicInstant::from_micros(now_micros());
                     let transition = pass.transition();
+                    if let NodeInterfaceSupervisorTransition::Data(DataRouterStep::Routed(hop)) =
+                        transition
+                    {
+                        if let Some((submission, destination)) =
+                            storage.routed_submission_context(hop.prepared())
+                        {
+                            let hops = supervisor.retained_path_hops(&destination).unwrap_or(0);
+                            let resolution = match hop.prepared().target() {
+                                TxTarget::Only(_) => RadioTraceRouteResolution::ExactRetainedPath,
+                                TxTarget::All | TxTarget::AllExcept(_) | TxTarget::Selected(_) => {
+                                    RadioTraceRouteResolution::BroadcastFallback
+                                }
+                            };
+                            radio_diagnostics.record_route_selected(
+                                dispatch_completed_at.as_micros(),
+                                RadioTraceRouteSelected::new(
+                                    submission.get(),
+                                    *destination.as_bytes(),
+                                    supervisor.retained_path_next_hop(&destination),
+                                    hops,
+                                    hop.interface().get(),
+                                    resolution,
+                                    hop.prepared().packet_len(),
+                                    *hop.prepared().encoded_packet_sha256().as_bytes(),
+                                    *hop.prepared().attempt().as_bytes(),
+                                ),
+                            );
+                        }
+                        match reticulum_probe.destination_for_prepared(hop.prepared()) {
+                            Ok(Some(_)) => {
+                                let dispatched_at =
+                                    MonotonicMillis::new(dispatch_completed_at.as_micros() / 1_000);
+                                match reticulum_probe
+                                    .observe_routed(hop.prepared(), dispatched_at.get())
+                                {
+                                    Ok(true) => info!(
+                                        "e290-node stage=reticulum-proof-probe status=DISPATCHED interface={} route_hops=preparation-snapshot rtt_clock=first-router-dispatch-acceptance",
+                                        hop.interface().get(),
+                                    ),
+                                    Ok(false) => {
+                                        error!(
+                                            "e290-node stage=reticulum-proof-probe status=FAIL reason=exact-routed-owner-became-unrelated action=fail-closed-drain"
+                                        );
+                                        fail_closed_draining = true;
+                                    }
+                                    Err(reason) => {
+                                        error!(
+                                            "e290-node stage=reticulum-proof-probe status=FAIL reason={reason:?} action=fail-closed-drain"
+                                        );
+                                        fail_closed_draining = true;
+                                    }
+                                }
+                                progressed = true;
+                            }
+                            Ok(None) => {}
+                            Err(reason) => {
+                                error!(
+                                    "e290-node stage=reticulum-proof-probe status=FAIL reason={reason:?} source=data-router-routed action=fail-closed-drain"
+                                );
+                                fail_closed_draining = true;
+                                progressed = true;
+                            }
+                        }
+                    }
                     if let NodeInterfaceSupervisorTransition::Lifecycle(lifecycle) = transition {
                         let acknowledgement = lifecycle.acknowledgement();
                         let request = acknowledgement.request();
@@ -802,7 +1081,63 @@ pub async fn run(
                         }
                     }
                     if let NodeInterfaceSupervisorTransition::Ordinary(
+                        OrdinaryRouterStep::PacketStaged { token, .. },
+                    ) = transition
+                        && let Some(OrdinaryProtocolDispatch::Submission(
+                            SubmissionProtocolDispatch::Path {
+                                offer,
+                                token: pending_token,
+                            },
+                        )) = pending_protocol_dispatch
+                    {
+                        match config::exact_packet_correlation(pending_token, token) {
+                            config::ExactPacketCorrelation::Capture => {
+                                pending_protocol_dispatch =
+                                    Some(OrdinaryProtocolDispatch::Submission(
+                                        SubmissionProtocolDispatch::Path {
+                                            offer,
+                                            token: Some(token),
+                                        },
+                                    ));
+                                info!(
+                                    "e290-node stage=path-discovery status=STAGED submission={} ordinal={} slot={} generation={} response_clock=not-started",
+                                    offer.id().get(),
+                                    offer.ordinal(),
+                                    token.slot_id().get(),
+                                    token.generation().get(),
+                                );
+                            }
+                            config::ExactPacketCorrelation::Exact => {
+                                error!(
+                                    "e290-node stage=path-discovery status=FAIL reason=duplicate-exact-stage submission={} ordinal={} slot={} generation={} action=disable-submissions",
+                                    offer.id().get(),
+                                    offer.ordinal(),
+                                    token.slot_id().get(),
+                                    token.generation().get(),
+                                );
+                                disable_submission_for_path_fault(
+                                    storage,
+                                    &mut durability_service,
+                                    &retained_frame,
+                                    &pending_frame_acknowledgement,
+                                    supervisor,
+                                    lora_descriptor,
+                                    &mut fail_closed_draining,
+                                    "path-request-stage-correlation",
+                                );
+                            }
+                            config::ExactPacketCorrelation::Unrelated => {
+                                // Active ordinary packet generations may overlap. The
+                                // path owner remains pending until its concrete actor
+                                // reports complete transmission, so a different token
+                                // belongs to independent ordinary work.
+                            }
+                        }
+                        progressed = true;
+                    }
+                    if let NodeInterfaceSupervisorTransition::Ordinary(
                         OrdinaryRouterStep::Routed {
+                            token: dispatch_token,
                             interface,
                             protocol_token,
                             first_dispatch,
@@ -856,57 +1191,52 @@ pub async fn run(
                                 MonotonicMillis::new(dispatch_completed_at.as_micros() / 1_000);
                             match pending {
                                 OrdinaryProtocolDispatch::Submission(
-                                    SubmissionProtocolDispatch::Path(offer),
+                                    SubmissionProtocolDispatch::Path {
+                                        offer,
+                                        token: expected_token,
+                                    },
                                 ) => {
-                                    if !first_dispatch || protocol_token.is_some() {
-                                        error!(
-                                            "e290-node stage=path-discovery status=FAIL reason=dispatch-correlation first_dispatch={first_dispatch} protocol_token_present={} interface={} action=disable-submissions",
-                                            protocol_token.is_some(),
-                                            interface.get(),
-                                        );
-                                        disable_submission_for_path_fault(
-                                            storage,
-                                            &mut durability_service,
-                                            &retained_frame,
-                                            &pending_frame_acknowledgement,
-                                            supervisor,
-                                            lora_descriptor,
-                                            &mut fail_closed_draining,
-                                            "path-request-dispatch-correlation",
-                                        );
-                                    } else {
-                                        pending_protocol_dispatch = None;
-                                        match storage.acknowledge_path_request_dispatched(
-                                            offer,
-                                            dispatched_at,
-                                        ) {
-                                            Ok(()) => info!(
-                                                "e290-node stage=path-discovery status=DISPATCHED submission={} ordinal={} interface={} dispatch_ms={} response_clock=started",
+                                    match config::retained_packet_correlation(
+                                        expected_token,
+                                        dispatch_token,
+                                    ) {
+                                        config::RetainedPacketCorrelation::Exact
+                                            if protocol_token.is_some() =>
+                                        {
+                                            error!(
+                                                "e290-node stage=path-discovery status=FAIL reason=exact-dispatch-has-protocol-token first_dispatch={first_dispatch} interface={} slot={} generation={} action=disable-submissions",
+                                                interface.get(),
+                                                dispatch_token.slot_id().get(),
+                                                dispatch_token.generation().get(),
+                                            );
+                                            disable_submission_for_path_fault(
+                                                storage,
+                                                &mut durability_service,
+                                                &retained_frame,
+                                                &pending_frame_acknowledgement,
+                                                supervisor,
+                                                lora_descriptor,
+                                                &mut fail_closed_draining,
+                                                "path-request-dispatch-correlation",
+                                            );
+                                        }
+                                        config::RetainedPacketCorrelation::Exact => {
+                                            info!(
+                                                "e290-node stage=path-discovery status=ACTOR-QUEUED submission={} ordinal={} interface={} first_dispatch={first_dispatch} slot={} generation={} response_clock=not-started action=await-interface-completion",
                                                 offer.id().get(),
                                                 offer.ordinal(),
                                                 interface.get(),
-                                                dispatched_at.get(),
-                                            ),
-                                            Err(reason) => {
-                                                error!(
-                                                    "e290-node stage=path-discovery status=FAIL reason=dispatch-ack:{reason:?} submission={} ordinal={} action=disable-submissions",
-                                                    offer.id().get(),
-                                                    offer.ordinal(),
-                                                );
-                                                disable_submission_for_path_fault(
-                                                    storage,
-                                                    &mut durability_service,
-                                                    &retained_frame,
-                                                    &pending_frame_acknowledgement,
-                                                    supervisor,
-                                                    lora_descriptor,
-                                                    &mut fail_closed_draining,
-                                                    "path-request-dispatch-ack",
-                                                );
-                                            }
+                                                dispatch_token.slot_id().get(),
+                                                dispatch_token.generation().get(),
+                                            );
                                         }
-                                        progressed = true;
+                                        config::RetainedPacketCorrelation::Unrelated => {
+                                            // The transition belongs to another active
+                                            // ordinary packet generation. Its protocol
+                                            // token, when present, was confirmed above.
+                                        }
                                     }
+                                    progressed = true;
                                 }
                                 OrdinaryProtocolDispatch::Submission(
                                     SubmissionProtocolDispatch::Link { offer, link },
@@ -1010,10 +1340,127 @@ pub async fn run(
                         progressed = true;
                     }
                     if let NodeInterfaceSupervisorTransition::Ordinary(
+                        OrdinaryRouterStep::Completion(completion),
+                    ) = transition
+                    {
+                        let (route_returned, completed) = match completion {
+                            OrdinaryRouterCompletionProgress::Next { completed, .. } => {
+                                (false, completed)
+                            }
+                            OrdinaryRouterCompletionProgress::Returned { completed, .. } => {
+                                (true, completed)
+                            }
+                        };
+                        if let Some(OrdinaryProtocolDispatch::Submission(
+                            SubmissionProtocolDispatch::Path {
+                                offer,
+                                token: expected_token,
+                            },
+                        )) = pending_protocol_dispatch
+                        {
+                            let completed_at =
+                                MonotonicMillis::new(dispatch_completed_at.as_micros() / 1_000);
+                            let correlation = config::retained_packet_correlation(
+                                expected_token,
+                                completed.token(),
+                            );
+                            if correlation == config::RetainedPacketCorrelation::Unrelated {
+                                // Another ordinary packet completed while the exact
+                                // path request is waiting to stage or remains owned by
+                                // its interface actor.
+                            } else if completed.transmission()
+                                == OrdinaryTransmissionOutcome::Transmitted
+                            {
+                                pending_protocol_dispatch = None;
+                                match storage
+                                    .acknowledge_path_request_dispatched(offer, completed_at)
+                                {
+                                    Ok(()) => info!(
+                                        "e290-node stage=path-discovery status=TRANSMITTED submission={} ordinal={} interface={} slot={} generation={} completed_ms={} response_clock=started",
+                                        offer.id().get(),
+                                        offer.ordinal(),
+                                        completed.interface().get(),
+                                        completed.token().slot_id().get(),
+                                        completed.token().generation().get(),
+                                        completed_at.get(),
+                                    ),
+                                    Err(reason) => {
+                                        error!(
+                                            "e290-node stage=path-discovery status=FAIL reason=transmission-ack:{reason:?} submission={} ordinal={} action=disable-submissions",
+                                            offer.id().get(),
+                                            offer.ordinal(),
+                                        );
+                                        disable_submission_for_path_fault(
+                                            storage,
+                                            &mut durability_service,
+                                            &retained_frame,
+                                            &pending_frame_acknowledgement,
+                                            supervisor,
+                                            lora_descriptor,
+                                            &mut fail_closed_draining,
+                                            "path-request-transmission-ack",
+                                        );
+                                    }
+                                }
+                            } else if route_returned {
+                                pending_protocol_dispatch = None;
+                                let retry_not_before = MonotonicMillis::new(
+                                    completed_at
+                                        .get()
+                                        .saturating_add(config::STORAGE_RETRY_BACKOFF_MS),
+                                );
+                                match storage.retry_path_request_dispatch(offer, retry_not_before) {
+                                    Ok(()) => warn!(
+                                        "e290-node stage=path-discovery status=NOT-TRANSMITTED submission={} ordinal={} interface={} slot={} generation={} response_clock=not-started retry_not_before_ms={}",
+                                        offer.id().get(),
+                                        offer.ordinal(),
+                                        completed.interface().get(),
+                                        completed.token().slot_id().get(),
+                                        completed.token().generation().get(),
+                                        retry_not_before.get(),
+                                    ),
+                                    Err(reason) => {
+                                        error!(
+                                            "e290-node stage=path-discovery status=FAIL reason=negative-ack:{reason:?} submission={} ordinal={} action=disable-submissions",
+                                            offer.id().get(),
+                                            offer.ordinal(),
+                                        );
+                                        disable_submission_for_path_fault(
+                                            storage,
+                                            &mut durability_service,
+                                            &retained_frame,
+                                            &pending_frame_acknowledgement,
+                                            supervisor,
+                                            lora_descriptor,
+                                            &mut fail_closed_draining,
+                                            "path-request-negative-ack",
+                                        );
+                                    }
+                                }
+                            } else {
+                                info!(
+                                    "e290-node stage=path-discovery status=HOP-NOT-TRANSMITTED submission={} ordinal={} interface={} slot={} generation={} response_clock=not-started action=await-next-interface",
+                                    offer.id().get(),
+                                    offer.ordinal(),
+                                    completed.interface().get(),
+                                    completed.token().slot_id().get(),
+                                    completed.token().generation().get(),
+                                );
+                            }
+                            progressed = true;
+                        }
+                    }
+                    if let NodeInterfaceSupervisorTransition::Ordinary(
                         OrdinaryRouterStep::Completion(
-                            OrdinaryRouterCompletionProgress::Returned { slot },
+                            OrdinaryRouterCompletionProgress::Returned { slot, .. },
                         ),
                     ) = transition
+                        && !matches!(
+                            pending_protocol_dispatch,
+                            Some(OrdinaryProtocolDispatch::Submission(
+                                SubmissionProtocolDispatch::Path { .. }
+                            ))
+                        )
                         && let Some(protocol) = pending_protocol_dispatch.take()
                     {
                         let submission =
@@ -1045,6 +1492,12 @@ pub async fn run(
                         OrdinaryRouterStep::PendingJobExpired { slot }
                         | OrdinaryRouterStep::PendingJobCancelledForFault { slot },
                     ) = transition
+                        && !matches!(
+                            pending_protocol_dispatch,
+                            Some(OrdinaryProtocolDispatch::Submission(
+                                SubmissionProtocolDispatch::Path { .. }
+                            ))
+                        )
                         && let Some(protocol) = pending_protocol_dispatch.take()
                     {
                         let submission =
@@ -1089,7 +1542,18 @@ pub async fn run(
                                 | OrdinaryRouterFaultResidueKind::AdmissionFailure
                         )
                     );
+                    let input_fault_owns_pending_protocol = !matches!(
+                        pending_protocol_dispatch,
+                        Some(OrdinaryProtocolDispatch::Submission(
+                            SubmissionProtocolDispatch::Path {
+                                token: staged_token,
+                                ..
+                            }
+                        )) if config::pending_path_protocol_disposition(staged_token)
+                            == config::PendingPathProtocolDisposition::RetainInFlight
+                    );
                     if input_fault_terminated_protocol
+                        && input_fault_owns_pending_protocol
                         && let Some(protocol) = pending_protocol_dispatch.take()
                     {
                         let submission =
@@ -1188,10 +1652,14 @@ pub async fn run(
                             }
                             config::ActionRetrySlot::None => {
                                 let now = now_seconds();
-                                if pending_protocol_dispatch.is_none()
-                                    && !supervisor.ingress_actions_pending()
-                                    && now >= next_tick_seconds
-                                {
+                                // Receipt, path, and Link clocks must receive a
+                                // fair bounded maintenance turn even while an
+                                // earlier protocol dispatch or ingress action
+                                // remains queued. This lane has an empty retry
+                                // slot, so any generated actions that cannot
+                                // enter the ordinary coordinator are retained
+                                // behind that earlier owner instead of lost.
+                                if now >= next_tick_seconds {
                                     next_tick_seconds =
                                         now.saturating_add(config::PROTOCOL_TICK_INTERVAL_SECONDS);
                                     let link_now = MonotonicInstant::from_micros(now_micros());
@@ -1274,16 +1742,40 @@ pub async fn run(
                 }
                 3 => {
                     let now = now_seconds();
-                    if retry_actions_a.is_none()
+                    let announce_lane_ready = retry_actions_a.is_none()
                         && retry_actions_b.is_none()
                         && quarantined_actions.is_none()
                         && pending_protocol_dispatch.is_none()
                         && !supervisor.ingress_actions_pending()
                         && !fail_closed_draining
                         && !fresh_nomad_turn_reserved
-                        && !announce_clock.is_exhausted()
-                        && let Some(scheduled) = announce_schedule.due(now)
-                    {
+                        && !announce_clock.is_exhausted();
+                    let manual_scheduled = manual_announce_schedule.due(now);
+                    let initial_rmap_interface_ready = rmap_publication_policy
+                        .initial_interface()
+                        .is_none_or(|interface| {
+                            supervisor
+                                .interface_registry()
+                                .descriptor(interface)
+                                .is_some_and(|descriptor| descriptor.is_online())
+                        });
+                    let rmap_due = manual_scheduled.is_none()
+                        && rmap_destination.is_some()
+                        && rmap
+                            .due_app_data_for_policy(
+                                now,
+                                rmap_publication_policy,
+                                initial_rmap_interface_ready,
+                            )
+                            .is_some();
+                    let scheduled = manual_scheduled.or_else(|| {
+                        if rmap_due || !automatic_announces_enabled {
+                            None
+                        } else {
+                            announce_schedule.due(now)
+                        }
+                    });
+                    if announce_lane_ready && let Some(scheduled) = scheduled {
                         let mut admission_deferred = false;
                         let mut primary_emission = None;
                         if scheduled == ScheduledAnnounce::Primary {
@@ -1360,12 +1852,20 @@ pub async fn run(
                         }
 
                         if admission_deferred {
-                            announce_schedule.defer_attempt(now);
+                            if manual_scheduled.is_some() {
+                                manual_announce_schedule.defer_attempt(now);
+                            } else {
+                                announce_schedule.defer_attempt(now);
+                            }
                         } else {
                             // A queued announce completed this event. An LXMF
                             // event whose service was cleanly disabled is also
                             // consumed without spending an announce ordinal.
-                            announce_schedule.mark_attempted(now);
+                            if manual_scheduled.is_some() {
+                                manual_announce_schedule.mark_attempted(now);
+                            } else {
+                                announce_schedule.mark_attempted(now);
+                            }
                         }
 
                         if primary_emission.is_some()
@@ -1404,21 +1904,100 @@ pub async fn run(
                             );
                         }
                     }
+                    if announce_lane_ready
+                        && scheduled.is_none()
+                        && rmap_due
+                        && let Some(destination) = rmap_destination
+                    {
+                        let emitted_at = announce_clock
+                            .next_emission()
+                            .expect("a non-exhausted announce clock has an emission");
+                        let app_data = rmap
+                            .due_app_data_for_policy(
+                                now,
+                                rmap_publication_policy,
+                                initial_rmap_interface_ready,
+                            )
+                            .expect("the selected RMAP event remains due for this node turn");
+                        match supervisor.queue_announce_for(
+                            &destination,
+                            Some(app_data.as_bytes()),
+                            emitted_at,
+                            &mut rng,
+                        ) {
+                            Ok(()) => {
+                                announce_clock.mark_queued();
+                                rmap.mark_announced(now);
+                                match supervisor.flush_announces(
+                                    MonotonicSeconds::new(now),
+                                    config::ordinary_admission(now_millis()),
+                                    &mut rng,
+                                ) {
+                                    NodeInterfaceAnnounceFlushResult::Accepted => {
+                                        info!(
+                                            "e290-node stage=rmap-discovery-announce status=QUEUED emission={} boot_epoch={} next_after_seconds={}",
+                                            emitted_at.get(),
+                                            announce_clock.epoch().get(),
+                                            RMAP_DISCOVERY_INTERVAL_SECONDS,
+                                        );
+                                        progressed = true;
+                                    }
+                                    NodeInterfaceAnnounceFlushResult::ActionOfferRejected(
+                                        failure,
+                                    ) => match handle_action_offer_failure(
+                                        failure,
+                                        "rmap-discovery-announce",
+                                    ) {
+                                        ActionOfferHandling::Retry(retained) => {
+                                            retry_actions_a = Some(retained)
+                                        }
+                                        ActionOfferHandling::RetainAndDrain(retained) => {
+                                            retry_actions_a = Some(retained);
+                                            fail_closed_draining = true;
+                                        }
+                                    },
+                                }
+                            }
+                            Err(reason) => {
+                                rmap.defer_announce(now);
+                                warn!(
+                                    "e290-node stage=rmap-discovery-announce status=DEFERRED reason={reason:?} retry_after_seconds={}",
+                                    RMAP_DISCOVERY_RETRY_SECONDS,
+                                );
+                            }
+                        }
+                    }
                 }
                 4 => {
-                    progressed |= step_authenticated_api(
+                    let manual_announce_was_pending = manual_announce_schedule.is_pending();
+                    let authenticated_api_progressed = step_authenticated_api(
                         storage,
                         supervisor,
+                        radio_diagnostics,
+                        route_diagnostics,
                         discovered_peers,
                         peer_discovery_incarnation,
                         now_millis(),
+                        &mut manual_announce_schedule,
+                        now_seconds(),
                         nomad,
                         nomad_api,
+                        reticulum_probe,
                         !fail_closed_draining,
                         identity_summary,
                         &mut authenticated_api,
                         &mut authenticated_api_state,
                     );
+                    progressed |= authenticated_api_progressed;
+                    if authenticated_api_progressed
+                        && !manual_announce_was_pending
+                        && manual_announce_schedule.is_pending()
+                        && rmap.request_manual_publication(now_seconds())
+                    {
+                        info!(
+                            "e290-node stage=rmap-discovery-announce status=REQUESTED source=manual-service-announce"
+                        );
+                    }
                 }
                 5 => {
                     let fresh_command_pending = nomad.fresh_command_pending();
@@ -1447,6 +2026,25 @@ pub async fn run(
                         exact_nomad_packet_owned,
                         fail_closed_draining,
                         ordinary_owners_quiescent,
+                    );
+                }
+                6 => {
+                    let ordinary_owners_quiescent = retry_actions_a.is_none()
+                        && retry_actions_b.is_none()
+                        && quarantined_actions.is_none()
+                        && pending_protocol_dispatch.is_none()
+                        && !supervisor.ingress_actions_pending()
+                        && ordinary_router_is_idle(supervisor)
+                        && !fail_closed_draining;
+                    progressed |= drive_one_reticulum_probe(
+                        supervisor,
+                        reticulum_probe,
+                        &mut retry_actions_a,
+                        &mut retry_actions_b,
+                        &mut fail_closed_draining,
+                        ordinary_owners_quiescent,
+                        &mut rng,
+                        now_millis(),
                     );
                 }
                 _ => {
@@ -1560,7 +2158,7 @@ pub async fn run(
                                                 debug_assert!(pending_protocol_dispatch.is_none());
                                                 pending_protocol_dispatch =
                                                     Some(OrdinaryProtocolDispatch::Submission(
-                                                        SubmissionProtocolDispatch::Path(offer),
+                                                        SubmissionProtocolDispatch::path(offer),
                                                     ));
                                                 info!(
                                                     "e290-node stage=path-discovery status=ADMITTED submission={} ordinal={} progress={progress:?} response_clock=awaiting-first-dispatch",
@@ -1584,7 +2182,7 @@ pub async fn run(
                                                 };
                                                 let retained = retained.with_protocol_dispatch(
                                                     OrdinaryProtocolDispatch::Submission(
-                                                        SubmissionProtocolDispatch::Path(offer),
+                                                        SubmissionProtocolDispatch::path(offer),
                                                     ),
                                                 );
                                                 if terminal {
@@ -1832,6 +2430,41 @@ pub async fn run(
                                 );
                                 progressed = true;
                             }
+                            ProductSubmissionDrive::Runtime(Ok(RuntimeStep::Terminal {
+                                terminal,
+                                progress,
+                            })) => {
+                                durability_service = durability_service.runtime_progress();
+                                let outcome = match terminal.outcome() {
+                                    AttemptOutcome::Delivered => {
+                                        RadioTraceAttemptOutcome::Delivered
+                                    }
+                                    AttemptOutcome::DeliveryTimeout => {
+                                        RadioTraceAttemptOutcome::DeliveryTimeout
+                                    }
+                                    AttemptOutcome::Unsent(_) => RadioTraceAttemptOutcome::Unsent,
+                                };
+                                let proof_ingress = terminal.ingress().map(|ingress| {
+                                    RadioTraceProofIngress::new(
+                                        ingress.interface().get(),
+                                        ingress
+                                            .signal()
+                                            .map(|signal| (signal.rssi_dbm(), signal.snr_db())),
+                                    )
+                                });
+                                radio_diagnostics.record_attempt_terminal(
+                                    now_micros(),
+                                    RadioTraceAttemptTerminal::new(
+                                        *terminal.token().as_bytes(),
+                                        outcome,
+                                        proof_ingress,
+                                    ),
+                                );
+                                info!(
+                                    "e290-node stage=durable-submission status=PROGRESS step=Terminal {{ terminal: {terminal:?}, progress: {progress:?} }}"
+                                );
+                                progressed = true;
+                            }
                             ProductSubmissionDrive::Runtime(Ok(step)) => {
                                 durability_service = durability_service.runtime_progress();
                                 info!(
@@ -1953,7 +2586,7 @@ pub async fn run(
                 match supervisor.drain_application_events(&mut application_events) {
                     NodeInterfaceApplicationEventDrain::Idle => {}
                     NodeInterfaceApplicationEventDrain::Drained(report) => {
-                        info!(
+                        debug!(
                             "e290-node stage=application-event-handoff status=ADMITTED events={} unroutable={} owner_capacity={} consumer=transport-neutral",
                             report.accepted_events(),
                             report.unroutable_packets(),
@@ -2011,6 +2644,7 @@ pub async fn run(
                     discovered_peers,
                     lxmf_destination,
                     nomad_destination,
+                    proof_probe_destination,
                     &mut retry_actions_a,
                     &mut retry_actions_b,
                     &mut fail_closed_draining,
@@ -2193,6 +2827,7 @@ fn drive_one_application_event(
     >,
     lxmf_destination: Option<DestinationHash>,
     nomad_destination: DestinationHash,
+    proof_probe_destination: DestinationHash,
     retry_actions_a: &mut Option<RetainedActions>,
     retry_actions_b: &mut Option<RetainedActions>,
     fail_closed_draining: &mut bool,
@@ -2212,6 +2847,8 @@ fn drive_one_application_event(
     if held_store_fault && let Some(entry) = retries.take_nonheld() {
         let class = entry.class();
         let message_id = entry.message_id();
+        let admission_attempt = entry.admission_attempt();
+        let admission_source = entry.admission_source();
         match owner.try_reacquire_quarantined(entry.into_token()) {
             Ok(lease) => {
                 let event_id = lease.id();
@@ -2226,7 +2863,8 @@ fn drive_one_application_event(
                 let reason = failure.reason();
                 retain_lxmf_authority_fault(
                     authority_fault,
-                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id),
+                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id)
+                        .with_admission_state(admission_attempt, admission_source),
                 );
                 error!(
                     "e290-node stage=lxmf-retry status=FAIL reason={reason:?} action=retain-unchanged-token-and-stop-lxmf"
@@ -2243,6 +2881,8 @@ fn drive_one_application_event(
     {
         let class = entry.class();
         let message_id = entry.message_id();
+        let admission_attempt = entry.admission_attempt();
+        let admission_source = entry.admission_source();
         match owner.try_reacquire_quarantined(entry.into_token()) {
             Ok(lease) => {
                 let event_id = lease.id();
@@ -2267,7 +2907,8 @@ fn drive_one_application_event(
                 let reason = failure.reason();
                 retain_lxmf_authority_fault(
                     authority_fault,
-                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id),
+                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id)
+                        .with_admission_state(admission_attempt, admission_source),
                 );
                 error!(
                     "e290-node stage=lxmf-retry status=FAIL reason={reason:?} action=retain-unchanged-token-and-stop-lxmf"
@@ -2282,16 +2923,27 @@ fn drive_one_application_event(
     } else {
         None
     };
-    let (lease, retry_class, retry_message_id) = if let Some(entry) = retry {
+    let (lease, retry_class, retry_message_id, retry_attempt, retry_source) = if let Some(entry) =
+        retry
+    {
         let class = entry.class();
         let message_id = entry.message_id();
+        let admission_attempt = entry.admission_attempt();
+        let admission_source = entry.admission_source();
         match owner.try_reacquire_quarantined(entry.into_token()) {
-            Ok(lease) => (lease, Some(class), message_id),
+            Ok(lease) => (
+                lease,
+                Some(class),
+                message_id,
+                admission_attempt,
+                admission_source,
+            ),
             Err(failure) => {
                 let reason = failure.reason();
                 retain_lxmf_authority_fault(
                     authority_fault,
-                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id),
+                    LxmfRetryEntry::new(failure.into_token(), u64::MAX, class, message_id)
+                        .with_admission_state(admission_attempt, admission_source),
                 );
                 error!(
                     "e290-node stage=lxmf-retry status=FAIL reason={reason:?} action=retain-unchanged-token-and-stop-lxmf"
@@ -2303,7 +2955,7 @@ fn drive_one_application_event(
         let Some(lease) = owner.lease_next() else {
             return false;
         };
-        (lease, None, None)
+        (lease, None, None, 0, None)
     };
 
     let is_lxmf = match lease.event() {
@@ -2353,6 +3005,8 @@ fn drive_one_application_event(
                 now_ms,
                 LxmfRetryClass::StoreBusy,
                 None,
+                0,
+                None,
             );
             return true;
         }
@@ -2367,6 +3021,8 @@ fn drive_one_application_event(
             service_fault_observed,
             retry_class,
             retry_message_id,
+            retry_attempt,
+            retry_source,
             now_ms,
         );
     }
@@ -2377,7 +3033,9 @@ fn drive_one_application_event(
         supervisor,
         nomad,
         discovered_peers,
+        retries,
         nomad_destination,
+        proof_probe_destination,
         retry_actions_a,
         retry_actions_b,
         fail_closed_draining,
@@ -2396,7 +3054,9 @@ fn drive_non_lxmf_application_event(
         { config::LXMF_DISCOVERED_PEERS },
         { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
     >,
+    retries: &mut LxmfRetrySet<'static, { config::APPLICATION_EVENT_SLOTS }>,
     nomad_destination: DestinationHash,
+    proof_probe_destination: DestinationHash,
     retry_actions_a: &mut Option<RetainedActions>,
     retry_actions_b: &mut Option<RetainedActions>,
     fail_closed_draining: &mut bool,
@@ -2496,9 +3156,41 @@ fn drive_non_lxmf_application_event(
     }
 
     match lease.event() {
+        ApplicationEvent::DataReceived { destination, .. }
+            if destination == proof_probe_destination.as_bytes() =>
+        {
+            // `rnstransport.probe` is registered with PROVE_ALL. Rete emits
+            // that proof as an immediate packet action on the ingress
+            // interface, so this semantic event intentionally carries no
+            // retained delayed proof. The packet action remains owned by the
+            // ordinary transport-neutral action pipeline.
+            match lease.acknowledge() {
+                Ok(event) => {
+                    drop(event);
+                    info!(
+                        "e290-node stage=reticulum-proof-probe-responder status=ACKNOWLEDGED kind={kind} slot={} generation={} sequence={} proof_policy=prove-all proof_delivery=immediate-action durable-inbox=not-used",
+                        event_id.slot().get(),
+                        event_id.generation().get(),
+                        sequence.get(),
+                    );
+                }
+                Err(failure) => {
+                    let lease = failure.into_lease();
+                    error!(
+                        "e290-node stage=reticulum-proof-probe-responder status=FAIL kind={kind} slot={} generation={} sequence={} reason=unexpected-retained-proof-for-prove-all action=fail-closed-drain",
+                        event_id.slot().get(),
+                        event_id.generation().get(),
+                        sequence.get(),
+                    );
+                    *fail_closed_draining = true;
+                    lease.quarantine(ApplicationEventQuarantineReason::ConsumerFault);
+                }
+            }
+        }
         ApplicationEvent::DataReceived {
             destination,
             payload,
+            ..
         } => match InboxCandidate::new(InboxDestination::new(*destination), payload) {
             Ok(candidate) if pending_inbound.is_none() => {
                 let payload_len = payload.len();
@@ -2533,12 +3225,38 @@ fn drive_non_lxmf_application_event(
             identity,
             hops,
             app_data,
+            ingress,
         } => {
             let destination = *destination;
             let identity = *identity;
             let hops = *hops;
             let app_data_len = app_data.as_ref().map_or(0, |data| data.len());
             let destination_hash = DestinationHash::new(destination);
+            if supervisor.recall_identity(&destination_hash).is_some() {
+                let woken = retries.wake_admission_for_source(destination_hash, now_ms);
+                if woken != 0 {
+                    info!(
+                        "e290-node stage=lxmf-retry status=WOKEN source={destination:02x?} count={woken} trigger=authenticated-announce"
+                    );
+                }
+            }
+            let Some(ingress) = *ingress else {
+                warn!(
+                    "e290-node stage=peer-discovery status=DROPPED destination={destination:02x?} reason=missing-ingress-observation routing=unchanged"
+                );
+                lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+                return true;
+            };
+            let observed_interface = ingress.interface().0;
+            let signal = ingress.signal().map_or(
+                SignalObservations::UNKNOWN,
+                |signal| {
+                    SignalObservations::new(
+                        Some(signal.rssi_dbm()),
+                        Some(signal.snr_db()),
+                    )
+                },
+            );
             let Some(public_key) = supervisor.recall_lxmf_delivery_identity(&destination_hash)
             else {
                 lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
@@ -2551,8 +3269,8 @@ fn drive_non_lxmf_application_event(
                 app_data.as_deref().unwrap_or(&[]),
                 ObservationMetadata::new(
                     hops,
-                    ObservedInterfaceId::new(LORA_INTERFACE.get()),
-                    SignalObservations::UNKNOWN,
+                    ObservedInterfaceId::new(observed_interface),
+                    signal,
                     PeerObservedMillis::new(now_ms),
                 ),
             );
@@ -2563,8 +3281,7 @@ fn drive_non_lxmf_application_event(
                     let event = lease.acknowledge();
                     drop(event);
                     info!(
-                        "e290-node stage=peer-discovery status=OBSERVED destination={destination:02x?} identity={identity:02x?} hops={hops} interface={} app_data_len={app_data_len} generation={generation} disposition={disposition:?}",
-                        LORA_INTERFACE.get(),
+                        "e290-node stage=peer-discovery status=OBSERVED destination={destination:02x?} identity={identity:02x?} hops={hops} interface={observed_interface} app_data_len={app_data_len} generation={generation} disposition={disposition:?}",
                     );
                 }
                 Err(reason) => {
@@ -2765,6 +3482,8 @@ fn drive_lxmf_event(
     service_fault_observed: &mut bool,
     attempted_retry_class: Option<LxmfRetryClass>,
     attempted_message_id: Option<reticulum_lxmf_model::MessageId>,
+    attempted_admission_attempt: u8,
+    attempted_admission_source: Option<DestinationHash>,
     now_ms: u64,
 ) -> bool {
     let event_id = lease.id();
@@ -2785,7 +3504,16 @@ fn drive_lxmf_event(
                 attempted_message_id,
                 LxmfRetryClass::CrossStoreBusy,
             );
-            quarantine_lxmf_retry(lease, retries, authority_fault, now_ms, class, message_id);
+            quarantine_lxmf_retry(
+                lease,
+                retries,
+                authority_fault,
+                now_ms,
+                class,
+                message_id,
+                0,
+                None,
+            );
         }
         ProductLxmfAdmission::DeferredForJournalMutation(lease) => {
             let (class, message_id) = retry_after_pre_io_deferral(
@@ -2793,7 +3521,16 @@ fn drive_lxmf_event(
                 attempted_message_id,
                 LxmfRetryClass::CrossStoreBusy,
             );
-            quarantine_lxmf_retry(lease, retries, authority_fault, now_ms, class, message_id);
+            quarantine_lxmf_retry(
+                lease,
+                retries,
+                authority_fault,
+                now_ms,
+                class,
+                message_id,
+                0,
+                None,
+            );
         }
         ProductLxmfAdmission::RuntimeUnavailable(lease) => {
             lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
@@ -2812,6 +3549,7 @@ fn drive_lxmf_event(
         ProductLxmfAdmission::Ingress(DurableIngressOutcome::Retained(retained)) => {
             let pending = storage.lxmf_pending_message_id();
             let action = retention_action(retained.reason(), pending);
+            let deferred_source = admission_deferred_source(retained.reason());
             let (lease, reason) = retained.into_parts();
             match action {
                 LxmfRetentionAction::Retry(class) => {
@@ -2829,17 +3567,33 @@ fn drive_lxmf_event(
                     } else {
                         (class, None)
                     };
-                    quarantine_lxmf_retry(
+                    let (prior_admission_attempt, admission_source) =
+                        if class == LxmfRetryClass::AdmissionDeferred {
+                            let prior = if attempted_retry_class
+                                == Some(LxmfRetryClass::AdmissionDeferred)
+                                && attempted_admission_source == deferred_source
+                            {
+                                attempted_admission_attempt
+                            } else {
+                                0
+                            };
+                            (prior, deferred_source)
+                        } else {
+                            (0, None)
+                        };
+                    let retry_not_before_ms = quarantine_lxmf_retry(
                         lease,
                         retries,
                         authority_fault,
                         now_ms,
                         class,
                         message_id,
+                        prior_admission_attempt,
+                        admission_source,
                     );
                     warn!(
                         "e290-node stage=lxmf-ingress status=RETRY reason={reason:?} class={class:?} retry_not_before_ms={} proof=retained",
-                        now_ms.saturating_add(config::STORAGE_RETRY_BACKOFF_MS),
+                        retry_not_before_ms,
                     );
                 }
                 LxmfRetentionAction::HoldPendingFault => {
@@ -2857,6 +3611,8 @@ fn drive_lxmf_event(
                         u64::MAX,
                         LxmfRetryClass::StoreFaultHold,
                         Some(message_id),
+                        0,
+                        None,
                     );
                     error!(
                         "e290-node stage=lxmf-ingress status=FAIL-STOP reason={reason:?} message_id={:02x?} action=hold-exact-token-no-retry-until-reset other-flash-mutation=blocked routing=continue proof=not-sent",
@@ -2919,24 +3675,38 @@ fn quarantine_lxmf_retry(
     now_ms: u64,
     class: LxmfRetryClass,
     message_id: Option<reticulum_lxmf_model::MessageId>,
-) {
+    prior_admission_attempt: u8,
+    admission_source: Option<DestinationHash>,
+) -> u64 {
     let event_id = lease.id();
+    let sequence = lease.sequence();
     let token = lease.quarantine_for_retry(LXMF_RETRY_QUARANTINE);
-    let retry_not_before_ms = if class == LxmfRetryClass::StoreFaultHold {
-        u64::MAX
-    } else {
-        now_ms.saturating_add(config::STORAGE_RETRY_BACKOFF_MS)
+    let (retry_not_before_ms, admission_attempt, admission_source) = match class {
+        LxmfRetryClass::StoreFaultHold => (u64::MAX, 0, None),
+        LxmfRetryClass::AdmissionDeferred => {
+            let attempt = prior_admission_attempt.saturating_add(1);
+            let delay_ms = admission_retry_delay_ms(attempt, sequence);
+            (now_ms.saturating_add(delay_ms), attempt, admission_source)
+        }
+        _ => (
+            now_ms.saturating_add(config::STORAGE_RETRY_BACKOFF_MS),
+            0,
+            None,
+        ),
     };
     retain_lxmf_retry_entry(
         retries,
         authority_fault,
-        LxmfRetryEntry::new(token, retry_not_before_ms, class, message_id),
+        LxmfRetryEntry::new(token, retry_not_before_ms, class, message_id)
+            .with_admission_state(admission_attempt, admission_source),
     );
     info!(
-        "e290-node stage=lxmf-retry status=RETAINED slot={} generation={} class={class:?} retry_not_before_ms={retry_not_before_ms}",
+        "e290-node stage=lxmf-retry status=RETAINED slot={} generation={} class={class:?} admission_attempt={admission_attempt} admission_source={:?} retry_not_before_ms={retry_not_before_ms}",
         event_id.slot().get(),
         event_id.generation().get(),
+        admission_source.map(|source| *source.as_bytes()),
     );
+    retry_not_before_ms
 }
 
 fn retain_lxmf_retry_entry(
@@ -3083,14 +3853,19 @@ fn drive_inbound_candidate(
 fn step_authenticated_api(
     storage: &mut ProductStorageCoordinator,
     supervisor: &ProductSupervisor,
+    radio_diagnostics: &RadioDiagnosticsCell,
+    route_diagnostics: &mut RouteDiagnosticsSnapshot<{ config::PATHS }>,
     discovered_peers: &DiscoveredPeers<
         { config::LXMF_DISCOVERED_PEERS },
         { config::LXMF_DISCOVERED_PEER_APP_DATA_BYTES },
     >,
     peer_discovery_incarnation: LxmfPeerDiscoveryIncarnation,
     now_ms: u64,
+    manual_announce_schedule: &mut ManualAnnounceSchedule,
+    announce_now_seconds: u64,
     nomad: &mut ProductNomadRuntimeState,
     nomad_api: &mut NomadFetchApiState,
+    reticulum_probe: &mut ProductReticulumProbeState,
     nomad_service_enabled: bool,
     identity: IdentitySummary,
     handoff: &mut NodeHandoff<CriticalSectionRawMutex, AuthenticatedGrant>,
@@ -3128,12 +3903,23 @@ fn step_authenticated_api(
             *peer_discovery_incarnation.as_bytes(),
             nomad_service_enabled,
         );
+        let mut probe_port = ProductReticulumProbePort::new(
+            reticulum_probe,
+            *peer_discovery_incarnation.as_bytes(),
+            now_ms,
+            nomad_service_enabled,
+        );
         let dispatch = storage.dispatch_authenticated_request(
             supervisor,
+            radio_diagnostics,
+            route_diagnostics,
             discovered_peers,
             peer_discovery_incarnation,
             now_ms,
+            manual_announce_schedule,
+            announce_now_seconds,
             &mut nomad_port,
+            &mut probe_port,
             request,
             identity,
         );
@@ -3167,6 +3953,388 @@ fn step_authenticated_api(
         return true;
     }
     false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_one_reticulum_probe(
+    supervisor: &mut ProductSupervisor,
+    state: &mut ProductReticulumProbeState,
+    retry_actions_a: &mut Option<RetainedActions>,
+    retry_actions_b: &mut Option<RetainedActions>,
+    fail_closed_draining: &mut bool,
+    ordinary_owners_quiescent: bool,
+    rng: &mut Trng,
+    now_ms: u64,
+) -> bool {
+    match state.next_drive(now_ms) {
+        ReticulumProbeDrive::Idle | ReticulumProbeDrive::AwaitingAttempt => false,
+        ReticulumProbeDrive::ResolveIdentity {
+            destination,
+            request_path,
+        } => match supervisor.prepare_proof_probe_destination_for(&destination) {
+            Ok(probe_destination) => {
+                match state.identity_resolved(destination, probe_destination, now_ms) {
+                    Ok(()) => info!(
+                        "e290-node stage=reticulum-proof-probe status=IDENTITY-READY requested={:02x?} probe_destination={:02x?} path=fresh-lookup-required",
+                        destination.as_bytes(),
+                        probe_destination.as_bytes(),
+                    ),
+                    Err(reason) => {
+                        error!(
+                            "e290-node stage=reticulum-proof-probe status=FAIL reason={reason:?} source=identity-transition action=fail-closed-drain"
+                        );
+                        *fail_closed_draining = true;
+                    }
+                }
+                true
+            }
+            Err(ProofProbeIdentityAliasError::SourceIdentityUnknown)
+                if request_path && ordinary_owners_quiescent =>
+            {
+                offer_reticulum_probe_path_request(
+                    supervisor,
+                    state,
+                    retry_actions_a,
+                    retry_actions_b,
+                    fail_closed_draining,
+                    destination,
+                    "identity",
+                    rng,
+                    now_ms,
+                )
+            }
+            Err(ProofProbeIdentityAliasError::SourceIdentityUnknown) => false,
+            Err(reason) => {
+                error!(
+                    "e290-node stage=reticulum-proof-probe status=FAILED reason=identity-alias:{reason:?} action=report-internal"
+                );
+                if state
+                    .fail_before_attempt(reticulum_device_api::ProbeFailure::Internal)
+                    .is_err()
+                {
+                    *fail_closed_draining = true;
+                }
+                true
+            }
+        },
+        ReticulumProbeDrive::ResolvePath {
+            destination,
+            request_path,
+        } => {
+            if supervisor.has_usable_path(&destination) {
+                match state.path_resolved(destination, now_ms) {
+                    Ok(()) => info!(
+                        "e290-node stage=reticulum-proof-probe status=PATH-READY probe_destination={:02x?} route_hops={:?}",
+                        destination.as_bytes(),
+                        supervisor.retained_path_hops(&destination),
+                    ),
+                    Err(reason) => {
+                        error!(
+                            "e290-node stage=reticulum-proof-probe status=FAIL reason={reason:?} source=path-transition action=fail-closed-drain"
+                        );
+                        *fail_closed_draining = true;
+                    }
+                }
+                true
+            } else if request_path && ordinary_owners_quiescent {
+                offer_reticulum_probe_path_request(
+                    supervisor,
+                    state,
+                    retry_actions_a,
+                    retry_actions_b,
+                    fail_closed_draining,
+                    destination,
+                    "probe-destination",
+                    rng,
+                    now_ms,
+                )
+            } else {
+                false
+            }
+        }
+        ReticulumProbeDrive::Prepare { destination } => {
+            let route_hops = match (
+                supervisor.has_usable_path(&destination),
+                supervisor.retained_path_hops(&destination),
+            ) {
+                (true, Some(route_hops)) => route_hops,
+                _ => {
+                    warn!(
+                        "e290-node stage=reticulum-proof-probe status=FAILED reason=path-lost-before-prepare probe_destination={:02x?} public=NoPath",
+                        destination.as_bytes(),
+                    );
+                    if state
+                        .fail_before_attempt(reticulum_device_api::ProbeFailure::NoPath)
+                        .is_err()
+                    {
+                        *fail_closed_draining = true;
+                    }
+                    return true;
+                }
+            };
+            let mut payload = [0_u8; PROBE_PAYLOAD_BYTES];
+            rng.fill_bytes(&mut payload);
+            let deadline = TxLeaseDeadline::new(MonotonicMillis::new(
+                now_ms.saturating_add(PROBE_DATA_OWNER_LEASE_MS),
+            ));
+            let result = supervisor.try_prepare_data(
+                DataRouterPrepareRequest {
+                    destination,
+                    plaintext: &payload,
+                    rns_now: MonotonicSeconds::new(now_ms / 1_000),
+                    deadline,
+                },
+                MonotonicMillis::new(now_ms),
+                rng,
+            );
+            payload.fill(0);
+            match result {
+                NodeInterfaceDataPrepareResult::Coordinator(DataRouterPrepareResult::Prepared(
+                    hop,
+                )) => {
+                    match state.prepared(destination, hop.prepared(), route_hops, now_ms) {
+                        Ok(()) => info!(
+                            "e290-node stage=reticulum-proof-probe status=PREPARED probe_destination={:02x?} slot={} route_hops={} owner_deadline_ms={} durable_submission_journal=bypassed",
+                            destination.as_bytes(),
+                            hop.slot_id().get(),
+                            route_hops,
+                            deadline.instant().get(),
+                        ),
+                        Err(reason) => {
+                            error!(
+                                "e290-node stage=reticulum-proof-probe status=FAIL reason={reason:?} source=prepared-owner-binding action=fail-closed-drain"
+                            );
+                            *fail_closed_draining = true;
+                        }
+                    }
+                    true
+                }
+                NodeInterfaceDataPrepareResult::Coordinator(
+                    DataRouterPrepareResult::NoAvailable,
+                ) => false,
+                NodeInterfaceDataPrepareResult::Coordinator(
+                    DataRouterPrepareResult::Rejected { reason, .. },
+                ) => {
+                    let failure = match reason {
+                        SubmitError::NoEligibleInterface { .. } => {
+                            reticulum_device_api::ProbeFailure::Dispatch
+                        }
+                        SubmitError::UnknownDestination => {
+                            reticulum_device_api::ProbeFailure::IdentityUnavailable
+                        }
+                        _ => reticulum_device_api::ProbeFailure::Internal,
+                    };
+                    warn!(
+                        "e290-node stage=reticulum-proof-probe status=FAILED reason=prepare:{reason:?} public={failure:?}"
+                    );
+                    if state.fail_before_attempt(failure).is_err() {
+                        *fail_closed_draining = true;
+                    }
+                    true
+                }
+                NodeInterfaceDataPrepareResult::Coordinator(
+                    DataRouterPrepareResult::RejectedQuarantined {
+                        reason,
+                        observation,
+                    },
+                ) => {
+                    error!(
+                        "e290-node stage=reticulum-proof-probe status=FAIL reason=prepare-quarantined:{reason:?} recovery={observation:?} action=fail-closed-drain"
+                    );
+                    *fail_closed_draining = true;
+                    true
+                }
+                NodeInterfaceDataPrepareResult::Coordinator(
+                    DataRouterPrepareResult::OwnerMismatch | DataRouterPrepareResult::Disabled(_),
+                )
+                | NodeInterfaceDataPrepareResult::Fault(_) => {
+                    error!(
+                        "e290-node stage=reticulum-proof-probe status=FAIL reason=data-coordinator-unavailable action=fail-closed-drain"
+                    );
+                    *fail_closed_draining = true;
+                    true
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn offer_reticulum_probe_path_request(
+    supervisor: &mut ProductSupervisor,
+    state: &mut ProductReticulumProbeState,
+    retry_actions_a: &mut Option<RetainedActions>,
+    retry_actions_b: &mut Option<RetainedActions>,
+    fail_closed_draining: &mut bool,
+    destination: DestinationHash,
+    lookup: &'static str,
+    rng: &mut Trng,
+    now_ms: u64,
+) -> bool {
+    let actions = match supervisor.request_path(&destination, rng) {
+        Ok(actions) => actions,
+        Err(reason) => {
+            error!(
+                "e290-node stage=reticulum-proof-probe status=FAILED reason=path-request-build:{reason:?} lookup={lookup} action=report-internal"
+            );
+            if state
+                .fail_before_attempt(reticulum_device_api::ProbeFailure::Internal)
+                .is_err()
+            {
+                *fail_closed_draining = true;
+            }
+            return true;
+        }
+    };
+    if state.path_request_attempted(destination, now_ms).is_err() {
+        error!(
+            "e290-node stage=reticulum-proof-probe status=FAIL reason=path-request-state-correlation lookup={lookup} action=retain-actions-and-fail-closed-drain"
+        );
+        *fail_closed_draining = true;
+    }
+    match supervisor.try_offer_actions(actions, config::ordinary_admission(now_ms)) {
+        Ok(()) => {
+            info!(
+                "e290-node stage=reticulum-proof-probe status=PATH-REQUEST-QUEUED lookup={lookup} destination={:02x?} retry_after_ms={}",
+                destination.as_bytes(),
+                reticulum_heltec_vision_master_e290_node::reticulum_probe::PROBE_PATH_REQUEST_INTERVAL_MS,
+            );
+        }
+        Err(failure) => match handle_action_offer_failure(failure, "reticulum-proof-probe-path") {
+            ActionOfferHandling::Retry(retained) => {
+                if retry_actions_a.is_none() {
+                    *retry_actions_a = Some(retained);
+                } else if retry_actions_b.is_none() {
+                    *retry_actions_b = Some(retained);
+                } else {
+                    error!(
+                        "e290-node stage=reticulum-proof-probe status=FAIL reason=retry-owner-capacity-contradiction action=fail-closed-drain"
+                    );
+                    *fail_closed_draining = true;
+                }
+            }
+            ActionOfferHandling::RetainAndDrain(retained) => {
+                if retry_actions_a.is_none() {
+                    *retry_actions_a = Some(retained);
+                } else if retry_actions_b.is_none() {
+                    *retry_actions_b = Some(retained);
+                }
+                *fail_closed_draining = true;
+            }
+        },
+    }
+    true
+}
+
+fn drive_reticulum_probe_recovery(
+    supervisor: &mut ProductSupervisor,
+    state: &mut ProductReticulumProbeState,
+    fail_closed_draining: &mut bool,
+) -> bool {
+    let mut exact = None;
+    for observation in supervisor.recovered_data_observations() {
+        match state.classifies_recovery(observation) {
+            Ok(true) => {
+                exact = Some(observation);
+                break;
+            }
+            Ok(false) => {}
+            Err(reason) => {
+                error!(
+                    "e290-node stage=reticulum-proof-probe-recovery status=FAIL reason={reason:?} action=fail-closed-drain"
+                );
+                *fail_closed_draining = true;
+                return true;
+            }
+        }
+    }
+    let Some(observation) = exact else {
+        return false;
+    };
+    if let Err(reason) = state.observe_recovery(observation) {
+        error!(
+            "e290-node stage=reticulum-proof-probe-recovery status=FAIL reason={reason:?} source=tracker action=fail-closed-drain"
+        );
+        *fail_closed_draining = true;
+        return true;
+    }
+    match supervisor.acknowledge_recovered_data(observation) {
+        Ok(()) => warn!(
+            "e290-node stage=reticulum-proof-probe-recovery status=ACKNOWLEDGED reason={:?} receipt=await-terminal durable_submission_journal=bypassed",
+            observation.record().reason(),
+        ),
+        Err(reason) => {
+            error!(
+                "e290-node stage=reticulum-proof-probe-recovery status=FAIL reason=ack:{reason:?} action=fail-closed-drain"
+            );
+            *fail_closed_draining = true;
+        }
+    }
+    true
+}
+
+fn drive_reticulum_probe_terminal(
+    supervisor: &mut ProductSupervisor,
+    state: &mut ProductReticulumProbeState,
+    fail_closed_draining: &mut bool,
+    now_ms: u64,
+) -> bool {
+    let mut exact = None;
+    for terminal in supervisor.terminal_attempts() {
+        match state.classifies_terminal(terminal) {
+            Ok(true) => {
+                exact = Some(terminal);
+                break;
+            }
+            Ok(false) => {}
+            Err(reason) => {
+                error!(
+                    "e290-node stage=reticulum-proof-probe-terminal status=FAIL reason={reason:?} action=fail-closed-drain"
+                );
+                *fail_closed_draining = true;
+                return true;
+            }
+        }
+    }
+    let Some(terminal) = exact else {
+        return false;
+    };
+    if let Err(reason) = state.observe_terminal(terminal, now_ms) {
+        error!(
+            "e290-node stage=reticulum-proof-probe-terminal status=FAIL reason={reason:?} source=tracker action=fail-closed-drain"
+        );
+        *fail_closed_draining = true;
+        return true;
+    }
+    let acknowledged = match supervisor.acknowledge_terminal(terminal.handle()) {
+        Ok(acknowledged) if acknowledged == terminal => acknowledged,
+        Ok(acknowledged) => {
+            error!(
+                "e290-node stage=reticulum-proof-probe-terminal status=FAIL reason=ack-mismatch expected={terminal:?} observed={acknowledged:?} action=fail-closed-drain"
+            );
+            *fail_closed_draining = true;
+            return true;
+        }
+        Err(reason) => {
+            error!(
+                "e290-node stage=reticulum-proof-probe-terminal status=FAIL reason=ack:{reason:?} action=fail-closed-drain"
+            );
+            *fail_closed_draining = true;
+            return true;
+        }
+    };
+    match state.finalize_terminal(acknowledged) {
+        Ok(response) => info!(
+            "e290-node stage=reticulum-proof-probe-terminal status=COMPLETE result={response:?} signal_semantics=proof-receiver-local-final-return-hop durable_submission_journal=bypassed"
+        ),
+        Err(reason) => {
+            error!(
+                "e290-node stage=reticulum-proof-probe-terminal status=FAIL reason={reason:?} source=finalize-after-ack action=fail-closed-drain"
+            );
+            *fail_closed_draining = true;
+        }
+    }
+    true
 }
 
 fn step_pairing_frontier(
@@ -4360,7 +5528,7 @@ fn handle_terminal_protocol_dispatch(
     terminal: bool,
 ) -> bool {
     match protocol {
-        OrdinaryProtocolDispatch::Submission(SubmissionProtocolDispatch::Path(_)) => false,
+        OrdinaryProtocolDispatch::Submission(SubmissionProtocolDispatch::Path { .. }) => false,
         OrdinaryProtocolDispatch::Submission(SubmissionProtocolDispatch::Link { offer, link }) => {
             let aborted = supervisor.abort_unestablished_link(link);
             warn!(

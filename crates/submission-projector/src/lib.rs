@@ -224,6 +224,18 @@ pub enum ProjectionProgress {
     AlreadyObserved,
     /// A volatile attempt was newly correlated after the preparation barrier.
     AttemptBound,
+    /// A complete LXMF attempt frame was validated under the already-durable
+    /// logical delivery loop without appending attempt-specific state.
+    AttemptDurablyCovered,
+    /// An exact recovered packet owner is covered by an already-durable LXMF
+    /// delivery loop and is ready for acknowledgement without an attempt audit.
+    RecoveryDurablyCovered,
+    /// A retryable LXMF attempt terminal is ready for exact upstream
+    /// acknowledgement while its durable logical delivery loop remains
+    /// `Preparing`.
+    RetryableAttemptTerminal,
+    /// A fresh projector restored one already-durable LXMF delivery loop.
+    DeliveryLoopResumed,
     /// The observation requires no new durable or volatile action yet.
     NoAction,
 }
@@ -424,6 +436,20 @@ impl PendingRecord {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StoredAcknowledgement {
     action: AcknowledgementAction,
+    terminal_effect: TerminalAcknowledgementEffect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalAcknowledgementEffect {
+    RetainAttempt,
+    ClearAttemptForRetry,
+    CompletePairedRetryTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PairedRetryTerminal {
+    outcome: AttemptOutcome,
+    acknowledged: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,6 +460,8 @@ struct SubmissionSlot {
     last_transport: Option<TransportObservation>,
     terminal_acknowledgement: Option<StoredAcknowledgement>,
     recovery_acknowledgement: Option<StoredAcknowledgement>,
+    recovered_owner_acknowledged: bool,
+    paired_retry_terminal: Option<PairedRetryTerminal>,
     deferred_final: Option<FinalDisposition>,
 }
 
@@ -446,6 +474,8 @@ impl SubmissionSlot {
             last_transport: None,
             terminal_acknowledgement: None,
             recovery_acknowledgement: None,
+            recovered_owner_acknowledged: false,
+            paired_retry_terminal: None,
             deferred_final: None,
         }
     }
@@ -529,6 +559,39 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
     /// Number of volatile submission correlations currently retained.
     pub fn retained_submissions(&self) -> usize {
         self.slots.iter().flatten().count()
+    }
+
+    /// Resolve the submission bound to one exact terminal attempt.
+    ///
+    /// This immutable lookup requires both the generation-checked handle and
+    /// complete receipt token to match the retained attempt binding. It does
+    /// not latch a projector fault and grants no acknowledgement authority.
+    /// Delivery orchestration uses it only after [`Self::observe_terminal`]
+    /// succeeds, to recover immutable intent metadata such as destination.
+    pub fn submission_for_terminal(&self, terminal: TerminalAttempt) -> Option<SubmissionId> {
+        self.slots.iter().flatten().find_map(|slot| {
+            slot.attempt
+                .is_some_and(|attempt| {
+                    attempt.handle == terminal.handle() && attempt.token == terminal.token()
+                })
+                .then_some(slot.id)
+        })
+    }
+
+    /// Resolve the durable submission bound to one exact prepared packet.
+    ///
+    /// This read-only correlation requires both the generation-scoped handle
+    /// and complete proof token to match. It is intended for diagnostics that
+    /// need immutable submission metadata at the router-acceptance boundary;
+    /// it grants no permission to mutate or acknowledge the attempt.
+    pub fn submission_for_prepared(&self, prepared: PreparedPacket) -> Option<SubmissionId> {
+        self.slots.iter().flatten().find_map(|slot| {
+            slot.attempt
+                .is_some_and(|attempt| {
+                    attempt.handle == prepared.handle() && attempt.token == prepared.attempt()
+                })
+                .then_some(slot.id)
+        })
     }
 
     /// Iterate exact journal requests in stable projector-slot order.
@@ -633,6 +696,38 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
         });
         self.slots[slot_index] = Some(slot);
         Ok(ProjectionProgress::Persist(request.handle()))
+    }
+
+    /// Restore volatile correlation for one already-durable LXMF delivery loop.
+    ///
+    /// This operation appends no journal record. It is intended for boot
+    /// recovery after complete replay has established an LXMF submission in
+    /// `Preparing`; generic RNS DATA retains its conservative one-shot policy
+    /// and cannot use this restoration seam.
+    pub fn resume_lxmf_delivery_loop<const INDEXED: usize>(
+        &mut self,
+        live: &SubmissionIndex<INDEXED>,
+        id: SubmissionId,
+    ) -> Result<ProjectionProgress, ProjectorError> {
+        self.ensure_healthy()?;
+        let indexed = live.get(id).ok_or(ProjectorError::UnknownSubmission)?;
+        if indexed.state() != LifecycleState::Preparing
+            || indexed.accepted().intent().lxmf_message().is_none()
+        {
+            return Err(self.latch(ProjectorFault::UnexpectedDurableState(id)));
+        }
+        if let Some(slot_index) = self.slot_for_id(id) {
+            let slot = self.slots[slot_index].unwrap();
+            if let Some(pending) = slot.pending {
+                return Ok(ProjectionProgress::Persist(pending.request().handle()));
+            }
+            return Ok(ProjectionProgress::AlreadyObserved);
+        }
+        let Some(slot_index) = self.slots.iter().position(Option::is_none) else {
+            return Err(ProjectorError::CapacityExhausted);
+        };
+        self.slots[slot_index] = Some(SubmissionSlot::new(id));
+        Ok(ProjectionProgress::DeliveryLoopResumed)
     }
 
     /// Project one transport-neutral permanent-node preparation observation.
@@ -748,6 +843,13 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
             return Err(ProjectorError::WritePending);
         }
         match indexed.state() {
+            LifecycleState::Preparing if indexed.accepted().intent().lxmf_message().is_some() => {
+                // The durable Preparing record owns the complete signed LXMF
+                // message across any number of fresh volatile RNS attempts.
+                // Attempt-specific packet metadata remains in this binding so
+                // a winning proof can still persist exact delivery evidence.
+                Ok(ProjectionProgress::AttemptDurablyCovered)
+            }
             LifecycleState::Preparing => {
                 if current.terminal_acknowledgement.is_some()
                     || current.recovery_acknowledgement.is_some()
@@ -817,6 +919,41 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
             }
             return Err(ProjectorError::WritePending);
         }
+        if indexed.state() == LifecycleState::Preparing
+            && indexed.accepted().intent().lxmf_message().is_some()
+            && is_retryable_lxmf_attempt_terminal(terminal.outcome())
+        {
+            let requires_recovered_owner =
+                retryable_terminal_requires_recovered_owner(terminal.outcome())
+                    || current.recovery_acknowledgement.is_some()
+                    || current.recovered_owner_acknowledged
+                    || current
+                        .last_transport
+                        .is_some_and(|transport| transport.kind == TransportKind::Recovered);
+            if requires_recovered_owner && let Some(paired) = current.paired_retry_terminal {
+                return if paired.outcome == terminal.outcome() {
+                    Ok(ProjectionProgress::AlreadyObserved)
+                } else {
+                    Err(self.latch(ProjectorFault::TerminalOutcomeMismatch(id)))
+                };
+            }
+            let action = self.new_acknowledgement(id, AcknowledgementKind::Terminal(terminal))?;
+            let slot = self.slots[index].as_mut().unwrap();
+            let terminal_effect = if requires_recovered_owner {
+                slot.paired_retry_terminal = Some(PairedRetryTerminal {
+                    outcome: terminal.outcome(),
+                    acknowledged: false,
+                });
+                TerminalAcknowledgementEffect::CompletePairedRetryTerminal
+            } else {
+                TerminalAcknowledgementEffect::ClearAttemptForRetry
+            };
+            slot.terminal_acknowledgement = Some(StoredAcknowledgement {
+                action,
+                terminal_effect,
+            });
+            return Ok(ProjectionProgress::RetryableAttemptTerminal);
+        }
         if matches!(
             indexed.state(),
             LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::Internal(_)))
@@ -829,7 +966,10 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
             // terminal is safe to release only after both durable records.
             let action = self.new_acknowledgement(id, AcknowledgementKind::Terminal(terminal))?;
             self.slots[index].as_mut().unwrap().terminal_acknowledgement =
-                Some(StoredAcknowledgement { action });
+                Some(StoredAcknowledgement {
+                    action,
+                    terminal_effect: TerminalAcknowledgementEffect::RetainAttempt,
+                });
             return Ok(ProjectionProgress::AlreadyObserved);
         }
         let preframe_details = if indexed.state() == LifecycleState::Preparing
@@ -855,21 +995,75 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
             }
             let action = self.new_acknowledgement(id, AcknowledgementKind::Terminal(terminal))?;
             self.slots[index].as_mut().unwrap().terminal_acknowledgement =
-                Some(StoredAcknowledgement { action });
+                Some(StoredAcknowledgement {
+                    action,
+                    terminal_effect: TerminalAcknowledgementEffect::RetainAttempt,
+                });
             return Ok(ProjectionProgress::AlreadyObserved);
         }
         self.plan_final(live, id, disposition, Some(terminal))
     }
 
-    /// Project one exact recovered-owner observation to a transport audit.
+    /// Project one exact recovered-owner observation.
     ///
-    /// The exact observation is retained as an acknowledgement action only
-    /// after the audit record is durable.
+    /// Generic one-shot submissions retain the persist-before-ack transport
+    /// audit. A durable LXMF `Preparing` record already owns the immutable
+    /// logical message across any number of volatile carrier attempts, so its
+    /// exact recovered packet owner is retained directly as an acknowledgement
+    /// action without consuming the submission's single audit record. The
+    /// attempt binding remains live until its proof or timeout terminal is also
+    /// reconciled.
     pub fn observe_recovered<const INDEXED: usize>(
         &mut self,
         live: &SubmissionIndex<INDEXED>,
         observation: TxRecoveryObservation,
     ) -> Result<ProjectionProgress, ProjectorError> {
+        self.ensure_healthy()?;
+        let index = self.correlated_slot(observation.attempt_handle(), observation.attempt())?;
+        let current = self.slots[index].unwrap();
+        let id = current.id;
+        let indexed = live
+            .get(id)
+            .ok_or_else(|| self.latch(ProjectorFault::UnexpectedDurableState(id)))?;
+        if indexed.state() == LifecycleState::Preparing
+            && indexed.accepted().intent().lxmf_message().is_some()
+        {
+            let transport = TransportObservation {
+                kind: TransportKind::Recovered,
+                observation,
+            };
+            if let Some(pending) = current.pending {
+                if pending_transport(pending) == Some(transport) {
+                    return Ok(ProjectionProgress::AlreadyObserved);
+                }
+                return Err(ProjectorError::WritePending);
+            }
+            if let Some(ack) = current.recovery_acknowledgement {
+                return if ack.action.kind == AcknowledgementKind::Recovered(observation) {
+                    Ok(ProjectionProgress::AlreadyObserved)
+                } else {
+                    Err(ProjectorError::AcknowledgementPending)
+                };
+            }
+            if let Some(existing) = current.last_transport {
+                return if existing == transport {
+                    Ok(ProjectionProgress::AlreadyObserved)
+                } else {
+                    Err(self.latch(ProjectorFault::TransportObservationConflict(id)))
+                };
+            }
+
+            let action =
+                self.new_acknowledgement(id, AcknowledgementKind::Recovered(observation))?;
+            let slot = self.slots[index].as_mut().unwrap();
+            slot.last_transport = Some(transport);
+            slot.recovered_owner_acknowledged = false;
+            slot.recovery_acknowledgement = Some(StoredAcknowledgement {
+                action,
+                terminal_effect: TerminalAcknowledgementEffect::RetainAttempt,
+            });
+            return Ok(ProjectionProgress::RecoveryDurablyCovered);
+        }
         self.observe_transport(live, TransportKind::Recovered, observation)
     }
 
@@ -1021,14 +1215,48 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
                 }))
             }
             AcknowledgementReply::Completed => {
+                let mut slot = self.slots[index].unwrap();
                 match action.kind {
-                    AcknowledgementKind::Terminal(_) => {
-                        self.slots[index].as_mut().unwrap().terminal_acknowledgement = None;
+                    AcknowledgementKind::Terminal(terminal) => {
+                        slot.terminal_acknowledgement = None;
+                        match stored.terminal_effect {
+                            TerminalAcknowledgementEffect::RetainAttempt => {}
+                            TerminalAcknowledgementEffect::ClearAttemptForRetry => {
+                                slot.attempt = None;
+                                slot.recovered_owner_acknowledged = false;
+                                slot.paired_retry_terminal = None;
+                            }
+                            TerminalAcknowledgementEffect::CompletePairedRetryTerminal => {
+                                let Some(mut paired) = slot.paired_retry_terminal else {
+                                    return Err(
+                                        self.latch(ProjectorFault::AcknowledgementReplyMismatch)
+                                    );
+                                };
+                                if paired.outcome != terminal.outcome() {
+                                    return Err(
+                                        self.latch(ProjectorFault::AcknowledgementReplyMismatch)
+                                    );
+                                }
+                                paired.acknowledged = true;
+                                slot.paired_retry_terminal = Some(paired);
+                            }
+                        }
                     }
                     AcknowledgementKind::Recovered(_) => {
-                        self.slots[index].as_mut().unwrap().recovery_acknowledgement = None;
+                        slot.recovery_acknowledgement = None;
+                        slot.recovered_owner_acknowledged = true;
                     }
                 }
+                if slot.recovered_owner_acknowledged
+                    && slot
+                        .paired_retry_terminal
+                        .is_some_and(|paired| paired.acknowledged)
+                {
+                    slot.attempt = None;
+                    slot.recovered_owner_acknowledged = false;
+                    slot.paired_retry_terminal = None;
+                }
+                self.slots[index] = Some(slot);
                 Ok(())
             }
         }
@@ -1155,7 +1383,11 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
         }
         match current.attempt {
             None => {
-                self.slots[index].as_mut().unwrap().attempt = Some(binding);
+                let slot = self.slots[index].as_mut().unwrap();
+                slot.attempt = Some(binding);
+                slot.last_transport = None;
+                slot.recovered_owner_acknowledged = false;
+                slot.paired_retry_terminal = None;
                 Ok(ProjectionProgress::AttemptBound)
             }
             Some(existing) if existing == binding => Ok(ProjectionProgress::AlreadyObserved),
@@ -1328,7 +1560,10 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
                 if let Some(terminal) = terminal {
                     let action =
                         self.new_acknowledgement(slot.id, AcknowledgementKind::Terminal(terminal))?;
-                    slot.terminal_acknowledgement = Some(StoredAcknowledgement { action });
+                    slot.terminal_acknowledgement = Some(StoredAcknowledgement {
+                        action,
+                        terminal_effect: TerminalAcknowledgementEffect::RetainAttempt,
+                    });
                 }
                 self.slots[index] = Some(slot);
             }
@@ -1343,7 +1578,11 @@ impl<const SUBMISSIONS: usize> SubmissionProjector<SUBMISSIONS> {
                         slot.id,
                         AcknowledgementKind::Recovered(transport.observation),
                     )?;
-                    slot.recovery_acknowledgement = Some(StoredAcknowledgement { action });
+                    slot.recovered_owner_acknowledged = false;
+                    slot.recovery_acknowledgement = Some(StoredAcknowledgement {
+                        action,
+                        terminal_effect: TerminalAcknowledgementEffect::RetainAttempt,
+                    });
                 }
                 self.slots[index] = Some(slot);
             }
@@ -1476,6 +1715,28 @@ fn terminal_disposition(
             }
         }
     }
+}
+
+fn is_retryable_lxmf_attempt_terminal(outcome: AttemptOutcome) -> bool {
+    matches!(
+        outcome,
+        AttemptOutcome::DeliveryTimeout
+            | AttemptOutcome::Unsent(
+                AttemptUnsentReason::QueueRollback
+                    | AttemptUnsentReason::PermitDeadlineExpired
+                    | AttemptUnsentReason::RecoveryRequired
+                    | AttemptUnsentReason::Unpermitted(_)
+            )
+    )
+}
+
+fn retryable_terminal_requires_recovered_owner(outcome: AttemptOutcome) -> bool {
+    matches!(
+        outcome,
+        AttemptOutcome::Unsent(
+            AttemptUnsentReason::PermitDeadlineExpired | AttemptUnsentReason::RecoveryRequired
+        )
+    )
 }
 
 fn recovery_reason(reason: TxRecoveryReason) -> TransportRecoveryReason {

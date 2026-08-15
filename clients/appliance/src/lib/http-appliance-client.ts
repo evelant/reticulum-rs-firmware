@@ -5,7 +5,10 @@ import type {
   ApplianceSnapshot,
   ContactRequest,
   ContactView,
+  ConversationPeerView,
   HttpApplianceSnapshot,
+  MessageActivityPageRequest,
+  MessageActivityPageView,
   MutationResponse,
   NearbyPeerView,
   NoContent,
@@ -14,7 +17,16 @@ import type {
   NomadFetchStartRequest,
   NomadFetchStartResponse,
   OnboardingView,
+  RadioRoutesStatusView,
+  RadioTracePageRequest,
+  RadioTracePageView,
   RecoveryRequest,
+  ReticulumProbePollRequest,
+  ReticulumProbePollResponse,
+  ReticulumProbeStartRequest,
+  ReticulumProbeStartResponse,
+  RetrySendRequest,
+  RetrySendResponse,
   SendRequest,
   SendResponse,
   SessionRequest,
@@ -74,8 +86,20 @@ export class HttpApplianceClient implements ApplianceClient {
     return this.#request("/api/v1/contacts");
   }
 
+  conversationPeers(): Promise<ConversationPeerView[]> {
+    return this.#request("/api/v1/conversations");
+  }
+
   nearbyPeers(): Promise<NearbyPeerView[]> {
     return this.#request("/api/v1/nearby");
+  }
+
+  radioRoutesStatus(): Promise<RadioRoutesStatusView> {
+    return this.#request("/api/v1/radio-routes");
+  }
+
+  radioTrace(request: RadioTracePageRequest): Promise<RadioTracePageView> {
+    return this.#request("/api/v1/radio-trace/query", { method: "POST", body: request });
   }
 
   nomadFetchStart(request: NomadFetchStartRequest): Promise<NomadFetchStartResponse> {
@@ -86,8 +110,20 @@ export class HttpApplianceClient implements ApplianceClient {
     return this.#request("/api/v1/nomad/fetches/poll", { method: "POST", body: request });
   }
 
+  reticulumProbeStart(request: ReticulumProbeStartRequest): Promise<ReticulumProbeStartResponse> {
+    return this.#request("/api/v1/reticulum/probes", { method: "POST", body: request });
+  }
+
+  reticulumProbePoll(request: ReticulumProbePollRequest): Promise<ReticulumProbePollResponse> {
+    return this.#request("/api/v1/reticulum/probes/poll", { method: "POST", body: request });
+  }
+
   timeline(destination: string): Promise<TimelineView[]> {
     return this.#request(`/api/v1/conversations/${destination}`);
+  }
+
+  messageActivity(request: MessageActivityPageRequest): Promise<MessageActivityPageView> {
+    return this.#request("/api/v1/activity/query", { method: "POST", body: request });
   }
 
   upsertContact(destination: string, request: ContactRequest): Promise<MutationResponse> {
@@ -99,6 +135,10 @@ export class HttpApplianceClient implements ApplianceClient {
 
   send(request: SendRequest): Promise<SendResponse> {
     return this.#request("/api/v1/messages", { method: "POST", body: request });
+  }
+
+  retryMessage(request: RetrySendRequest): Promise<RetrySendResponse> {
+    return this.#request("/api/v1/messages/retry", { method: "POST", body: request });
   }
 
   startOnboarding(): Promise<NoContent> {

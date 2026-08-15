@@ -12,6 +12,17 @@ import type {
 export const MINIMUM_WRITE_WITH_RESPONSE_BYTES = 20;
 
 /**
+ * Return the smallest platform capability that must fit one characteristic
+ * value. CoreBluetooth exposes separate with-response and without-response
+ * maxima even though this profile writes only with response; using the lower
+ * value avoids treating a larger controller buffer as the negotiated ATT MTU.
+ */
+export function conservativeSingleWriteBytes(capabilities: readonly number[]): number {
+  if (capabilities.length === 0) return MINIMUM_WRITE_WITH_RESPONSE_BYTES;
+  return Math.min(...capabilities);
+}
+
+/**
  * Prefer the name carried by this advertisement over a cached platform name.
  *
  * Exact credential-derived targeting is about the peripheral's current local
@@ -67,6 +78,7 @@ export interface BleGattDiscovery {
 
 export interface BleCentralDriver {
   prepare(): Promise<void>;
+  connectedPeripherals(serviceUuid: string): Promise<readonly BleDiscoveredPeripheral[]>;
   onDiscovered(listener: (peripheral: BleDiscoveredPeripheral) => void): () => void;
   onDisconnected(listener: (event: BleDriverDisconnectEvent) => void): () => void;
   onIndication(listener: (event: BleDriverIndicationEvent) => void): () => void;
@@ -114,6 +126,19 @@ function sameUuid(left: string, right: string): boolean {
 
 function samePeripheral(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+function acceptedPeripheralNames(options: BleConnectOptions): ReadonlySet<string> {
+  const names = new Set<string>();
+  if (options.peripheralName !== undefined) names.add(options.peripheralName);
+  for (const name of options.peripheralNameAliases ?? []) {
+    const normalized = name.trim();
+    if (normalized.length === 0) {
+      throw new Error("BLE peripheral name alias must not be empty");
+    }
+    names.add(normalized);
+  }
+  return names;
 }
 
 function validateProfile(profile: BleGattProfile): void {
@@ -566,7 +591,10 @@ export class ForegroundBleCentral implements BleCentral {
       abort.abort(options.signal?.reason ?? new Error("BLE scan was cancelled"));
     };
     if (options.signal?.aborted) forwardCancellation();
-    else options.signal?.addEventListener("abort", forwardCancellation, { once: true });
+    else
+      options.signal?.addEventListener("abort", forwardCancellation, {
+        once: true,
+      });
     this.scanning = abort;
 
     const scanning = this.runScan(serviceUuid, scanTimeoutMs, operationTimeoutMs, abort).finally(
@@ -716,6 +744,10 @@ export class ForegroundBleCentral implements BleCentral {
     if (options.peripheralId !== undefined && selectedPeripheralId === "") {
       throw new Error("BLE peripheral identifier must not be empty");
     }
+    const acceptedNames = acceptedPeripheralNames(options);
+    if (options.reclaimConnectedPeripheral && acceptedNames.size === 0) {
+      throw new Error("BLE connected peripheral reclaim requires an exact peripheral name");
+    }
 
     const scanTimeoutMs = validateTimeout(
       options.scanTimeoutMs ?? DEFAULT_BLE_SCAN_TIMEOUT_MS,
@@ -734,7 +766,10 @@ export class ForegroundBleCentral implements BleCentral {
       abort.abort(options.signal?.reason ?? new Error("BLE connection attempt was cancelled"));
     };
     if (options.signal?.aborted) forwardCancellation();
-    else options.signal?.addEventListener("abort", forwardCancellation, { once: true });
+    else
+      options.signal?.addEventListener("abort", forwardCancellation, {
+        once: true,
+      });
     this.connecting = abort;
 
     let connected = false;
@@ -742,6 +777,7 @@ export class ForegroundBleCentral implements BleCentral {
     let scanStarted = false;
     let connection: ManagedBleConnection | undefined;
     let connectionAttemptStarted = false;
+    let reusedConnectedLink = false;
     let disconnectedDuringSetup: BleDriverDisconnectEvent | undefined;
     let disconnectDuringSetupConfirmed = false;
     let platformConnectionRejected = false;
@@ -820,7 +856,7 @@ export class ForegroundBleCentral implements BleCentral {
       if (abort.signal.aborted) throw cancellationError(abort.signal);
       removeListeners.push(
         this.driver.onDiscovered((peripheral) => {
-          if (options.peripheralName !== undefined && peripheral.name !== options.peripheralName) {
+          if (acceptedNames.size > 0 && !acceptedNames.has(peripheral.name ?? "")) {
             return;
           }
           if (
@@ -862,46 +898,77 @@ export class ForegroundBleCentral implements BleCentral {
         };
         selected = peripheral;
       } else {
-        const scanStart = driverOperation(() => this.driver.startScan(profile.serviceUuid, false));
-        try {
-          await withDeadline(
-            scanStart,
-            operationTimeoutMs,
-            "BLE scan start timed out",
+        const connectedPeripherals = !options.reclaimConnectedPeripheral
+          ? []
+          : await run(
+              () => this.driver.connectedPeripherals(profile.serviceUuid),
+              "BLE connected peripheral lookup timed out",
+            );
+        const connectedMatches = connectedPeripherals.filter(
+          (candidate) => candidate.name !== undefined && acceptedNames.has(candidate.name),
+        );
+        if (connectedMatches.length > 1) {
+          throw new Error(
+            `More than one connected BLE peripheral matched the selected appliance names: ${connectedMatches
+              .map((candidate) => candidate.id)
+              .join(", ")}`,
+          );
+        }
+        const connectedPeripheral = connectedMatches[0];
+        if (connectedPeripheral !== undefined) {
+          peripheral = connectedPeripheral;
+          selected = peripheral;
+          connected = true;
+          connectionAttemptStarted = true;
+          reusedConnectedLink = true;
+        } else {
+          const scanStart = driverOperation(() =>
+            this.driver.startScan(profile.serviceUuid, false),
+          );
+          try {
+            await withDeadline(
+              scanStart,
+              operationTimeoutMs,
+              "BLE scan start timed out",
+              abort.signal,
+            );
+          } catch (error) {
+            void scanStart.then(cleanUpLateScan, () => undefined);
+            throw error;
+          }
+          scanStarted = true;
+          peripheral = await withDeadline(
+            peripheralFound,
+            scanTimeoutMs,
+            options.peripheralName === undefined
+              ? `No BLE appliance advertising ${profile.serviceUuid} was found within ${scanTimeoutMs} ms`
+              : `No BLE appliance named "${options.peripheralName}" advertising ${profile.serviceUuid} was found within ${scanTimeoutMs} ms. It may still be connected to another phone or host, which prevents it from advertising.`,
             abort.signal,
           );
-        } catch (error) {
-          void scanStart.then(cleanUpLateScan, () => undefined);
-          throw error;
+          selected = peripheral;
+          await run(() => this.driver.stopScan(), `BLE scan stop for ${peripheral.id} timed out`);
+          scanStarted = false;
         }
-        scanStarted = true;
-        peripheral = await withDeadline(
-          peripheralFound,
-          scanTimeoutMs,
-          `No BLE appliance advertising ${profile.serviceUuid} was found within ${scanTimeoutMs} ms`,
-          abort.signal,
-        );
-        selected = peripheral;
-        await run(() => this.driver.stopScan(), `BLE scan stop for ${peripheral.id} timed out`);
-        scanStarted = false;
       }
 
-      connectionAttemptStarted = true;
-      const platformConnection = driverOperation(() => this.driver.connect(peripheral.id));
-      // A rejection observed before teardown proves that no link was produced.
-      // Once teardown starts, Android may induce this rejection itself, so only
-      // the matching disconnect event can release ownership.
-      void platformConnection.then(
-        () => {},
-        () => confirmPlatformConnectionRejected(),
-      );
-      await withDeadline(
-        platformConnection,
-        connectionTimeoutMs,
-        `BLE connection to ${peripheral.id} timed out after ${connectionTimeoutMs} ms`,
-        abort.signal,
-      );
-      connected = true;
+      if (!connected) {
+        connectionAttemptStarted = true;
+        const platformConnection = driverOperation(() => this.driver.connect(peripheral.id));
+        // A rejection observed before teardown proves that no link was produced.
+        // Once teardown starts, Android may induce this rejection itself, so only
+        // the matching disconnect event can release ownership.
+        void platformConnection.then(
+          () => {},
+          () => confirmPlatformConnectionRejected(),
+        );
+        await withDeadline(
+          platformConnection,
+          connectionTimeoutMs,
+          `BLE connection to ${peripheral.id} timed out after ${connectionTimeoutMs} ms`,
+          abort.signal,
+        );
+        connected = true;
+      }
       if (disconnectedDuringSetup !== undefined) {
         throw new Error(disconnectReason(disconnectedDuringSetup));
       }
@@ -913,6 +980,17 @@ export class ForegroundBleCentral implements BleCentral {
         throw new Error(disconnectReason(disconnectedDuringSetup));
       }
       validateDiscovery(discovery, profile);
+      if (reusedConnectedLink) {
+        await run(
+          () =>
+            this.driver.stopIndications(
+              peripheral.id,
+              profile.serviceUuid,
+              profile.indicateCharacteristicUuid,
+            ),
+          `BLE stale indication unsubscribe for ${peripheral.id} timed out`,
+        );
+      }
 
       connection = new ManagedBleConnection(peripheral, {
         driver: this.driver,
@@ -923,6 +1001,18 @@ export class ForegroundBleCentral implements BleCentral {
         },
         removeListeners: removeAllListeners,
       });
+
+      // Negotiate/query the safe single-write payload before enabling the
+      // server's indication CCCD. Firmware logs LINK-READY at that transition,
+      // so Android's explicit MTU exchange must already be visible there.
+      const maximum = await run(
+        () => this.driver.maximumWriteWithResponseBytes(peripheral.id),
+        `BLE write MTU lookup for ${peripheral.id} timed out`,
+      );
+      connection.setMaximumWriteBytes(maximum);
+      if (connection.isClosed) {
+        throw new Error("BLE peripheral disconnected while the write MTU was being resolved");
+      }
 
       const indicationSubscription = driverOperation(() =>
         this.driver.startIndications(
@@ -948,14 +1038,6 @@ export class ForegroundBleCentral implements BleCentral {
       indicationsStarted = true;
       if (connection.isClosed) {
         throw new Error("BLE peripheral disconnected while indications were being subscribed");
-      }
-      const maximum = await run(
-        () => this.driver.maximumWriteWithResponseBytes(peripheral.id),
-        `BLE write MTU lookup for ${peripheral.id} timed out`,
-      );
-      connection.setMaximumWriteBytes(maximum);
-      if (connection.isClosed) {
-        throw new Error("BLE peripheral disconnected while the GATT link was being prepared");
       }
       if (abort.signal.aborted) throw cancellationError(abort.signal);
       this.active = connection;

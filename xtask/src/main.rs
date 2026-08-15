@@ -249,8 +249,22 @@ fn build_tracker() -> ExitCode {
     )
 }
 
+fn validate_xtensa_final_link_policy_workspace(root: &Path) -> Result<(), String> {
+    let config_path = root.join(".cargo/config.toml");
+    let cargo_config = fs::read_to_string(&config_path)
+        .map_err(|error| format!("could not read {}: {error}", config_path.display()))?;
+    let ci_path = root.join(".github/workflows/ci.yml");
+    let ci_workflow = fs::read_to_string(&ci_path)
+        .map_err(|error| format!("could not read {}: {error}", ci_path.display()))?;
+    phase1_tooling::validate_xtensa_final_link_policy_sources(&cargo_config, &ci_workflow)
+}
+
 fn graph_policy() -> ExitCode {
     let root = workspace_root();
+    if let Err(error) = validate_xtensa_final_link_policy_workspace(&root) {
+        eprintln!("error: Xtensa final-link policy: {error}");
+        return ExitCode::FAILURE;
+    }
     if let Err(error) = validate_pairing_publication_workspace(&root) {
         eprintln!("error: credential-store integration source boundary: {error}");
         return ExitCode::FAILURE;
@@ -1003,10 +1017,10 @@ fn graph_policy() -> ExitCode {
     .and_then(|json| {
         validate_pairing_publication_workspace_member_coverage(&json, &root)
             .map_err(|error| format!("credential-store integration scan coverage: {error}"))?;
-        validate_resolved_rete_pin(&json, candidate.source, candidate.revision)
+        validate_resolved_rete_pin(&json, &root, candidate.source, candidate.revision)
             .map_err(|error| format!("Rete pin/report mismatch: {error}"))?;
-        validate_resolved_esp_rtos_patch(&json, &root)
-            .map_err(|error| format!("esp-rtos patch boundary: {error}"))?;
+        validate_resolved_esp_rtos_pin(&json)
+            .map_err(|error| format!("esp-rtos upstream pin boundary: {error}"))?;
         validate_resolved_lora_phy_patch(&json, &root)
             .map_err(|error| format!("lora-phy patch boundary: {error}"))?;
         validate_firmware_dependency_boundary(&json, &root)
@@ -1019,6 +1033,8 @@ fn graph_policy() -> ExitCode {
             .map_err(|error| format!("portable durability dependency boundary: {error}"))?;
         validate_rns_inbox_store_dependency_boundary(&json, &root)
             .map_err(|error| format!("durable RNS inbox store dependency boundary: {error}"))?;
+        validate_network_config_store_dependency_boundary(&json, &root)
+            .map_err(|error| format!("network configuration store dependency boundary: {error}"))?;
         validate_tracker_radio_dependency_boundary(&json, &root)
             .map_err(|error| format!("Tracker bidirectional radio dependency boundary: {error}"))?;
         validate_tx_handoff_dependency_boundary(&json, &root)
@@ -1107,20 +1123,21 @@ fn graph_policy() -> ExitCode {
              comparison graph are isolated; every firmware and HIL graph excludes the host-only device and pairing clients, chat application/service crates, SQLite/serial access and Axum/Hyper/Tokio/Tower OS runtime; the returned-radio-fault, inbound-commit-fault and runtime-measurement hooks are feature-exclusive; \
              legacy Tracker firmware direct dependencies use only the RX façade and every-feature resolution \
              excludes TX ownership and pre-integration durable crates; resolved Rete packages match reported \
-             source/revision; esp-rtos and lora-phy resolve only to their reviewed local patches, \
-             and each checked vendor inventory reconstructs the pristine registry source; the device \
+             source/revision; esp-rtos resolves from the coherent reviewed upstream esp-rs revision, \
+             lora-phy resolves only to its reviewed local patch, and each active checked vendor inventory \
+             reconstructs its pristine upstream source; the device \
              API and node core remain mutually isolated and free of direct platform dependencies; the \
              allocation-free device-API framing crate has only its reviewed zeroization edge and no feature surface; the featureless pre-authentication pairing-control codec reaches only framing, remains absent from every legacy/HIL graph and is composed only into the permanent E290 USB control surface; the live-pairing core has only its reviewed HMAC/SHA-256/zeroization, credential-authority and framing edges plus test-only hex, is composed only into the permanent E290 resident credential lifecycle, and remains absent from every legacy/HIL graph, while the \
-             boot-lifetime job handoff reaches only the logical device API and Embassy Sync, and the \
+             boot-lifetime job handoff reaches only the logical device API, Embassy Sync and zeroization, and the \
              credential authority has only its exact logical device-API, constant-time comparison and zeroization edges; credential-store integration escape identifiers remain restricted to their exact reviewed definition and call sites in the two trusted owner files, and every workspace member target remains beneath a scanned source root; the physical-presence pairing policy has only its exact feature-disabled credential-authority edge, is composed feature-free only into the permanent E290 node, and remains absent from every legacy product and HIL graph; the \
              authenticated session layer has only its exact reviewed cryptographic, device-API, credentials, framing and handoff normal edges plus its exact test-only hex, semantic-adapter and storage-model fixtures; \
              the Rete integration and node-core normal closures contain no RNode, radio-interface, LoRa or board package; \
-             the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; the display, Wi-Fi and BLE API proof profiles retain the complete permanent node graph and add only their exact locked component or transport closures and shared feature transitions; the BLE startup diagnostic retains the same optional display surface and matches the production BLE profile except for its package root and exact ESP Serial/JTAG trace path in place of the production silent logger, so it cannot acquire Wi-Fi or another transport closure; \
-             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the allocation-free appliance display model has only its exact feature-disabled zeroization edge and generic bare-metal closure, with no std, alloc, platform or firmware acquisition; the featureless SSD1680 driver has exactly its three embedded graphics/HAL trait edges and an exact six-package generic bare-metal closure, while the RF-inert display HIL and opt-in permanent display profile reach only their reviewed display and ESP platform surfaces; the permanent E290 node and its BLE startup diagnostic compose the exact local feature-disabled display model path while reaching the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission and durable inbound-RNS-inbox layers, the feature-free durable LXMF ingress/model/store stack, bounded feature-free Nomad protocol state and explicit external allocator, all three target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding deferred full onboard client/service stacks and foreign Tracker/HIL packages; \
+             the shared lora-phy owner and E290 radio wrapper have only their exact reviewed HAL, framing, board and test edges; the display, Wi-Fi and BLE API proof profiles retain the complete permanent node graph and add only their exact locked component or transport closures and shared feature transitions; every E290 production profile and the BLE startup diagnostic retain the exact reviewed USB Serial/JTAG logging path, while the diagnostic differs from the production BLE profile only at its package root and cannot acquire Wi-Fi or another transport closure; \
+             the Tracker bidirectional radio has only its reviewed board, shared lora-phy owner, framing, HAL, critical-section and patched lora-phy edges while the historical board TX-HIL crate is a one-edge compatibility facade; the E290 and Tracker semantic HILs share one board-independent semantic round-trip fixture crate while retaining separate physical MAC and radio authorization, and the E290 graph cannot reach Tracker firmware, board, radio, FEM or runtime dependencies; the allocation-free appliance display model has only its exact feature-disabled zeroization edge and generic bare-metal closure, with no std, alloc, platform or firmware acquisition; the featureless SSD1680 driver has exactly its three embedded graphics/HAL trait edges and an exact six-package generic bare-metal closure, while the RF-inert display HIL and opt-in permanent display profile reach only their reviewed display and ESP platform surfaces; the permanent E290 node and its BLE startup diagnostic compose the exact local feature-disabled display model path while reaching the LoRa-first node/router/dispatcher graph, exact portable identity, credential-store authority, announce-clock, NOR-region, durable-submission, durable inbound-RNS-inbox and network-configuration layers, the feature-free durable LXMF ingress/model/store stack, bounded feature-free Nomad protocol state and explicit external allocator, all five target-safe experimental device-API feature sets, the featureless framed USB pre-authentication control codec, the resident live-pairing lifecycle and a minimal boot-lifetime USB authenticated-session bearer with transport-neutral admission and node-side dispatch while excluding deferred full onboard client/service stacks and foreign Tracker/HIL packages; \
              the interface router has only its reviewed node-core and Embassy Sync normal edges plus test-only rand_core and RNS fixture edges; \
              the TX handoff, RF-inert dispatcher and supervisor use only their reviewed node-core, \
              interface-router ingress, handoff, dispatcher, Embassy Sync/Futures/Time, rand_core \
-             and SHA-256 dependency edges; radio-interface has only its exact lora-modulation, RNS-conformance and \
+             and SHA-256 dependency edges plus exact test-only RNS proof-fixture edges in the TX handoff and RF-inert dispatcher; radio-interface has only its exact lora-modulation, RNS-conformance and \
              test-only Embassy Sync edges; the E290 board-facts crate has only its one \
              feature-free local radio-interface edge; the staged real-radio dispatcher has only its reviewed \
              portable interface-router, node-core, handoff, radio-interface, Embassy Sync/Time and rand_core normal \
@@ -1135,8 +1152,8 @@ fn graph_policy() -> ExitCode {
              the portable identity, announce-clock and NOR-region crates use only their exact reviewed embedded-storage, rand_core, SHA-256 and zeroize subsets; the durable inbound RNS inbox store uses only exact feature-free embedded-storage and SHA-256 pins; the durable \
              storage model uses only reviewed minicbor and SHA-256 edges; \
              the physical storage journal uses only reviewed embedded-storage, storage-model and SHA-256 edges; \
-             the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model and submission-projector edges plus its reviewed test-only rand_core edge; the durable submission runtime uses only reviewed Embassy Sync, embedded-storage, rand_core, node-core, storage-actor, semantic-model, submission-projector and transport-neutral supervisor edges plus its journal-only test fixture; \
-             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus exact experimental-lxmf, experimental-nomad, experimental-rns-data and experimental-rns-inbox feature forwards; \
+             the sole storage actor uses only reviewed embedded-storage, node-core, journal, semantic-model and submission-projector edges plus its reviewed test-only rand_core and RNS proof-fixture edges; the durable submission runtime uses only reviewed Embassy Sync, embedded-storage, rand_core, node-core, storage-actor, semantic-model, submission-projector and transport-neutral supervisor edges plus its journal-only test fixture; \
+             the device API adapter uses only reviewed device-API and semantic-model normal edges with test-only embedded-storage and storage-actor fixtures plus exact experimental-lxmf, experimental-network-config, experimental-nomad, experimental-rns-data and experimental-rns-inbox feature forwards; \
              the physical-storage HIL has only its reviewed raw-flash, journal, semantic-model, logging and ESP runtime edges and no radio/protocol stack; \
              the submission projector uses only reviewed node-core and storage-model \
              and test-only rand_core and RNS adapter edges"
@@ -1428,7 +1445,7 @@ const PRODUCT_GRAPH_FORBIDDEN: [&str; 35] = [
     "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
-    "reticulum-lxmf-wire",
+    "reticulum-network-config-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-radio-lora-phy",
@@ -1455,7 +1472,7 @@ fn validate_product_graph_boundary(label: &str, tree: &str) -> Result<(), String
     Ok(())
 }
 
-const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 40] = [
+const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 41] = [
     "embassy-executor",
     "esp-radio",
     "lora-modulation",
@@ -1485,6 +1502,7 @@ const STORAGE_HIL_GRAPH_FORBIDDEN: [&str; 40] = [
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
     "reticulum-lxmf-wire",
+    "reticulum-network-config-store",
     "reticulum-node-core",
     "reticulum-radio-interface",
     "reticulum-radio-tx-dispatch",
@@ -1506,7 +1524,7 @@ const TX_HIL_GRAPH_REQUIRED: [&str; 5] = [
     "reticulum-semantic-roundtrip-hil",
 ];
 
-const TX_HIL_GRAPH_FORBIDDEN: [&str; 35] = [
+const TX_HIL_GRAPH_FORBIDDEN: [&str; 36] = [
     "leviculum-core",
     "lxmf-rs",
     "rete-core",
@@ -1531,6 +1549,7 @@ const TX_HIL_GRAPH_FORBIDDEN: [&str; 35] = [
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
     "reticulum-lxmf-wire",
+    "reticulum-network-config-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -1596,7 +1615,7 @@ const SEMANTIC_TX_HIL_GRAPH_FORBIDDEN: [&str; 31] = [
     "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
-    "reticulum-lxmf-wire",
+    "reticulum-network-config-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -1750,7 +1769,7 @@ const E290_SEMANTIC_HIL_GRAPH_FORBIDDEN: [&str; 34] = [
     "reticulum-lxmf-ingress",
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
-    "reticulum-lxmf-wire",
+    "reticulum-network-config-store",
     "reticulum-node-core",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
@@ -1812,7 +1831,7 @@ const E290_DISPLAY_HIL_GRAPH_REQUIRED: [&str; 16] = [
     "reticulum-eink-ssd1680",
 ];
 
-const E290_DISPLAY_HIL_GRAPH_FORBIDDEN: [&str; 64] = [
+const E290_DISPLAY_HIL_GRAPH_FORBIDDEN: [&str; 65] = [
     "edge-dhcp",
     "edge-nal",
     "edge-nal-embassy",
@@ -1858,6 +1877,7 @@ const E290_DISPLAY_HIL_GRAPH_FORBIDDEN: [&str; 64] = [
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
     "reticulum-lxmf-wire",
+    "reticulum-network-config-store",
     "reticulum-node-core",
     "reticulum-nomad-protocol",
     "reticulum-nor-flash-region",
@@ -1980,20 +2000,36 @@ fn validate_e290_ble_display_startup_order_sources(
         ));
     }
 
-    let ble_initializer_index = required_source_statement_index(
+    let startup_statements = source_statement_scope(
         product_main,
+        &[
+            BLE_INITIALIZER_CALL,
+            DISPLAY_SPI_OWNER,
+            DISPLAY_TASK_CONSTRUCTION,
+            BLE_TASK_CONSTRUCTION,
+        ],
+    );
+    let ble_initializer_index = required_source_statement_index(
+        startup_statements,
+        "product_main",
         BLE_INITIALIZER_CALL,
         "BLE controller initializer",
     )?;
-    let display_spi_index =
-        required_source_statement_index(product_main, DISPLAY_SPI_OWNER, "SPI3 display owner")?;
+    let display_spi_index = required_source_statement_index(
+        startup_statements,
+        "product_main",
+        DISPLAY_SPI_OWNER,
+        "SPI3 display owner",
+    )?;
     let display_task_index = required_source_statement_index(
-        product_main,
+        startup_statements,
+        "product_main",
         DISPLAY_TASK_CONSTRUCTION,
         "display task construction",
     )?;
     let ble_task_index = required_source_statement_index(
-        product_main,
+        startup_statements,
+        "product_main",
         BLE_TASK_CONSTRUCTION,
         "BLE task construction",
     )?;
@@ -2010,17 +2046,17 @@ fn validate_e290_ble_display_startup_order_sources(
         );
     }
     require_source_statement_feature_gate(
-        &product_main.block.stmts[ble_initializer_index],
+        &startup_statements[ble_initializer_index],
         "ble-api-proof",
         "BLE controller initializer",
     )?;
     require_source_statement_feature_gate(
-        &product_main.block.stmts[display_spi_index],
+        &startup_statements[display_spi_index],
         "display",
         "SPI3 display owner",
     )?;
     require_source_statement_feature_gate(
-        &product_main.block.stmts[ble_task_index],
+        &startup_statements[ble_task_index],
         "ble-api-proof",
         "BLE task construction",
     )?;
@@ -2092,14 +2128,37 @@ fn required_source_function<'a>(
     Ok(matching[0])
 }
 
+fn source_statement_scope<'a>(function: &'a syn::ItemFn, markers: &[&str]) -> &'a [syn::Stmt] {
+    let mut statements = function.block.stmts.as_slice();
+    loop {
+        let containing = statements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                let tokens = compact_source_tokens(statement);
+                markers
+                    .iter()
+                    .all(|marker| tokens.contains(marker))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let [index] = containing.as_slice() else {
+            return statements;
+        };
+        let syn::Stmt::Expr(syn::Expr::Block(block), _) = &statements[*index] else {
+            return statements;
+        };
+        statements = block.block.stmts.as_slice();
+    }
+}
+
 fn required_source_statement_index(
-    function: &syn::ItemFn,
+    statements: &[syn::Stmt],
+    function_name: &str,
     marker: &str,
     label: &str,
 ) -> Result<usize, String> {
-    let matching = function
-        .block
-        .stmts
+    let matching = statements
         .iter()
         .enumerate()
         .filter_map(|(index, statement)| {
@@ -2110,8 +2169,7 @@ fn required_source_statement_index(
         .collect::<Vec<_>>();
     if matching.len() != 1 {
         return Err(format!(
-            "{} must contain {label} in exactly one top-level startup statement, found {}",
-            function.sig.ident,
+            "{function_name} must contain {label} in exactly one startup statement, found {}",
             matching.len()
         ));
     }
@@ -2716,7 +2774,7 @@ fn immediately_preceded_by_feature_cfg(source: &str, position: usize, feature: &
         .is_some_and(|line| line.trim() == format!("#[cfg(feature = \"{feature}\")]"))
 }
 
-const E290_NODE_GRAPH_REQUIRED: [&str; 48] = [
+const E290_NODE_GRAPH_REQUIRED: [&str; 50] = [
     "allocator-api2",
     "embedded-storage",
     "esp-alloc",
@@ -2743,6 +2801,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 48] = [
     "reticulum-lxmf-model",
     "reticulum-lxmf-store",
     "reticulum-lxmf-wire",
+    "reticulum-network-config-store",
     "reticulum-node-core",
     "reticulum-nomad-protocol",
     "reticulum-nor-flash-region",
@@ -2750,6 +2809,7 @@ const E290_NODE_GRAPH_REQUIRED: [&str; 48] = [
     "reticulum-radio-lora-phy",
     "reticulum-radio-tx-dispatch",
     "reticulum-rns-inbox-store",
+    "reticulum-rns-interface-discovery",
     "reticulum-rns-rete",
     "rete-core",
     "rete-lxmf-core",
@@ -2896,18 +2956,21 @@ const E290_WIFI_API_ADDED_PACKAGE_FEATURES: [(&str, &str); 20] = [
     ("docsplay v0.1.3", ""),
     ("docsplay-macros v0.1.2", ""),
     (
-        "edge-dhcp v0.7.0",
+        "edge-dhcp v0.8.0",
         "edge-nal,embassy-futures,embassy-time,io",
     ),
-    ("edge-nal v0.6.0", ""),
-    ("edge-nal-embassy v0.8.1", "medium-ethernet,proto-ipv4,udp"),
-    ("edge-raw v0.7.0", ""),
-    ("embassy-net v0.8.0", "medium-ethernet,proto-ipv4,tcp,udp"),
+    ("edge-nal v0.7.0", ""),
+    ("edge-nal-embassy v0.9.0", "medium-ethernet,proto-ipv4,udp"),
+    ("edge-raw v0.8.0", ""),
+    ("embassy-net v0.9.1", "medium-ethernet,proto-ipv4,tcp,udp"),
     ("embassy-net-driver v0.2.0", ""),
     ("embedded-nal v0.9.0", ""),
     ("embedded-nal-async v0.9.0", ""),
     ("esp-phy v0.2.0", "esp32s3"),
-    ("esp-radio v0.18.0", "esp-alloc,esp32s3,wifi,xtensa-lx-rt"),
+    (
+        "esp-radio v1.0.0-beta.0",
+        "esp-alloc,esp32s3,unstable,wifi,xtensa-lx-rt",
+    ),
     ("esp-wifi-sys-esp32s3 v0.2.0", "default"),
     ("managed v0.8.0", "map"),
     ("num-derive v0.4.2", ""),
@@ -2916,7 +2979,7 @@ const E290_WIFI_API_ADDED_PACKAGE_FEATURES: [(&str, &str); 20] = [
     ("portable_atomic_enum v0.3.1", "portable-atomic"),
     ("portable_atomic_enum_macros v0.2.1", ""),
     (
-        "smoltcp v0.12.0",
+        "smoltcp v0.13.0",
         "async,medium-ethernet,proto-ipv4,socket,socket-tcp,socket-udp",
     ),
 ];
@@ -2939,15 +3002,31 @@ const E290_WIFI_API_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 3] = [
     ),
 ];
 
-const E290_BLE_API_ADDED_PACKAGE_FEATURES: [(&str, &str); 24] = [
-    ("bt-hci v0.8.1", "uuid"),
+const E290_BLE_API_ADDED_PACKAGE_FEATURES: [(&str, &str); 46] = [
+    ("az v1.2.1", ""),
+    ("base16ct v0.2.0", ""),
+    ("bt-hci v0.9.0", "uuid"),
+    ("bt-hci-transport v0.1.0", ""),
     ("btuuid v0.1.1", "uuid"),
+    ("cmac v0.7.2", ""),
+    ("const-oid v0.9.6", ""),
     ("convert_case v0.8.0", ""),
+    ("crypto-bigint v0.5.5", "generic-array,rand_core,zeroize"),
+    ("dbl v0.3.2", ""),
+    ("der v0.7.10", "oid,zeroize"),
     ("docsplay v0.1.3", ""),
     ("docsplay-macros v0.1.2", ""),
-    ("esp-phy v0.2.0", "esp32s3"),
     (
-        "esp-radio v0.18.0",
+        "elliptic-curve v0.13.8",
+        "arithmetic,digest,ecdh,ff,group,hazmat,sec1",
+    ),
+    ("embedded-graphics v0.8.2", ""),
+    ("embedded-graphics-core v0.4.1", "default"),
+    ("esp-phy v0.2.0", "esp32s3"),
+    ("ff v0.13.1", ""),
+    ("float-cmp v0.9.0", "default,num-traits,ratio"),
+    (
+        "esp-radio v1.0.0-beta.0",
         "__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,xtensa-lx-rt",
     ),
     ("esp-wifi-sys-esp32s3 v0.2.0", "default"),
@@ -2955,28 +3034,37 @@ const E290_BLE_API_ADDED_PACKAGE_FEATURES: [(&str, &str); 24] = [
     ("futures-channel v0.3.33", "futures-sink,sink"),
     ("futures-intrusive v0.5.0", ""),
     ("futures-io v0.3.33", ""),
+    ("group v0.13.0", ""),
     ("lock_api v0.4.14", "atomic_usize,default"),
+    ("micromath v2.1.0", ""),
     ("num-derive v0.4.2", ""),
+    ("p256 v0.13.2", "arithmetic,ecdh"),
     ("portable_atomic_enum v0.3.1", "portable-atomic"),
     ("portable_atomic_enum_macros v0.2.1", ""),
+    ("ppv-lite86 v0.2.21", "simd"),
+    ("primeorder v0.13.6", ""),
+    ("rand v0.8.7", ""),
+    ("rand_chacha v0.3.1", ""),
+    ("reticulum-eink-ssd1680 v0.1.0", ""),
     ("scopeguard v1.2.0", ""),
+    ("sec1 v0.7.3", "default,der,point,subtle,zeroize"),
     (
-        "trouble-host v0.6.0",
-        "default-packet-pool,default-packet-pool-mtu-255,derive,gatt,peripheral,trouble-host-macros",
+        "trouble-host v0.7.0",
+        "central,connection-event-queue-size-4,default-packet-pool,default-packet-pool-mtu-255,derive,gatt,peripheral,security,trouble-host-macros",
     ),
-    ("trouble-host-macros v0.4.0", ""),
+    ("trouble-host-macros v0.5.0", ""),
     ("unicode-segmentation v1.13.3", ""),
     ("uuid v1.24.0", ""),
     ("uuid v1.24.0", "default,std"),
-    ("zerocopy v0.8.55", ""),
+    ("zerocopy v0.8.55", "simd"),
     ("zerocopy-derive v0.8.55", ""),
 ];
 
-const E290_BLE_API_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 5] = [
+const E290_BLE_API_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 7] = [
     (
-        "esp-hal v1.1.1",
-        "__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable",
-        "__bluetooth,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable",
+        "esp-hal v1.1.0",
+        "__sdmmc,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable",
+        "__bluetooth,__sdmmc,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable",
     ),
     (
         "esp-radio-rtos-driver v0.3.0",
@@ -2990,10 +3078,16 @@ const E290_BLE_API_SHARED_FEATURE_CHANGES: [(&str, &str, &str); 5] = [
     ),
     ("futures-util v0.3.33", "", "futures-sink,sink"),
     (
+        "generic-array v0.14.7",
+        "more_lengths",
+        "more_lengths,zeroize",
+    ),
+    (
         "reticulum-heltec-vision-master-e290-node v0.1.0",
         "default",
-        "ble-api-proof",
+        "ble-api-proof,display",
     ),
+    ("subtle v2.6.1", "", "i128"),
 ];
 
 const E290_DISPLAY_ADDED_PACKAGE_FEATURES: [(&str, &str); 6] = [
@@ -3048,7 +3142,7 @@ fn validate_e290_wifi_api_proof_graph_boundary(permanent: &str, wifi: &str) -> R
 }
 
 fn validate_e290_ble_api_proof_graph_boundary(permanent: &str, ble: &str) -> Result<(), String> {
-    validate_e290_node_graph_for_root_features(ble, "ble-api-proof", "E290 BLE API proof")?;
+    validate_e290_node_graph_for_root_features(ble, "ble-api-proof,display", "E290 BLE API proof")?;
     validate_e290_wireless_profile_delta(
         permanent,
         ble,
@@ -3064,8 +3158,8 @@ const E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE: &str =
 const E290_NODE_PACKAGE_IDENTITY: &str = "reticulum-heltec-vision-master-e290-node v0.1.0";
 const E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE_IDENTITY: &str =
     "reticulum-heltec-vision-master-e290-ble-startup-diagnostic v0.1.0";
-const E290_PRODUCTION_ESP_PRINTLN_FEATURES: &str = "esp32s3,log-04,no-op";
-const E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES: &str = "esp32s3,jtag-serial";
+const E290_PRODUCTION_ESP_PRINTLN_FEATURES: &str = "critical-section,esp32s3,jtag-serial,log-04";
+const E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES: &str = E290_PRODUCTION_ESP_PRINTLN_FEATURES;
 
 fn validate_e290_ble_startup_diagnostic_graph_boundary(
     production_ble: &str,
@@ -3073,20 +3167,20 @@ fn validate_e290_ble_startup_diagnostic_graph_boundary(
 ) -> Result<(), String> {
     validate_e290_node_graph_for_root_features(
         production_ble,
-        "ble-api-proof",
+        "ble-api-proof,display",
         "production E290 BLE API proof",
     )?;
     validate_e290_firmware_graph_for_root_features(
         diagnostic,
         E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
-        "ble-api-proof",
+        "ble-api-proof,display",
         E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES,
         "E290 BLE startup diagnostic",
     )?;
 
     let mut production_inventory = cargo_tree_feature_inventory(production_ble)?;
     let mut diagnostic_inventory = cargo_tree_feature_inventory(diagnostic)?;
-    let expected_root_features = BTreeSet::from(["ble-api-proof".to_owned()]);
+    let expected_root_features = BTreeSet::from(["ble-api-proof,display".to_owned()]);
     if production_inventory.remove(E290_NODE_PACKAGE_IDENTITY)
         != Some(expected_root_features.clone())
     {
@@ -3107,7 +3201,7 @@ fn validate_e290_ble_startup_diagnostic_graph_boundary(
     let production_println = BTreeSet::from([E290_PRODUCTION_ESP_PRINTLN_FEATURES.to_owned()]);
     if production_inventory.remove("esp-println v0.17.0") != Some(production_println) {
         return Err(
-            "production E290 BLE API proof must retain the exact silent esp-println path"
+            "production E290 BLE API proof must retain the exact USB Serial/JTAG esp-println path"
                 .to_owned(),
         );
     }
@@ -3121,7 +3215,7 @@ fn validate_e290_ble_startup_diagnostic_graph_boundary(
 
     if production_inventory != diagnostic_inventory {
         return Err(format!(
-            "E290 BLE startup diagnostic may differ from the production BLE graph only at the package root and esp-println path: production-only or changed {:#?}, diagnostic-only or changed {:#?}",
+            "E290 BLE startup diagnostic may differ from the production BLE graph only at the package root: production-only or changed {:#?}, diagnostic-only or changed {:#?}",
             cargo_tree_inventory_difference(&production_inventory, &diagnostic_inventory),
             cargo_tree_inventory_difference(&diagnostic_inventory, &production_inventory),
         ));
@@ -3315,11 +3409,11 @@ fn validate_e290_firmware_graph_for_root_features(
             .find(|line| line.contains(package))
             .ok_or_else(|| format!("{profile} graph has no {package}line"))?;
         if !line.ends_with(
-            "features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]",
+            "features=[experimental-lxmf,experimental-network-config,experimental-nomad,experimental-rns-data,experimental-rns-inbox]",
         )
         {
             return Err(format!(
-                "{profile} must enable only the target-safe experimental LXMF, Nomad, RNS DATA, and durable inbox operations on {package}, observed {line}"
+                "{profile} must enable only the target-safe experimental LXMF, network configuration, Nomad, RNS DATA, and durable inbox operations on {package}, observed {line}"
             ));
         }
     }
@@ -3331,7 +3425,9 @@ fn validate_e290_firmware_graph_for_root_features(
         "reticulum-lxmf-model ",
         "reticulum-lxmf-store ",
         "reticulum-lxmf-wire ",
+        "reticulum-network-config-store ",
         "reticulum-nomad-protocol ",
+        "reticulum-rns-interface-discovery ",
         "reticulum-device-api-ble ",
         "reticulum-device-api-credential-store ",
         "reticulum-device-api-credentials ",
@@ -3371,7 +3467,10 @@ fn validate_e290_firmware_graph_for_root_features(
             "{profile} must retain only its reviewed esp-println path {expected_esp_println_features}, observed {println_line}"
         ));
     }
-    if !matches!(expected_root_features, "wifi-api-proof" | "ble-api-proof") {
+    if !matches!(
+        expected_root_features,
+        "wifi-api-proof" | "ble-api-proof,display"
+    ) {
         for wireless_package in [
             "edge-dhcp",
             "edge-nal",
@@ -3411,6 +3510,7 @@ fn validate_e290_node_feature_boundary(
         .ok_or_else(|| format!("{package_name} package has no feature map"))?;
     let expected_features = serde_json::json!({
         "ble-api-proof": [
+            "display",
             "dep:embassy-sync-07",
             "dep:esp-radio",
             "dep:trouble-host",
@@ -3427,12 +3527,26 @@ fn validate_e290_node_feature_boundary(
         "journal-schema3-dev-reprovision": [],
         "rns-inbox-commit-fault-hil": [],
         "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
+        "wifi-station-proof": [
+            "ble-api-proof",
+            "dep:embassy-net",
+            "embassy-net/dhcpv4",
+            "embassy-net/dns",
+            "esp-radio/coex",
+            "esp-radio/wifi"
+        ],
+        "wifi-tcp-proof": [
+            "wifi-station-proof",
+            "dep:rete-core",
+            "dep:smoltcp"
+        ],
         "wifi-api-proof": [
             "dep:edge-dhcp",
             "dep:edge-nal",
             "dep:edge-nal-embassy",
             "dep:embassy-net",
             "dep:esp-radio",
+            "esp-radio/unstable",
             "esp-radio/wifi",
             "esp-rtos/esp-radio"
         ]
@@ -3504,6 +3618,20 @@ fn validate_e290_node_feature_boundary(
         package_name,
         "reticulum-rns-inbox-store",
         &workspace.join("crates/rns-inbox-store"),
+        false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-rns-interface-discovery",
+        &workspace.join("crates/rns-interface-discovery"),
+        false,
+    )?;
+    validate_exact_local_dependency(
+        dependencies,
+        package_name,
+        "reticulum-network-config-store",
+        &workspace.join("crates/network-config-store"),
         false,
     )?;
     validate_exact_local_dependency(
@@ -3607,6 +3735,17 @@ fn validate_e290_node_feature_boundary(
         false,
         &[],
     )?;
+    for (dependency, requirement) in [("sha2", "=0.10.9"), ("subtle", "=2.6.1")] {
+        validate_exact_registry_dependency(
+            dependencies,
+            package_name,
+            dependency,
+            requirement,
+            None,
+            false,
+            &[],
+        )?;
+    }
     validate_exact_target_registry_dependency(
         dependencies,
         package_name,
@@ -3623,7 +3762,16 @@ fn validate_e290_node_feature_boundary(
         "=0.17.0",
         "cfg(target_arch = \"xtensa\")",
         false,
-        &["esp32s3", "log-04", "no-op"],
+        &["critical-section", "esp32s3", "jtag-serial", "log-04"],
+    )?;
+    validate_exact_target_registry_dependency(
+        dependencies,
+        package_name,
+        "esp-storage",
+        "=0.9.0",
+        "cfg(target_arch = \"xtensa\")",
+        false,
+        &["esp32s3", "critical-section", "embedded-storage"],
     )?;
 
     let expected_optional_dependencies = BTreeSet::from([
@@ -3634,8 +3782,10 @@ fn validate_e290_node_feature_boundary(
         ("embassy-sync", Some("embassy-sync-07")),
         ("embedded-graphics", None),
         ("esp-radio", None),
+        ("rete-core", None),
         ("reticulum-board-heltec-vision-master-e290", None),
         ("reticulum-eink-ssd1680", None),
+        ("smoltcp", None),
         ("trouble-host", None),
     ]);
     let optional_dependencies = dependencies
@@ -3654,34 +3804,59 @@ fn validate_e290_node_feature_boundary(
             "{package_name} optional dependency inventory changed: expected {expected_optional_dependencies:?}, observed {optional_dependencies:?}"
         ));
     }
+    let rete_core = exact_dependency(dependencies, package_name, "rete-core", None)?;
+    if rete_core["source"].as_str()
+        != Some(
+            "git+https://github.com/evelant/rete.git?rev=dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08",
+        )
+        || rete_core["req"].as_str() != Some("*")
+        || !rete_core["path"].is_null()
+        || rete_core["optional"].as_bool() != Some(true)
+        || !rete_core["rename"].is_null()
+        || !rete_core["target"].is_null()
+        || rete_core["uses_default_features"].as_bool() != Some(false)
+        || rete_core["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "{package_name} must retain the exact optional feature-free reviewed rete-core revision"
+        ));
+    }
+    validate_exact_optional_registry_dependency(
+        dependencies,
+        package_name,
+        "smoltcp",
+        "=0.13.0",
+        false,
+        &["proto-dns", "proto-ipv4"],
+    )?;
+    validate_exact_git_dependency(
+        dependencies,
+        package_name,
+        "esp-radio",
+        "=1.0.0-beta.0",
+        ESP_HAL_B50_DEPENDENCY_SOURCE,
+        Some("cfg(target_arch = \"xtensa\")"),
+        true,
+        &["esp-alloc", "esp32s3"],
+    )?;
     for (dependency, requirement, rename, expected_features) in [
-        ("edge-dhcp", "=0.7.0", None, &["io"][..]),
-        ("edge-nal", "=0.6.0", None, &[][..]),
+        ("edge-dhcp", "=0.8.0", None, &["io"][..]),
+        ("edge-nal", "=0.7.0", None, &[][..]),
         (
             "edge-nal-embassy",
-            "=0.8.1",
+            "=0.9.0",
             None,
             &["medium-ethernet", "proto-ipv4", "udp"][..],
         ),
         (
             "embassy-net",
-            "=0.8.0",
+            "=0.9.1",
             None,
             &["medium-ethernet", "proto-ipv4", "tcp", "udp"][..],
         ),
         ("embassy-sync", "=0.7.2", Some("embassy-sync-07"), &[][..]),
-        ("esp-radio", "=0.18.0", None, &["esp-alloc", "esp32s3"][..]),
-        (
-            "trouble-host",
-            "=0.6.0",
-            None,
-            &[
-                "default-packet-pool-mtu-255",
-                "derive",
-                "gatt",
-                "peripheral",
-            ][..],
-        ),
     ] {
         validate_exact_optional_target_registry_dependency(
             dependencies,
@@ -3693,6 +3868,24 @@ fn validate_e290_node_feature_boundary(
             expected_features,
         )?;
     }
+    validate_exact_git_dependency(
+        dependencies,
+        package_name,
+        "trouble-host",
+        "=0.7.0",
+        TROUBLE_088_DEPENDENCY_SOURCE,
+        Some("cfg(target_arch = \"xtensa\")"),
+        true,
+        &[
+            "central",
+            "connection-event-queue-size-4",
+            "default-packet-pool-mtu-255",
+            "derive",
+            "gatt",
+            "peripheral",
+            "security",
+        ],
+    )?;
     Ok(())
 }
 
@@ -3725,6 +3918,7 @@ fn validate_e290_ble_startup_diagnostic_metadata_boundary(
     })?;
     let expected_diagnostic_features = serde_json::json!({
         "ble-api-proof": [
+            "display",
             "dep:embassy-sync-07",
             "dep:esp-radio",
             "dep:trouble-host",
@@ -3741,12 +3935,26 @@ fn validate_e290_ble_startup_diagnostic_metadata_boundary(
         "journal-schema3-dev-reprovision": [],
         "rns-inbox-commit-fault-hil": [],
         "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
+        "wifi-station-proof": [
+            "ble-api-proof",
+            "dep:embassy-net",
+            "embassy-net/dhcpv4",
+            "embassy-net/dns",
+            "esp-radio/coex",
+            "esp-radio/wifi"
+        ],
+        "wifi-tcp-proof": [
+            "wifi-station-proof",
+            "dep:rete-core",
+            "dep:smoltcp"
+        ],
         "wifi-api-proof": [
             "dep:edge-dhcp",
             "dep:edge-nal",
             "dep:edge-nal-embassy",
             "dep:embassy-net",
             "dep:esp-radio",
+            "esp-radio/unstable",
             "esp-radio/wifi",
             "esp-rtos/esp-radio"
         ]
@@ -3777,26 +3985,14 @@ fn validate_e290_ble_startup_diagnostic_metadata_boundary(
         "=0.17.0",
         "cfg(target_arch = \"xtensa\")",
         false,
-        &["esp32s3", "jtag-serial"],
+        &["critical-section", "esp32s3", "jtag-serial", "log-04"],
     )?;
 
     let production_inventory = canonical_dependency_metadata(production_dependencies);
-    let mut normalized_diagnostic_dependencies = diagnostic_dependencies.to_vec();
-    let mut diagnostic_println = normalized_diagnostic_dependencies
-        .iter_mut()
-        .filter(|dependency| dependency["name"].as_str() == Some("esp-println"))
-        .collect::<Vec<_>>();
-    if diagnostic_println.len() != 1 {
+    let diagnostic_inventory = canonical_dependency_metadata(diagnostic_dependencies);
+    if production_inventory != diagnostic_inventory {
         return Err(format!(
-            "{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} must have exactly one esp-println dependency"
-        ));
-    }
-    diagnostic_println[0]["features"] = serde_json::json!(["esp32s3", "log-04", "no-op"]);
-    let normalized_diagnostic_inventory =
-        canonical_dependency_metadata(&normalized_diagnostic_dependencies);
-    if production_inventory != normalized_diagnostic_inventory {
-        return Err(format!(
-            "{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} direct dependency metadata may differ from {E290_NODE_PACKAGE} only at the reviewed esp-println feature path"
+            "{E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE} direct dependency metadata must exactly match {E290_NODE_PACKAGE}"
         ));
     }
     Ok(())
@@ -4149,9 +4345,9 @@ fn validate_device_api_edge_dependency_boundary(
     let handoff_dependencies = handoff["dependencies"]
         .as_array()
         .ok_or_else(|| format!("{handoff_name} package has no dependency array"))?;
-    if !handoff_features.is_empty() || handoff_dependencies.len() != 2 {
+    if !handoff_features.is_empty() || handoff_dependencies.len() != 3 {
         return Err(format!(
-            "{handoff_name} must expose no features and exactly two reviewed normal dependencies"
+            "{handoff_name} must expose no features and exactly three reviewed normal dependencies"
         ));
     }
     validate_exact_registry_dependency(
@@ -4169,6 +4365,15 @@ fn validate_device_api_edge_dependency_boundary(
         "reticulum-device-api",
         &workspace.join("crates/device-api"),
         false,
+    )?;
+    validate_exact_registry_dependency(
+        handoff_dependencies,
+        handoff_name,
+        "zeroize",
+        "=1.9.0",
+        None,
+        false,
+        &[],
     )?;
 
     let credentials_name = "reticulum-device-api-credentials";
@@ -4624,6 +4829,66 @@ fn validate_rns_inbox_store_dependency_boundary(
     Ok(())
 }
 
+fn validate_network_config_store_dependency_boundary(
+    metadata_json: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
+    let package_name = "reticulum-network-config-store";
+    let package = exact_local_package(
+        packages,
+        workspace,
+        package_name,
+        "crates/network-config-store/Cargo.toml",
+    )?;
+    let features = package["features"]
+        .as_object()
+        .ok_or_else(|| format!("{package_name} package has no feature map"))?;
+    if features.len() != 1
+        || features
+            .get("default")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err(format!(
+            "{package_name} must expose only one empty default feature"
+        ));
+    }
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .ok_or_else(|| format!("{package_name} package has no dependency array"))?;
+    if dependencies.len() != 3
+        || dependencies
+            .iter()
+            .any(|dependency| !dependency["kind"].is_null())
+    {
+        return Err(format!(
+            "{package_name} must have exactly three reviewed normal dependencies and no build or test dependencies"
+        ));
+    }
+    for (dependency_name, requirement) in [
+        ("embedded-storage", "=0.3.1"),
+        ("sha2", "=0.10.9"),
+        ("zeroize", "=1.9.0"),
+    ] {
+        validate_exact_registry_dependency(
+            dependencies,
+            package_name,
+            dependency_name,
+            requirement,
+            None,
+            false,
+            &[],
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_tracker_radio_dependency_boundary(
     metadata_json: &str,
     workspace: &Path,
@@ -4952,10 +5217,11 @@ fn validate_tx_handoff_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
         .collect::<Vec<_>>();
-    if development.len() != expected_dev.len() {
+    let expected_dev_count = expected_dev.len() + 1;
+    if development.len() != expected_dev_count {
         return Err(format!(
             "reticulum-tx-handoff must have exactly {} reviewed dev dependencies, found {}",
-            expected_dev.len(),
+            expected_dev_count,
             development.len()
         ));
     }
@@ -4977,6 +5243,15 @@ fn validate_tx_handoff_dependency_boundary(
             ));
         }
     }
+    validate_exact_local_dependency_with_kind(
+        dependencies,
+        "reticulum-tx-handoff",
+        "reticulum-rns-rete",
+        &workspace.join("crates/rns-rete"),
+        Some("dev"),
+        false,
+        &[],
+    )?;
     if dependencies
         .iter()
         .any(|dependency| dependency["kind"].as_str() == Some("build"))
@@ -5036,9 +5311,9 @@ fn validate_tx_dispatch_dependency_boundary(
     {
         return Err("reticulum-tx-dispatch must not have build dependencies".to_owned());
     }
-    if dependencies.len() != 7 {
+    if dependencies.len() != 8 {
         return Err(format!(
-            "reticulum-tx-dispatch must have exactly seven reviewed dependencies, found {}",
+            "reticulum-tx-dispatch must have exactly eight reviewed dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -5159,10 +5434,10 @@ fn validate_tx_dispatch_dependency_boundary(
         ("embassy-futures", "=0.1.2", false),
         ("static_cell", "=2.1.1", true),
     ];
-    if development.len() != expected_dev.len() {
+    if development.len() != expected_dev.len() + 1 {
         return Err(format!(
             "reticulum-tx-dispatch must have exactly {} reviewed dev dependencies, found {}",
-            expected_dev.len(),
+            expected_dev.len() + 1,
             development.len()
         ));
     }
@@ -5188,6 +5463,29 @@ fn validate_tx_dispatch_dependency_boundary(
                 "reticulum-tx-dispatch dev dependency {name} does not match the reviewed pin"
             ));
         }
+    }
+
+    let expected_rns_path = workspace.join("crates/rns-rete");
+    let rns_rete = development
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-rns-rete"))
+        .collect::<Vec<_>>();
+    if rns_rete.len() != 1
+        || rns_rete[0]["req"].as_str() != Some("*")
+        || rns_rete[0]["path"].as_str().map(Path::new) != Some(expected_rns_path.as_path())
+        || !rns_rete[0]["source"].is_null()
+        || rns_rete[0]["optional"].as_bool() != Some(false)
+        || !rns_rete[0]["rename"].is_null()
+        || !rns_rete[0]["target"].is_null()
+        || rns_rete[0]["uses_default_features"].as_bool() != Some(false)
+        || rns_rete[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "reticulum-tx-dispatch test proof dependency must be one feature-free local dev edge at {}",
+            expected_rns_path.display()
+        ));
     }
 
     Ok(())
@@ -5588,6 +5886,41 @@ fn validate_exact_target_registry_dependency(
     {
         return Err(format!(
             "{package_name} has an unreviewed target-specific registry {dependency_name} dependency shape"
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_exact_git_dependency(
+    dependencies: &[serde_json::Value],
+    package_name: &str,
+    dependency_name: &str,
+    requirement: &str,
+    source: &str,
+    target: Option<&str>,
+    optional: bool,
+    expected_features: &[&str],
+) -> Result<(), String> {
+    let dependency = exact_dependency(dependencies, package_name, dependency_name, None)?;
+    let features = dependency["features"].as_array().ok_or_else(|| {
+        format!("{package_name} {dependency_name} dependency has no feature list")
+    })?;
+    let actual_features = features
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    if dependency["req"].as_str() != Some(requirement)
+        || dependency["source"].as_str() != Some(source)
+        || !dependency["path"].is_null()
+        || dependency["optional"].as_bool() != Some(optional)
+        || !dependency["rename"].is_null()
+        || dependency["target"].as_str() != target
+        || dependency["uses_default_features"].as_bool() != Some(false)
+        || actual_features != expected_features
+    {
+        return Err(format!(
+            "{package_name} has an unreviewed Git {dependency_name} dependency shape"
         ));
     }
     Ok(())
@@ -6119,7 +6452,7 @@ fn validate_radio_tx_dispatch_dependency_boundary(
 
     for (name, requirement) in [
         ("embassy-sync", "=0.8.0"),
-        ("embassy-time", "=0.5.0"),
+        ("embassy-time", "=0.5.1"),
         ("rand_core", "=0.6.4"),
     ] {
         let dependency = normal
@@ -6904,15 +7237,17 @@ fn forbidden_lxmf_durable_component_closure_category(
 }
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-const RETE_GIT_SOURCE: &str = "git+https://github.com/evelant/rete.git?rev=\
-dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08#\
-dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08";
+const ESP_HAL_B50_DEPENDENCY_SOURCE: &str = "git+https://github.com/esp-rs/esp-hal.git?rev=\
+b50efcb0dcd94b58ec337e511891057aa1f2e8fb";
+const ESP_HAL_B50_RESOLVED_SOURCE: &str = "git+https://github.com/esp-rs/esp-hal.git?rev=\
+b50efcb0dcd94b58ec337e511891057aa1f2e8fb#b50efcb0dcd94b58ec337e511891057aa1f2e8fb";
+const TROUBLE_088_DEPENDENCY_SOURCE: &str = "git+https://github.com/embassy-rs/trouble.git?rev=\
+088e09c451177d5db50cf3e58c68d05512265ba0";
 
 #[derive(Clone, Copy)]
 enum ReviewedClosureSource {
     Local(&'static str),
     Registry,
-    Git(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -6932,19 +7267,6 @@ const fn closure_registry(
         name,
         version,
         source: ReviewedClosureSource::Registry,
-        features,
-    }
-}
-
-const fn closure_git(
-    name: &'static str,
-    version: &'static str,
-    features: &'static [&'static str],
-) -> ReviewedClosurePackage {
-    ReviewedClosurePackage {
-        name,
-        version,
-        source: ReviewedClosureSource::Git(RETE_GIT_SOURCE),
         features,
     }
 }
@@ -7067,10 +7389,26 @@ const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 41] = [
     closure_registry("proc-macro2", "1.0.106", &["default", "proc-macro"]),
     closure_registry("quote", "1.0.46", &["default", "proc-macro"]),
     closure_registry("rand_core", "0.6.4", &[]),
-    closure_git("rete-core", "0.1.0", &["alloc", "default"]),
-    closure_git("rete-lxmf-core", "0.1.0", &[]),
-    closure_git("rete-stack", "0.1.0", &["alloc"]),
-    closure_git("rete-transport", "0.1.0", &[]),
+    closure_local(
+        "rete-core",
+        "vendor/rete-dfcaa36/crates/rete-core/Cargo.toml",
+        &["alloc", "default"],
+    ),
+    closure_local(
+        "rete-lxmf-core",
+        "vendor/rete-dfcaa36/crates/rete-lxmf-core/Cargo.toml",
+        &[],
+    ),
+    closure_local(
+        "rete-stack",
+        "vendor/rete-dfcaa36/crates/rete-stack/Cargo.toml",
+        &["alloc"],
+    ),
+    closure_local(
+        "rete-transport",
+        "vendor/rete-dfcaa36/crates/rete-transport/Cargo.toml",
+        &[],
+    ),
     closure_local(
         "reticulum-lxmf-ingress",
         "crates/lxmf-ingress/Cargo.toml",
@@ -7110,7 +7448,7 @@ const LXMF_INGRESS_REVIEWED_CLOSURE: [ReviewedClosurePackage; 41] = [
     closure_registry("zeroize_derive", "1.5.0", &[]),
 ];
 
-const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 65] = [
+const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 66] = [
     closure_registry("aes", "0.8.4", &[]),
     closure_registry("block-buffer", "0.10.4", &[]),
     closure_registry("byteorder", "1.5.0", &[]),
@@ -7129,9 +7467,9 @@ const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 65] = [
     ),
     closure_registry("document-features", "0.2.12", &["default"]),
     closure_registry("ed25519", "2.2.3", &[]),
-    closure_registry("ed25519-dalek", "2.2.0", &["zeroize"]),
+    closure_registry("ed25519-dalek", "2.2.0", &["hazmat", "zeroize"]),
     closure_registry("embassy-sync", "0.8.0", &[]),
-    closure_registry("embassy-time", "0.5.0", &[]),
+    closure_registry("embassy-time", "0.5.1", &[]),
     closure_registry("embassy-time-driver", "0.2.2", &[]),
     closure_registry("embedded-hal", "0.2.7", &[]),
     closure_registry("embedded-hal", "1.0.0", &[]),
@@ -7158,15 +7496,32 @@ const RADIO_TX_DISPATCH_REVIEWED_CLOSURE: [ReviewedClosurePackage; 65] = [
     closure_registry("proc-macro2", "1.0.106", &["default", "proc-macro"]),
     closure_registry("quote", "1.0.46", &["default", "proc-macro"]),
     closure_registry("rand_core", "0.6.4", &[]),
-    closure_git("rete-core", "0.1.0", &["alloc", "default"]),
-    closure_git("rete-lxmf-core", "0.1.0", &[]),
-    closure_git("rete-stack", "0.1.0", &["alloc"]),
-    closure_git("rete-transport", "0.1.0", &[]),
+    closure_local(
+        "rete-core",
+        "vendor/rete-dfcaa36/crates/rete-core/Cargo.toml",
+        &["alloc", "default"],
+    ),
+    closure_local(
+        "rete-lxmf-core",
+        "vendor/rete-dfcaa36/crates/rete-lxmf-core/Cargo.toml",
+        &[],
+    ),
+    closure_local(
+        "rete-stack",
+        "vendor/rete-dfcaa36/crates/rete-stack/Cargo.toml",
+        &["alloc"],
+    ),
+    closure_local(
+        "rete-transport",
+        "vendor/rete-dfcaa36/crates/rete-transport/Cargo.toml",
+        &[],
+    ),
     closure_local(
         "reticulum-interface-router",
         "crates/interface-router/Cargo.toml",
         &[],
     ),
+    closure_local("reticulum-lxmf-wire", "crates/lxmf-wire/Cargo.toml", &[]),
     closure_local("reticulum-node-core", "crates/node-core/Cargo.toml", &[]),
     closure_local(
         "reticulum-radio-interface",
@@ -7227,18 +7582,6 @@ fn reviewed_closure_display(
             Ok(format!("{base} ({})", crate_directory.display()))
         }
         ReviewedClosureSource::Registry => Ok(base),
-        ReviewedClosureSource::Git(source) => {
-            let source = source
-                .strip_prefix("git+")
-                .ok_or_else(|| format!("reviewed git source for {} lacks git+", package.name))?;
-            let (url, revision) = source.rsplit_once('#').ok_or_else(|| {
-                format!("reviewed git source for {} lacks a revision", package.name)
-            })?;
-            let short_revision = revision.get(..8).ok_or_else(|| {
-                format!("reviewed git revision for {} is too short", package.name)
-            })?;
-            Ok(format!("{base} ({url}#{short_revision})"))
-        }
     }
 }
 
@@ -7259,7 +7602,6 @@ fn metadata_matches_reviewed_closure_package(
                     == Some(workspace.join(relative_manifest).as_path())
         }
         ReviewedClosureSource::Registry => package["source"].as_str() == Some(CRATES_IO_SOURCE),
-        ReviewedClosureSource::Git(source) => package["source"].as_str() == Some(source),
     }
 }
 
@@ -7741,9 +8083,9 @@ fn validate_storage_actor_dependency_boundary(
     {
         return Err("reticulum-storage-actor must not have build dependencies".to_owned());
     }
-    if dependencies.len() != 6 {
+    if dependencies.len() != 7 {
         return Err(format!(
-            "reticulum-storage-actor must have exactly six reviewed dependencies, found {}",
+            "reticulum-storage-actor must have exactly seven reviewed dependencies, found {}",
             dependencies.len()
         ));
     }
@@ -7819,9 +8161,9 @@ fn validate_storage_actor_dependency_boundary(
         .iter()
         .filter(|dependency| dependency["kind"].as_str() == Some("dev"))
         .collect::<Vec<_>>();
-    if development.len() != 1 {
+    if development.len() != 2 {
         return Err(format!(
-            "reticulum-storage-actor must have exactly one reviewed dev dependency, found {}",
+            "reticulum-storage-actor must have exactly two reviewed dev dependencies, found {}",
             development.len()
         ));
     }
@@ -7847,6 +8189,29 @@ fn validate_storage_actor_dependency_boundary(
             "reticulum-storage-actor dev dependency rand_core must be the unconditional feature-free registry =0.6.4 pin"
                 .to_owned(),
         );
+    }
+
+    let expected_rns_path = workspace.join("crates/rns-rete");
+    let rns_rete = development
+        .iter()
+        .filter(|dependency| dependency["name"].as_str() == Some("reticulum-rns-rete"))
+        .collect::<Vec<_>>();
+    if rns_rete.len() != 1
+        || rns_rete[0]["req"].as_str() != Some("*")
+        || rns_rete[0]["path"].as_str().map(Path::new) != Some(expected_rns_path.as_path())
+        || !rns_rete[0]["source"].is_null()
+        || rns_rete[0]["optional"].as_bool() != Some(false)
+        || !rns_rete[0]["rename"].is_null()
+        || !rns_rete[0]["target"].is_null()
+        || rns_rete[0]["uses_default_features"].as_bool() != Some(false)
+        || rns_rete[0]["features"]
+            .as_array()
+            .is_none_or(|features| !features.is_empty())
+    {
+        return Err(format!(
+            "reticulum-storage-actor test proof dependency must be one feature-free local dev edge at {}",
+            expected_rns_path.display()
+        ));
     }
 
     Ok(())
@@ -8012,7 +8377,10 @@ fn validate_device_api_adapter_dependency_boundary(
     let experimental_nomad = features
         .get("experimental-nomad")
         .and_then(serde_json::Value::as_array);
-    if features.len() != 5
+    let experimental_network_config = features
+        .get("experimental-network-config")
+        .and_then(serde_json::Value::as_array);
+    if features.len() != 6
         || default.is_none_or(|default| !default.is_empty())
         || experimental_rns_data.is_none_or(|experimental_rns_data| {
             experimental_rns_data.len() != 1
@@ -8032,9 +8400,22 @@ fn validate_device_api_adapter_dependency_boundary(
             experimental_nomad.len() != 1
                 || experimental_nomad[0].as_str() != Some("reticulum-device-api/experimental-nomad")
         })
+        || experimental_network_config.is_none_or(|experimental_network_config| {
+            let expected = [
+                "experimental-rns-inbox",
+                "experimental-lxmf",
+                "experimental-nomad",
+                "reticulum-device-api/experimental-network-config",
+            ];
+            experimental_network_config.len() != expected.len()
+                || experimental_network_config
+                    .iter()
+                    .zip(expected)
+                    .any(|(observed, expected)| observed.as_str() != Some(expected))
+        })
     {
         return Err(
-            "reticulum-device-api-adapter must expose only default=[] plus exact experimental-lxmf, experimental-nomad, experimental-rns-data, and experimental-rns-inbox forwards"
+            "reticulum-device-api-adapter must expose only default=[] plus exact experimental-lxmf, experimental-network-config, experimental-nomad, experimental-rns-data, and experimental-rns-inbox forwards"
                 .to_owned(),
         );
     }
@@ -8231,7 +8612,24 @@ fn validate_storage_hil_dependency_boundary(
             ));
         }
     }
-    let registry_dependencies: [(&str, &str, &[&str]); 7] = [
+    validate_exact_git_dependency(
+        dependencies,
+        "physical-storage HIL",
+        "esp-hal",
+        "=1.1.0",
+        ESP_HAL_B50_DEPENDENCY_SOURCE,
+        None,
+        false,
+        &[
+            "esp32s3",
+            "exception-handler",
+            "float-save-restore",
+            "log-04",
+            "rt",
+            "unstable",
+        ],
+    )?;
+    let registry_dependencies: [(&str, &str, &[&str]); 6] = [
         ("embedded-storage", "=0.3.1", &[]),
         (
             "esp-backtrace",
@@ -8242,18 +8640,6 @@ fn validate_storage_hil_dependency_boundary(
             "esp-bootloader-esp-idf",
             "=0.5.0",
             &["esp32s3", "log-04", "validation"],
-        ),
-        (
-            "esp-hal",
-            "=1.1.1",
-            &[
-                "esp32s3",
-                "exception-handler",
-                "float-save-restore",
-                "log-04",
-                "rt",
-                "unstable",
-            ],
         ),
         ("esp-println", "=0.17.0", &["auto", "esp32s3", "log-04"]),
         ("esp-storage", "=0.9.0", &["critical-section", "esp32s3"]),
@@ -8540,7 +8926,7 @@ fn validate_tx_supervisor_dependency_boundary(
     for (name, requirement) in [
         ("embassy-sync", "=0.8.0"),
         ("embassy-futures", "=0.1.2"),
-        ("embassy-time", "=0.5.0"),
+        ("embassy-time", "=0.5.1"),
         ("rand_core", "=0.6.4"),
     ] {
         let dependency = normal
@@ -9612,11 +9998,40 @@ fn is_public(visibility: &Visibility) -> bool {
     matches!(visibility, Visibility::Public(_))
 }
 
+const RETE_REVIEWED_SOURCE: &str = "https://github.com/evelant/rete";
+const RETE_REVIEWED_REVISION: &str = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08";
+const RETE_VENDOR_PATCHES_SHA256: &str =
+    "a759b42f2378925c4b9e0b1b70411d0ab78aee576f447008520eb2d535c5ad5d";
+const RETE_VENDOR_PACKAGES: [(&str, &str); 4] = [
+    (
+        "rete-core",
+        "vendor/rete-dfcaa36/crates/rete-core/Cargo.toml",
+    ),
+    (
+        "rete-lxmf-core",
+        "vendor/rete-dfcaa36/crates/rete-lxmf-core/Cargo.toml",
+    ),
+    (
+        "rete-stack",
+        "vendor/rete-dfcaa36/crates/rete-stack/Cargo.toml",
+    ),
+    (
+        "rete-transport",
+        "vendor/rete-dfcaa36/crates/rete-transport/Cargo.toml",
+    ),
+];
+
 fn validate_resolved_rete_pin(
     metadata_json: &str,
+    workspace: &Path,
     reported_source: &str,
     reported_revision: &str,
 ) -> Result<(), String> {
+    if reported_source != RETE_REVIEWED_SOURCE || reported_revision != RETE_REVIEWED_REVISION {
+        return Err(format!(
+            "Rete integration reports {reported_source}@{reported_revision}, expected exact reviewed {RETE_REVIEWED_SOURCE}@{RETE_REVIEWED_REVISION}"
+        ));
+    }
     if reported_revision.len() != 40
         || !reported_revision
             .bytes()
@@ -9628,20 +10043,27 @@ fn validate_resolved_rete_pin(
         ));
     }
 
+    let root_manifest_path = workspace.join("Cargo.toml");
+    let root_manifest = fs::read_to_string(&root_manifest_path).map_err(|error| {
+        format!(
+            "could not read root manifest {}: {error}",
+            root_manifest_path.display()
+        )
+    })?;
     let repository = reported_source
         .strip_suffix(".git")
         .unwrap_or(reported_source);
-    let expected_source = format!(
-        "git+{repository}.git?rev={revision}#{revision}",
-        revision = reported_revision
-    );
+    let repository_git = format!("{repository}.git");
+    validate_rete_root_manifest(&root_manifest, &repository_git, reported_revision)?;
+    validate_rete_vendor_provenance(workspace, reported_source, reported_revision)?;
+
     let metadata: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
     let packages = metadata["packages"]
         .as_array()
         .ok_or_else(|| "cargo metadata has no packages array".to_owned())?;
 
-    for name in ["rete-core", "rete-stack", "rete-transport"] {
+    for (name, relative_manifest) in RETE_VENDOR_PACKAGES {
         let matching = packages
             .iter()
             .filter(|package| package["name"].as_str() == Some(name))
@@ -9652,12 +10074,25 @@ fn validate_resolved_rete_pin(
                 matching.len()
             ));
         }
-        let source = matching[0]["source"]
-            .as_str()
-            .ok_or_else(|| format!("resolved {name} package has no Git source"))?;
-        if source != expected_source {
+        let package = matching[0];
+        if package["version"].as_str() != Some("0.1.0") {
             return Err(format!(
-                "resolved {name} source {source:?} does not match report-derived {expected_source:?}"
+                "resolved {name} version {:?} is not the reviewed 0.1.0 base",
+                package["version"].as_str()
+            ));
+        }
+        if !package["source"].is_null() {
+            return Err(format!(
+                "resolved {name} source {:?} is not the reviewed local overlay",
+                package["source"].as_str()
+            ));
+        }
+        let expected_manifest = workspace.join(relative_manifest);
+        if package["manifest_path"].as_str().map(Path::new) != Some(expected_manifest.as_path()) {
+            return Err(format!(
+                "resolved {name} manifest {:?} does not match reviewed vendor path {}",
+                package["manifest_path"].as_str(),
+                expected_manifest.display()
             ));
         }
     }
@@ -9665,7 +10100,93 @@ fn validate_resolved_rete_pin(
     Ok(())
 }
 
-fn validate_resolved_esp_rtos_patch(metadata_json: &str, workspace: &Path) -> Result<(), String> {
+fn validate_rete_root_manifest(
+    manifest: &str,
+    repository_git: &str,
+    revision: &str,
+) -> Result<(), String> {
+    let exact_line_count = |expected: &str| {
+        manifest
+            .lines()
+            .filter(|line| line.trim() == expected)
+            .count()
+    };
+
+    for (name, relative_manifest) in RETE_VENDOR_PACKAGES {
+        let dependency = format!(
+            "{name} = {{ git = \"{repository_git}\", rev = \"{revision}\", default-features = false }}"
+        );
+        if exact_line_count(&dependency) != 1 {
+            return Err(format!(
+                "root workspace must declare {name} exactly once at reviewed upstream {repository_git}@{revision}"
+            ));
+        }
+        let patch = format!(
+            "{name} = {{ path = \"{}\" }}",
+            relative_manifest.trim_end_matches("/Cargo.toml")
+        );
+        if exact_line_count(&patch) != 1 {
+            return Err(format!(
+                "root workspace must patch {name} exactly once to {}",
+                relative_manifest.trim_end_matches("/Cargo.toml")
+            ));
+        }
+    }
+
+    let patch_header = format!("[patch.\"{repository_git}\"]");
+    if exact_line_count(&patch_header) != 1 {
+        return Err(format!(
+            "root workspace must contain exactly one {patch_header} overlay table"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rete_vendor_provenance(
+    workspace: &Path,
+    reported_source: &str,
+    reported_revision: &str,
+) -> Result<(), String> {
+    let vendor = workspace.join("vendor/rete-dfcaa36");
+    for forbidden in ["Cargo.lock", ".DS_Store", "target"] {
+        if vendor.join(forbidden).exists() {
+            return Err(format!(
+                "Rete vendor overlay contains forbidden build artifact {forbidden}"
+            ));
+        }
+    }
+
+    let patches_path = vendor.join("PATCHES.md");
+    let patches = fs::read(&patches_path).map_err(|error| {
+        format!(
+            "could not read Rete patch provenance {}: {error}",
+            patches_path.display()
+        )
+    })?;
+    let digest = sha256_bytes(&patches);
+    if digest != RETE_VENDOR_PATCHES_SHA256 {
+        return Err(format!(
+            "Rete PATCHES.md digest {digest} does not match reviewed {RETE_VENDOR_PATCHES_SHA256}"
+        ));
+    }
+    let patches = core::str::from_utf8(&patches)
+        .map_err(|error| format!("Rete PATCHES.md is not UTF-8: {error}"))?;
+    for provenance in [
+        reported_source,
+        reported_revision,
+        "rete_transport::Transport::new_in",
+        "rete_stack::NodeCore::new_in",
+    ] {
+        if !patches.contains(provenance) {
+            return Err(format!(
+                "Rete PATCHES.md does not retain required provenance {provenance:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_resolved_esp_rtos_pin(metadata_json: &str) -> Result<(), String> {
     let metadata: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|error| format!("could not parse cargo metadata: {error}"))?;
     let packages = metadata["packages"]
@@ -9689,22 +10210,25 @@ fn validate_resolved_esp_rtos_patch(metadata_json: &str, workspace: &Path) -> Re
             package["version"].as_str()
         ));
     }
-    if !package["source"].is_null() {
+    if package["source"].as_str() != Some(ESP_HAL_B50_RESOLVED_SOURCE) {
         return Err(format!(
-            "resolved esp-rtos source {:?} is not the reviewed local path",
+            "resolved esp-rtos source {:?} is not the reviewed upstream esp-rs revision",
             package["source"].as_str()
         ));
     }
-    let expected_manifest = workspace.join("vendor/esp-rtos-0.3.0/Cargo.toml");
-    if package["manifest_path"].as_str().map(Path::new) != Some(expected_manifest.as_path()) {
+    let manifest = package["manifest_path"]
+        .as_str()
+        .map(Path::new)
+        .ok_or_else(|| "resolved esp-rtos has no manifest path".to_owned())?;
+    if manifest.file_name() != Some(OsStr::new("Cargo.toml"))
+        || manifest.parent().and_then(Path::file_name) != Some(OsStr::new("esp-rtos"))
+    {
         return Err(format!(
-            "resolved esp-rtos manifest {:?} does not match {}",
-            package["manifest_path"].as_str(),
-            expected_manifest.display()
+            "resolved esp-rtos manifest {:?} is not the esp-rtos package from the pinned source",
+            package["manifest_path"].as_str()
         ));
     }
-
-    validate_esp_rtos_vendor_tree(&workspace.join("vendor/esp-rtos-0.3.0"))
+    Ok(())
 }
 
 fn validate_resolved_lora_phy_patch(metadata_json: &str, workspace: &Path) -> Result<(), String> {
@@ -9749,97 +10273,6 @@ fn validate_resolved_lora_phy_patch(metadata_json: &str, workspace: &Path) -> Re
     validate_lora_phy_vendor_tree(&workspace.join("vendor/lora-phy-3.0.1"))
 }
 
-const ESP_RTOS_VENDOR_MANIFEST: &str = "VENDOR-HASHES.json";
-const ESP_RTOS_ARCHIVE_SHA256: &str =
-    "551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712";
-const ESP_RTOS_UPSTREAM_COMMIT: &str = "347003de8a48320bb7724f53045be3afa9204411";
-const ESP_RTOS_PROJECT_FILES: [(&str, &str); 3] = [
-    (
-        "LICENSE-APACHE",
-        "2bf4fe1a37e545c3b4f7bfaa2326c99f153af32ef8d112fbaa4bff7fb2a575bd",
-    ),
-    (
-        "LICENSE-MIT",
-        "7b2165c6740592038d887d51d56d122b0b563337a7756b424f19eecc7a936ef1",
-    ),
-    (
-        "PATCHES.md",
-        "188a1cce2ba29d7c5c8dd136fd8db63afb51d5315c66cf99c53e44ff3341557b",
-    ),
-];
-const ESP_RTOS_UNMODIFIED_UPSTREAM_FILES: [&str; 16] = [
-    ".cargo_vcs_info.json",
-    "CHANGELOG.md",
-    "Cargo.toml",
-    "Cargo.toml.orig",
-    "README.md",
-    "build.rs",
-    "esp_config.yml",
-    "src/embassy/mod.rs",
-    "src/fmt.rs",
-    "src/run_queue.rs",
-    "src/syscall.rs",
-    "src/task/mod.rs",
-    "src/task/riscv.rs",
-    "src/task/xtensa.rs",
-    "src/timer/embassy.rs",
-    "src/wait_queue.rs",
-];
-const ESP_RTOS_PATCHED_UPSTREAM_FILES: [(&str, &str, &str); 4] = [
-    (
-        "src/esp_radio/mod.rs",
-        "a6116f123c75b9584c829eea2d53151085b6bcb9a94536e9dfdeaaf29fbe9f5d",
-        "fae392998ae5d7c622a6d3469049f9f97bdf3e3f82f331dfa8738b5b393dc495",
-    ),
-    (
-        "src/lib.rs",
-        "0de5aec7bf732bba96fe6c1218fc634a5e72c9daed26c5bdbde726d7ebd0d0f9",
-        "1c04cceca3731e7604e8af9c94e0eefbbcfbbe84f546c1c518c0533671eec33f",
-    ),
-    (
-        "src/scheduler.rs",
-        "809eb9122d9e1a40718e48670148facd9a474c2869b926edd071f2c394a1bcbc",
-        "ae77f2ae9c07f30f53596ae10ada1a8047ce5d4630ab162774f8c5c68f345c5e",
-    ),
-    (
-        "src/timer/mod.rs",
-        "c75310a53ecf3cc0ef820d57a551866f6aa29b48098ffbe289fbcf0e742a485a",
-        "10faff7ffe8e8cc10c7bb6035c7a4e7bccf64c892f3d50e4e8b67bdcfcc8cd6b",
-    ),
-];
-const ESP_RTOS_REVIEWED_EDITS: [(&str, &str, &str); 6] = [
-    (
-        "src/esp_radio/mod.rs",
-        "    register_queue_implementation,\n    register_semaphore_implementation,\n    register_timer_implementation,\n    register_wait_queue_implementation,",
-        "    register_queue_implementation, register_semaphore_implementation,\n    register_timer_implementation, register_wait_queue_implementation,",
-    ),
-    (
-        "src/lib.rs",
-        "//! ```\n//! \n//! To write",
-        "//! ```\n//!\n//! To write",
-    ),
-    (
-        "src/lib.rs",
-        "            stack_top as usize - stack_bottom as usize,",
-        "            (stack_top as usize - stack_bottom as usize) / core::mem::size_of::<MaybeUninit<u32>>(),",
-    ),
-    (
-        "src/lib.rs",
-        "            STACK_SIZE,",
-        "            STACK_SIZE / core::mem::size_of::<MaybeUninit<u32>>(),",
-    ),
-    (
-        "src/scheduler.rs",
-        "    task::{\n        self,\n        ContextExt,\n        CpuContext,\n        IdleFn,\n        Task,\n        TaskAllocListElement,\n        TaskDeleteListElement,\n        TaskExt,\n        TaskList,\n        TaskListItem,\n        TaskPtr,\n        TaskState,\n        ThreadLocalData,\n        read_thread_pointer,\n    },",
-        "    task::{\n        self, ContextExt, CpuContext, IdleFn, Task, TaskAllocListElement, TaskDeleteListElement,\n        TaskExt, TaskList, TaskListItem, TaskPtr, TaskState, ThreadLocalData, read_thread_pointer,\n    },",
-    ),
-    (
-        "src/timer/mod.rs",
-        "use crate::{\n    SCHEDULER,\n    TICK_RATE,\n    TimeBase,\n    task::{",
-        "use crate::{\n    SCHEDULER, TICK_RATE, TimeBase,\n    task::{",
-    ),
-];
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VendorHashManifest {
@@ -9868,219 +10301,6 @@ struct ReviewedSourceEdit {
     path: String,
     upstream: String,
     vendored: String,
-}
-
-fn validate_esp_rtos_vendor_tree(vendor: &Path) -> Result<(), String> {
-    let manifest_path = vendor.join(ESP_RTOS_VENDOR_MANIFEST);
-    let text = fs::read_to_string(&manifest_path).map_err(|error| {
-        format!(
-            "could not read checked vendor manifest {}: {error}",
-            manifest_path.display()
-        )
-    })?;
-    let manifest: VendorHashManifest = serde_json::from_str(&text).map_err(|error| {
-        format!(
-            "could not parse checked vendor manifest {}: {error}",
-            manifest_path.display()
-        )
-    })?;
-    validate_esp_rtos_vendor_tree_with_manifest(vendor, &manifest)
-}
-
-fn validate_esp_rtos_vendor_tree_with_manifest(
-    vendor: &Path,
-    manifest: &VendorHashManifest,
-) -> Result<(), String> {
-    if manifest.schema != 1
-        || manifest.crate_name != "esp-rtos"
-        || manifest.crate_version != "0.3.0"
-        || manifest.archive_sha256 != ESP_RTOS_ARCHIVE_SHA256
-        || manifest.upstream_commit != ESP_RTOS_UPSTREAM_COMMIT
-    {
-        return Err(
-            "checked vendor manifest does not identify the reviewed esp-rtos 0.3.0 archive"
-                .to_owned(),
-        );
-    }
-
-    if manifest.omitted_upstream_files.len() != 1
-        || manifest
-            .omitted_upstream_files
-            .get("Cargo.lock")
-            .map(String::as_str)
-            != Some("72ab2b50ff8cbed99f8f2f8b85963e5e3561a87ec56a1538a18c209245009d0f")
-    {
-        return Err(
-            "checked vendor manifest must omit exactly the published package-local Cargo.lock"
-                .to_owned(),
-        );
-    }
-    if manifest.project_files.len() != ESP_RTOS_PROJECT_FILES.len()
-        || ESP_RTOS_PROJECT_FILES.into_iter().any(|(path, digest)| {
-            manifest.project_files.get(path).map(String::as_str) != Some(digest)
-        })
-    {
-        return Err(
-            "checked esp-rtos vendor manifest has the wrong project provenance files".to_owned(),
-        );
-    }
-
-    let unmodified_paths = manifest
-        .unmodified_upstream_files
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let expected_unmodified_paths = ESP_RTOS_UNMODIFIED_UPSTREAM_FILES
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    if unmodified_paths != expected_unmodified_paths {
-        return Err("checked esp-rtos manifest has the wrong pristine file inventory".to_owned());
-    }
-
-    if manifest.patched_upstream_files.len() != ESP_RTOS_PATCHED_UPSTREAM_FILES.len() {
-        return Err(
-            "checked esp-rtos manifest must identify exactly four patched source files".to_owned(),
-        );
-    }
-    for (relative, upstream_sha256, vendored_sha256) in ESP_RTOS_PATCHED_UPSTREAM_FILES {
-        let record = manifest
-            .patched_upstream_files
-            .get(relative)
-            .ok_or_else(|| format!("checked esp-rtos manifest is missing patched {relative}"))?;
-        if record.upstream_sha256 != upstream_sha256 || record.vendored_sha256 != vendored_sha256 {
-            return Err(format!(
-                "checked esp-rtos manifest does not bind {relative} to its reviewed pristine and patched digests"
-            ));
-        }
-    }
-
-    if manifest.reviewed_source_edits.len() != ESP_RTOS_REVIEWED_EDITS.len()
-        || manifest
-            .reviewed_source_edits
-            .iter()
-            .zip(ESP_RTOS_REVIEWED_EDITS)
-            .any(|(edit, (path, upstream, vendored))| {
-                edit.path != path || edit.upstream != upstream || edit.vendored != vendored
-            })
-    {
-        return Err(
-            "checked esp-rtos manifest must describe the exact ordered six reviewed edits across the four changed source files"
-                .to_owned(),
-        );
-    }
-
-    let mut expected_files = BTreeMap::new();
-    for (role, files) in [
-        ("unmodified upstream", &manifest.unmodified_upstream_files),
-        ("project provenance", &manifest.project_files),
-    ] {
-        for (relative, digest) in files {
-            validate_vendor_relative_path(relative)?;
-            validate_sha256_digest(digest)?;
-            if expected_files
-                .insert(relative.clone(), digest.clone())
-                .is_some()
-            {
-                return Err(format!(
-                    "checked vendor manifest lists {relative:?} in more than one role ({role})"
-                ));
-            }
-        }
-    }
-    for (relative, record) in &manifest.patched_upstream_files {
-        validate_vendor_relative_path(relative)?;
-        validate_sha256_digest(&record.upstream_sha256)?;
-        validate_sha256_digest(&record.vendored_sha256)?;
-        if expected_files
-            .insert(relative.clone(), record.vendored_sha256.clone())
-            .is_some()
-        {
-            return Err(format!(
-                "checked vendor manifest lists patched file {relative:?} in more than one role"
-            ));
-        }
-    }
-    for (relative, digest) in &manifest.omitted_upstream_files {
-        validate_vendor_relative_path(relative)?;
-        validate_sha256_digest(digest)?;
-        if vendor.join(relative).exists() {
-            return Err(format!(
-                "intentionally omitted upstream file {relative:?} is present in the vendor tree"
-            ));
-        }
-    }
-    if expected_files
-        .insert(ESP_RTOS_VENDOR_MANIFEST.to_owned(), String::new())
-        .is_some()
-    {
-        return Err(format!(
-            "checked vendor manifest must not classify {ESP_RTOS_VENDOR_MANIFEST} as payload"
-        ));
-    }
-
-    let mut actual_files = BTreeSet::new();
-    collect_vendor_files(vendor, vendor, &mut actual_files)?;
-    let expected_paths = expected_files.keys().cloned().collect::<BTreeSet<_>>();
-    if actual_files != expected_paths {
-        let missing = expected_paths
-            .difference(&actual_files)
-            .cloned()
-            .collect::<Vec<_>>();
-        let unexpected = actual_files
-            .difference(&expected_paths)
-            .cloned()
-            .collect::<Vec<_>>();
-        return Err(format!(
-            "vendor tree differs from checked inventory; missing={missing:?}, unexpected={unexpected:?}"
-        ));
-    }
-
-    for (relative, expected_digest) in expected_files {
-        if relative == ESP_RTOS_VENDOR_MANIFEST {
-            continue;
-        }
-        let actual_digest = sha256_file(&vendor.join(&relative))?;
-        if actual_digest != expected_digest {
-            return Err(format!(
-                "vendor file {relative:?} digest {actual_digest} does not match checked {expected_digest}"
-            ));
-        }
-    }
-
-    let mut reconstructed = BTreeMap::new();
-    for (relative, _, _) in ESP_RTOS_PATCHED_UPSTREAM_FILES {
-        let source = fs::read_to_string(vendor.join(relative))
-            .map_err(|error| format!("could not read patched {relative}: {error}"))?;
-        reconstructed.insert(relative, source);
-    }
-    for edit in &manifest.reviewed_source_edits {
-        let source = reconstructed
-            .get_mut(edit.path.as_str())
-            .ok_or_else(|| format!("reviewed edit names unpatched file {:?}", edit.path))?;
-        let vendored_occurrences = source.matches(&edit.vendored).count();
-        if vendored_occurrences != 1 {
-            return Err(format!(
-                "reviewed esp-rtos edit in {:?} has {vendored_occurrences} vendored occurrences, expected 1",
-                edit.path
-            ));
-        }
-        *source = source.replacen(&edit.vendored, &edit.upstream, 1);
-    }
-    for (relative, upstream_sha256, _) in ESP_RTOS_PATCHED_UPSTREAM_FILES {
-        let reconstructed_digest = sha256_bytes(
-            reconstructed
-                .get(relative)
-                .expect("all reviewed patched files were loaded")
-                .as_bytes(),
-        );
-        if reconstructed_digest != upstream_sha256 {
-            return Err(format!(
-                "reversing the reviewed edits produced {relative} digest {reconstructed_digest}, expected pristine {upstream_sha256}"
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 const LORA_PHY_VENDOR_MANIFEST: &str = "VENDOR-HASHES.json";
@@ -10838,78 +11058,80 @@ mod tests {
 
     #[test]
     fn resolved_rete_pin_is_tied_to_reported_metadata() {
-        let source = "https://github.com/example/rete";
-        let revision = "0123456789abcdef0123456789abcdef01234567";
-        let expected = "git+https://github.com/example/rete.git?rev=\
-                        0123456789abcdef0123456789abcdef01234567#\
-                        0123456789abcdef0123456789abcdef01234567";
+        let root = workspace_root();
         let metadata = serde_json::json!({
-            "packages": [
-                { "name": "rete-core", "source": expected },
-                { "name": "rete-stack", "source": expected },
-                { "name": "rete-transport", "source": expected },
-            ]
+            "packages": RETE_VENDOR_PACKAGES.map(|(name, relative_manifest)| serde_json::json!({
+                "name": name,
+                "version": "0.1.0",
+                "source": null,
+                "manifest_path": root.join(relative_manifest),
+            }))
         });
 
-        validate_resolved_rete_pin(&metadata.to_string(), source, revision).unwrap();
+        validate_resolved_rete_pin(
+            &metadata.to_string(),
+            &root,
+            RETE_REVIEWED_SOURCE,
+            RETE_REVIEWED_REVISION,
+        )
+        .unwrap();
 
         let mut mismatched = metadata;
         mismatched["packages"][2]["source"] = serde_json::Value::String(
-            "git+https://github.com/example/rete.git?rev=bad#bad".to_owned(),
+            "git+https://github.com/evelant/rete.git?rev=bad#bad".to_owned(),
         );
-        assert!(validate_resolved_rete_pin(&mismatched.to_string(), source, revision).is_err());
+        assert!(
+            validate_resolved_rete_pin(
+                &mismatched.to_string(),
+                &root,
+                RETE_REVIEWED_SOURCE,
+                RETE_REVIEWED_REVISION,
+            )
+            .is_err()
+        );
+
+        let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        validate_rete_root_manifest(
+            &manifest,
+            "https://github.com/evelant/rete.git",
+            RETE_REVIEWED_REVISION,
+        )
+        .unwrap();
+        let wrong_revision = manifest.replacen(RETE_REVIEWED_REVISION, &"0".repeat(40), 1);
+        assert!(
+            validate_rete_root_manifest(
+                &wrong_revision,
+                "https://github.com/evelant/rete.git",
+                RETE_REVIEWED_REVISION,
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn resolved_esp_rtos_is_tied_to_reviewed_local_patch() {
-        let root = workspace_root();
-        let manifest = root.join("vendor/esp-rtos-0.3.0/Cargo.toml");
+    fn resolved_esp_rtos_is_tied_to_reviewed_upstream_revision() {
         let metadata = serde_json::json!({
             "packages": [{
                 "name": "esp-rtos",
                 "version": "0.3.0",
-                "source": null,
-                "manifest_path": manifest,
+                "source": ESP_HAL_B50_RESOLVED_SOURCE,
+                "manifest_path": "/cargo/git/checkouts/esp-hal/revision/esp-rtos/Cargo.toml",
             }]
         });
 
-        validate_resolved_esp_rtos_patch(&metadata.to_string(), &root).unwrap();
+        validate_resolved_esp_rtos_pin(&metadata.to_string()).unwrap();
 
         let mut crates_io = metadata.clone();
         crates_io["packages"][0]["source"] = serde_json::Value::String(
             "registry+https://github.com/rust-lang/crates.io-index".into(),
         );
-        assert!(validate_resolved_esp_rtos_patch(&crates_io.to_string(), &root).is_err());
+        assert!(validate_resolved_esp_rtos_pin(&crates_io.to_string()).is_err());
 
         let mut wrong_path = metadata;
-        wrong_path["packages"][0]["manifest_path"] =
-            serde_json::Value::String(root.join("elsewhere/Cargo.toml").display().to_string());
-        assert!(validate_resolved_esp_rtos_patch(&wrong_path.to_string(), &root).is_err());
-    }
-
-    #[test]
-    fn esp_rtos_vendor_tree_matches_checked_registry_inventory_and_six_edits() {
-        let vendor = workspace_root().join("vendor/esp-rtos-0.3.0");
-        validate_esp_rtos_vendor_tree(&vendor).unwrap();
-
-        let manifest_text = fs::read_to_string(vendor.join(ESP_RTOS_VENDOR_MANIFEST)).unwrap();
-        let manifest: VendorHashManifest = serde_json::from_str(&manifest_text).unwrap();
-
-        let mut missing_file = manifest.clone();
-        missing_file.unmodified_upstream_files.remove("README.md");
-        assert!(validate_esp_rtos_vendor_tree_with_manifest(&vendor, &missing_file).is_err());
-
-        let mut changed_edit = manifest.clone();
-        changed_edit.reviewed_source_edits[1].vendored.push(' ');
-        assert!(validate_esp_rtos_vendor_tree_with_manifest(&vendor, &changed_edit).is_err());
-
-        let mut changed_digest = manifest;
-        changed_digest
-            .patched_upstream_files
-            .get_mut("src/lib.rs")
-            .unwrap()
-            .vendored_sha256 = "0".repeat(64);
-        assert!(validate_esp_rtos_vendor_tree_with_manifest(&vendor, &changed_digest).is_err());
+        wrong_path["packages"][0]["manifest_path"] = serde_json::Value::String(
+            "/cargo/git/checkouts/esp-hal/revision/elsewhere/Cargo.toml".into(),
+        );
+        assert!(validate_resolved_esp_rtos_pin(&wrong_path.to_string()).is_err());
     }
 
     #[test]
@@ -11401,7 +11623,7 @@ mod tests {
     }
 
     fn e290_ble_profile_graph_fixture() -> String {
-        let mut tree = format!("{E290_NODE_PACKAGE_IDENTITY} features=[ble-api-proof]");
+        let mut tree = format!("{E290_NODE_PACKAGE_IDENTITY} features=[ble-api-proof,display]");
         for package in E290_NODE_GRAPH_REQUIRED {
             let (version, features) = match package {
                 "allocator-api2" => ("0.3.1", "alloc"),
@@ -11411,10 +11633,13 @@ mod tests {
                     "compat,default,esp32s3,global-allocator,internal-heap-stats",
                 ),
                 "esp-println" => ("0.17.0", E290_PRODUCTION_ESP_PRINTLN_FEATURES),
-                "esp-storage" => ("0.9.0", "critical-section,esp32s3"),
+                "esp-storage" => (
+                    "0.9.0",
+                    "critical-section,embedded-storage,esp-hal,esp-rom-sys,esp-sync,esp32s3",
+                ),
                 "reticulum-device-api" | "reticulum-device-api-adapter" => (
                     "0.1.0",
-                    "experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox",
+                    "experimental-lxmf,experimental-network-config,experimental-nomad,experimental-rns-data,experimental-rns-inbox",
                 ),
                 "static_cell" => ("2.1.1", ""),
                 _ => ("0.1.0", ""),
@@ -11422,12 +11647,12 @@ mod tests {
             tree.push_str(&format!("\n├── {package} v{version} features=[{features}]"));
         }
         for line in [
-            "esp-hal v1.1.1 features=[__bluetooth,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable]",
-            "esp-radio v0.18.0 features=[__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,xtensa-lx-rt]",
+            "esp-hal v1.1.0 features=[__bluetooth,__sdmmc,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable]",
+            "esp-radio v1.0.0-beta.0 features=[__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,xtensa-lx-rt]",
             "esp-radio-rtos-driver v0.3.0 features=[esp-sync,esp32s3,ipc-implementations]",
             "esp-rtos v0.3.0 features=[alloc,embassy,esp-alloc,esp-radio,esp32s3,log-04]",
             "futures-util v0.3.33 features=[futures-sink,sink]",
-            "trouble-host v0.6.0 features=[default-packet-pool,default-packet-pool-mtu-255,derive,gatt,peripheral,trouble-host-macros]",
+            "trouble-host v0.7.0 features=[central,connection-event-queue-size-4,default-packet-pool,default-packet-pool-mtu-255,derive,gatt,peripheral,security,trouble-host-macros]",
         ] {
             tree.push_str(&format!("\n└── {line}"));
         }
@@ -11453,14 +11678,14 @@ mod tests {
         for drifted in [
             diagnostic.replace(
                 E290_DIAGNOSTIC_ESP_PRINTLN_FEATURES,
-                E290_PRODUCTION_ESP_PRINTLN_FEATURES,
+                "critical-section,esp32s3,jtag-serial,log-04,no-op",
             ),
-            diagnostic.replace("features=[ble-api-proof]", "features=[default]"),
+            diagnostic.replace("features=[ble-api-proof,display]", "features=[default]"),
             diagnostic.replace(
                 "__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,xtensa-lx-rt",
                 "__has_unstable_feature_enabled,ble,esp-alloc,esp32s3,unstable,wifi,xtensa-lx-rt",
             ),
-            format!("{diagnostic}\n└── edge-dhcp v0.7.0 features=[io]"),
+            format!("{diagnostic}\n└── edge-dhcp v0.8.0 features=[io]"),
             format!("{diagnostic}\n└── unreviewed-transport v1.0.0 features=[]"),
         ] {
             assert!(
@@ -11480,8 +11705,13 @@ mod tests {
         esp_alloc["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
         esp_alloc["uses_default_features"] = serde_json::Value::Bool(true);
         let mut esp_println = handoff_dependency_fixture("esp-println", "=0.17.0", None);
-        esp_println["features"] = serde_json::json!(["esp32s3", "log-04", "no-op"]);
+        esp_println["features"] =
+            serde_json::json!(["critical-section", "esp32s3", "jtag-serial", "log-04"]);
         esp_println["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
+        let mut esp_storage = handoff_dependency_fixture("esp-storage", "=0.9.0", None);
+        esp_storage["features"] =
+            serde_json::json!(["esp32s3", "critical-section", "embedded-storage"]);
+        esp_storage["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
         let mut embedded_storage_target =
             handoff_dependency_fixture("embedded-storage", "=0.3.1", None);
         embedded_storage_target["target"] = serde_json::json!("cfg(target_arch = \"xtensa\")");
@@ -11502,6 +11732,38 @@ mod tests {
             dependency["optional"] = serde_json::Value::Bool(true);
             dependency
         };
+        let mut optional_smoltcp = optional_registry("smoltcp", "=0.13.0");
+        optional_smoltcp["features"] = serde_json::json!(["proto-dns", "proto-ipv4"]);
+        let mut optional_esp_radio = optional_target(
+            "esp-radio",
+            "=1.0.0-beta.0",
+            None,
+            &["esp-alloc", "esp32s3"],
+        );
+        optional_esp_radio["source"] = serde_json::json!(ESP_HAL_B50_DEPENDENCY_SOURCE);
+        let mut optional_trouble = optional_target(
+            "trouble-host",
+            "=0.7.0",
+            None,
+            &[
+                "central",
+                "connection-event-queue-size-4",
+                "default-packet-pool-mtu-255",
+                "derive",
+                "gatt",
+                "peripheral",
+                "security",
+            ],
+        );
+        optional_trouble["source"] = serde_json::json!(TROUBLE_088_DEPENDENCY_SOURCE);
+        let mut optional_rete_core = handoff_dependency_fixture("rete-core", "*", None);
+        optional_rete_core["source"] = serde_json::json!(
+            "git+https://github.com/evelant/rete.git?rev=dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08"
+        );
+        optional_rete_core["optional"] = serde_json::Value::Bool(true);
+        let mut critical_section_dev =
+            handoff_dependency_fixture("critical-section", "=1.2.0", Some("dev"));
+        critical_section_dev["features"] = serde_json::json!(["std"]);
         let optional_local = |name: &str, relative_path: &str| {
             let mut dependency =
                 handoff_path_dependency_fixture(name, "*", &root.join(relative_path), None);
@@ -11515,6 +11777,7 @@ mod tests {
                 "manifest_path": root.join("firmware/heltec-vision-master-e290-node/Cargo.toml"),
                 "features": {
                     "ble-api-proof": [
+                        "display",
                         "dep:embassy-sync-07",
                         "dep:esp-radio",
                         "dep:trouble-host",
@@ -11531,12 +11794,26 @@ mod tests {
                     "journal-schema3-dev-reprovision": [],
                     "rns-inbox-commit-fault-hil": [],
                     "runtime-measurement-hil": ["esp-alloc/alloc-hooks"],
+                    "wifi-station-proof": [
+                        "ble-api-proof",
+                        "dep:embassy-net",
+                        "embassy-net/dhcpv4",
+                        "embassy-net/dns",
+                        "esp-radio/coex",
+                        "esp-radio/wifi"
+                    ],
+                    "wifi-tcp-proof": [
+                        "wifi-station-proof",
+                        "dep:rete-core",
+                        "dep:smoltcp"
+                    ],
                     "wifi-api-proof": [
                         "dep:edge-dhcp",
                         "dep:edge-nal",
                         "dep:edge-nal-embassy",
                         "dep:embassy-net",
                         "dep:esp-radio",
+                        "esp-radio/unstable",
                         "esp-radio/wifi",
                         "esp-rtos/esp-radio"
                     ]
@@ -11599,6 +11876,18 @@ mod tests {
                         None,
                     ),
                     handoff_path_dependency_fixture(
+                        "reticulum-rns-interface-discovery",
+                        "*",
+                        &root.join("crates/rns-interface-discovery"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
+                        "reticulum-network-config-store",
+                        "*",
+                        &root.join("crates/network-config-store"),
+                        None,
+                    ),
+                    handoff_path_dependency_fixture(
                         "reticulum-device-api-credential-store",
                         "*",
                         &root.join("crates/device-api-credential-store"),
@@ -11649,22 +11938,27 @@ mod tests {
                     embedded_storage_target,
                     embedded_storage_dev,
                     handoff_dependency_fixture("rand_core", "=0.6.4", None),
+                    handoff_dependency_fixture("sha2", "=0.10.9", None),
+                    handoff_dependency_fixture("subtle", "=2.6.1", None),
                     handoff_dependency_fixture("zeroize", "=1.9.0", None),
                     optional_registry("embedded-graphics", "=0.8.2"),
+                    optional_smoltcp,
+                    optional_rete_core,
                     allocator_api,
                     esp_alloc,
                     esp_println,
-                    optional_target("edge-dhcp", "=0.7.0", None, &["io"]),
-                    optional_target("edge-nal", "=0.6.0", None, &[]),
+                    esp_storage,
+                    optional_target("edge-dhcp", "=0.8.0", None, &["io"]),
+                    optional_target("edge-nal", "=0.7.0", None, &[]),
                     optional_target(
                         "edge-nal-embassy",
-                        "=0.8.1",
+                        "=0.9.0",
                         None,
                         &["medium-ethernet", "proto-ipv4", "udp"],
                     ),
                     optional_target(
                         "embassy-net",
-                        "=0.8.0",
+                        "=0.9.1",
                         None,
                         &["medium-ethernet", "proto-ipv4", "tcp", "udp"],
                     ),
@@ -11674,23 +11968,9 @@ mod tests {
                         Some("embassy-sync-07"),
                         &[],
                     ),
-                    optional_target(
-                        "esp-radio",
-                        "=0.18.0",
-                        None,
-                        &["esp-alloc", "esp32s3"],
-                    ),
-                    optional_target(
-                        "trouble-host",
-                        "=0.6.0",
-                        None,
-                        &[
-                            "default-packet-pool-mtu-255",
-                            "derive",
-                            "gatt",
-                            "peripheral",
-                        ],
-                    ),
+                    optional_esp_radio,
+                    optional_trouble,
+                    critical_section_dev,
                 ]
             }]
         })
@@ -11704,13 +11984,6 @@ mod tests {
             root.join("firmware/heltec-vision-master-e290-ble-startup-diagnostic/Cargo.toml")
         );
         diagnostic["features"]["default"] = serde_json::json!(["ble-api-proof"]);
-        let println = diagnostic["dependencies"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|dependency| dependency["name"].as_str() == Some("esp-println"))
-            .unwrap();
-        println["features"] = serde_json::json!(["esp32s3", "jtag-serial"]);
         metadata["packages"]
             .as_array_mut()
             .unwrap()
@@ -11776,7 +12049,7 @@ mod tests {
             .iter_mut()
             .find(|dependency| dependency["name"].as_str() == Some("esp-radio"))
             .unwrap();
-        esp_radio["req"] = serde_json::json!("^0.18");
+        esp_radio["req"] = serde_json::json!("^1.0.0-beta.0");
         assert!(
             validate_e290_ble_startup_diagnostic_metadata_boundary(&pin_drift.to_string(), &root,)
                 .is_err()
@@ -11796,6 +12069,24 @@ mod tests {
         assert!(
             validate_e290_ble_startup_diagnostic_metadata_boundary(
                 &dependency_feature_drift.to_string(),
+                &root,
+            )
+            .is_err()
+        );
+
+        let mut missing_discovery = baseline.clone();
+        fixture_package_mut(
+            &mut missing_discovery,
+            E290_BLE_STARTUP_DIAGNOSTIC_PACKAGE,
+        )["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|dependency| {
+                dependency["name"].as_str() != Some("reticulum-rns-interface-discovery")
+            });
+        assert!(
+            validate_e290_ble_startup_diagnostic_metadata_boundary(
+                &missing_discovery.to_string(),
                 &root,
             )
             .is_err()
@@ -11899,19 +12190,20 @@ mod tests {
                      ├── allocator-api2 v0.3.1 features=[alloc]\n\
                      ├── embedded-storage v0.3.1 features=[]\n\
                      ├── esp-alloc v0.10.0 features=[compat,default,esp32s3,global-allocator,internal-heap-stats]\n\
-                     ├── esp-hal v1.1.1 features=[__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable]\n\
-                     ├── esp-println v0.17.0 features=[esp32s3,log-04,no-op]\n\
+                     ├── esp-hal v1.1.0 features=[__sdmmc,__usb_otg,critical-section,esp32s3,exception-handler,float-save-restore,log-04,requires-unstable,rt,unstable]\n\
+                     ├── esp-println v0.17.0 features=[critical-section,esp32s3,jtag-serial,log-04]\n\
                      ├── esp-radio-rtos-driver v0.3.0 features=[esp-sync,ipc-implementations]\n\
                      ├── esp-rtos v0.3.0 features=[alloc,embassy,esp-alloc,esp32s3,log-04]\n\
-                     ├── esp-storage v0.9.0 features=[critical-section,esp32s3]\n\
+                     ├── esp-storage v0.9.0 features=[critical-section,embedded-storage,esp-hal,esp-rom-sys,esp-sync,esp32s3]\n\
                      ├── futures-util v0.3.33 features=[]\n\
+                     ├── generic-array v0.14.7 features=[more_lengths]\n\
                      ├── reticulum-announce-clock v0.1.0 features=[]\n\
                      ├── reticulum-appliance-display-model v0.1.0 features=[]\n\
                      ├── reticulum-board-heltec-vision-master-e290-radio v0.1.0 features=[]\n\
                      │   ├── reticulum-board-heltec-vision-master-e290 v0.1.0 features=[]\n\
                      │   └── reticulum-radio-lora-phy v0.1.0 features=[]\n\
-                     ├── reticulum-device-api v0.1.0 features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]\n\
-                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api v0.1.0 features=[experimental-lxmf,experimental-network-config,experimental-nomad,experimental-rns-data,experimental-rns-inbox]\n\
+                     ├── reticulum-device-api-adapter v0.1.0 features=[experimental-lxmf,experimental-network-config,experimental-nomad,experimental-rns-data,experimental-rns-inbox]\n\
                      ├── reticulum-device-api-ble v0.1.0 features=[]\n\
                      ├── reticulum-device-api-credential-store v0.1.0 features=[]\n\
                      │   └── reticulum-device-api-credentials v0.1.0 features=[]\n\
@@ -11931,6 +12223,7 @@ mod tests {
                      ├── reticulum-lxmf-ingress v0.1.0 features=[] (*)\n\
                      ├── reticulum-lxmf-model v0.1.0 features=[]\n\
                      ├── reticulum-lxmf-store v0.1.0 features=[] (*)\n\
+                     ├── reticulum-network-config-store v0.1.0 features=[]\n\
                      ├── reticulum-node-core v0.1.0 features=[]\n\
                      │   └── reticulum-rns-rete v0.1.0 features=[]\n\
                      │       ├── rete-core v0.1.0 features=[alloc,default]\n\
@@ -11942,6 +12235,7 @@ mod tests {
                      ├── reticulum-radio-interface v0.1.0 features=[]\n\
                      ├── reticulum-radio-tx-dispatch v0.1.0 features=[]\n\
                      ├── reticulum-rns-inbox-store v0.1.0 features=[]\n\
+                     ├── reticulum-rns-interface-discovery v0.1.0 features=[]\n\
                      ├── reticulum-storage-actor v0.1.0 features=[]\n\
                      ├── reticulum-storage-journal v0.1.0 features=[]\n\
                      ├── reticulum-storage-model v0.1.0 features=[]\n\
@@ -11950,6 +12244,7 @@ mod tests {
                      ├── reticulum-tx-dispatch v0.1.0 features=[]\n\
                      ├── reticulum-tx-handoff v0.1.0 features=[]\n\
                      ├── reticulum-tx-supervisor v0.1.0 features=[]\n\
+                     ├── subtle v2.6.1 features=[]\n\
                      └── static_cell v2.1.1 features=[]";
         validate_e290_node_graph_boundary(valid).unwrap();
         assert_host_appliance_packages_rejected(valid, validate_e290_node_graph_boundary);
@@ -12001,7 +12296,7 @@ mod tests {
         );
         validate_e290_wifi_api_proof_graph_boundary(valid, &wifi).unwrap();
         let ble = wireless_profile(
-            "ble-api-proof",
+            "ble-api-proof,display",
             &E290_BLE_API_ADDED_PACKAGE_FEATURES,
             &E290_BLE_API_SHARED_FEATURE_CHANGES,
         );
@@ -12156,7 +12451,7 @@ mod tests {
 
         for package in ["reticulum-device-api", "reticulum-device-api-adapter"] {
             let expected = format!(
-                "{package} v0.1.0 features=[experimental-lxmf,experimental-nomad,experimental-rns-data,experimental-rns-inbox]"
+                "{package} v0.1.0 features=[experimental-lxmf,experimental-network-config,experimental-nomad,experimental-rns-data,experimental-rns-inbox]"
             );
             let drifted = format!("{package} v0.1.0 features=[]");
             let feature_drift = valid.replacen(&expected, &drifted, 1);
@@ -12167,11 +12462,13 @@ mod tests {
         }
         for package in [
             "reticulum-rns-inbox-store",
+            "reticulum-rns-interface-discovery",
             "reticulum-lxmf-durable-ingress",
             "reticulum-lxmf-ingress",
             "reticulum-lxmf-model",
             "reticulum-lxmf-store",
             "reticulum-lxmf-wire",
+            "reticulum-network-config-store",
             "reticulum-nomad-protocol",
             "reticulum-device-api-ble",
             "reticulum-device-api-credential-store",
@@ -12198,10 +12495,12 @@ mod tests {
         );
         assert!(validate_e290_node_graph_boundary(&allocator_drift).is_err());
 
-        for forbidden_backend in ["auto", "jtag-serial", "uart"] {
+        for forbidden_backend in ["auto", "no-op", "uart"] {
             let feature_drift = valid.replacen(
-                "esp-println v0.17.0 features=[esp32s3,log-04,no-op]",
-                &format!("esp-println v0.17.0 features=[esp32s3,log-04,{forbidden_backend}]"),
+                "esp-println v0.17.0 features=[critical-section,esp32s3,jtag-serial,log-04]",
+                &format!(
+                    "esp-println v0.17.0 features=[critical-section,esp32s3,{forbidden_backend},log-04]"
+                ),
                 1,
             );
             assert!(
@@ -12222,6 +12521,8 @@ mod tests {
             "rns-inbox-commit-fault-hil",
             "runtime-measurement-hil",
             "wifi-api-proof",
+            "wifi-station-proof",
+            "wifi-tcp-proof",
             "ble-api-proof",
             "display",
         ] {
@@ -12282,6 +12583,7 @@ mod tests {
             (
                 "ble-api-proof",
                 serde_json::json!([
+                    "display",
                     "dep:embassy-sync-07",
                     "dep:esp-radio",
                     "dep:trouble-host",
@@ -12600,7 +12902,7 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn permanent_e290_node_requires_exact_direct_lxmf_nomad_and_authentication_dependencies() {
+    fn permanent_e290_node_requires_exact_direct_messaging_config_and_auth_dependencies() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
@@ -12645,6 +12947,16 @@ fn sample(layout: Layout) {
                 "reticulum-rns-inbox-store",
                 "crates/not-the-rns-inbox-store",
                 "rns-inbox-store",
+            ),
+            (
+                "reticulum-rns-interface-discovery",
+                "crates/not-the-rns-interface-discovery",
+                "rns-interface-discovery",
+            ),
+            (
+                "reticulum-network-config-store",
+                "crates/not-the-network-config-store",
+                "network-config-store",
             ),
             (
                 "reticulum-device-api-credential-store",
@@ -12891,10 +13203,16 @@ fn sample(layout: Layout) {
             "permanent node accepted duplicate esp-println"
         );
 
-        for forbidden_backend in ["auto", "jtag-serial", "uart"] {
+        for forbidden_backend in ["auto", "no-op", "uart"] {
             for features in [
-                serde_json::json!(["esp32s3", "log-04", forbidden_backend]),
-                serde_json::json!(["esp32s3", "log-04", "no-op", forbidden_backend]),
+                serde_json::json!(["critical-section", "esp32s3", "log-04", forbidden_backend]),
+                serde_json::json!([
+                    "critical-section",
+                    "esp32s3",
+                    "jtag-serial",
+                    "log-04",
+                    forbidden_backend
+                ]),
             ] {
                 let mut drifted = baseline.clone();
                 fixture_dependency_mut(
@@ -12952,6 +13270,24 @@ fn sample(layout: Layout) {
                 "permanent node accepted esp-println {label} drift"
             );
         }
+
+        let mut storage_without_embedded_trait = baseline.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(
+                &mut storage_without_embedded_trait,
+                "reticulum-heltec-vision-master-e290-node",
+            ),
+            "esp-storage",
+            None,
+        )["features"] = serde_json::json!(["esp32s3", "critical-section"]);
+        assert!(
+            validate_e290_node_feature_boundary(
+                &storage_without_embedded_trait.to_string(),
+                &root,
+            )
+            .is_err(),
+            "permanent node accepted esp-storage without embedded-storage support"
+        );
 
         let mut missing_esp_alloc = baseline.clone();
         fixture_package_mut(
@@ -13012,7 +13348,7 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn e290_wireless_profiles_lock_exact_optional_registry_edges() {
+    fn e290_wireless_profiles_lock_exact_optional_edges() {
         let root = workspace_root();
         let baseline = e290_node_metadata_fixture(&root);
         validate_e290_node_feature_boundary(&baseline.to_string(), &root).unwrap();
@@ -13024,6 +13360,7 @@ fn sample(layout: Layout) {
             ("embassy-net", None),
             ("embassy-sync", Some("embassy-sync-07")),
             ("esp-radio", None),
+            ("smoltcp", None),
             ("trouble-host", None),
         ] {
             let select = |dependency: &serde_json::Value| {
@@ -13078,7 +13415,14 @@ fn sample(layout: Layout) {
                         |_| serde_json::Value::Null,
                     ),
                 ),
-                ("target", serde_json::Value::Null),
+                (
+                    "target",
+                    if dependency_name == "smoltcp" {
+                        serde_json::json!("cfg(target_arch = \"xtensa\")")
+                    } else {
+                        serde_json::Value::Null
+                    },
+                ),
                 ("uses_default_features", serde_json::json!(true)),
                 ("features", serde_json::json!(["unreviewed"])),
             ] {
@@ -13109,7 +13453,7 @@ fn sample(layout: Layout) {
     }
 
     #[test]
-    fn credential_and_inbox_stores_remain_forbidden_from_legacy_product_and_hil_graphs() {
+    fn credential_inbox_and_network_config_stores_remain_forbidden_from_legacy_graphs() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
             ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
@@ -13123,6 +13467,7 @@ fn sample(layout: Layout) {
             for package in [
                 "reticulum-device-api-credential-store",
                 "reticulum-device-api-credentials",
+                "reticulum-network-config-store",
                 "reticulum-rns-inbox-store",
             ] {
                 assert!(
@@ -13131,12 +13476,14 @@ fn sample(layout: Layout) {
                 );
             }
         }
+        assert!(E290_NODE_GRAPH_REQUIRED.contains(&"reticulum-network-config-store"));
+        assert!(!E290_NODE_GRAPH_FORBIDDEN.contains(&"reticulum-network-config-store"));
         assert!(E290_NODE_GRAPH_REQUIRED.contains(&"reticulum-rns-inbox-store"));
         assert!(!E290_NODE_GRAPH_FORBIDDEN.contains(&"reticulum-rns-inbox-store"));
     }
 
     #[test]
-    fn durable_lxmf_ingress_is_composed_only_in_the_e290_product_family() {
+    fn durable_lxmf_ingress_is_e290_only_while_the_portable_wire_is_shared_with_rns() {
         for (label, forbidden) in [
             ("Tracker product", &PRODUCT_GRAPH_FORBIDDEN[..]),
             ("storage HIL", &STORAGE_HIL_GRAPH_FORBIDDEN[..]),
@@ -13152,7 +13499,6 @@ fn sample(layout: Layout) {
                 "reticulum-lxmf-ingress",
                 "reticulum-lxmf-model",
                 "reticulum-lxmf-store",
-                "reticulum-lxmf-wire",
             ] {
                 assert!(
                     forbidden.contains(&package),
@@ -13160,6 +13506,11 @@ fn sample(layout: Layout) {
                 );
             }
         }
+        assert!(!PRODUCT_GRAPH_FORBIDDEN.contains(&"reticulum-lxmf-wire"));
+        assert!(!SEMANTIC_TX_HIL_GRAPH_FORBIDDEN.contains(&"reticulum-lxmf-wire"));
+        assert!(!E290_SEMANTIC_HIL_GRAPH_FORBIDDEN.contains(&"reticulum-lxmf-wire"));
+        assert!(STORAGE_HIL_GRAPH_FORBIDDEN.contains(&"reticulum-lxmf-wire"));
+        assert!(TX_HIL_GRAPH_FORBIDDEN.contains(&"reticulum-lxmf-wire"));
         for package in [
             "reticulum-lxmf-durable-ingress",
             "reticulum-lxmf-ingress",
@@ -13326,6 +13677,14 @@ fn sample(layout: Layout) {
             .push(serde_json::Value::String("radio".to_owned()));
         assert!(
             validate_storage_hil_dependency_boundary(&unreviewed_feature.to_string(), &root)
+                .is_err()
+        );
+
+        let mut wrong_esp_hal_source = metadata.clone();
+        wrong_esp_hal_source["packages"][0]["dependencies"][3]["source"] =
+            serde_json::json!(CRATES_IO_SOURCE);
+        assert!(
+            validate_storage_hil_dependency_boundary(&wrong_esp_hal_source.to_string(), &root)
                 .is_err()
         );
 
@@ -13531,6 +13890,20 @@ fn sample(layout: Layout) {
         )["req"] = serde_json::Value::String("=0.7.2".to_owned());
         assert!(
             validate_device_api_edge_dependency_boundary(&wrong_sync.to_string(), &root).is_err()
+        );
+
+        let mut wrong_handoff_zeroize = metadata.clone();
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_handoff_zeroize, "reticulum-device-api-handoff"),
+            "zeroize",
+            None,
+        )["req"] = serde_json::Value::String("=0.0.0".to_owned());
+        assert!(
+            validate_device_api_edge_dependency_boundary(
+                &wrong_handoff_zeroize.to_string(),
+                &root,
+            )
+            .is_err()
         );
 
         let mut wrong_api_path = metadata.clone();
@@ -13972,6 +14345,16 @@ fn sample(layout: Layout) {
             validate_tx_handoff_dependency_boundary(&wrong_node_path.to_string(), &root).is_err()
         );
 
+        let mut wrong_rns_path = portable_layers_metadata_fixture(&root);
+        fixture_dependency_mut(
+            fixture_package_mut(&mut wrong_rns_path, "reticulum-tx-handoff"),
+            "reticulum-rns-rete",
+            Some("dev"),
+        )["path"] = serde_json::Value::String(root.join("elsewhere").display().to_string());
+        assert!(
+            validate_tx_handoff_dependency_boundary(&wrong_rns_path.to_string(), &root).is_err()
+        );
+
         let mut wrong_embassy = portable_layers_metadata_fixture(&root);
         wrong_embassy["packages"][2]["dependencies"][1]["req"] =
             serde_json::Value::String("=0.7.2".to_owned());
@@ -14114,12 +14497,35 @@ fn sample(layout: Layout) {
         assert!(validate_tx_dispatch_dependency_boundary(&wrong_dev.to_string(), &root).is_err());
 
         let mut wrong_dev_defaults = portable_layers_metadata_fixture(&root);
-        wrong_dev_defaults["packages"][3]["dependencies"][6]["uses_default_features"] =
+        wrong_dev_defaults["packages"][3]["dependencies"][7]["uses_default_features"] =
             serde_json::Value::Bool(false);
         assert!(
             validate_tx_dispatch_dependency_boundary(&wrong_dev_defaults.to_string(), &root)
                 .is_err()
         );
+
+        for (field, value) in [
+            (
+                "path",
+                serde_json::json!(root.join("crates/lookalike-rns-rete")),
+            ),
+            (
+                "source",
+                serde_json::json!("registry+https://example.invalid/index"),
+            ),
+            ("uses_default_features", serde_json::json!(true)),
+            ("features", serde_json::json!(["unreviewed"])),
+            ("optional", serde_json::json!(true)),
+            ("rename", serde_json::json!("renamed-rns")),
+            ("target", serde_json::json!("cfg(target_os = \"none\")")),
+        ] {
+            let mut changed = portable_layers_metadata_fixture(&root);
+            changed["packages"][3]["dependencies"][6][field] = value;
+            assert!(
+                validate_tx_dispatch_dependency_boundary(&changed.to_string(), &root).is_err(),
+                "test-only rns-rete edge accepted changed {field}"
+            );
+        }
 
         let mut build = portable_layers_metadata_fixture(&root);
         let mut build_dependency = handoff_dependency_fixture("cc", "=1.0.0", Some("dev"));
@@ -16088,6 +16494,73 @@ fn sample(layout: Layout) {
     }
 
     #[test]
+    fn network_config_store_boundary_allows_only_three_exact_registry_edges() {
+        let root = workspace_root();
+        let baseline = portable_layers_metadata_fixture(&root);
+        validate_network_config_store_dependency_boundary(&baseline.to_string(), &root).unwrap();
+
+        let mut wrong_manifest = baseline.clone();
+        fixture_package_mut(&mut wrong_manifest, "reticulum-network-config-store")["manifest_path"] =
+            serde_json::json!(root.join("crates/lookalike-network-config-store/Cargo.toml"));
+        assert!(
+            validate_network_config_store_dependency_boundary(&wrong_manifest.to_string(), &root)
+                .is_err()
+        );
+
+        for features in [
+            serde_json::json!({}),
+            serde_json::json!({"default": ["unreviewed"]}),
+            serde_json::json!({"default": [], "future": []}),
+        ] {
+            let mut changed = baseline.clone();
+            fixture_package_mut(&mut changed, "reticulum-network-config-store")["features"] =
+                features;
+            assert!(
+                validate_network_config_store_dependency_boundary(&changed.to_string(), &root)
+                    .is_err()
+            );
+        }
+
+        for dependency_name in ["embedded-storage", "sha2", "zeroize"] {
+            for (field, value) in [
+                ("req", serde_json::json!(">=0.0.0")),
+                (
+                    "source",
+                    serde_json::json!("registry+https://example.invalid/index"),
+                ),
+                ("path", serde_json::json!(root.join("crates/lookalike"))),
+                ("kind", serde_json::json!("dev")),
+                ("optional", serde_json::json!(true)),
+                ("rename", serde_json::json!("renamed-dependency")),
+                ("target", serde_json::json!("cfg(target_os = \"none\")")),
+                ("uses_default_features", serde_json::json!(true)),
+                ("features", serde_json::json!(["unreviewed"])),
+            ] {
+                let mut changed = baseline.clone();
+                fixture_dependency_mut(
+                    fixture_package_mut(&mut changed, "reticulum-network-config-store"),
+                    dependency_name,
+                    None,
+                )[field] = value;
+                assert!(
+                    validate_network_config_store_dependency_boundary(&changed.to_string(), &root,)
+                        .is_err(),
+                    "{dependency_name} accepted changed {field}"
+                );
+            }
+        }
+
+        let mut extra = baseline;
+        fixture_package_mut(&mut extra, "reticulum-network-config-store")["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .push(handoff_dependency_fixture("heapless", "=0.9.1", None));
+        assert!(
+            validate_network_config_store_dependency_boundary(&extra.to_string(), &root).is_err()
+        );
+    }
+
+    #[test]
     fn storage_model_boundary_rejects_unreviewed_dependencies_features_and_edge_shapes() {
         let root = workspace_root();
         const PACKAGE_INDEX: usize = 5;
@@ -16242,6 +16715,7 @@ fn sample(layout: Layout) {
             ("reticulum-storage-model", None),
             ("reticulum-submission-projector", None),
             ("rand_core", Some("dev")),
+            ("reticulum-rns-rete", Some("dev")),
         ];
         for (name, kind) in dependencies {
             let mut default_features = portable_layers_metadata_fixture(&root);
@@ -16325,6 +16799,7 @@ fn sample(layout: Layout) {
             ("reticulum-storage-journal", None),
             ("reticulum-storage-model", None),
             ("reticulum-submission-projector", None),
+            ("reticulum-rns-rete", Some("dev")),
         ] {
             let mut wrong_path = portable_layers_metadata_fixture(&root);
             fixture_dependency_mut(
@@ -16351,6 +16826,17 @@ fn sample(layout: Layout) {
                 "registry dependency {name} accepted a path"
             );
         }
+
+        let mut rns_registry_source = portable_layers_metadata_fixture(&root);
+        fixture_dependency_mut(
+            fixture_package_mut(&mut rns_registry_source, "reticulum-storage-actor"),
+            "reticulum-rns-rete",
+            Some("dev"),
+        )["source"] = serde_json::json!("registry+https://example.invalid/index");
+        assert!(
+            validate_storage_actor_dependency_boundary(&rns_registry_source.to_string(), &root)
+                .is_err()
+        );
 
         let mut build = portable_layers_metadata_fixture(&root);
         fixture_dependency_mut(
@@ -16474,6 +16960,16 @@ fn sample(layout: Layout) {
             (
                 "experimental-nomad",
                 serde_json::json!(["reticulum-device-api/unreviewed"]),
+            ),
+            ("experimental-network-config", serde_json::json!([])),
+            (
+                "experimental-network-config",
+                serde_json::json!([
+                    "experimental-rns-inbox",
+                    "experimental-lxmf",
+                    "experimental-nomad",
+                    "reticulum-device-api/unreviewed",
+                ]),
             ),
         ] {
             let mut feature_drift = portable_layers_metadata_fixture(&root);
@@ -17214,6 +17710,12 @@ fn sample(layout: Layout) {
                         handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
                         handoff_dependency_fixture("embassy-futures", "=0.1.2", Some("dev")),
                         handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
+                        handoff_path_dependency_fixture(
+                            "reticulum-rns-rete",
+                            "*",
+                            &root.join("crates/rns-rete"),
+                            Some("dev"),
+                        ),
                         handoff_dependency_fixture("static_cell", "=2.1.1", Some("dev")),
                     ],
                 },
@@ -17240,6 +17742,7 @@ fn sample(layout: Layout) {
                 nor_flash_region_package_fixture(root),
                 submission_runtime_package_fixture(root),
                 rns_inbox_store_package_fixture(root),
+                network_config_store_package_fixture(root),
                 appliance_display_model_package_fixture(root),
                 eink_ssd1680_package_fixture(root),
             ]
@@ -17348,6 +17851,20 @@ fn sample(layout: Layout) {
         })
     }
 
+    fn network_config_store_package_fixture(root: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "reticulum-network-config-store",
+            "source": null,
+            "manifest_path": root.join("crates/network-config-store/Cargo.toml"),
+            "features": { "default": [] },
+            "dependencies": [
+                handoff_dependency_fixture("embedded-storage", "=0.3.1", None),
+                handoff_dependency_fixture("sha2", "=0.10.9", None),
+                handoff_dependency_fixture("zeroize", "=1.9.0", None),
+            ],
+        })
+    }
+
     fn dispatch_package_fixture(root: &Path) -> serde_json::Value {
         let mut static_cell = handoff_dependency_fixture("static_cell", "=2.1.1", Some("dev"));
         static_cell["uses_default_features"] = serde_json::Value::Bool(true);
@@ -17373,6 +17890,12 @@ fn sample(layout: Layout) {
                 handoff_dependency_fixture("rand_core", "=0.6.4", None),
                 handoff_dependency_fixture("sha2", "=0.10.9", None),
                 handoff_dependency_fixture("embassy-futures", "=0.1.2", Some("dev")),
+                handoff_path_dependency_fixture(
+                    "reticulum-rns-rete",
+                    "*",
+                    &root.join("crates/rns-rete"),
+                    Some("dev"),
+                ),
                 static_cell,
             ],
         })
@@ -17388,7 +17911,7 @@ fn sample(layout: Layout) {
             "features": { "default": [] },
             "dependencies": [
                 handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
-                handoff_dependency_fixture("embassy-time", "=0.5.0", None),
+                handoff_dependency_fixture("embassy-time", "=0.5.1", None),
                 handoff_dependency_fixture("rand_core", "=0.6.4", None),
                 handoff_path_dependency_fixture(
                     "reticulum-interface-router",
@@ -17710,14 +18233,6 @@ fn sample(layout: Layout) {
                             .display()
                             .to_string(),
                     ),
-                    ReviewedClosureSource::Git(source) => (
-                        serde_json::Value::String(source.to_owned()),
-                        root.join("fixture/git")
-                            .join(package.name)
-                            .join("Cargo.toml")
-                            .display()
-                            .to_string(),
-                    ),
                 };
                 serde_json::json!({
                     "name": package.name,
@@ -17886,6 +18401,12 @@ fn sample(layout: Layout) {
                     None,
                 ),
                 handoff_dependency_fixture("rand_core", "=0.6.4", Some("dev")),
+                handoff_path_dependency_fixture(
+                    "reticulum-rns-rete",
+                    "*",
+                    &root.join("crates/rns-rete"),
+                    Some("dev"),
+                ),
             ],
         })
     }
@@ -17979,6 +18500,12 @@ fn sample(layout: Layout) {
             "features": {
                 "default": [],
                 "experimental-lxmf": ["reticulum-device-api/experimental-lxmf"],
+                "experimental-network-config": [
+                    "experimental-rns-inbox",
+                    "experimental-lxmf",
+                    "experimental-nomad",
+                    "reticulum-device-api/experimental-network-config",
+                ],
                 "experimental-nomad": ["reticulum-device-api/experimental-nomad"],
                 "experimental-rns-data": ["reticulum-device-api/experimental-rns-data"],
                 "experimental-rns-inbox": ["reticulum-device-api/experimental-rns-inbox"],
@@ -18093,6 +18620,7 @@ fn sample(layout: Layout) {
                             &root.join("crates/device-api"),
                             None,
                         ),
+                        handoff_dependency_fixture("zeroize", "=1.9.0", None),
                     ],
                 },
                 {
@@ -18197,9 +18725,10 @@ fn sample(layout: Layout) {
                         "=0.5.0",
                         &["esp32s3", "log-04", "validation"],
                     ),
-                    hil_registry_dependency_fixture(
+                    hil_git_dependency_fixture(
                         "esp-hal",
-                        "=1.1.1",
+                        "=1.1.0",
+                        ESP_HAL_B50_DEPENDENCY_SOURCE,
                         &[
                             "esp32s3",
                             "exception-handler",
@@ -18250,6 +18779,17 @@ fn sample(layout: Layout) {
     ) -> serde_json::Value {
         let mut dependency = handoff_dependency_fixture(name, requirement, None);
         dependency["features"] = serde_json::json!(features);
+        dependency
+    }
+
+    fn hil_git_dependency_fixture(
+        name: &str,
+        requirement: &str,
+        source: &str,
+        features: &[&str],
+    ) -> serde_json::Value {
+        let mut dependency = hil_registry_dependency_fixture(name, requirement, features);
+        dependency["source"] = serde_json::json!(source);
         dependency
     }
 
@@ -18306,7 +18846,7 @@ fn sample(layout: Layout) {
                 ),
                 handoff_dependency_fixture("embassy-sync", "=0.8.0", None),
                 handoff_dependency_fixture("embassy-futures", "=0.1.2", None),
-                handoff_dependency_fixture("embassy-time", "=0.5.0", None),
+                handoff_dependency_fixture("embassy-time", "=0.5.1", None),
                 handoff_dependency_fixture("rand_core", "=0.6.4", None),
                 handoff_path_dependency_fixture(
                     "reticulum-interface-router",

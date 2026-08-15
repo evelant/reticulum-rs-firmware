@@ -1,0 +1,14 @@
+diff --git a/lib/parseJob.js b/lib/parseJob.js
+index 4e34eb2f5af046f3751f4e7f1c45443fd206f65f..f3c13245788f3f777f833a7670ee21f6f8bc4c51 100644
+--- a/lib/parseJob.js
++++ b/lib/parseJob.js
+@@ -26 +26 @@
+-    fileContents = fs.readFileSync(path, 'utf-8');
++    fileContents = fs.readFileSync(path, 'utf-8').replace(/\0+$/, '');
+diff --git a/lib/pbxProject.js b/lib/pbxProject.js
+index 068548ab89dfd2d39f90d46d881c17dc86f90bf4..aa2d4e7705980673df96a2e93348307189702cee 100644
+--- a/lib/pbxProject.js
++++ b/lib/pbxProject.js
+@@ -61 +61 @@
+-    var file_contents = fs.readFileSync(this.filepath, 'utf-8');
++    var file_contents = fs.readFileSync(this.filepath, 'utf-8').replace(/\0+$/, '');

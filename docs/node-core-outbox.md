@@ -537,7 +537,10 @@ same buffer binding becomes reusable. `NodeTxDataMachine` parks the recovered
 buffer with its complete generation-safe observation and does not expose it as
 available until exact acknowledgement. The supervisor exposes both the
 observation and acknowledgement facade. `reticulum-submission-projector`
-withholds that action until the transport audit is known committed.
+withholds that action until the transport audit is known committed for generic
+one-shot submissions. For a coherent carrier recovery under an already-durable
+LXMF `Preparing` obligation, that logical record covers exact owner release
+without an unbounded per-attempt audit.
 `reticulum-storage-journal` supplies the
 physical append/replay/compaction backend, and `reticulum-storage-actor` now
 owns that journal, the live replay index and the sole projector. It retains one

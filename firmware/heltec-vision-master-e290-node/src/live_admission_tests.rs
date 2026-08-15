@@ -291,9 +291,11 @@ fn authenticated_submission_crosses_lora_policy_and_scripted_radio_durability_bo
         transition,
         NodeInterfaceSupervisorTransition::CompletionAccepted { .. }
     )));
+    let parked_after_completion = system.supervisor.data_parked_counts();
     assert_eq!(
-        system.supervisor.data_parked_counts().available(),
-        config::DATA_BUFFERS
+        parked_after_completion.available(),
+        config::DATA_BUFFERS,
+        "completion transitions={completion_transitions:?}, parked={parked_after_completion:?}"
     );
 
     system.force_delivery_timeout();

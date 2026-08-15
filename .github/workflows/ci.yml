@@ -59,9 +59,7 @@ jobs:
 
       - name: Formatting
         # At a virtual workspace root, this checks every workspace member while
-        # excluding local path dependencies such as the minimally patched,
-        # source-provenance-preserving esp-rtos vendor tree. `--all` would add
-        # those dependencies and require unrelated upstream formatting changes.
+        # leaving reviewed local dependency overlays outside the workspace.
         run: cargo fmt -- --check
 
       - name: Host tests
@@ -554,7 +552,7 @@ jobs:
       - name: Link permanent LoRa-first Vision Master E290 node
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/e290-default-target
-          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
         run: >-
           cargo +esp build --locked --release
           -p reticulum-heltec-vision-master-e290-node
@@ -583,7 +581,7 @@ jobs:
       - name: Strict clippy for permanent LoRa-first Vision Master E290 node
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/e290-default-target
-          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
         run: >-
           cargo +esp clippy --locked --release
           -p reticulum-heltec-vision-master-e290-node
@@ -594,7 +592,7 @@ jobs:
       - name: Link production BLE Vision Master E290 node
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/e290-ble-target
-          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
         run: >-
           cargo +esp build --locked --release
           -p reticulum-heltec-vision-master-e290-node
@@ -605,12 +603,35 @@ jobs:
       - name: Strict clippy for production BLE Vision Master E290 node
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/e290-ble-target
-          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
         run: >-
           cargo +esp clippy --locked --release
           -p reticulum-heltec-vision-master-e290-node
           --bin reticulum-heltec-vision-master-e290-node
           --no-default-features --features ble-api-proof
+          --target xtensa-esp32s3-none-elf
+          -- -D warnings
+
+      - name: Link Wi-Fi/TCP Vision Master E290 border candidate
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-wifi-tcp-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
+        run: >-
+          cargo +esp build --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --bin reticulum-heltec-vision-master-e290-node
+          --no-default-features --features wifi-tcp-proof
+          --target xtensa-esp32s3-none-elf
+
+      - name: Strict clippy for Wi-Fi/TCP Vision Master E290 border candidate
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/e290-wifi-tcp-target
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
+        run: >-
+          cargo +esp clippy --locked --release
+          -p reticulum-heltec-vision-master-e290-node
+          --bin reticulum-heltec-vision-master-e290-node
+          --no-default-features --features wifi-tcp-proof
           --target xtensa-esp32s3-none-elf
           -- -D warnings
 
@@ -666,7 +687,7 @@ jobs:
       - name: Link E290 runtime-measurement HIL
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/e290-runtime-measurement-target
-          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
         run: >-
           cargo +esp build --locked --release
           -p reticulum-heltec-vision-master-e290-node
@@ -676,7 +697,7 @@ jobs:
       - name: Strict clippy for E290 runtime-measurement HIL
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/e290-runtime-measurement-target
-          RUSTFLAGS: -C link-arg=-nostartfiles -Z emit-stack-sizes
+          RUSTFLAGS: -C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes
         run: >-
           cargo +esp clippy --locked --release
           -p reticulum-heltec-vision-master-e290-node
@@ -689,7 +710,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes'
+          export RUSTFLAGS='-C link-arg=-nostartfiles -C code-model=large -Z emit-stack-sizes'
           CARGO_TARGET_DIR="$RUNNER_TEMP/e290-default-target" \
             cargo +esp build --locked --release \
             -p reticulum-heltec-vision-master-e290-node \
@@ -699,6 +720,12 @@ jobs:
             -p reticulum-heltec-vision-master-e290-node \
             --bin reticulum-heltec-vision-master-e290-node \
             --no-default-features --features ble-api-proof \
+            --target xtensa-esp32s3-none-elf
+          CARGO_TARGET_DIR="$RUNNER_TEMP/e290-wifi-tcp-target" \
+            cargo +esp build --locked --release \
+            -p reticulum-heltec-vision-master-e290-node \
+            --bin reticulum-heltec-vision-master-e290-node \
+            --no-default-features --features wifi-tcp-proof \
             --target xtensa-esp32s3-none-elf
           CARGO_TARGET_DIR="$RUNNER_TEMP/e290-runtime-measurement-target" \
             cargo +esp build --locked --release \
@@ -713,6 +740,7 @@ jobs:
           for elf in \
             "$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
             "$RUNNER_TEMP/e290-ble-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
+            "$RUNNER_TEMP/e290-wifi-tcp-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
             "$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node"
           do
             cargo run --locked -p xtask -- \
@@ -1136,6 +1164,14 @@ jobs:
           # The 2026-07-25 corrected production BLE baseline is
           # 1090679/11472/469552/1571703. Its separate caps retain about 8%
           # text, 42% data, 1% BSS and 5% aggregate headroom.
+          # The 2026-08-01 API 1.16 packet-trace rebaseline is
+          # 1028227/4860/467968/1501055 default,
+          # 1352003/12720/468300/1833023 BLE,
+          # 1028923/4900/467928/1501751 inbox-fault, and
+          # 1041191/5460/467368/1514019 runtime-measurement. The shared caps
+          # retain at least 7% text and 4% aggregate headroom; the BLE caps
+          # retain about 8% text and 5% aggregate headroom. The unchanged data
+          # and BSS ceilings continue to guard scarce internal memory.
           release=target/xtensa-esp32s3-none-elf/release
           check_size safe-idle "$release/reticulum-heltec-tracker-v2" \
             65536 6144 475136 550000
@@ -1144,16 +1180,16 @@ jobs:
             360448 12288 475136 840000
           check_size e290-node \
             "$RUNNER_TEMP/e290-default-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
-            980000 16384 475136 1460000
+            1120000 16384 475136 1590000
           check_size e290-ble \
             "$RUNNER_TEMP/e290-ble-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
-            1180000 16384 475136 1650000
+            1460000 16384 475136 1930000
           check_size e290-inbox-commit-fault-hil \
             "$RUNNER_TEMP/e290-inbox-commit-fault-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
-            980000 16384 475136 1460000
+            1120000 16384 475136 1590000
           check_size e290-runtime-measurement-hil \
             "$RUNNER_TEMP/e290-runtime-measurement-target/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node" \
-            980000 16384 475136 1460000
+            1120000 16384 475136 1590000
 
       - name: Enforce lab retained-state and startup-stack link contracts
         shell: bash
@@ -1231,8 +1267,8 @@ jobs:
           xtensa-esp32s3-elf-strings "$safe" >"$safe_strings"
           xtensa-esp32s3-elf-strings "$lab" >"$normal_strings"
           for strings in "$safe_strings" "$normal_strings"; do
-            if ! grep -Fq 'esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2' "$strings"; then
-              echo "::error title=Runtime patch identity missing::ELF does not bind the reviewed esp-rtos CPU0/CPU1 main-stack corrections"
+            if ! grep -Fq 'esp-rtos-upstream-b50efcb-stack-words-v1' "$strings"; then
+              echo "::error title=Runtime source identity missing::ELF does not bind the reviewed upstream esp-rtos source containing the CPU0/CPU1 main-stack corrections"
               rm -f "$safe_strings" "$normal_strings"
               exit 1
             fi

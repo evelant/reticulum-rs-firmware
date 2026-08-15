@@ -8,7 +8,7 @@
 //! semantic view from one that the actor physically rendered.
 
 use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
-use reticulum_appliance_display_model::{DisplayCommand, DisplayViewKind};
+use reticulum_appliance_display_model::{DisplayCommand, DisplayHomeSnapshot, DisplayViewKind};
 
 /// Pixel width of the fitted E290 monochrome panel.
 pub const E290_DISPLAY_WIDTH_PIXELS: usize = 296;
@@ -24,6 +24,130 @@ pub const E290_DISPLAY_FRAMEBUFFER_CEILING_BYTES: usize = 4_736;
 
 const _: () = assert!(E290_MONOCHROME_FRAMEBUFFER_BYTES == 4_736);
 const _: () = assert!(E290_MONOCHROME_FRAMEBUFFER_BYTES <= E290_DISPLAY_FRAMEBUFFER_CEILING_BYTES);
+
+/// Latest non-secret live fields folded into the complete Home presentation.
+///
+/// This is deliberately separate from [`DisplayRequest`]. Pairing and recovery
+/// remain the only producer of protected presentation commands, while the node
+/// actor may replace this small telemetry snapshot without waiting for an
+/// e-paper refresh.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DisplayHomeTelemetry {
+    uncollected_messages: u32,
+}
+
+impl DisplayHomeTelemetry {
+    /// Construct the current live Home projection.
+    pub const fn new(uncollected_messages: u32) -> Self {
+        Self {
+            uncollected_messages,
+        }
+    }
+
+    /// Messages durably retained by the appliance but not yet acknowledged as
+    /// collected by the app.
+    pub const fn uncollected_messages(self) -> u32 {
+        self.uncollected_messages
+    }
+}
+
+/// Overlay live telemetry only after a producer has supplied an observation.
+///
+/// `None` deliberately preserves the durable count already carried by the
+/// boot-composed Home snapshot. It is not equivalent to an observed zero.
+pub const fn overlay_observed_home_telemetry(
+    snapshot: DisplayHomeSnapshot,
+    telemetry: Option<DisplayHomeTelemetry>,
+) -> DisplayHomeSnapshot {
+    match telemetry {
+        Some(telemetry) => snapshot.with_uncollected_messages(telemetry.uncollected_messages()),
+        None => snapshot,
+    }
+}
+
+/// Latest-value producer for non-secret Home telemetry.
+#[must_use = "dropping the telemetry publisher abandons live Home updates"]
+pub struct DisplayTelemetryPublisher<M>
+where
+    M: RawMutex + 'static,
+{
+    latest: &'static Signal<M, DisplayHomeTelemetry>,
+}
+
+impl<M> DisplayTelemetryPublisher<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Replace any unconsumed telemetry with the newest complete snapshot.
+    pub fn publish_latest(&mut self, telemetry: DisplayHomeTelemetry) {
+        self.latest.signal(telemetry);
+    }
+}
+
+/// Latest-value consumer owned by the display actor.
+#[must_use = "dropping the telemetry receiver abandons live Home updates"]
+pub struct DisplayTelemetryReceiver<M>
+where
+    M: RawMutex + 'static,
+{
+    latest: &'static Signal<M, DisplayHomeTelemetry>,
+}
+
+impl<M> DisplayTelemetryReceiver<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Take the newest telemetry immediately, when one is pending.
+    pub fn try_take_latest(&mut self) -> Option<DisplayHomeTelemetry> {
+        self.latest.try_take()
+    }
+
+    /// Wait for the next telemetry replacement.
+    pub async fn next(&mut self) -> DisplayHomeTelemetry {
+        self.latest.wait().await
+    }
+}
+
+/// Static storage for the node-to-display live Home projection.
+pub struct DisplayTelemetryHandoff<M>
+where
+    M: RawMutex,
+{
+    latest: Signal<M, DisplayHomeTelemetry>,
+}
+
+impl<M> DisplayTelemetryHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    /// Construct an empty latest-value telemetry store.
+    pub const fn new() -> Self {
+        Self {
+            latest: Signal::new(),
+        }
+    }
+
+    /// Split storage into its sole publisher and receiver capabilities.
+    pub fn split(&'static mut self) -> (DisplayTelemetryPublisher<M>, DisplayTelemetryReceiver<M>) {
+        (
+            DisplayTelemetryPublisher {
+                latest: &self.latest,
+            },
+            DisplayTelemetryReceiver {
+                latest: &self.latest,
+            },
+        )
+    }
+}
+
+impl<M> Default for DisplayTelemetryHandoff<M>
+where
+    M: RawMutex + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Opaque, strictly increasing identifier assigned to one published request.
 ///
@@ -369,8 +493,9 @@ mod tests {
 
     use super::{
         DisplayBootClearOutcome, DisplayCompletion, DisplayCompletionGateError, DisplayHandoff,
-        DisplayPublisher, DisplayReceiver, DisplayRenderOutcome, DisplayRequestIdExhausted,
-        E290_DISPLAY_FRAMEBUFFER_CEILING_BYTES, E290_MONOCHROME_FRAMEBUFFER_BYTES,
+        DisplayHomeTelemetry, DisplayPublisher, DisplayReceiver, DisplayRenderOutcome,
+        DisplayRequestIdExhausted, DisplayTelemetryHandoff, E290_DISPLAY_FRAMEBUFFER_CEILING_BYTES,
+        E290_MONOCHROME_FRAMEBUFFER_BYTES, overlay_observed_home_telemetry,
     };
 
     fn label() -> DisplayLabel {
@@ -398,6 +523,43 @@ mod tests {
         DisplayReceiver<NoopRawMutex>,
     ) {
         std::boxed::Box::leak(std::boxed::Box::new(DisplayHandoff::new())).split()
+    }
+
+    #[test]
+    fn home_telemetry_pressure_keeps_only_the_latest_complete_snapshot() {
+        let (mut publisher, mut receiver) = std::boxed::Box::leak(std::boxed::Box::new(
+            DisplayTelemetryHandoff::<NoopRawMutex>::new(),
+        ))
+        .split();
+        publisher.publish_latest(DisplayHomeTelemetry::new(1));
+        publisher.publish_latest(DisplayHomeTelemetry::new(7));
+        publisher.publish_latest(DisplayHomeTelemetry::new(12));
+
+        assert_eq!(
+            receiver.try_take_latest(),
+            Some(DisplayHomeTelemetry::new(12))
+        );
+        assert!(receiver.try_take_latest().is_none());
+
+        publisher.publish_latest(DisplayHomeTelemetry::new(13));
+        assert_eq!(
+            embassy_futures::block_on(receiver.next()),
+            DisplayHomeTelemetry::new(13)
+        );
+    }
+
+    #[test]
+    fn absent_home_telemetry_preserves_the_durable_boot_count() {
+        let durable = home().with_uncollected_messages(7);
+        assert_eq!(
+            overlay_observed_home_telemetry(durable, None).uncollected_messages(),
+            7
+        );
+        assert_eq!(
+            overlay_observed_home_telemetry(durable, Some(DisplayHomeTelemetry::new(0)))
+                .uncollected_messages(),
+            0
+        );
     }
 
     #[test]

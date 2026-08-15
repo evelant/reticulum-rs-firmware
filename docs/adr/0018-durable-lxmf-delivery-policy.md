@@ -4,7 +4,7 @@
   delivery and the bounded fresh outbound-initiator one-packet direct-Link
   success path are powered-qualified
 - **Date:** 2026-07-23
-- **Revised:** 2026-07-24
+- **Revised:** 2026-08-02
 - **Extends:** [ADR 0013](0013-bounded-lxmf-wire-boundary.md),
   [ADR 0014](0014-durable-lxmf-message-ownership.md),
   [ADR 0016](0016-bound-link-data-lxmf-ingress.md), and
@@ -12,6 +12,7 @@
 - **Supersedes in part:** [ADR 0008](0008-durable-authorization-provenance.md)
   for the journal schema, physical format, record-body ceiling, and geometry;
   ADR 0008's authorization-provenance decision remains in force
+- **Further refined by:** [ADR 0027](0027-board-owned-durable-lxmf-retry.md)
 
 ## Context
 
@@ -183,10 +184,11 @@ following transport-neutral lifecycle:
 7. route the packet only to the interface bound by the retained Link;
 8. durably project authorized-frame evidence before acknowledging interface
    completion; and
-9. map a valid Link proof to `Delivered`, or timeout, cancellation, Link close,
-   or recovery to the existing durable failure vocabulary; a Link-DATA
-   `DeliveryTimeout` also retires that exact reusable Link through the normal
-   authenticated close path.
+9. map a valid Link proof to durable `Delivered`; an attempt timeout retires
+   that exact receipt and reusable Link through the normal authenticated close
+   path while the LXMF submission remains in its board-owned `Preparing`
+   delivery loop. Semantic cancellation, policy rejection, or an unrecoverable
+   owner failure may still use the durable failure vocabulary.
 
 The Link request, establishment event, prepared Link packet, receipt, interface
 handoff, and durable submission remain correlated by bounded generation-safe
@@ -197,10 +199,11 @@ failed peers cannot consume the fixed Link table indefinitely.
 
 A direct terminal retains the exact Link handle that carried its packet. If
 that receipt times out while native state still appears `Active`, the runtime
-evicts the matching reusable entry and firmware routes the authenticated
-`LINKCLOSE` action through the ordinary owner. The timed-out submission remains
-terminal `Failed(DeliveryTimeout)`; it is not automatically replayed. A later
-direct submission may establish a fresh Link.
+durably reconciles and exactly acknowledges the attempt terminal, evicts the
+matching reusable entry, and routes the authenticated `LINKCLOSE` action
+through the ordinary owner. The accepted LXMF submission remains `Preparing`
+and a later board-owned attempt may establish a fresh Link. This relaxation is
+specific to LXMF; raw RNS DATA retains terminal `Failed(DeliveryTimeout)`.
 
 The first implementation serializes Link establishment to one active product
 transaction and serializes direct DATA attempts per exact Link while retaining
@@ -222,19 +225,23 @@ the durable message or device API.
 
 The establishment transaction, reusable-Link registry, path-discovery counters,
 deadline, retry history, and Resource-wait marker are boot-volatile. The exact
-LXMF wire remains in the journal, but the current storage model does **not**
-resume pre-I/O `Auto` work after reset: boot recovery conservatively finalizes
-both `Preparing` and `AwaitingDelivery` as `InterruptedByReset`. A future schema
-or durable state distinction must identify work that provably never exposed a
-frame before path/Link selection can resume safely. No Resource bytes are
-emitted until durable Resource ownership and recovery are implemented.
+LXMF wire remains in the journal and the durable LXMF lifecycle remains
+`Preparing` across its volatile carrier attempts. Boot recovery restores that
+delivery loop and arms it after 15 seconds plus deterministic jitter of at most
+20 percent. It does not recreate or overlap an old receipt: each restored
+attempt uses fresh RNS ciphertext and a fresh attempt token while preserving
+the same signed LXMF wire and message ID. Raw RNS DATA still conservatively
+finalizes ambiguous `Preparing` or `AwaitingDelivery` work as
+`InterruptedByReset`. No Resource bytes are emitted until durable Resource
+ownership and recovery are implemented.
 
-Within one uninterrupted boot, Link-establishment expiry or loss clears the
-volatile transaction and the firmware waits one second before trying the
-submission, which is still `Preparing`, again with a fresh generation. These
-retries are currently unbounded: there is no persisted retry budget and no
-boot-local attempt ceiling. A bounded failure/escalation policy remains future
-work.
+Link-establishment pressure, expiry, loss, and receipt timeout leave the
+submission `Preparing` for another serialized attempt. Receipt-timeout backoff
+uses 5-second, 15-second, 60-second, 5-minute, and capped 15-minute base delays,
+each with deterministic additive jitter of at most 20 percent. The runtime
+admits only one automatic retry globally, prefers fresh sends, and can wake an
+exact submission early when its destination path changes from unusable to
+usable. There is no persisted retry budget or boot-local attempt ceiling.
 
 ### Extend Rete with an explicit ordinary Link-DATA receipt
 
@@ -296,13 +303,16 @@ closed/unknown registry pruning, non-selectable `Stale` retention, full-registry
 backpressure, path-gated establishment, first-dispatch deadline start and exact
 pending-Link abort, complete-wire Link-DATA preparation, typed receipt
 ownership, the authorized-frame durability barrier, and exact reusable-Link
-retirement after a Link-DATA timeout. One integrated regression holds a second
+retirement after a Link-DATA timeout. It also covers the board-owned durable
+LXMF retry policy in ADR 0027; powered retry qualification remains pending. One
+integrated regression holds a second
 direct-only submission while the first exact Link attempt is active and while
 its terminal remains unacknowledged, proves that no second establishment is
 created, then reuses the exact same `LinkHandle` after acknowledgement and
 delivers both submissions. The timeout regression separately proves that a
-waiting follower remains parked until the failed leader is durably finalized
-and its Link is retired, after which the follower requests a fresh Link. The
+waiting follower remains parked until the leader's timed-out attempt is exactly
+acknowledged and its Link is retired, after which the follower requests a fresh
+Link while the leader's LXMF obligation remains `Preparing`. The
 complete fault/pressure matrix remains unqualified.
 
 The [July 24 direct-Link powered record](../e290-direct-link-powered-proof.md)
@@ -320,8 +330,8 @@ The
 separately starts with a successful direct baseline, reboots only the receiver,
 observes a durable sender `DeliveryTimeout` with no receiver commit, and then
 delivers the next sequential submission over a fresh Link. This qualifies the
-narrow timeout-retirement consequence, not automatic retry of the failed
-submission.
+narrow timeout-retirement consequence of that historical image, not the
+current board-owned retry loop.
 
 The
 [same-Link reuse and replay record](../e290-same-link-reuse-replay-powered-proof.md)
@@ -349,17 +359,20 @@ opaque `LinkHandle` or replay kind through the client API.
   retains its slot so it can revive, until it becomes `Closed` or disappears.
 - Direct DATA is single-flight per exact Link from active attempt through
   durable terminal acknowledgement. A later direct-required submission for a
-  busy matching Link stays durably `Preparing` under the firmware's bounded
-  retry backoff, so timeout retirement has no younger same-Link sibling to
-  invalidate. This does not block eligible opportunistic delivery or direct
-  work on another usable Link.
+  busy matching Link stays durably `Preparing`; an LXMF timeout also retains its
+  own submission in `Preparing` until exact attempt acknowledgement releases
+  the old receipt and Link. Retry scheduling therefore has no overlapping
+  same-Link sibling to invalidate. This does not block eligible opportunistic
+  delivery or direct work on another usable Link.
 - This appliance's `Auto` default intentionally differs from Python LXMF's
   implicit `DIRECT` default while remaining wire-compatible with both LXMF
   delivery methods.
 - The accepted signed LXMF bytes and message identifier remain stable across
-  reboot, retry, escalation, and OTA changes, but current reset recovery
-  finalizes in-flight work as `InterruptedByReset` instead of resuming it.
-- Generic RNS DATA remains a narrow independent operation.
+  reboot, retry, escalation, and OTA changes. Every new carrier attempt uses
+  fresh ciphertext and a fresh attempt token, and boot restores the durable
+  `Preparing` delivery loop after bounded delay.
+- Generic RNS DATA remains a narrow independent operation with conservative
+  timeout and reset-finalization semantics.
 - End-to-end `Delivered` requires the remote endpoint's proof after durable
   acceptance, whether the selected carrier is opportunistic DATA or Link DATA.
 - The lifecycle can route over any retained Reticulum interface; LoRa is the

@@ -380,6 +380,88 @@ impl fmt::Display for CarrierLengthMismatch {
     }
 }
 
+/// Product-local interface identifier that received one LXMF carrier.
+///
+/// The identifier is meaningful only within the appliance incarnation that
+/// committed the message. It deliberately does not encode a concrete
+/// transport such as LoRa or TCP; callers resolve the identifier through the
+/// device's interface descriptors.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct InboundInterfaceId(u8);
+
+impl InboundInterfaceId {
+    /// Preserve one complete product-local interface identifier.
+    pub const fn new(value: u8) -> Self {
+        Self(value)
+    }
+
+    /// Numeric product-local interface identifier.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// Receiver-local physical signal evidence for one complete carrier.
+///
+/// These values describe the final physical hop into this appliance. They do
+/// not claim end-to-end signal strength or identify the original sender when
+/// Reticulum used one or more relays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundSignalObservation {
+    rssi_dbm: i16,
+    snr_db: i16,
+}
+
+impl InboundSignalObservation {
+    /// Preserve receiver-reported RSSI and SNR without deriving a quality
+    /// percentage.
+    pub const fn new(rssi_dbm: i16, snr_db: i16) -> Self {
+        Self { rssi_dbm, snr_db }
+    }
+
+    /// Receiver-reported RSSI in dBm.
+    pub const fn rssi_dbm(self) -> i16 {
+        self.rssi_dbm
+    }
+
+    /// Receiver-reported SNR in dB.
+    pub const fn snr_db(self) -> i16 {
+        self.snr_db
+    }
+}
+
+/// First-arrival transport evidence retained with one authenticated LXMF
+/// message.
+///
+/// The evidence is deliberately excluded from the authenticated-message
+/// fingerprint. A replay over a different route is still the same LXMF
+/// message, and the first durable arrival remains authoritative.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundTransportObservation {
+    interface: InboundInterfaceId,
+    signal: Option<InboundSignalObservation>,
+}
+
+impl InboundTransportObservation {
+    /// Construct one first-arrival observation.
+    pub const fn new(
+        interface: InboundInterfaceId,
+        signal: Option<InboundSignalObservation>,
+    ) -> Self {
+        Self { interface, signal }
+    }
+
+    /// Product-local interface that received the carrier.
+    pub const fn interface(self) -> InboundInterfaceId {
+        self.interface
+    }
+
+    /// Optional receiver-local physical signal evidence.
+    pub const fn signal(self) -> Option<InboundSignalObservation> {
+        self.signal
+    }
+}
+
 /// Immutable semantic and first-arrival metadata for one admitted message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InboundMessageMetadata {
@@ -391,6 +473,7 @@ pub struct InboundMessageMetadata {
     carrier: CarrierProvenance,
     stamp_admission: StampAdmissionProvenance,
     lengths: InboundMessageLengths,
+    ingress: Option<InboundTransportObservation>,
 }
 
 impl InboundMessageMetadata {
@@ -432,7 +515,22 @@ impl InboundMessageMetadata {
             carrier,
             stamp_admission,
             lengths,
+            ingress: None,
         })
+    }
+
+    /// Attach receiver-local evidence before the metadata is durably
+    /// committed.
+    ///
+    /// Callers must invoke this only for the first admitted carrier. Replay
+    /// handling compares authenticated material independently and never
+    /// replaces an already durable observation.
+    pub const fn with_ingress_observation(
+        mut self,
+        ingress: Option<InboundTransportObservation>,
+    ) -> Self {
+        self.ingress = ingress;
+        self
     }
 
     /// Python-compatible logical message ID.
@@ -473,6 +571,11 @@ impl InboundMessageMetadata {
     /// Exact normalized, carrier and decoded-component lengths.
     pub const fn lengths(self) -> InboundMessageLengths {
         self.lengths
+    }
+
+    /// First-arrival interface and optional receiver-local signal evidence.
+    pub const fn ingress_observation(self) -> Option<InboundTransportObservation> {
+        self.ingress
     }
 
     /// Authenticated logical-message fingerprint used for replay decisions.

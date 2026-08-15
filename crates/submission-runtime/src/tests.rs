@@ -5,11 +5,12 @@ use embedded_storage::nor_flash::{
     check_erase, check_read, check_write,
 };
 use reticulum_node_core::{
-    AcknowledgeError, AttemptOutcome, AuthorizedFrameObservation, InboundProofPolicy, InterfaceSet,
-    MAX_DIRECT_LXMF_WIRE, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, PacketInterfaceId,
-    PermitResolution, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
-    TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition, TxPacketBuffer,
-    TxPermitRequirements, TxPermitReservation, TxPermitResourceId, TxPolicyDecision,
+    AcknowledgeError, AttemptOutcome, AttemptUnsentReason, AuthorizedFrameObservation,
+    InboundProofPolicy, InterfaceSet, MAX_DIRECT_LXMF_WIRE, NodeConfig, NodeCore, NodeIdentity,
+    NodeInstanceId, PacketInterfaceId, PermitResolution, PrepareDataRequest, RoutedTxJob,
+    TxAuthorizationCandidate, TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition,
+    TxPacketBuffer, TxPermitRequirements, TxPermitReservation, TxPermitResourceId,
+    TxPolicyDecision,
 };
 use reticulum_storage_actor::{BoundJournal, DriveError, JournalBinding, StorageDeviceId};
 use reticulum_storage_journal::{
@@ -207,6 +208,7 @@ struct TestNode {
     forced_direct_lxmf_preparation: Option<SubmissionPreparationObservation>,
     integrated_direct_preparation: bool,
     has_usable_path: bool,
+    removed_paths: Vec<DestinationHash>,
     retained_path_hops: Option<u8>,
     retained_path_first_hop_serialization_ms: Option<u64>,
     can_initiate_link: bool,
@@ -264,6 +266,7 @@ impl TestNode {
             forced_direct_lxmf_preparation: None,
             integrated_direct_preparation: false,
             has_usable_path: true,
+            removed_paths: Vec::new(),
             retained_path_hops: Some(1),
             retained_path_first_hop_serialization_ms: Some(0),
             can_initiate_link: true,
@@ -290,6 +293,69 @@ impl TestNode {
 
     fn force_direct_lxmf_preparation(&mut self, observation: SubmissionPreparationObservation) {
         self.forced_direct_lxmf_preparation = Some(observation);
+    }
+
+    fn rollback_queued_attempt(&mut self, now_ms: u64) {
+        let job = self
+            .job
+            .take()
+            .expect("the test must own one queued attempt");
+        match self
+            .core
+            .rollback_queued(job, MonotonicMillis::new(now_ms))
+            .unwrap_or_else(|failure| panic!("rollback failed: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Available(buffer) => self.buffer = Some(buffer),
+            TxCompletionDisposition::Next(_) => {
+                panic!("single-interface job unexpectedly fanned out")
+            }
+            TxCompletionDisposition::Recovered { .. } => {
+                panic!("pre-deadline queued job unexpectedly required recovery")
+            }
+            TxCompletionDisposition::Quarantined(_) => {
+                panic!("ordinary queued rollback unexpectedly quarantined")
+            }
+        }
+    }
+
+    fn recover_expired_queued_attempt(
+        &mut self,
+        deadline_ms: u64,
+        completed_at_ms: u64,
+    ) -> TxRecoveryObservation {
+        let job = self
+            .job
+            .take()
+            .expect("the test must own one queued attempt");
+        assert_eq!(
+            self.core
+                .maintain_tx(MonotonicMillis::new(deadline_ms))
+                .newly_recovery_required,
+            1
+        );
+        match self
+            .core
+            .rollback_queued(job, MonotonicMillis::new(completed_at_ms))
+            .unwrap_or_else(|failure| panic!("recovery rollback failed: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Recovered {
+                buffer,
+                observation,
+            } => {
+                self.buffer = Some(buffer);
+                self.recovered = Some(observation);
+                observation
+            }
+            TxCompletionDisposition::Available(_) => {
+                panic!("expired queued job unexpectedly bypassed recovery")
+            }
+            TxCompletionDisposition::Next(_) => {
+                panic!("single-interface job unexpectedly fanned out")
+            }
+            TxCompletionDisposition::Quarantined(_) => {
+                panic!("ordinary queued recovery unexpectedly quarantined")
+            }
+        }
     }
 
     fn enable_integrated_direct_preparation(&mut self) -> (LinkHandle, Vec<u8>) {
@@ -370,6 +436,43 @@ impl TestNode {
         self.retain_link(link, LinkState::Active);
         self.integrated_direct_preparation = true;
         (link, wire)
+    }
+
+    fn establish_additional_direct_link(&mut self) -> LinkHandle {
+        let mut rng = CounterRng(0xa0);
+        let (request, link) = self
+            .core
+            .initiate_link(&self.destination, MonotonicSeconds::new(190), &mut rng)
+            .unwrap();
+        let response = self
+            .peer
+            .ingest(
+                request.packets[0].bytes(),
+                MonotonicSeconds::new(190),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap();
+        let established = self
+            .core
+            .ingest(
+                response.actions.packets[0].bytes(),
+                MonotonicSeconds::new(191),
+                PacketInterfaceId::new(1),
+                &mut rng,
+            )
+            .unwrap();
+        self.peer
+            .ingest(
+                established.actions.packets[0].bytes(),
+                MonotonicSeconds::new(192),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(self.core.link_state(link), Some(LinkState::Active));
+        self.retain_link(link, LinkState::Active);
+        link
     }
 
     fn direct_lxmf_wire(&self, timestamp_ms: u64, title: &[u8], content: u8) -> Vec<u8> {
@@ -720,6 +823,12 @@ impl SubmissionNodePort for TestNode {
         self.has_usable_path
     }
 
+    fn remove_retained_path(&mut self, destination: &DestinationHash) -> bool {
+        self.has_usable_path = false;
+        self.removed_paths.push(*destination);
+        self.core.remove_retained_path(destination)
+    }
+
     fn retained_path_hops(&self, _destination: &DestinationHash) -> Option<u8> {
         self.retained_path_hops
     }
@@ -1064,6 +1173,10 @@ fn durable_runtime_enforces_barrier_frame_terminal_and_ack_ordering() {
         runtime.offer_authorized_frame(frame),
         Ok(FrameOfferProgress::Durable)
     );
+    assert!(
+        node.core.has_path(&node.destination),
+        "the timed-out attempt starts with one retained route"
+    );
 
     let RuntimeStep::Terminal { terminal, progress } = drive(&mut runtime, &mut access, &mut node)
     else {
@@ -1071,6 +1184,11 @@ fn durable_runtime_enforces_barrier_frame_terminal_and_ack_ordering() {
     };
     assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
     assert!(matches!(progress, ProjectionProgress::Persist(_)));
+    assert_eq!(node.removed_paths, [node.destination]);
+    assert!(
+        !node.core.has_path(&node.destination),
+        "a non-Link timeout must invalidate its stale route before retry"
+    );
     assert_eq!(runtime.storage().pending_acknowledgements().count(), 0);
     assert_eq!(
         drive(&mut runtime, &mut access, &mut node),
@@ -1853,14 +1971,6 @@ fn direct_link_single_flight_waits_through_terminal_ack_then_reuses_same_link() 
     let first_frame = node.expose_frame_and_deliver();
     assert_eq!(
         runtime.offer_authorized_frame(first_frame),
-        Ok(FrameOfferProgress::Retain)
-    );
-    assert_eq!(
-        drive(&mut runtime, &mut access, &mut node),
-        RuntimeStep::Persistence(PersistenceProgress::Committed)
-    );
-    assert_eq!(
-        runtime.offer_authorized_frame(first_frame),
         Ok(FrameOfferProgress::Durable)
     );
     let RuntimeStep::Terminal {
@@ -1906,14 +2016,6 @@ fn direct_link_single_flight_waits_through_terminal_ack_then_reuses_same_link() 
     let second_frame = node.expose_frame_and_deliver();
     assert_eq!(
         runtime.offer_authorized_frame(second_frame),
-        Ok(FrameOfferProgress::Retain)
-    );
-    assert_eq!(
-        drive(&mut runtime, &mut access, &mut node),
-        RuntimeStep::Persistence(PersistenceProgress::Committed)
-    );
-    assert_eq!(
-        runtime.offer_authorized_frame(second_frame),
         Ok(FrameOfferProgress::Durable)
     );
     let RuntimeStep::Terminal {
@@ -1953,15 +2055,780 @@ fn direct_link_single_flight_waits_through_terminal_ack_then_reuses_same_link() 
 
 #[test]
 fn direct_delivery_timeout_is_durable_before_reusable_link_retirement() {
-    exercise_direct_delivery_timeout_retirement(false);
+    exercise_direct_delivery_timeout_retirement();
 }
 
 #[test]
-fn ambiguous_direct_timeout_commit_retains_exact_link_retirement() {
-    exercise_direct_delivery_timeout_retirement(true);
+fn timed_out_lxmf_retries_the_same_durable_wire_after_backoff_without_a_client() {
+    let mut node = TestNode::new();
+    let (link, wire) = node.enable_integrated_direct_preparation();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2, 2>::mount(&mut access, SubmissionId::new(49), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match runtime
+        .accept(&mut access, exact_lxmf_message_candidate(&wire, 0x60))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh direct candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::PreparationBarrier { id: observed, .. } if observed == id
+    ));
+    assert_eq!(
+        drive(&mut runtime, &mut access, &mut node),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    let RuntimeStep::LinkEstablishment { offer, .. } = drive(&mut runtime, &mut access, &mut node)
+    else {
+        panic!("direct-only candidate must establish its first Link")
+    };
+    runtime.attach_created_link(offer, link).unwrap();
+    runtime
+        .acknowledge_link_request_dispatched(offer, link, MonotonicMillis::new(100_000))
+        .unwrap();
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_001).unwrap(),
+        RuntimeStep::Preparation {
+            id: observed,
+            progress: ProjectionProgress::AttemptBound,
+        } if observed == id
+    ));
+    let first_attempt = node.job.as_ref().unwrap().prepared().attempt();
+    assert_eq!(node.last_direct_lxmf_wire.as_deref(), Some(wire.as_slice()));
+
+    let frame = node.expose_frame_and_timeout();
+    assert_eq!(
+        runtime.offer_authorized_frame(frame),
+        Ok(FrameOfferProgress::Durable)
+    );
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_100).unwrap(),
+        RuntimeStep::Terminal {
+            progress: ProjectionProgress::RetryableAttemptTerminal,
+            ..
+        }
+    ));
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_101).unwrap(),
+        RuntimeStep::DirectLinkDeliveryTimedOut { link: retired, .. } if retired == link
+    ));
+    let close = node.core.close_link(link, &mut CounterRng::default());
+    assert_eq!(close.packets.len(), 1);
+    node.set_link_state(link, LinkState::Closed);
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_102).unwrap(),
+        RuntimeStep::Acknowledgement {
+            reply: AcknowledgementReply::Completed,
+            ..
+        }
+    ));
+
+    let slot = runtime.submission_slot(id).unwrap();
+    let retry_at = runtime.lxmf_delivery_loops[slot]
+        .retry_not_before_ms
+        .expect("receipt timeout must arm board-owned retry");
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, retry_at - 1).unwrap(),
+        RuntimeStep::Idle
+    );
+    let RuntimeStep::LinkEstablishment {
+        offer: retry_offer, ..
+    } = try_drive_at(&mut runtime, &mut access, &mut node, retry_at).unwrap()
+    else {
+        panic!("the board must retry its durable LXMF obligation when due")
+    };
+    assert_eq!(retry_offer.id(), id);
+    let retry_link = node.establish_additional_direct_link();
+    assert_ne!(retry_link, link);
+    runtime
+        .attach_created_link(retry_offer, retry_link)
+        .unwrap();
+    runtime
+        .acknowledge_link_request_dispatched(
+            retry_offer,
+            retry_link,
+            MonotonicMillis::new(retry_at + 1),
+        )
+        .unwrap();
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, retry_at + 2).unwrap(),
+        RuntimeStep::Preparation {
+            id: observed,
+            progress: ProjectionProgress::AttemptBound,
+        } if observed == id
+    ));
+    let second_attempt = node.job.as_ref().unwrap().prepared().attempt();
+    assert_ne!(second_attempt, first_attempt);
+    assert_eq!(node.last_direct_lxmf_wire.as_deref(), Some(wire.as_slice()));
+    assert_eq!(runtime.active_lxmf_retry_submission, Some(id));
+    assert_eq!(runtime.lxmf_delivery_loops[slot].attempts_started, 2);
 }
 
-fn exercise_direct_delivery_timeout_retirement(lose_final_write_reply: bool) {
+#[test]
+fn reboot_restores_pending_lxmf_and_arms_board_owned_retry() {
+    let mut node = TestNode::new();
+    let (_link, wire) = node.enable_integrated_direct_preparation();
+    let mut access = formatted_access();
+    let mut initial =
+        SubmissionRuntime::<4, 2, 2>::mount(&mut access, SubmissionId::new(48), 7).unwrap();
+    assert_eq!(
+        initial.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match initial
+        .accept(&mut access, exact_lxmf_message_candidate(&wire, 0x5f))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh direct candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        drive(&mut initial, &mut access, &mut node),
+        RuntimeStep::PreparationBarrier { id: observed, .. } if observed == id
+    ));
+    assert_eq!(
+        drive(&mut initial, &mut access, &mut node),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    assert_eq!(
+        initial.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+    let mut recovered =
+        SubmissionRuntime::<4, 2, 2>::mount(&mut access, SubmissionId::new(48), 8).unwrap();
+    assert_eq!(
+        recovered.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Submission {
+            id,
+            progress: BootRecoveryProgress::ReplayPendingLxmf,
+        })
+    );
+    assert_eq!(
+        recovered.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    assert_eq!(
+        try_drive_at(&mut recovered, &mut access, &mut node, 200_000).unwrap(),
+        RuntimeStep::Idle,
+        "the first live turn establishes a conservative boot-relative delay"
+    );
+    let slot = recovered.submission_slot(id).unwrap();
+    let retry_at = recovered.lxmf_delivery_loops[slot]
+        .retry_not_before_ms
+        .expect("boot recovery must arm a retry deadline");
+    let RuntimeStep::LinkEstablishment { offer, .. } =
+        try_drive_at(&mut recovered, &mut access, &mut node, retry_at).unwrap()
+    else {
+        panic!("replayed LXMF must resume without any client connection")
+    };
+    assert_eq!(offer.id(), id);
+}
+
+#[test]
+fn automatic_lxmf_retries_are_single_flight_and_path_learning_wakes_backoff() {
+    let node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(47), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let first = match runtime
+        .accept(&mut access, lxmf_message_candidate(node.destination, 40))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("first candidate did not accept: {other:?}"),
+    };
+    let second = match runtime
+        .accept(&mut access, lxmf_message_candidate(node.destination, 41))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("second candidate did not accept: {other:?}"),
+    };
+    for id in [first, second] {
+        assert!(matches!(
+            runtime.storage.begin_preparation(id).unwrap(),
+            ProjectionProgress::Persist(_)
+        ));
+        let request = runtime
+            .storage
+            .projector()
+            .pending_persistence()
+            .next()
+            .unwrap();
+        assert_eq!(
+            runtime.storage.persist_projector(&mut access, request),
+            Ok(PersistenceProgress::Committed)
+        );
+    }
+    let first_slot = runtime.submission_slot(first).unwrap();
+    let second_slot = runtime.submission_slot(second).unwrap();
+    for slot in [first_slot, second_slot] {
+        runtime.lxmf_delivery_loops[slot].attempts_started = 1;
+        runtime.lxmf_delivery_loops[slot].retry_pending = true;
+        runtime.lxmf_delivery_loops[slot].retry_not_before_ms = Some(0);
+    }
+
+    let (selected_slot, selected, _, _) = runtime
+        .select_ready_submission(&node, 100)
+        .expect("one due retry must be selected");
+    assert_eq!((selected_slot, selected), (first_slot, first));
+    runtime.note_lxmf_attempt_started(selected_slot, selected);
+    // The helper call above models the scheduler edge without allocating a
+    // node-core packet; park that synthetic active row as a real binding would.
+    runtime.direct_link_waiting[first_slot] = DirectLinkWaitReason::MatchingLinkBusy;
+    assert_eq!(runtime.active_lxmf_retry_submission, Some(first));
+    assert_eq!(
+        runtime.select_ready_submission(&node, 101),
+        None,
+        "a second automatic retry must wait for the first terminal acknowledgement"
+    );
+    runtime.note_lxmf_terminal_acknowledged(first, AttemptOutcome::DeliveryTimeout);
+    assert_eq!(runtime.active_lxmf_retry_submission, None);
+    assert!(matches!(
+        runtime.select_ready_submission(&node, 102),
+        Some((slot, id, _, _)) if slot == second_slot && id == second
+    ));
+
+    let delivery = &mut runtime.lxmf_delivery_loops[second_slot];
+    delivery.retry_pending = true;
+    delivery.retry_not_before_ms = Some(1_000_000);
+    delivery.arm_after_boot = false;
+    delivery.last_path_usable = false;
+    assert!(!runtime.lxmf_retry_is_eligible(second_slot, second, 200, false));
+    assert!(
+        runtime.lxmf_retry_is_eligible(second_slot, second, 201, true),
+        "an exact destination becoming reachable must advance its retry"
+    );
+}
+
+#[test]
+fn transient_interface_loss_keeps_lxmf_pending_and_retries_on_the_board() {
+    let mut node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(50), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let id = match runtime
+        .accept(&mut access, lxmf_message_candidate(node.destination, 46))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100).unwrap(),
+        RuntimeStep::PreparationBarrier { id: observed, .. } if observed == id
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100).unwrap(),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+
+    node.force_opportunistic_lxmf_preparation(SubmissionPreparationObservation::Rejected(
+        SubmitError::NoEligibleInterface {
+            target: reticulum_node_core::TxTarget::All,
+        },
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100).unwrap(),
+        RuntimeStep::Preparation {
+            id,
+            progress: ProjectionProgress::NoAction,
+        }
+    );
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing,
+        "temporary interface loss must not permanently fail a durable message"
+    );
+    let slot = runtime.submission_slot(id).unwrap();
+    let retry_at = runtime.lxmf_delivery_loops[slot]
+        .retry_not_before_ms
+        .expect("interface loss must arm the autonomous retry scheduler");
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, retry_at - 1).unwrap(),
+        RuntimeStep::Idle
+    );
+
+    node.force_opportunistic_lxmf_preparation(SubmissionPreparationObservation::Rejected(
+        SubmitError::NoEligibleInterface {
+            target: reticulum_node_core::TxTarget::All,
+        },
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, retry_at).unwrap(),
+        RuntimeStep::Preparation {
+            id,
+            progress: ProjectionProgress::NoAction,
+        }
+    );
+    assert!(
+        runtime.lxmf_delivery_loops[slot]
+            .retry_not_before_ms
+            .is_some_and(|next_retry| next_retry > retry_at),
+        "a still-offline interface must rearm another bounded retry"
+    );
+}
+
+#[test]
+fn definitely_unsent_lxmf_attempt_recycles_into_the_board_retry_loop() {
+    let mut node = TestNode::new();
+    let mut wire = vec![0x6d; 56];
+    wire[..16].copy_from_slice(node.destination.as_bytes());
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(53), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let id = match runtime
+        .accept(&mut access, exact_lxmf_message_candidate(&wire, 0x53))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::PreparationBarrier { id: observed, .. } if observed == id
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+
+    let first_observation = node.prepare_submission(
+        SubmissionPrepareRequest {
+            destination: node.destination,
+            plaintext: &wire,
+            rns_now: MonotonicSeconds::new(100),
+            owner_now: MonotonicMillis::new(100_000),
+            deadline: TxLeaseDeadline::new(MonotonicMillis::new(200_000)),
+        },
+        &mut CounterRng(0x20),
+    );
+    let SubmissionPreparationObservation::Prepared(first_prepared) = first_observation else {
+        panic!("test node must prepare the first exact attempt")
+    };
+    node.force_opportunistic_lxmf_preparation(first_observation);
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::Preparation {
+            id,
+            progress: ProjectionProgress::AttemptBound,
+        }
+    );
+
+    node.rollback_queued_attempt(100_100);
+    let first_terminal = node.core.terminal_attempts().next().unwrap();
+    assert_eq!(
+        first_terminal.outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback)
+    );
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_100).unwrap(),
+        RuntimeStep::Terminal {
+            terminal: first_terminal,
+            progress: ProjectionProgress::RetryableAttemptTerminal,
+        }
+    );
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+    let slot = runtime.submission_slot(id).unwrap();
+    let retry_at = runtime.lxmf_delivery_loops[slot]
+        .retry_not_before_ms
+        .expect("definitely-unsent terminal must schedule a board retry");
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_101).unwrap(),
+        RuntimeStep::Acknowledgement {
+            reply: AcknowledgementReply::Completed,
+            ..
+        }
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, retry_at - 1).unwrap(),
+        RuntimeStep::Idle
+    );
+
+    let second_observation = node.prepare_submission(
+        SubmissionPrepareRequest {
+            destination: node.destination,
+            plaintext: &wire,
+            rns_now: MonotonicSeconds::new(retry_at / 1_000),
+            owner_now: MonotonicMillis::new(retry_at),
+            deadline: TxLeaseDeadline::new(MonotonicMillis::new(retry_at.saturating_add(100_000))),
+        },
+        &mut CounterRng(0x80),
+    );
+    let SubmissionPreparationObservation::Prepared(second_prepared) = second_observation else {
+        panic!("test node must prepare the replacement carrier attempt")
+    };
+    node.force_opportunistic_lxmf_preparation(second_observation);
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, retry_at).unwrap(),
+        RuntimeStep::Preparation {
+            id,
+            progress: ProjectionProgress::AttemptBound,
+        }
+    );
+    assert_ne!(first_prepared.attempt(), second_prepared.attempt());
+    assert_eq!(runtime.active_lxmf_retry_submission, Some(id));
+}
+
+#[test]
+fn recovery_backed_unsent_lxmf_releases_both_owners_before_recycling() {
+    let mut node = TestNode::new();
+    let mut wire = vec![0x6e; 57];
+    wire[..16].copy_from_slice(node.destination.as_bytes());
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(54), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let id = match runtime
+        .accept(&mut access, exact_lxmf_message_candidate(&wire, 0x54))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::PreparationBarrier { id: observed, .. } if observed == id
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    let prepared = node.prepare_submission(
+        SubmissionPrepareRequest {
+            destination: node.destination,
+            plaintext: &wire,
+            rns_now: MonotonicSeconds::new(100),
+            owner_now: MonotonicMillis::new(100_000),
+            deadline: TxLeaseDeadline::new(MonotonicMillis::new(200_000)),
+        },
+        &mut CounterRng(0x30),
+    );
+    assert!(matches!(
+        prepared,
+        SubmissionPreparationObservation::Prepared(_)
+    ));
+    node.force_opportunistic_lxmf_preparation(prepared);
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap(),
+        RuntimeStep::Preparation {
+            id: observed,
+            progress: ProjectionProgress::AttemptBound,
+        } if observed == id
+    ));
+
+    let recovered = node.recover_expired_queued_attempt(200_000, 200_001);
+    let terminal = node.core.terminal_attempts().next().unwrap();
+    assert_eq!(
+        terminal.outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PermitDeadlineExpired)
+    );
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 200_001).unwrap(),
+        RuntimeStep::Recovered {
+            observation,
+            progress: ProjectionProgress::RecoveryDurablyCovered,
+        } if observation == recovered
+    ));
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 200_001).unwrap(),
+        RuntimeStep::Acknowledgement {
+            action,
+            reply: AcknowledgementReply::Completed,
+        } if action.kind() == AcknowledgementKind::Recovered(recovered)
+    ));
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 200_001).unwrap(),
+        RuntimeStep::Terminal {
+            terminal: observed,
+            progress: ProjectionProgress::RetryableAttemptTerminal,
+        } if observed == terminal
+    ));
+    let slot = runtime.submission_slot(id).unwrap();
+    assert!(runtime.lxmf_delivery_loops[slot].retry_pending);
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 200_001).unwrap(),
+        RuntimeStep::Acknowledgement {
+            action,
+            reply: AcknowledgementReply::Completed,
+        } if action.kind() == AcknowledgementKind::Terminal(terminal)
+    ));
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+    assert!(
+        runtime
+            .storage()
+            .projector()
+            .preparation_allowed(runtime.index(), id)
+    );
+}
+
+#[test]
+fn a_shared_path_offer_cannot_consume_an_lxmf_path_wakeup() {
+    let node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(52), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let id = match runtime
+        .accept(&mut access, lxmf_message_candidate(node.destination, 47))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        runtime.storage.begin_preparation(id).unwrap(),
+        ProjectionProgress::Persist(_)
+    ));
+    let request = runtime
+        .storage
+        .projector()
+        .pending_persistence()
+        .next()
+        .unwrap();
+    assert_eq!(
+        runtime.storage.persist_projector(&mut access, request),
+        Ok(PersistenceProgress::Committed)
+    );
+    let slot = runtime.submission_slot(id).unwrap();
+    runtime.lxmf_delivery_loops[slot].retry_pending = true;
+    runtime.lxmf_delivery_loops[slot].retry_not_before_ms = Some(1_000_000);
+    runtime.lxmf_delivery_loops[slot].last_path_usable = false;
+
+    let (_, offer) = runtime.classify_path_discovery(
+        id,
+        node.destination,
+        SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination),
+        100,
+    );
+    assert!(
+        offer.is_some(),
+        "the shared path request must remain undispatched"
+    );
+    assert_eq!(runtime.select_ready_submission(&node, 101), None);
+    assert!(
+        !runtime.lxmf_delivery_loops[slot].last_path_usable,
+        "a later selection gate must not consume the false-to-true path edge"
+    );
+
+    runtime.clear_path_discovery(node.destination);
+    assert!(matches!(
+        runtime.select_ready_submission(&node, 102),
+        Some((selected_slot, selected, _, _)) if selected_slot == slot && selected == id
+    ));
+}
+
+#[test]
+fn same_boot_preparation_pressure_cannot_consume_an_lxmf_path_wakeup() {
+    let node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(55), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let id = match runtime
+        .accept(&mut access, lxmf_message_candidate(node.destination, 49))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        runtime.storage.begin_preparation(id).unwrap(),
+        ProjectionProgress::Persist(_)
+    ));
+    let request = runtime
+        .storage
+        .projector()
+        .pending_persistence()
+        .next()
+        .unwrap();
+    assert_eq!(
+        runtime.storage.persist_projector(&mut access, request),
+        Ok(PersistenceProgress::Committed)
+    );
+    let slot = runtime.submission_slot(id).unwrap();
+    runtime.lxmf_delivery_loops[slot].retry_pending = true;
+    runtime.lxmf_delivery_loops[slot].retry_not_before_ms = Some(1_000_000);
+    runtime.lxmf_delivery_loops[slot].last_path_usable = false;
+
+    assert!(matches!(
+        runtime.select_ready_submission(&node, 101),
+        Some((selected_slot, selected, _, _)) if selected_slot == slot && selected == id
+    ));
+    assert_eq!(
+        runtime
+            .project_preparation(id, SubmissionPreparationObservation::RetrySameBoot)
+            .unwrap(),
+        ProjectionProgress::NoAction
+    );
+    assert!(
+        !runtime.lxmf_delivery_loops[slot].last_path_usable,
+        "only a bound carrier attempt may consume the exact path edge"
+    );
+    assert!(matches!(
+        runtime.select_ready_submission(&node, 102),
+        Some((selected_slot, selected, _, _)) if selected_slot == slot && selected == id
+    ));
+}
+
+#[test]
+fn newly_accepted_work_crosses_its_barrier_before_a_due_background_retry() {
+    let mut node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(49), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let retrying = match runtime
+        .accept(&mut access, lxmf_message_candidate(node.destination, 42))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("retry candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        runtime.storage.begin_preparation(retrying).unwrap(),
+        ProjectionProgress::Persist(_)
+    ));
+    let request = runtime
+        .storage
+        .projector()
+        .pending_persistence()
+        .next()
+        .unwrap();
+    assert_eq!(
+        runtime.storage.persist_projector(&mut access, request),
+        Ok(PersistenceProgress::Committed)
+    );
+    let retrying_slot = runtime.submission_slot(retrying).unwrap();
+    runtime.lxmf_delivery_loops[retrying_slot].attempts_started = 1;
+    runtime.lxmf_delivery_loops[retrying_slot].retry_pending = true;
+    runtime.lxmf_delivery_loops[retrying_slot].retry_not_before_ms = Some(0);
+
+    let fresh = match runtime
+        .accept(&mut access, lxmf_message_candidate(node.destination, 43))
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh candidate did not accept: {other:?}"),
+    };
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100).unwrap(),
+        RuntimeStep::PreparationBarrier { id, .. } if id == fresh
+    ));
+    assert_eq!(runtime.active_lxmf_retry_submission, None);
+}
+
+#[test]
+fn a_finalized_retry_owner_cannot_strand_the_global_retry_gate() {
+    let mut node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(51), 7).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+
+    let mut ids = [SubmissionId::new(0); 2];
+    for (index, tag) in [44, 45].into_iter().enumerate() {
+        let id = match runtime
+            .accept(&mut access, lxmf_message_candidate(node.destination, tag))
+            .unwrap()
+        {
+            AcceptanceProgress::Accepted(id) => id,
+            other => panic!("candidate did not accept: {other:?}"),
+        };
+        ids[index] = id;
+        assert!(matches!(
+            runtime.storage.begin_preparation(id).unwrap(),
+            ProjectionProgress::Persist(_)
+        ));
+        let request = runtime
+            .storage
+            .projector()
+            .pending_persistence()
+            .next()
+            .unwrap();
+        assert_eq!(
+            runtime.storage.persist_projector(&mut access, request),
+            Ok(PersistenceProgress::Committed)
+        );
+        let slot = runtime.submission_slot(id).unwrap();
+        runtime.lxmf_delivery_loops[slot].attempts_started = 1;
+        runtime.lxmf_delivery_loops[slot].retry_pending = true;
+        runtime.lxmf_delivery_loops[slot].retry_not_before_ms = Some(0);
+    }
+
+    runtime.active_lxmf_retry_submission = Some(ids[0]);
+    assert!(matches!(
+        runtime
+            .storage
+            .observe_preparation(ids[0], SubmissionPreparationObservation::InternalFailure)
+            .unwrap(),
+        ProjectionProgress::Persist(_)
+    ));
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 100).unwrap(),
+        RuntimeStep::Persistence(PersistenceProgress::Committed)
+    );
+    assert!(runtime.index().get(ids[0]).unwrap().state().is_final());
+
+    assert!(runtime.storage.ready_intent(ids[1]).is_some());
+    let resumed = try_drive_at(&mut runtime, &mut access, &mut node, 101).unwrap();
+    assert!(
+        matches!(resumed, RuntimeStep::Preparation { id, .. } if id == ids[1]),
+        "the next retry did not resume after finalization: {resumed:?}"
+    );
+    assert_eq!(runtime.active_lxmf_retry_submission, None);
+}
+
+fn exercise_direct_delivery_timeout_retirement() {
     let mut node = TestNode::new();
     let (link, wire) = node.enable_integrated_direct_preparation();
     let mut access = formatted_access();
@@ -2031,24 +2898,20 @@ fn exercise_direct_delivery_timeout_retirement(lose_final_write_reply: bool) {
     let frame = node.expose_frame_and_timeout();
     assert_eq!(
         runtime.offer_authorized_frame(frame),
-        Ok(FrameOfferProgress::Retain)
-    );
-    assert_eq!(
-        drive(&mut runtime, &mut access, &mut node),
-        RuntimeStep::Persistence(PersistenceProgress::Committed)
-    );
-    assert_eq!(
-        runtime.offer_authorized_frame(frame),
         Ok(FrameOfferProgress::Durable)
     );
 
     let RuntimeStep::Terminal { terminal, progress } = drive(&mut runtime, &mut access, &mut node)
     else {
-        panic!("a direct receipt timeout must first plan its durable final record")
+        panic!("a direct receipt timeout must preserve the durable delivery loop")
     };
     assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
     assert_eq!(terminal.link(), Some(link));
-    assert!(matches!(progress, ProjectionProgress::Persist(_)));
+    assert_eq!(progress, ProjectionProgress::RetryableAttemptTerminal);
+    assert!(
+        node.removed_paths.is_empty(),
+        "direct Link timeout must not enter opportunistic route invalidation"
+    );
     assert_eq!(
         node.link_state(link),
         Some(LinkState::Active),
@@ -2060,50 +2923,8 @@ fn exercise_direct_delivery_timeout_retirement(lose_final_write_reply: bool) {
             .iter()
             .flatten()
             .any(|candidate| candidate.link == link),
-        "retirement must not precede the failed submission's durable final record"
+        "retirement remains a separate product control edge"
     );
-
-    if lose_final_write_reply {
-        access.backend_mut().lose_write_reply_after(1);
-        assert_eq!(
-            try_drive(&mut runtime, &mut access, &mut node),
-            Err(RuntimeError::Storage(DriveError::Backend(
-                FakeError::Injected
-            )))
-        );
-        assert_eq!(
-            runtime.storage().pending_kind(),
-            Some(reticulum_storage_actor::PendingKind::Projector)
-        );
-        assert_eq!(
-            runtime.storage().pending_projector_handle(),
-            runtime
-                .direct_link_retirement
-                .and_then(|retirement| match retirement {
-                    DirectLinkRetirement::AwaitingDurability { persistence, .. } => {
-                        Some(persistence)
-                    }
-                    DirectLinkRetirement::Ready { .. } => None,
-                })
-        );
-        assert!(
-            runtime
-                .reusable_direct_links
-                .iter()
-                .flatten()
-                .any(|candidate| candidate.link == link),
-            "ambiguous final-record I/O must retain the Link retirement"
-        );
-        assert_eq!(
-            drive(&mut runtime, &mut access, &mut node),
-            RuntimeStep::Pending(PendingProgress::ProjectorCommitted)
-        );
-    } else {
-        assert_eq!(
-            drive(&mut runtime, &mut access, &mut node),
-            RuntimeStep::Persistence(PersistenceProgress::Committed)
-        );
-    }
     assert!(matches!(
         runtime.direct_link_retirement,
         Some(DirectLinkRetirement::Ready {
@@ -2118,7 +2939,7 @@ fn exercise_direct_delivery_timeout_retirement(lose_final_write_reply: bool) {
             .iter()
             .flatten()
             .any(|candidate| candidate.link == link),
-        "a durable commit and the later retirement signal are separate steps"
+        "the continuing durable loop and Link-retirement signal are separate"
     );
 
     let RuntimeStep::DirectLinkDeliveryTimedOut {
@@ -2133,7 +2954,7 @@ fn exercise_direct_delivery_timeout_retirement(lose_final_write_reply: bool) {
     assert!(!runtime.direct_link_retirement_is_next_step());
     assert_eq!(
         runtime.index().get(first_id).unwrap().state(),
-        LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::DeliveryTimeout))
+        LifecycleState::Preparing
     );
     assert!(
         runtime.reusable_direct_links.iter().all(Option::is_none),
@@ -2571,6 +3392,7 @@ fn active_link_on_an_ineligible_interface_is_retained_but_not_selected() {
 #[test]
 fn unknown_destination_requests_a_path_twice_then_prepares_after_announce_learning() {
     let mut node = TestNode::new();
+    node.set_has_usable_path(false);
     node.force_unknown_preparations(3);
     let mut access = formatted_access();
     let mut runtime =
@@ -2647,6 +3469,7 @@ fn unknown_destination_requests_a_path_twice_then_prepares_after_announce_learni
         try_drive_at(&mut runtime, &mut access, &mut node, 127_999).unwrap(),
         RuntimeStep::Idle
     );
+    node.set_has_usable_path(true);
     assert!(matches!(
         try_drive_at(&mut runtime, &mut access, &mut node, 128_000).unwrap(),
         RuntimeStep::Preparation {
@@ -2662,8 +3485,9 @@ fn unknown_destination_requests_a_path_twice_then_prepares_after_announce_learni
 }
 
 #[test]
-fn path_discovery_exhaustion_commits_terminal_no_path() {
+fn raw_path_discovery_exhaustion_remains_terminal_no_path() {
     let mut node = TestNode::new();
+    node.set_has_usable_path(false);
     node.force_unknown_preparations(4);
     let mut access = formatted_access();
     let mut runtime =
@@ -2708,7 +3532,8 @@ fn path_discovery_exhaustion_commits_terminal_no_path() {
         RuntimeStep::Preparation {
             id: observed,
             progress: ProjectionProgress::Persist(_),
-        } if observed == id
+        }
+        if observed == id
     ));
     assert_eq!(
         try_drive_at(&mut runtime, &mut access, &mut node, 128_000).unwrap(),
@@ -2718,6 +3543,218 @@ fn path_discovery_exhaustion_commits_terminal_no_path() {
         runtime.index().get(id).unwrap().state(),
         LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::NoPath))
     );
+}
+
+#[test]
+fn shared_path_exhaustion_keeps_raw_and_lxmf_policies_per_submission() {
+    for lxmf_reaches_exhaustion_first in [false, true] {
+        let node = TestNode::new();
+        let mut access = formatted_access();
+        let mut runtime =
+            SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(54), 9).unwrap();
+        assert_eq!(
+            runtime.recover_boot_step(&mut access),
+            Ok(RecoveryStep::Complete)
+        );
+        let raw = match runtime
+            .accept(&mut access, candidate(node.destination))
+            .unwrap()
+        {
+            AcceptanceProgress::Accepted(id) => id,
+            other => panic!("raw candidate did not accept: {other:?}"),
+        };
+        let lxmf = match runtime
+            .accept(&mut access, lxmf_message_candidate(node.destination, 48))
+            .unwrap()
+        {
+            AcceptanceProgress::Accepted(id) => id,
+            other => panic!("LXMF candidate did not accept: {other:?}"),
+        };
+        for id in [raw, lxmf] {
+            assert!(matches!(
+                runtime.storage.begin_preparation(id).unwrap(),
+                ProjectionProgress::Persist(_)
+            ));
+            let request = runtime
+                .storage
+                .projector()
+                .pending_persistence()
+                .next()
+                .unwrap();
+            assert_eq!(
+                runtime.storage.persist_projector(&mut access, request),
+                Ok(PersistenceProgress::Committed)
+            );
+        }
+        runtime.path_discoveries[0] = Some(PathDiscovery {
+            destination: node.destination,
+            phase: PathDiscoveryPhase::Waiting {
+                first_request_ms: 100_000,
+                next_probe_ms: 128_000,
+                requests_sent: PATH_DISCOVERY_MAX_REQUESTS,
+            },
+        });
+        let unknown = SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination);
+        let order = if lxmf_reaches_exhaustion_first {
+            [lxmf, raw]
+        } else {
+            [raw, lxmf]
+        };
+        for id in order {
+            let (observation, offer) =
+                runtime.classify_path_discovery(id, node.destination, unknown, 128_000);
+            assert_eq!(offer, None);
+            assert_eq!(
+                observation,
+                if id == lxmf {
+                    SubmissionPreparationObservation::RetrySameBoot
+                } else {
+                    unknown
+                },
+                "shared discovery must not transfer one submission's completion policy"
+            );
+        }
+        assert!(matches!(
+            runtime.path_discoveries[0],
+            Some(PathDiscovery {
+                phase: PathDiscoveryPhase::CycleBackoff { .. },
+                ..
+            })
+        ));
+        assert!(
+            runtime.path_discovery_ready(node.destination, 128_001, false, false),
+            "raw work must be allowed to observe terminal exhaustion immediately"
+        );
+        assert!(
+            !runtime.path_discovery_ready(node.destination, 187_999, false, true),
+            "LXMF must respect its longer cycle backoff"
+        );
+        let (observation, offer) =
+            runtime.classify_path_discovery(lxmf, node.destination, unknown, 188_000);
+        assert_eq!(observation, SubmissionPreparationObservation::RetrySameBoot);
+        let offer = offer.expect("LXMF must begin a fresh shared discovery cycle when due");
+        assert_eq!(offer.id(), lxmf);
+        assert_eq!(offer.ordinal(), 1);
+    }
+}
+
+#[test]
+fn lxmf_path_discovery_exhaustion_retains_message_and_starts_a_later_cycle() {
+    let mut node = TestNode::new();
+    node.set_has_usable_path(false);
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(56), 9).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match runtime
+        .accept(
+            &mut access,
+            lxmf_message_candidate(node.destination, MAX_OPPORTUNISTIC_LXMF_CARRIER + 1),
+        )
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh candidate did not accept: {other:?}"),
+    };
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap();
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: first_offer, ..
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap()
+    else {
+        panic!("first path offer must be produced")
+    };
+    runtime
+        .acknowledge_path_request_dispatched(first_offer, MonotonicMillis::new(100_000))
+        .unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 107_000).unwrap();
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: second_offer,
+        ..
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 121_000).unwrap()
+    else {
+        panic!("second path offer must be produced")
+    };
+    runtime
+        .acknowledge_path_request_dispatched(second_offer, MonotonicMillis::new(121_000))
+        .unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 128_000).unwrap();
+
+    assert_eq!(
+        runtime.index().get(id).unwrap().state(),
+        LifecycleState::Preparing
+    );
+    assert_eq!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 187_999).unwrap(),
+        RuntimeStep::Idle
+    );
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: third_offer,
+        progress: ProjectionProgress::NoAction,
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 188_000).unwrap()
+    else {
+        panic!("the retained LXMF message must start another discovery cycle")
+    };
+    assert_eq!(third_offer.id(), id);
+    assert_eq!(third_offer.ordinal(), 1);
+}
+
+#[test]
+fn newly_learned_path_wakes_an_exhausted_lxmf_discovery_cycle_immediately() {
+    let mut node = TestNode::new();
+    node.set_has_usable_path(false);
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(56), 9).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = match runtime
+        .accept(
+            &mut access,
+            lxmf_message_candidate(node.destination, MAX_OPPORTUNISTIC_LXMF_CARRIER + 2),
+        )
+        .unwrap()
+    {
+        AcceptanceProgress::Accepted(id) => id,
+        other => panic!("fresh candidate did not accept: {other:?}"),
+    };
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap();
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: first_offer, ..
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 100_000).unwrap()
+    else {
+        panic!("first path offer must be produced")
+    };
+    runtime
+        .acknowledge_path_request_dispatched(first_offer, MonotonicMillis::new(100_000))
+        .unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 107_000).unwrap();
+    let RuntimeStep::PathDiscoveryRequest {
+        offer: second_offer,
+        ..
+    } = try_drive_at(&mut runtime, &mut access, &mut node, 121_000).unwrap()
+    else {
+        panic!("second path offer must be produced")
+    };
+    runtime
+        .acknowledge_path_request_dispatched(second_offer, MonotonicMillis::new(121_000))
+        .unwrap();
+    let _ = try_drive_at(&mut runtime, &mut access, &mut node, 128_000).unwrap();
+
+    node.set_has_usable_path(true);
+    assert!(matches!(
+        try_drive_at(&mut runtime, &mut access, &mut node, 128_001).unwrap(),
+        RuntimeStep::LinkEstablishment {
+            offer,
+            progress: ProjectionProgress::NoAction,
+        } if offer.id() == id
+    ));
 }
 
 #[test]
@@ -2776,6 +3813,108 @@ fn path_discovery_is_shared_per_destination_and_acknowledged_exactly() {
     let shared_retry = shared_retry.expect("one shared retry must become due");
     assert_eq!(shared_retry.id(), second_id);
     assert_eq!(shared_retry.ordinal(), 2);
+}
+
+#[test]
+fn undispatched_path_offer_retries_the_exact_ordinal_after_its_deadline() {
+    let node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(59), 10).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = SubmissionId::new(59);
+    let unknown = SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination);
+    let (_, first_offer) = runtime.classify_path_discovery(id, node.destination, unknown, 100_000);
+    let first_offer = first_offer.expect("the first miss must offer one path request");
+
+    runtime
+        .retry_path_request_dispatch(first_offer, MonotonicMillis::new(105_000))
+        .unwrap();
+    assert!(!runtime.path_discovery_due(node.destination, 104_999));
+    let (_, early_offer) = runtime.classify_path_discovery(id, node.destination, unknown, 104_999);
+    assert_eq!(early_offer, None);
+    assert!(runtime.path_discovery_due(node.destination, 105_000));
+    let (_, retried_offer) =
+        runtime.classify_path_discovery(id, node.destination, unknown, 105_000);
+    assert_eq!(retried_offer, Some(first_offer));
+    assert_eq!(retried_offer.unwrap().ordinal(), 1);
+}
+
+#[test]
+fn path_dispatch_retry_rejects_mismatches_without_releasing_the_offer() {
+    let node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(60), 10).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = SubmissionId::new(60);
+    let unknown = SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination);
+    let (_, first_offer) = runtime.classify_path_discovery(id, node.destination, unknown, 100_000);
+    let first_offer = first_offer.expect("the first miss must offer one path request");
+    let mismatched = PathDiscoveryOffer {
+        id: SubmissionId::new(61),
+        ..first_offer
+    };
+    assert_eq!(
+        runtime.retry_path_request_dispatch(mismatched, MonotonicMillis::new(105_000)),
+        Err(PathDiscoveryAcknowledgeError::OfferMismatch)
+    );
+    let absent_destination = PathDiscoveryOffer {
+        destination: DestinationHash::new([0x7a; 16]),
+        ..first_offer
+    };
+    assert_eq!(
+        runtime.retry_path_request_dispatch(absent_destination, MonotonicMillis::new(105_000)),
+        Err(PathDiscoveryAcknowledgeError::DestinationNotPending)
+    );
+
+    runtime
+        .acknowledge_path_request_dispatched(first_offer, MonotonicMillis::new(100_000))
+        .expect("mismatches must leave the original exact offer pending");
+}
+
+#[test]
+fn untransmitted_retry_then_completed_transmission_consumes_one_path_attempt() {
+    let node = TestNode::new();
+    let mut access = formatted_access();
+    let mut runtime =
+        SubmissionRuntime::<4, 2>::mount(&mut access, SubmissionId::new(62), 10).unwrap();
+    assert_eq!(
+        runtime.recover_boot_step(&mut access),
+        Ok(RecoveryStep::Complete)
+    );
+    let id = SubmissionId::new(62);
+    let unknown = SubmissionPreparationObservation::Rejected(SubmitError::UnknownDestination);
+    let (_, first_offer) = runtime.classify_path_discovery(id, node.destination, unknown, 100_000);
+    let first_offer = first_offer.expect("the first miss must offer one path request");
+    runtime
+        .retry_path_request_dispatch(first_offer, MonotonicMillis::new(105_000))
+        .unwrap();
+    let (_, retried_offer) =
+        runtime.classify_path_discovery(id, node.destination, unknown, 105_000);
+    let retried_offer = retried_offer.expect("the exact undispatched request must return");
+    assert_eq!(retried_offer, first_offer);
+    runtime
+        .acknowledge_path_request_dispatched(retried_offer, MonotonicMillis::new(105_000))
+        .unwrap();
+
+    assert!(!runtime.path_discovery_due(node.destination, 111_999));
+    assert!(runtime.path_discovery_due(node.destination, 112_000));
+    let (_, response_timeout_offer) =
+        runtime.classify_path_discovery(id, node.destination, unknown, 112_000);
+    assert_eq!(response_timeout_offer, None);
+    assert!(!runtime.path_discovery_due(node.destination, 125_999));
+    assert!(runtime.path_discovery_due(node.destination, 126_000));
+    let (_, second_offer) = runtime.classify_path_discovery(id, node.destination, unknown, 126_000);
+    let second_offer =
+        second_offer.expect("one completed transmission must advance to ordinal two");
+    assert_eq!(second_offer.ordinal(), 2);
 }
 
 #[test]

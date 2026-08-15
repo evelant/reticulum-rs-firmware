@@ -1,10 +1,17 @@
 # Heltec Vision Master E290 product target
 
+> This is the detailed board-selection, cutover, and implementation dossier.
+> It preserves historical execution order and HIL evidence. Use
+> [Build and flash the E290 appliance firmware](getting-started/firmware-e290.md)
+> for the current app-usable image and [current status](status.md) for
+> user-visible capabilities and limits.
+
 **Status:** selected and memory-qualified as the primary full-stack prototype
 target. Both supplied boards have 16 MiB flash and 8 MiB mapped octal PSRAM.
 The independent E290 HT-RA62 radio owner now passes host command-log tests and
-generic bare-metal plus ESP32-S3 target checks. Its MAC-gated same-image
-semantic HIL has now passed on both physically confirmed `HT-RA62-HF` boards;
+generic bare-metal plus ESP32-S3 target checks, including the exact +14, +17,
++20, and +22 dBm SX1262 PA command rows. Its MAC-gated same-image semantic HIL
+has now passed at +14 dBm on both physically confirmed `HT-RA62-HF` boards;
 see [`e290-semantic-hil.md`](e290-semantic-hil.md). The first permanent
 LoRa-only E290 node graph is composed/build-verified and now has bounded powered
 boot/erased-credential/ordinary-TX smoke on both boards; full qualification
@@ -15,6 +22,12 @@ BLE-startup proof with the real controller retained before display
 initialization. See [`e290-node.md`](e290-node.md) and
 [`e290-display-hil.md`](e290-display-hil.md). The Tracker V2 pair remains the
 second known-good Reticulum/RNode radio regression fixture.
+
+The current full-appliance successor also composes BLE onboarding, durable
+LXMF, NomadNet, optional Wi-Fi station/TCP interface 2, and unreleased API 1.14
+receiver-local ingress evidence plus a one-shot Reticulum proof probe. The
+ingress/probe additions are source- and host-qualified but do not yet have a
+powered E290 field record.
 
 ## Cutover decision
 
@@ -118,8 +131,8 @@ RF-path/reset policy:
 - configure DIO3 TCXO control for 1.8 V; Heltec's executable SX1262
   initialization uses a 5 ms wake time, while the pinned driver currently uses
   a conservative 10 ms;
-- start with receive boost disabled and an opaque NA915 development power
-  selection;
+- start with receive boost disabled and one boot-selected, validated NA915
+  transmit-power row;
 - use the shared core's `Option<Active>` cancellation behavior, but fail closed
   by asserting only the SX1262 reset rather than manipulating FEM pins;
 - retain the final-DIO1-observation timestamp capture used by timed RNode
@@ -129,29 +142,59 @@ RF-path/reset policy:
   board-neutral `SoleRnodeRadio` contract used by the permanent E290 LoRa
   actor.
 
-The opaque first profile is 915 MHz, SF7/BW125/CR4/5, 24-symbol preamble,
-explicit header, CRC, normal IQ, private sync word `0x1424`, a legacy 248-symbol
-receive-search value, and requested 14 dBm output. The permanent actor converts
-that symbol count to a 253,952-us software scheduling cadence while the SX1262
-remains in continuous receive. Semtech SX1261/2 Data Sheet Rev. 2.2
-Table 13-21 realizes that optimal SX1262 row with PA values `02/02/00/01` and
-raw `SetTxParams(+22)`; this is not a calibrated antenna-path claim. The shared sole-radio path must be constructed with
+The NA915 profile is 915 MHz, SF7/BW125/CR4/5, 24-symbol preamble, explicit
+header, CRC, normal IQ, private sync word `0x1424`, and a legacy 248-symbol
+receive-search value. The permanent actor converts that symbol count to a
+253,952-us software scheduling cadence while the SX1262 remains in continuous
+receive. It admits only the four optimal high-power PA rows in
+[Semtech SX1261/2 Data Sheet Rev. 2.2][sx1262-datasheet]:
+
+| Requested SX1262 output | `SetPaConfig` |
+| ---: | --- |
+| +14 dBm | `02/02/00/01` |
+| +17 dBm | `02/03/00/01` |
+| +20 dBm | `03/05/00/01` |
+| +22 dBm | `04/07/00/01` |
+
+All four rows use raw `SetTxParams(+22)` (`0x16`); the PA row determines the
+requested result. There is no distinct qualified +21 dBm row, so the product
+does not expose 21 as a selection or silently round it to 22. +22 dBm is the
+maximum selection. The SX1262's integrated high-power PA is used directly;
+the E290 has no Tracker-style external FEM gain to add.
+
+`SetPaConfig` for the SX1262 restores OCP register `0x08e7` to `0x38`
+(140 mA), so the E290 owner deliberately does not copy the Tracker's external-
+FEM 100 mA OCP override. At +22 dBm, Semtech requires at least 3.3 V at the PA
+supply. The [HT-RA62 Rev. 1.1 datasheet][ht-ra62-datasheet] recommends a supply
+capable of at least 150 mA and gives approximately 118 mA TX consumption at
++22 dBm. An under-voltage or current-limited USB cable, hub, regulator, or
+battery can therefore prevent maximum-power operation even when the command
+trace is correct.
+
+The existing +14 dBm selection remains the default for erased media and
+upgrades. An authenticated app can persist +14, +17, +20, or +22 dBm; the
+choice takes effect only after reboot because power is part of the immutable
+radio-configuration fingerprint and airtime authorization. These values are
+requested chip outputs, not calibrated conducted measurements, antenna EIRP,
+or range guarantees.
+
+Host tests require DC-DC mode (`0x96, 0x01`), DIO2 RF-switch control
+(`0x9d, 0x01`), the pinned 10 ms 1.8 V DIO3 TCXO command
+(`0x97, 0x02, 0x00, 0x02, 0x80`), the private sync word, and the exact selected
+PA/raw-command sequence on every physical frame before exercising RX, CAD, and
+one/two-frame TX. They reject the Tracker OCP-register write and cover
+reset/SPI/cancellation containment, legacy receive timeout/success, partial
+second-frame progress, two frames and 307-byte RNode reassembly across an
+intervening scheduler yield after one continuous `SetRx`, repeated scheduler
+yields without rearm, stalled-preamble rearm followed by a valid frame,
+invalid-frame recovery, explicit epoch invalidation, and standby/IRQ quiescence
+before CAD/TX. The existing semantic HIL was performed at +14 dBm; +22 dBm
+power integrity, RF output, thermal behavior, and range remain to be measured.
+
+The shared sole-radio path must be constructed with
 `IrqTimestampCapture::new_monotonic_us` in the same clock domain as channel
 access; the legacy tick constructor is only for the historical direct receive
 surface and is rejected fail-closed by `SoleRnodeRadio` operations.
-
-Twelve host tests require DC-DC mode (`0x96, 0x01`), DIO2 RF-switch control
-(`0x9d, 0x01`), the pinned 10 ms 1.8 V DIO3 TCXO command
-(`0x97, 0x02, 0x00, 0x02, 0x80`), the private sync word and the Rev. 2.2
-optimal 14 dBm PA/raw-command pair before exercising RX, CAD and one/two-frame
-TX. They reject the Tracker OCP-register write and cover reset/SPI/cancellation
-containment, legacy receive timeout/success, partial second-frame progress,
-two frames and 307-byte RNode reassembly across an intervening scheduler yield
-after one continuous `SetRx`, repeated scheduler yields without rearm, stalled-
-preamble rearm followed by a valid frame, invalid-frame recovery, explicit
-epoch invalidation, and standby/IRQ quiescence before CAD/TX. Maximum-power work
-must separately verify OCP behavior; initial semantic HIL does not need to
-start at the module's 21 +/- 1 dBm rated maximum.
 
 US915 operation requires the `HT-VME290-HF` / `HT-RA62-HF` variant. Its fitted
 range is 863--928 MHz and the US915 operating range is 902--928 MHz. The generic
@@ -237,12 +280,13 @@ status=PASS`. The preserved local evidence is under
 `artifacts/e290-qualification/20260717T042037Z-first-pair/`.
 
 This binary is release-only in practice: the HAL's PSRAM support requires a
-release build. Do not use the workspace `cargo run` runner for it because that
-runner still encodes the Tracker's 8 MB flash size. Build the ELF explicitly,
-then pass the capacity reported for the exact physical board to `espflash`:
+release build. The shared Xtensa target configuration deliberately defines no
+flash runner because board geometry differs. Build the ELF explicitly, then
+pass the capacity reported for the exact physical board to `espflash`:
 
 ```sh
 source ~/export-esp.sh
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-qualification \
   --target xtensa-esp32s3-none-elf
@@ -450,12 +494,13 @@ sleep/wake cycles, production pairing views, pressure, or soak.
    display model, portable SSD1680 driver, powered display-only HIL, and
    opt-in permanent display actor. Wi-Fi and BLE remain local API bearers, not
    Reticulum packet interfaces.
-8. **Next:** extend the bounded integrated display startup proof to repeated
-   boots and live pairing, connect its semantic pairing views to authenticated
-   BLE Secure Connections, and then
-   add a second Reticulum packet interface to prove heterogeneous routing.
-   Partial display refresh, GNSS/location, and richer clients remain
-   independent later slices.
+8. **Completed after the display foundation:** connect semantic pairing views
+   and the displayed passkey to authenticated BLE Secure Connections, qualify
+   fileless onboarding and persistent reconnect, and expose board switching in
+   the installed iOS client. Next, add truthful live-status coordination and a
+   second Reticulum packet interface to prove heterogeneous routing. Partial
+   display refresh, GNSS/location, richer clients, and broader powered matrices
+   remain independent later slices.
 
 ## Sources
 
@@ -469,13 +514,16 @@ Local supplied sources (kept under the ignored `reference/` research tree):
 Primary online references:
 
 - [Semtech SX1262 product page and current datasheet](https://www.semtech.com/products/wireless-rf/lora-connect/sx1262)
-- [Semtech SX1261/2 Data Sheet Rev. 2.2 mirror](https://resource.heltec.cn/download/WiFi_LoRa_32_V4/datasheet/SX1261_2%20V2-2.pdf)
+- [Semtech SX1261/2 Data Sheet Rev. 2.2 mirror][sx1262-datasheet]
 - [Heltec DEPG0290BxS800FxX display driver](https://github.com/HelTecAutomation/Heltec_ESP32/blob/master/src/HT_DEPG0290BxS800FxX_BW.h)
 - [Heltec Vision Master E290 display example](https://github.com/HelTecAutomation/Heltec_ESP32/tree/master/examples/VME290/DEPG0290BxS800FxX_BW)
 - [Heltec Vision Master E290 documentation](https://docs.heltec.org/en/node/esp32/ht_vme290/index.html)
 - [Heltec HT-RA62 documentation](https://docs.heltec.org/en/node/ht-ra62/index.html)
-- [Heltec HT-RA62 Rev. 1.1 datasheet](https://resource.heltec.cn/download/HT-RA62/HT-RA62%28Rev1.1%29.pdf)
+- [Heltec HT-RA62 Rev. 1.1 datasheet][ht-ra62-datasheet]
 - [Heltec HT-RA62 schematic](https://resource.heltec.cn/download/HT-RA62/HT-RA62_Schematic_diagram.pdf)
 - [Heltec E290 Arduino board metadata](https://raw.githubusercontent.com/Heltec-Aaron-Lee/WiFi_Kit_series/master/boards.txt)
 - [Espressif ESP32-S3 datasheet](https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf)
 - [Espressif ESP32-S3 package marking](https://docs.espressif.com/projects/esp-packaging/en/latest/esp32s3/01-marking/index_chip.html)
+
+[ht-ra62-datasheet]: https://resource.heltec.cn/download/HT-RA62/HT-RA62%28Rev1.1%29.pdf
+[sx1262-datasheet]: https://resource.heltec.cn/download/WiFi_LoRa_32_V4/datasheet/SX1261_2%20V2-2.pdf

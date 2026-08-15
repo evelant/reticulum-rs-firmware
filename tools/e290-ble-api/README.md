@@ -38,8 +38,9 @@ The tool prints an exact URL resembling
 `http://127.0.0.1:8329/session/<random-token>/`. Open that URL in a current
 Chrome or Edge window and click **Choose E290 and connect**. The Web Bluetooth
 device chooser requires this user click. The browser validates the shared
-service, RX write-with-response, TX indication support, and the 20-byte value
-bound before reporting readiness.
+service, RX write-with-response, TX indication support, and the conservative
+20-byte write fallback before reporting readiness. It accepts negotiated
+device indications through the generated 248-byte profile ceiling.
 
 The browser never receives the device credential and does not implement RDA1,
 authentication, session suite 3, or `identity.summary`. It only moves opaque
@@ -52,7 +53,7 @@ rewrite the completed proof into contradictory failure evidence.
 The helper binds only IPv4 localhost, uses an unguessable per-run path, accepts
 one WebSocket client, permits one write in flight, and enforces finite
 connection/operation deadlines. Its indication path has a 64 KiB socket
-ceiling plus a 32-fragment/704-byte pre-readiness buffer for the short interval
+ceiling plus a 32-fragment/8,000-byte pre-readiness buffer for the short interval
 between CCCD subscription and Rust receiving the browser's readiness control.
 Every other queue is bounded; overflow or an ambiguous write response is
 terminal.
@@ -80,7 +81,9 @@ supported fallback.
 ## Transport invariants
 
 The transport deliberately writes each ordered stream fragment with an ATT
-response and caps it at the profile's initial 20-byte value size. It maintains
+response and keeps the universally safe 20-byte fallback because Web Bluetooth
+and `btleplug` do not expose the negotiated write length here. Device
+indications may use the generated 248-byte profile ceiling. The helper maintains
 one bounded receive queue. Any overflow, malformed indication, write timeout,
 or disconnect is terminal, so the authenticated client cannot accidentally
 retry an ambiguously acknowledged write.

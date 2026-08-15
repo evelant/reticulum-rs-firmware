@@ -146,6 +146,20 @@ fn identity(tag: u8) -> NodeIdentity {
     NodeIdentity::from_private_key(&[tag; 64]).expect("test identity must be valid")
 }
 
+fn proof_for(receiver_tag: u8, attempt: reticulum_node_core::AttemptToken) -> std::vec::Vec<u8> {
+    let identity = reticulum_rns_rete::identity_from_private_key(&[receiver_tag; 64])
+        .expect("test identity must be valid");
+    let signature = identity
+        .sign(attempt.as_bytes())
+        .expect("test proof must sign");
+    let mut proof = std::vec![0u8; 19 + 32 + 64];
+    proof[0] = 0x03;
+    proof[2..18].copy_from_slice(&attempt.as_bytes()[..16]);
+    proof[19..51].copy_from_slice(attempt.as_bytes());
+    proof[51..].copy_from_slice(&signature);
+    proof
+}
+
 fn node<const BUFFERS: usize>(tag: u8, aspect: &str) -> TestNode<BUFFERS> {
     TestNode::new(
         identity(tag),
@@ -880,7 +894,7 @@ static TERMINAL_HANDOFF: ConstStaticCell<TxHandoff<NoopRawMutex, 1>> =
     ConstStaticCell::new(TxHandoff::new());
 
 #[test]
-fn terminal_attempt_before_authorization_bypasses_policy_and_stops_fanout() {
+fn terminal_proof_before_authorization_bypasses_policy_and_stops_fanout() {
     let mut owner = node::<1>(9, "terminal-owner");
     let receiver = node::<0>(10, "terminal-receiver");
     register_peer(&mut owner, 10, "terminal-receiver");
@@ -902,6 +916,7 @@ fn terminal_attempt_before_authorization_bypasses_policy_and_stops_fanout() {
         &mut rng,
     );
     let handle = job.attempt_handle();
+    let attempt = job.attempt();
 
     let (mut node, mut dispatcher) = TERMINAL_HANDOFF.take().split();
     node.jobs
@@ -914,9 +929,14 @@ fn terminal_attempt_before_authorization_bypasses_policy_and_stops_fanout() {
         .try_send(request)
         .must_fit("request handoff must have room");
 
-    let report = owner.tick(MonotonicSeconds::new(132), &mut rng);
-    assert_eq!(report.timed_out_attempts, 1);
-    assert_eq!(report.correlation_fault, None);
+    owner
+        .ingest(
+            &proof_for(10, attempt),
+            MonotonicSeconds::new(101),
+            PacketInterfaceId::new(1),
+            &mut rng,
+        )
+        .expect("matching proof must commit the attempt terminal");
     assert_eq!(owner.capacities().attempts_terminal, 1);
     let mut policy = RecordingPolicy::allowing();
     let request = node
@@ -942,7 +962,7 @@ fn terminal_attempt_before_authorization_bypasses_policy_and_stops_fanout() {
     assert_eq!(
         unpermitted.denial(),
         Some(TxPermitDenialReason::AttemptTerminal(
-            AttemptOutcome::DeliveryTimeout
+            AttemptOutcome::Delivered
         ))
     );
     assert!(policy.candidates.is_empty());
@@ -968,7 +988,7 @@ fn terminal_attempt_before_authorization_bypasses_policy_and_stops_fanout() {
     let terminal = owner
         .acknowledge_terminal(handle)
         .expect("unbound terminal must acknowledge");
-    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+    assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
     assert_eq!(owner.capacities().dispatches_used, 0);
     assert_eq!(owner.capacities().receipts_used, 0);
     assert_eq!(owner.capacities().attempts_used, 0);

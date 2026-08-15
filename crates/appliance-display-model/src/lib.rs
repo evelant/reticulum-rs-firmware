@@ -227,8 +227,8 @@ pub enum DisplayCompositionState {
     Unavailable,
 }
 
-/// Application-level setup represented by credential authority and pairing
-/// admission.
+/// Local app setup represented by credential authority, pairing admission,
+/// and an explicitly recoverable BLE transport.
 ///
 /// A Bluetooth bond alone never selects `Paired`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,8 +237,11 @@ pub enum DisplaySetupState {
     /// includes a valid empty authority and pre-authority media for which the
     /// resident pairing policy can initialize or recover credentials.
     PairingRequired,
+    /// Application credentials remain configured, but the BLE bearer has no
+    /// durable bond and is advertising only for explicit phone recovery.
+    BluetoothRecoveryRequired,
     /// The publishable authority contains at least one active application
-    /// credential.
+    /// credential and no boot-composed BLE recovery is outstanding.
     Paired,
     /// No active authority or resident pairing path was available.
     Unavailable,
@@ -262,13 +265,27 @@ impl DisplaySetupState {
             None => Self::Unavailable,
         }
     }
+
+    /// Refine configured application state with the boot BLE bond projection.
+    ///
+    /// This never turns a fresh application setup into a transport-only
+    /// recovery and never hides an unavailable credential authority.
+    pub const fn with_ble_bond(self, ble_available: bool, durable_bond_present: bool) -> Self {
+        if matches!(self, Self::Paired) && ble_available && !durable_bond_present {
+            Self::BluetoothRecoveryRequired
+        } else {
+            self
+        }
+    }
 }
 
-/// Complete non-secret boot-composition snapshot for the appliance Home view.
+/// Complete non-secret snapshot for the appliance Home view.
 ///
 /// The physical suffix is the exact six-character suffix used by the
-/// board-specific discovery card. Capability fields describe composition,
-/// not task-spawn completion, live actor connectivity, or health.
+/// board-specific discovery card. Capability fields describe boot
+/// composition, not task-spawn completion, live actor connectivity, or
+/// health. The uncollected-message count is live mailbox presentation state;
+/// it contains no sender or message content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DisplayHomeSnapshot {
     label: DisplayLabel,
@@ -278,10 +295,11 @@ pub struct DisplayHomeSnapshot {
     ble: DisplayCompositionState,
     lxmf: DisplayCompositionState,
     nomad: DisplayCompositionState,
+    uncollected_messages: u32,
 }
 
 impl DisplayHomeSnapshot {
-    /// Construct one complete Home snapshot.
+    /// Construct one complete Home snapshot with an empty mailbox indicator.
     pub const fn new(
         label: DisplayLabel,
         device_suffix: DisplayLabel,
@@ -299,6 +317,7 @@ impl DisplayHomeSnapshot {
             ble,
             lxmf,
             nomad,
+            uncollected_messages: 0,
         }
     }
 
@@ -337,10 +356,28 @@ impl DisplayHomeSnapshot {
         self.nomad
     }
 
+    /// Messages durably retained by the appliance but not yet acknowledged as
+    /// collected by its app.
+    pub const fn uncollected_messages(self) -> u32 {
+        self.uncollected_messages
+    }
+
     /// Return the same composition snapshot with an updated authoritative
     /// application setup state.
     pub const fn with_setup(self, setup: DisplaySetupState) -> Self {
         Self { setup, ..self }
+    }
+
+    /// Return the same snapshot with updated live mailbox presentation state.
+    ///
+    /// Renderers may cap the displayed value, but the semantic snapshot keeps
+    /// the complete count so changes above that visual cap still deduplicate
+    /// correctly.
+    pub const fn with_uncollected_messages(self, uncollected_messages: u32) -> Self {
+        Self {
+            uncollected_messages,
+            ..self
+        }
     }
 }
 
@@ -796,11 +833,17 @@ mod tests {
         assert_eq!(snapshot.ble(), DisplayCompositionState::Configured);
         assert_eq!(snapshot.lxmf(), DisplayCompositionState::Configured);
         assert_eq!(snapshot.nomad(), DisplayCompositionState::Configured);
+        assert_eq!(snapshot.uncollected_messages(), 0);
 
         let paired = snapshot.with_setup(DisplaySetupState::Paired);
         assert_eq!(paired.setup(), DisplaySetupState::Paired);
         assert_eq!(paired.device_suffix(), snapshot.device_suffix());
         assert_eq!(paired.lora(), snapshot.lora());
+
+        let with_mail = paired.with_uncollected_messages(123);
+        assert_eq!(with_mail.uncollected_messages(), 123);
+        assert_eq!(with_mail.setup(), DisplaySetupState::Paired);
+        assert_eq!(with_mail.device_suffix(), snapshot.device_suffix());
     }
 
     #[test]
@@ -820,6 +863,22 @@ mod tests {
         assert_eq!(
             DisplaySetupState::from_application_state(None, false),
             DisplaySetupState::Unavailable
+        );
+        assert_eq!(
+            DisplaySetupState::Paired.with_ble_bond(true, false),
+            DisplaySetupState::BluetoothRecoveryRequired
+        );
+        assert_eq!(
+            DisplaySetupState::PairingRequired.with_ble_bond(true, false),
+            DisplaySetupState::PairingRequired
+        );
+        assert_eq!(
+            DisplaySetupState::Paired.with_ble_bond(true, true),
+            DisplaySetupState::Paired
+        );
+        assert_eq!(
+            DisplaySetupState::Paired.with_ble_bond(false, false),
+            DisplaySetupState::Paired
         );
     }
 

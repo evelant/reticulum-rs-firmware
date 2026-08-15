@@ -268,13 +268,21 @@ Run the binary with `--help` or `-h` to print the exact argument grammar.
 - The authenticated USB records provide integrity and peer authentication, not
   transcript confidentiality.
 - The Active credential and SQLite database are plaintext secrets/data at rest.
-- SQLite schema 2 supports an authenticated device binding, but this legacy
-  foreground CLI has not adopted the shared application/session adapter and
-  does not enforce that binding. One database per board remains an operator
-  rule when using this binary; the host appliance service enforces it.
+- Current SQLite schema 8 retains schema 2's authenticated device binding,
+  schema 3's automatic retry budget, schema 4's activity stream, schema 5's
+  nullable inbound first-arrival evidence, and closed queue-time phone-location
+  state for every initial or retry attempt. This legacy foreground CLI does not
+  collect phone location, so its attempt events retain the explicit
+  `not_observed` state. It has not adopted the shared application/session
+  adapter and does not enforce the binding. One database per board remains an
+  operator rule when using this binary; the host appliance service enforces it.
+  Schema 7's radio-trace side tables and schema 8's optional message-location
+  columns can coexist with this CLI, but the CLI does not synchronize, query,
+  export, or compose those additions.
 - `send` accepts title and content in process arguments, which can expose them
   through shell history or same-host process inspection.
-- The current send subset is method-neutral basic LXMF with empty fields.
+- This legacy CLI's current send subset is method-neutral basic LXMF with empty
+  fields; it does not expose API-1.17 message location.
   `Auto` currently selects opportunistic delivery when eligible; reusable
   direct-Link/Resource delivery and explicit propagated delivery remain
   unimplemented, as do stamps, tickets, attachments, and propagation-node

@@ -320,8 +320,8 @@ async fn main(spawner: Spawner) -> ! {
         HIL_RNS_POLICY,
     );
     info!(
-        "tx-hil stage=runtime-patch esp_rtos_main_stack_slice={}",
-        env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
+        "tx-hil stage=runtime-source esp_rtos_source={}",
+        env!("RETICULUM_ESP_RTOS_UPSTREAM_IDENTITY"),
     );
 
     let spi = match Spi::new(
@@ -1306,6 +1306,7 @@ where
                 [ApplicationEvent::DataReceived {
                     destination,
                     payload,
+                    ..
                 }]
                     if *destination == *local_destination.as_bytes()
                         && validate_semantic_roundtrip_payload(

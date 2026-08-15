@@ -178,10 +178,11 @@ pub(crate) fn read_nearby_peers(
 
 fn interface_name(interface_id: u8) -> Option<&'static str> {
     match interface_id {
-        // Interface slot one is the primary LoRa/RNode actor in the current
-        // E290 product registry. Unknown future slots remain explicit scalars
-        // until the device API exports the registry's human-readable label.
+        // These labels mirror the fixed E290 product registry. Unknown future
+        // slots remain explicit scalars until the device API exports the
+        // registry's human-readable label.
         1 => Some("LoRa"),
+        2 => Some("Reticulum TCP"),
         _ => None,
     }
 }
@@ -317,6 +318,14 @@ mod tests {
         LxmfPeerDiscoveryIncarnation::new([tag; 8])
     }
 
+    #[test]
+    fn current_product_interfaces_have_names_without_guessing_future_slots() {
+        assert_eq!(interface_name(1), Some("LoRa"));
+        assert_eq!(interface_name(2), Some("Reticulum TCP"));
+        assert_eq!(interface_name(0), None);
+        assert_eq!(interface_name(3), None);
+    }
+
     fn peer(tag: u8, generation: u64, app_data: &[u8]) -> LxmfDiscoveredPeer {
         LxmfDiscoveredPeer::new(
             DestinationHash([tag; 16]),
@@ -407,6 +416,65 @@ mod tests {
             _id: reticulum_device_api::NomadFetchId,
         ) -> Result<reticulum_device_api::NomadFetchPollResponse, Self::Error> {
             unreachable!("nearby projection does not perform NomadNet fetches")
+        }
+
+        fn reticulum_probe_start(
+            &mut self,
+            _request: reticulum_device_api::ProbeStartRequest,
+        ) -> Result<reticulum_device_api::ProbeStartAccepted, Self::Error> {
+            unreachable!("nearby projection does not perform Reticulum probes")
+        }
+
+        fn reticulum_probe_poll(
+            &mut self,
+            _id: reticulum_device_api::ProbeId,
+        ) -> Result<reticulum_device_api::ProbePollResponse, Self::Error> {
+            unreachable!("nearby projection does not perform Reticulum probes")
+        }
+
+        fn network_config_get(
+            &mut self,
+        ) -> Result<reticulum_device_api::NetworkConfigSnapshot, Self::Error> {
+            unreachable!("nearby projection does not manage network configuration")
+        }
+
+        fn network_config_mutate(
+            &mut self,
+            _request: reticulum_device_api::NetworkConfigMutationRequest<'_>,
+        ) -> Result<reticulum_device_api::NetworkConfigMutationOutcome, Self::Error> {
+            unreachable!("nearby projection does not manage network configuration")
+        }
+
+        fn network_status(
+            &mut self,
+        ) -> Result<reticulum_device_api::NetworkRuntimeStatus, Self::Error> {
+            unreachable!("nearby projection does not read network status")
+        }
+
+        fn manual_service_announce(
+            &mut self,
+        ) -> Result<reticulum_device_api::ManualServiceAnnounceDisposition, Self::Error> {
+            unreachable!("nearby projection does not request service announces")
+        }
+
+        fn node_diagnostics(
+            &mut self,
+        ) -> Result<reticulum_device_api::NodeDiagnosticsSnapshot, Self::Error> {
+            unreachable!("nearby projection does not request node diagnostics")
+        }
+
+        fn route_diagnostics_page(
+            &mut self,
+            _request: reticulum_device_api::RouteDiagnosticsRequest,
+        ) -> Result<reticulum_device_api::RouteDiagnosticsPage, Self::Error> {
+            unreachable!("nearby projection does not request route diagnostics")
+        }
+
+        fn radio_trace_page(
+            &mut self,
+            _request: reticulum_device_api::RadioTracePageRequest,
+        ) -> Result<reticulum_device_api::RadioTracePage, Self::Error> {
+            unreachable!("nearby projection does not request radio traces")
         }
 
         fn is_usable(&self) -> bool {

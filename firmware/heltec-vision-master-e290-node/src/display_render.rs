@@ -119,6 +119,7 @@ fn draw_home(snapshot: DisplayHomeSnapshot, frame: &mut E290FrameBuffer) -> Resu
         MonoTextStyle::new(&FONT_10X20, BinaryColor::On),
         frame,
     )?;
+    draw_uncollected_badge(snapshot.uncollected_messages(), frame)?;
     draw_centered(
         link_configuration(snapshot),
         67,
@@ -134,9 +135,28 @@ fn draw_home(snapshot: DisplayHomeSnapshot, frame: &mut E290FrameBuffer) -> Resu
     draw_footer(
         match snapshot.setup() {
             DisplaySetupState::PairingRequired => "HOLD GPIO21 TO PAIR",
-            DisplaySetupState::Paired => "PAIRED - OPEN APP",
+            DisplaySetupState::BluetoothRecoveryRequired => "BLE RECOVERY - OPEN APP",
+            DisplaySetupState::Paired => "READY - OPEN APP",
             DisplaySetupState::Unavailable => "LOCAL API UNAVAILABLE",
         },
+        frame,
+    )
+}
+
+fn draw_uncollected_badge(
+    uncollected_messages: u32,
+    frame: &mut E290FrameBuffer,
+) -> Result<(), Infallible> {
+    let Some(text) = UncollectedBadgeText::new(uncollected_messages) else {
+        return Ok(());
+    };
+    Rectangle::new(Point::new(225, 36), Size::new(64, 23))
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(frame)?;
+    draw_centered_at(
+        text.as_str(),
+        Point::new(257, 43),
+        MonoTextStyle::new(&FONT_6X10, BinaryColor::On),
         frame,
     )
 }
@@ -199,13 +219,53 @@ fn draw_centered(
     style: MonoTextStyle<'_, BinaryColor>,
     frame: &mut E290FrameBuffer,
 ) -> Result<(), Infallible> {
+    draw_centered_at(text, Point::new(HORIZONTAL_CENTER, y), style, frame)
+}
+
+fn draw_centered_at(
+    text: &str,
+    position: Point,
+    style: MonoTextStyle<'_, BinaryColor>,
+    frame: &mut E290FrameBuffer,
+) -> Result<(), Infallible> {
     let centered = TextStyleBuilder::new()
         .alignment(Alignment::Center)
         .baseline(Baseline::Top)
         .build();
-    Text::with_text_style(text, Point::new(HORIZONTAL_CENTER, y), style, centered)
+    Text::with_text_style(text, position, style, centered)
         .draw(frame)
         .map(|_| ())
+}
+
+struct UncollectedBadgeText {
+    bytes: [u8; 7],
+    length: usize,
+}
+
+impl UncollectedBadgeText {
+    fn new(count: u32) -> Option<Self> {
+        if count == 0 {
+            return None;
+        }
+
+        let mut bytes = *b"NEW 99+";
+        let length = if count >= 100 {
+            bytes.len()
+        } else if count >= 10 {
+            bytes[4] = b'0' + (count / 10) as u8;
+            bytes[5] = b'0' + (count % 10) as u8;
+            6
+        } else {
+            bytes[4] = b'0' + count as u8;
+            5
+        };
+        Some(Self { bytes, length })
+    }
+
+    fn as_str(&self) -> &str {
+        str::from_utf8(&self.bytes[..self.length])
+            .expect("the mailbox badge formatter emits only ASCII")
+    }
 }
 
 struct DecimalU16 {
@@ -317,6 +377,12 @@ mod tests {
                 DisplayCompositionState::Configured,
             ),
         });
+        let bluetooth_recovery = render(DisplayCommand::ShowHome {
+            snapshot: home(
+                DisplaySetupState::BluetoothRecoveryRequired,
+                DisplayCompositionState::Configured,
+            ),
+        });
         let lxmf_unavailable = render(DisplayCommand::ShowHome {
             snapshot: home(
                 DisplaySetupState::Paired,
@@ -325,7 +391,35 @@ mod tests {
         });
 
         assert_ne!(pairing_required.as_bytes(), paired.as_bytes());
+        assert_ne!(bluetooth_recovery.as_bytes(), paired.as_bytes());
+        assert_ne!(bluetooth_recovery.as_bytes(), pairing_required.as_bytes());
         assert_ne!(paired.as_bytes(), lxmf_unavailable.as_bytes());
+    }
+
+    #[test]
+    fn home_renders_a_bounded_uncollected_message_badge() {
+        let base = home(
+            DisplaySetupState::Paired,
+            DisplayCompositionState::Configured,
+        );
+        let empty = render(DisplayCommand::ShowHome { snapshot: base });
+        let one = render(DisplayCommand::ShowHome {
+            snapshot: base.with_uncollected_messages(1),
+        });
+        let ninety_nine = render(DisplayCommand::ShowHome {
+            snapshot: base.with_uncollected_messages(99),
+        });
+        let capped = render(DisplayCommand::ShowHome {
+            snapshot: base.with_uncollected_messages(100),
+        });
+        let still_capped = render(DisplayCommand::ShowHome {
+            snapshot: base.with_uncollected_messages(u32::MAX),
+        });
+
+        assert_ne!(empty.as_bytes(), one.as_bytes());
+        assert_ne!(one.as_bytes(), ninety_nine.as_bytes());
+        assert_ne!(ninety_nine.as_bytes(), capped.as_bytes());
+        assert_eq!(capped.as_bytes(), still_capped.as_bytes());
     }
 
     #[test]
@@ -392,6 +486,26 @@ mod tests {
             (65_535, "65535"),
         ] {
             assert_eq!(DecimalU16::new(value).as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn uncollected_badge_formatter_uses_new_and_caps_at_99_plus() {
+        assert!(UncollectedBadgeText::new(0).is_none());
+        for (value, expected) in [
+            (1, "NEW 1"),
+            (9, "NEW 9"),
+            (10, "NEW 10"),
+            (99, "NEW 99"),
+            (100, "NEW 99+"),
+            (u32::MAX, "NEW 99+"),
+        ] {
+            assert_eq!(
+                UncollectedBadgeText::new(value)
+                    .expect("positive count has a badge")
+                    .as_str(),
+                expected
+            );
         }
     }
 }

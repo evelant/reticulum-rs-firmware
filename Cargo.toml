@@ -35,10 +35,12 @@ members = [
     "crates/lxmf-chat-service",
     "crates/lxmf-durable-ingress",
     "crates/lxmf-ingress",
+    "crates/lxmf-mailbox-store",
     "crates/lxmf-model",
     "crates/lxmf-store",
     "crates/lxmf-wire",
     "crates/node-core",
+    "crates/network-config-store",
     "crates/nomad-protocol",
     "crates/nor-flash-region",
     "crates/peer-discovery",
@@ -46,6 +48,7 @@ members = [
     "crates/radio-tx-dispatch",
     "crates/radio-interface",
     "crates/rns-conformance",
+    "crates/rns-interface-discovery",
     "crates/rns-inbox-store",
     "crates/rns-rete",
     "crates/rns-rete-rx",
@@ -72,7 +75,10 @@ members = [
     "tools/storage-hil-verify",
     "xtask",
 ]
-exclude = ["vendor/esp-rtos-0.3.0", "vendor/lora-phy-3.0.1"]
+exclude = [
+    "vendor/lora-phy-3.0.1",
+    "vendor/rete-dfcaa36",
+]
 default-members = [
     "crates/announce-clock",
     "crates/appliance-display-model",
@@ -107,10 +113,12 @@ default-members = [
     "crates/lxmf-chat-service",
     "crates/lxmf-durable-ingress",
     "crates/lxmf-ingress",
+    "crates/lxmf-mailbox-store",
     "crates/lxmf-model",
     "crates/lxmf-store",
     "crates/lxmf-wire",
     "crates/node-core",
+    "crates/network-config-store",
     "crates/nomad-protocol",
     "crates/nor-flash-region",
     "crates/peer-discovery",
@@ -118,6 +126,7 @@ default-members = [
     "crates/radio-tx-dispatch",
     "crates/radio-interface",
     "crates/rns-conformance",
+    "crates/rns-interface-discovery",
     "crates/rns-inbox-store",
     "crates/rns-rete",
     "crates/rns-rete-rx",
@@ -150,7 +159,7 @@ axum = { version = "=0.8.9", default-features = false, features = ["http1", "jso
 embassy-executor = { version = "=0.10.0", default-features = false }
 embassy-futures = { version = "=0.1.2", default-features = false }
 embassy-sync = { version = "=0.8.0", default-features = false }
-embassy-time = { version = "=0.5.0", default-features = false }
+embassy-time = { version = "=0.5.1", default-features = false }
 critical-section = { version = "=1.2.0", default-features = false }
 curve25519-dalek = { version = "=4.1.3", default-features = false }
 ed25519-dalek = { version = "=2.2.0", default-features = false }
@@ -163,15 +172,15 @@ embedded-storage = { version = "=0.3.1", default-features = false }
 esp-alloc = "=0.10.0"
 esp-backtrace = { version = "=0.19.0", default-features = false }
 esp-bootloader-esp-idf = { version = "=0.5.0", default-features = false }
-esp-hal = { version = "=1.1.1", default-features = false }
+# Pin the coherent esp-rs radio/HAL source graph to one exact reviewed upstream
+# revision.
+esp-hal = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=1.1.0", default-features = false }
+esp-radio = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=1.0.0-beta.0", default-features = false }
 esp-println = { version = "=0.17.0", default-features = false }
 esp-storage = { version = "=0.9.0", default-features = false }
-# Local source patch over crates.io 0.3.0. Upstream currently constructs both
-# CPU0 and CPU1 main-task `*mut [MaybeUninit<u32>]` slices with byte counts as
-# element counts, making both fat pointers four times too long. Keep this path
-# pin until an equivalent upstream release exists; see the checked vendor
-# inventory and exact edits in vendor/esp-rtos-0.3.0/PATCHES.md.
-esp-rtos = { path = "vendor/esp-rtos-0.3.0", version = "=0.3.0", default-features = false }
+# Current upstream includes the corrected CPU0 and CPU1 stack-slice element
+# counts formerly carried in the local 0.3.0 overlay.
+esp-rtos = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=0.3.0", default-features = false }
 log = "=0.4.27"
 # Local source patch over crates.io 3.0.1. The SX126x driver otherwise derives
 # every high-power PA command from requested output power, while the Tracker V2
@@ -209,9 +218,12 @@ ts-rs = { version = "=12.0.1", default-features = false, features = ["no-serde-w
 uniffi = { version = "=0.31.0", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false }
 
-# Rete is not published as a coherent crates.io release. Keep every crate on
-# the same reviewed fork revision and never replace these with reference/ path
-# deps. The integration history is based on upstream 9bcb7d3e and composes the
+# Rete is not published as a coherent crates.io release. Keep every declared
+# crate on the same reviewed fork revision. The tracked vendor patch below is
+# an exact dfcaa36 snapshot with the audited in-place construction API required
+# to initialize the full E290 node directly in PSRAM; never use the ignored
+# reference/ checkout as a dependency. The integration history is based on
+# upstream 9bcb7d3e and composes the
 # earlier focused validation, transactional owned-Link and endpoint announce
 # policy changes with caller-owned DATA preparation, allocation-atomic receipt
 # terminals, exact DATA/channel terminal candidates, exact-interface
@@ -237,9 +249,35 @@ rete-stack = { git = "https://github.com/evelant/rete.git", rev = "dfcaa36b2d45c
 rete-transport = { git = "https://github.com/evelant/rete.git", rev = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08", default-features = false }
 
 [patch.crates-io]
+# Keep registry consumers of esp-rs support crates on the same source revision
+# as esp-hal/esp-radio, including upstream esp-rtos and its shared platform
+# types.
+esp-alloc = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-backtrace = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-config = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-hal = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-metadata-generated = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-phy = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-radio-rtos-driver = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-rtos = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-println = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-storage = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-sync = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 # Force every current and future graph consumer onto the one reviewed local
 # SX126x policy patch rather than allowing a second registry copy.
 lora-phy = { path = "vendor/lora-phy-3.0.1" }
+
+[patch."https://github.com/evelant/rete.git"]
+# Exact local overlay of the four coherent dfcaa36 crates. PATCHES.md records
+# the bounded construction delta; protocol behavior remains at the declared
+# reviewed Git revision above until an externally published successor is
+# explicitly approved and pinned.
+rete-core = { path = "vendor/rete-dfcaa36/crates/rete-core" }
+rete-lxmf-core = { path = "vendor/rete-dfcaa36/crates/rete-lxmf-core" }
+rete-stack = { path = "vendor/rete-dfcaa36/crates/rete-stack" }
+rete-transport = { path = "vendor/rete-dfcaa36/crates/rete-transport" }
 
 [profile.dev]
 opt-level = "s"

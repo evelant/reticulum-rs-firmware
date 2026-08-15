@@ -6,8 +6,8 @@ the complete durable control range compared byte-for-byte before and after.
 The historical 2026-07-23 image made USB disappear after the deliberate reset;
 that observation alone did not prove that Wi-Fi initialized. Current source
 instead retains native USB Serial/JTAG electrically and at runtime as a
-diagnostics-only sink, while the ordinary production `esp-println` backend
-remains no-op and emits nothing. SoftAP association, DHCP, authenticated TCP
+diagnostic sink and initializes the logger at `Info` for wireless production
+profiles. SoftAP association, DHCP, authenticated TCP
 exchange, reconnect behavior, and powered memory headroom remain open for a
 manually operated client.
 
@@ -22,16 +22,17 @@ The proof image deliberately chooses exactly one local API bearer:
 
 - the ordinary image runs the existing USB Serial/JTAG bearer;
 - the Wi-Fi profile runs the local API over Wi-Fi while retaining native USB
-  as an electrically/runtime-available, silent diagnostics-only sink; and
+  as an electrically/runtime-available logging sink; and
 - the separately enabled BLE proof profile follows the same one-bearer
   replacement rule, while other local API carriers remain future work.
 
 This replacement rule avoids two independent session-epoch allocators sharing
 the current reply-routing namespace. It also keeps a Wi-Fi initialization
 failure local to the detached API owner: LoRa and the autonomous node have
-already been spawned and remain resident. Every ordinary production profile
-keeps `esp-println` on its no-op backend. Only a separately named diagnostic
-image may emit USB Serial/JTAG diagnostics.
+already been spawned and remain resident. Wireless production profiles emit
+USB Serial/JTAG logs at `Info`. The legacy no-wireless image instead leaves its
+logger uninitialized because framed RDA1 records have sole ownership of that
+USB FIFO; raw log text is never mixed into those records.
 
 ## Fixed proof profile
 
@@ -50,16 +51,31 @@ image may emit USB Serial/JTAG diagnostics.
 | session binding | Wi-Fi qualification suite 2 |
 | concurrent API clients | 1 |
 | TCP RX/TX buffers | 1,536 bytes each |
+| Wi-Fi maximum TX power | 60 quarter-dBm (15 dBm) |
 
 Port 29716 is intentionally not the conventional RNode TCP port. This endpoint
 is a device-management and application API; it is not a raw Reticulum or RNode
 interface.
 
-The implementation follows the APIs in the official `esp-radio` 0.18.0
-Embassy access-point example and pins its compatible network family:
-`esp-radio` 0.18.0, `embassy-net` 0.8.0, `edge-dhcp` 0.7.0, `edge-nal` 0.6.0,
-and `edge-nal-embassy` 0.8.1. These dependencies are target-only and optional,
-so the default LoRa/USB graph is unchanged.
+The implementation uses the current split `WifiController`/`Interface` API and
+pins the coherent esp-rs graph to exact upstream revision
+`b50efcb0dcd94b58ec337e511891057aa1f2e8fb`. This includes
+[esp-hal #5776](https://github.com/esp-rs/esp-hal/pull/5776), the ESP32-S3
+combo-PHY fix that pairs PHY initialization with Wi-Fi RX enable/disable. Its
+compatible network family is `esp-radio` 1.0.0-beta.0 at that revision,
+`embassy-net` 0.9.1, `edge-dhcp` 0.8.0, `edge-nal` 0.7.0, and
+`edge-nal-embassy` 0.9.0. Network-specific dependencies are target-only and
+optional, and the same exact esp-rs revision applies to every ESP firmware
+profile. The firmware explicitly configures a 15 dBm Wi-Fi maximum rather than
+relying on the controller default.
+
+This upstream revision still has a separate TX-credit lifecycle defect. The
+driver increments its global in-flight count before the send path validates
+that the station is still connected; a disconnect race can therefore strand a
+credit without a completion callback. With this profile's three-credit TX
+queue, enough races can make both TX and RX unavailable while station/DHCP
+status remains superficially healthy. This is a known alpha risk, not closed by
+#5776, and reconnect/failure recovery still requires hardware qualification.
 
 ## Credential prerequisite
 
@@ -97,13 +113,19 @@ With the installed esp-rs environment loaded:
 ```sh
 source "$HOME/export-esp.sh"
 CARGO_TARGET_DIR=target/e290-wifi-api-proof \
-  cargo +esp build --locked --release \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features \
   --features wifi-api-proof \
   --target xtensa-esp32s3-none-elf
 ```
+
+The large code model is required for current E290 appliance ELFs because the
+full image has crossed Xtensa `l32r` literal reach; it is not an optimization.
+It lets Espressif LLVM intersperse text-section literal pools. Explicit
+`RUSTFLAGS` also repeat `-nostartfiles` because they replace the target defaults.
 
 The strict target review uses the same arguments with `clippy` and
 `-- -D warnings`.
@@ -129,7 +151,7 @@ while the peer E290 remained enumerated. That was consistent with this
 historical image's USB quarantine, but it was not evidence that the SoftAP,
 DHCP server, TCP listener, or LoRa/Wi-Fi coexistence reached a healthy steady
 state. It does not describe current source, which retains the USB peripheral
-but keeps the ordinary production logger silent.
+and emits wireless-profile diagnostics at `Info`.
 
 The development Mac's sole internet uplink is its Wi-Fi interface. Joining the
 E290 would sever the active development session, so the powered network

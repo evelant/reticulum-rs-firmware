@@ -1,5 +1,10 @@
 # Partition tables and storage-HIL runbook
 
+For the normal E290 build and flash path, use
+[`docs/getting-started/firmware-e290.md`](../docs/getting-started/firmware-e290.md).
+This file is the authoritative partition-layout reference and also retains
+historical storage-HIL procedures.
+
 `heltec-vision-master-e290-node.csv` is the first 16 MiB permanent-node layout:
 
 | Partition | Range | Size | Product state |
@@ -11,7 +16,7 @@
 | `announce_clock` | `0x612000..0x614000` | 8 KiB | Wired boot-epoch mirrors |
 | `api_credentials` | `0x614000..0x616000` | 8 KiB | Wired boot-mounted plaintext two-sector credential store |
 | `ble_bond` | `0x616000..0x618000` | 8 KiB | Wired boot-mounted authenticated BLE bond store |
-| `device_config` | `0x618000..0x630000` | 96 KiB | Reserved, not wired |
+| `device_config` | `0x618000..0x630000` | 96 KiB | Raw-NOR configuration arena; first 8 KiB assigned to network configuration and next 8 KiB to the LXMF collection watermark |
 | `node_journal` | `0x630000..0x730000` | 1 MiB | Schema-3/physical-2 resident submission runtime |
 | `message_store` | `0x730000..0x930000` | 2 MiB | Wired raw-RNS inbox qualification slot; not an LXMF store |
 | `lxmf_store` | `0x930000..0xb30000` | 2 MiB | Wired append-only LXMF store with mount-gated opportunistic and responder direct admission |
@@ -19,9 +24,13 @@
 
 The journal and message-store offsets are unchanged. The previously unwired
 `device_config` reservation now yields dedicated 8 KiB raw-NOR ranges for
-`api_credentials` and one authenticated `ble_bond`, leaving a 96 KiB
-standard-NVS configuration range. Both dedicated ranges are validated and
-boot-mounted. [ADR 0009](../docs/adr/0009-device-api-credential-store-and-pairing.md)
+`api_credentials` and one authenticated `ble_bond`, leaving a 96 KiB raw-NOR
+configuration arena. Its first 8 KiB (`0x618000..0x61a000`) is assigned to the
+network-configuration store, its next 8 KiB (`0x61a000..0x61c000`) to the
+power-loss-safe LXMF collection watermark, and the remaining 80 KiB stays
+reserved. The security-authority and mailbox-watermark ranges are validated
+and boot-mounted.
+[ADR 0009](../docs/adr/0009-device-api-credential-store-and-pairing.md)
 defines the credential store's implemented two-sector plaintext developer/HIL
 format and pairing policy;
 [ADR 0019](../docs/adr/0019-secure-ble-appliance-onboarding.md) defines the

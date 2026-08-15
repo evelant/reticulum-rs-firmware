@@ -39,7 +39,7 @@ EXPECTED_PROFILE = (
     "cad_operation_deadline_ms=500 receive_operation_deadline_ms=1750 "
     "transmit_operation_deadline_ms=1500 exchange_deadline_seconds=180"
 )
-EXPECTED_RUNTIME_PATCH = "esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2"
+EXPECTED_RUNTIME_SOURCE = "esp-rtos-upstream-b50efcb-stack-words-v1"
 EXPECTED_INERT_HEARTBEAT = (
     "e290-semantic-hil stage=inert-heartbeat rf_state=reset_low"
 )
@@ -351,9 +351,9 @@ def _common_prefix(
     )
     verifier.exact("fixed NA915 profile", EXPECTED_PROFILE)
     verifier.exact(
-        "runtime patch identity",
-        "e290-semantic-hil stage=runtime-patch "
-        f"esp_rtos_main_stack_slice={EXPECTED_RUNTIME_PATCH}",
+        "runtime source identity",
+        "e290-semantic-hil stage=runtime-source "
+        f"esp_rtos_source={EXPECTED_RUNTIME_SOURCE}",
     )
     verifier.exact(
         "radio initialization",

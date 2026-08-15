@@ -572,10 +572,12 @@ mod tests {
                     ApplicationEvent::DataReceived {
                         destination: [1; 16],
                         payload: vec![1],
+                        ingress: None,
                     },
                     ApplicationEvent::DataReceived {
                         destination: [2; 16],
                         payload: vec![2],
+                        ingress: None,
                     },
                 ],
                 vec![],

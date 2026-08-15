@@ -866,6 +866,7 @@ pub struct CredentialRejected;
 /// ```
 pub struct DispatchLease<'authority, const CAPACITY: usize> {
     context: DispatchContext,
+    pairing_origin: PairingOrigin,
     _authority: PhantomData<&'authority CredentialAuthority<CAPACITY>>,
 }
 
@@ -903,6 +904,15 @@ impl<const CAPACITY: usize> DispatchLease<'_, CAPACITY> {
     /// Authorization-policy version applied by this credential record.
     pub const fn policy_version(&self) -> AuthorizationPolicyVersion {
         AuthorizationPolicyVersion::new(self.provenance().policy_version())
+    }
+
+    /// Enrollment ceremony that introduced the revalidated credential.
+    ///
+    /// Product authorization policy may use this immutable device-owned audit
+    /// fact when applying an explicitly bounded compatibility rule. It is not
+    /// supplied by the client or encoded in the logical request.
+    pub const fn pairing_origin(&self) -> PairingOrigin {
+        self.pairing_origin
     }
 
     const fn provenance(&self) -> DispatchProvenance {
@@ -1814,6 +1824,7 @@ impl<const CAPACITY: usize> CredentialAuthority<CAPACITY> {
                 record.permissions,
                 provenance,
             ),
+            pairing_origin: record.audit.pairing_origin,
             _authority: PhantomData,
         })
     }

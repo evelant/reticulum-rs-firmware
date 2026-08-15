@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 embassy-sync.workspace = true
 reticulum-device-api = { path = "../device-api", default-features = false }
+zeroize.workspace = true
 
 [lib]
 path = "src/lib.rs"

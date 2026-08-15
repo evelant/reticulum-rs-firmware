@@ -1018,8 +1018,8 @@ async fn main(spawner: Spawner) -> ! {
         backpressure_evidence.timer_name,
     );
     info!(
-        "phase1 runtime patch: esp_rtos_main_stack_slice={}",
-        env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
+        "phase1 runtime source: esp_rtos_source={}",
+        env!("RETICULUM_ESP_RTOS_UPSTREAM_IDENTITY"),
     );
 
     info!(

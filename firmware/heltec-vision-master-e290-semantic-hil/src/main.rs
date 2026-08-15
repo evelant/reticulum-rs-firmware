@@ -249,8 +249,8 @@ async fn main(spawner: Spawner) -> ! {
         EXCHANGE_DEADLINE_SECONDS,
     );
     info!(
-        "e290-semantic-hil stage=runtime-patch esp_rtos_main_stack_slice={}",
-        env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
+        "e290-semantic-hil stage=runtime-source esp_rtos_source={}",
+        env!("RETICULUM_ESP_RTOS_UPSTREAM_IDENTITY"),
     );
 
     let spi = match Spi::new(

@@ -1,8 +1,10 @@
 use core::fmt;
 
 use reticulum_lxmf_chat_core::{
-    AcceptanceIds, AcceptanceOutcome, ChatStore, Contact, ContactUpsertOutcome, DestinationHash,
-    InboundCommitOutcome, MessageId, OutboxCommitOutcome, OutboxId, OutboxMaterial, ReconcileWork,
+    AcceptanceIds, AcceptanceOutcome, AutomaticOutboxRetryOutcome, ChatStore, Contact,
+    ContactUpsertOutcome, ConversationPeer, DestinationHash, IdempotencyKey, InboundCommitOutcome,
+    MessageActivityPage, MessageActivityPageRequest, MessageId, OutboxCommitOutcome, OutboxId,
+    OutboxMaterial, OutboxRetryOutcome, PhoneLocationSample, ReconcileWork,
     StatusProjectionOutcome, SubmissionState, TimelineEntry,
 };
 
@@ -35,6 +37,13 @@ pub enum ReconcileStep {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconcileSelection {
+    Ordinary,
+    Prefer(OutboxId),
+    Avoid(OutboxId),
+}
+
 /// One incremental device-inbox scan action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InboxStep {
@@ -57,6 +66,14 @@ pub enum InboxStep {
         /// Whether the exact semantic message was inserted or found during a
         /// concurrent/idempotent retry.
         outcome: InboundCommitOutcome,
+    },
+    /// The highest cursor observed during this scan was durably acknowledged.
+    ///
+    /// A scan acknowledges only after every preceding message is known to be
+    /// present in the local durable store.
+    Acknowledged {
+        /// Highest locally durable cursor included in the acknowledgement.
+        cursor: InboxCursor,
     },
 }
 
@@ -109,6 +126,7 @@ pub struct ChatEngine<S> {
     store: S,
     reconcile_offset: usize,
     inbox_after: Option<InboxCursor>,
+    inbox_ack_pending: Option<InboxCursor>,
 }
 
 impl<S> ChatEngine<S> {
@@ -118,6 +136,7 @@ impl<S> ChatEngine<S> {
             store,
             reconcile_offset: 0,
             inbox_after: None,
+            inbox_ack_pending: None,
         }
     }
 
@@ -141,6 +160,11 @@ impl<S> ChatEngine<S> {
     pub fn reset_session_scan(&mut self) {
         self.inbox_after = None;
     }
+
+    /// Highest locally durable cursor still awaiting device acknowledgement.
+    pub const fn pending_inbox_acknowledgement(&self) -> Option<InboxCursor> {
+        self.inbox_ack_pending
+    }
 }
 
 impl<S: ChatStore> ChatEngine<S> {
@@ -154,9 +178,32 @@ impl<S: ChatStore> ChatEngine<S> {
         self.store.contacts()
     }
 
+    /// Return saved contacts and durable message peers in conversation order.
+    pub fn conversation_peers(&self) -> Result<Vec<ConversationPeer>, S::Error> {
+        self.store.conversation_peers()
+    }
+
     /// Return one stable conversation timeline.
     pub fn timeline(&self, peer: DestinationHash) -> Result<Vec<TimelineEntry>, S::Error> {
         self.store.conversation_timeline(peer)
+    }
+
+    /// Return one bounded newest-first page of immutable message activity.
+    pub fn message_activity(
+        &self,
+        request: MessageActivityPageRequest,
+    ) -> Result<MessageActivityPage, S::Error> {
+        self.store.message_activity(request)
+    }
+
+    /// Return rows eligible under the legacy app-owned automatic-rearm fixture.
+    ///
+    /// Production schedulers must not call this; firmware owns unattended LXMF
+    /// retry while the durable device submission remains `Preparing`.
+    pub fn retryable_outbox(
+        &self,
+    ) -> Result<Vec<reticulum_lxmf_chat_core::OutboxRecord>, S::Error> {
+        self.store.retryable_outbox()
     }
 
     /// Commit exact outbound material without requiring a live device session.
@@ -167,6 +214,31 @@ impl<S: ChatStore> ChatEngine<S> {
         self.store.commit_outbound(material)
     }
 
+    /// Create a transitional replacement device submission for a legacy or
+    /// permanently terminal row without creating a second timeline entry or
+    /// changing its signed LXMF material and message identity.
+    pub fn retry_send(
+        &mut self,
+        outbox_id: OutboxId,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<OutboxRetryOutcome, S::Error> {
+        self.store.retry_outbox(outbox_id, idempotency_key)
+    }
+
+    /// Exercise the legacy app-owned automatic-rearm fixture and charge its
+    /// historical persisted budget.
+    ///
+    /// Retained for schema/migration and store-conformance tests only.
+    /// Production clients must not call or schedule it.
+    pub fn retry_send_automatically(
+        &mut self,
+        outbox_id: OutboxId,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<AutomaticOutboxRetryOutcome, S::Error> {
+        self.store
+            .retry_outbox_automatically(outbox_id, idempotency_key)
+    }
+
     /// Perform at most one submit or status request and its corresponding
     /// durable local mutation. Work selection rotates so one long-lived
     /// nonterminal submission cannot starve later outbox rows.
@@ -174,12 +246,67 @@ impl<S: ChatStore> ChatEngine<S> {
         &mut self,
         session: &mut D,
     ) -> Result<ReconcileStep, EngineError<S::Error, D::Error>> {
+        self.reconcile_step_selecting(session, ReconcileSelection::Ordinary)
+    }
+
+    /// Reconcile one exact outbox row first when it currently has work.
+    ///
+    /// This preserves the ordinary round-robin cursor for every other turn but
+    /// lets a UI-facing durable send hand its newly committed row to the device
+    /// before unrelated status and telemetry polling resumes.
+    pub fn reconcile_outbox_step<D: LxmfSession + ?Sized>(
+        &mut self,
+        session: &mut D,
+        preferred: OutboxId,
+    ) -> Result<ReconcileStep, EngineError<S::Error, D::Error>> {
+        self.reconcile_step_selecting(session, ReconcileSelection::Prefer(preferred))
+    }
+
+    /// Advance ordinary fair work while avoiding one UI-hot row when another
+    /// row is available. If it is the only remaining work, it still advances.
+    pub fn reconcile_step_avoiding<D: LxmfSession + ?Sized>(
+        &mut self,
+        session: &mut D,
+        avoided: OutboxId,
+    ) -> Result<ReconcileStep, EngineError<S::Error, D::Error>> {
+        self.reconcile_step_selecting(session, ReconcileSelection::Avoid(avoided))
+    }
+
+    fn reconcile_step_selecting<D: LxmfSession + ?Sized>(
+        &mut self,
+        session: &mut D,
+        selection: ReconcileSelection,
+    ) -> Result<ReconcileStep, EngineError<S::Error, D::Error>> {
         let mut work = self.store.reconcile().map_err(EngineError::Store)?;
         if work.is_empty() {
             self.reconcile_offset = 0;
             return Ok(ReconcileStep::Idle);
         }
-        let index = self.reconcile_offset % work.len();
+        let work_len = work.len();
+        let ordinary_index = self.reconcile_offset % work_len;
+        let (index, preserve_fairness_cursor) = match selection {
+            ReconcileSelection::Ordinary => (ordinary_index, false),
+            ReconcileSelection::Prefer(preferred) => {
+                let preferred_index = work.iter().position(|item| match item {
+                    ReconcileWork::Submit { outbox_id, .. }
+                    | ReconcileWork::RefreshStatus { outbox_id, .. } => *outbox_id == preferred,
+                });
+                (
+                    preferred_index.unwrap_or(ordinary_index),
+                    preferred_index.is_some(),
+                )
+            }
+            ReconcileSelection::Avoid(avoided) => {
+                let index = (0..work_len)
+                    .map(|offset| (ordinary_index + offset) % work_len)
+                    .find(|index| match &work[*index] {
+                        ReconcileWork::Submit { outbox_id, .. }
+                        | ReconcileWork::RefreshStatus { outbox_id, .. } => *outbox_id != avoided,
+                    })
+                    .unwrap_or(ordinary_index);
+                (index, false)
+            }
+        };
         let item = work.remove(index);
         let result = match item {
             ReconcileWork::Submit {
@@ -216,7 +343,12 @@ impl<S: ChatStore> ChatEngine<S> {
                 }
             }
         };
-        self.reconcile_offset = (index + 1) % work.len().saturating_add(1);
+        // An explicit UI-facing priority turn must not perturb the independent
+        // fairness cursor. Otherwise each preferred refresh can reset ordinary
+        // work to the same old row and starve the remainder indefinitely.
+        if !preserve_fairness_cursor {
+            self.reconcile_offset = (index + 1) % work_len;
+        }
         Ok(result)
     }
 
@@ -226,10 +358,31 @@ impl<S: ChatStore> ChatEngine<S> {
         &mut self,
         session: &mut D,
     ) -> Result<InboxStep, EngineError<S::Error, D::Error>> {
+        self.inbox_step_with_receiver_location(session, None)
+    }
+
+    /// Advance one committed inbox summary while atomically retaining the
+    /// receiver phone's latest available location with a newly imported row.
+    ///
+    /// The sample describes the app's position when it imported the appliance
+    /// inbox message. It does not claim the exact RF-arrival position when the
+    /// phone was disconnected or the message traversed one or more relays.
+    pub fn inbox_step_with_receiver_location<D: LxmfSession + ?Sized>(
+        &mut self,
+        session: &mut D,
+        receiver_location: Option<PhoneLocationSample>,
+    ) -> Result<InboxStep, EngineError<S::Error, D::Error>> {
         let Some(summary) = session
             .next_inbox(self.inbox_after)
             .map_err(EngineError::Session)?
         else {
+            if let Some(cursor) = self.inbox_ack_pending {
+                session
+                    .acknowledge_inbox_through(cursor)
+                    .map_err(EngineError::Session)?;
+                self.inbox_ack_pending = None;
+                return Ok(InboxStep::Acknowledged { cursor });
+            }
             return Ok(InboxStep::EndOfScan);
         };
         if self
@@ -238,6 +391,7 @@ impl<S: ChatStore> ChatEngine<S> {
             .map_err(EngineError::Store)?
         {
             self.inbox_after = Some(summary.cursor());
+            self.retain_inbox_ack(summary.cursor());
             return Ok(InboxStep::AlreadyImported {
                 message_id: summary.message_id(),
                 cursor: summary.cursor(),
@@ -253,13 +407,23 @@ impl<S: ChatStore> ChatEngine<S> {
         let message_id = message.message_id();
         let outcome = self
             .store
-            .commit_inbound(message)
+            .commit_inbound_with_receiver_location(message, receiver_location)
             .map_err(EngineError::Store)?;
         self.inbox_after = Some(summary.cursor());
+        self.retain_inbox_ack(summary.cursor());
         Ok(InboxStep::Imported {
             message_id,
             cursor: summary.cursor(),
             outcome,
         })
+    }
+
+    fn retain_inbox_ack(&mut self, cursor: InboxCursor) {
+        if self
+            .inbox_ack_pending
+            .is_none_or(|pending| cursor > pending)
+        {
+            self.inbox_ack_pending = Some(cursor);
+        }
     }
 }

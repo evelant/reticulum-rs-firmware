@@ -554,6 +554,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         Some(ApplicationEvent::DataReceived {
             destination,
             payload,
+            ..
         }) => {
             require(
                 *destination == *registered_plain.as_bytes(),
@@ -636,6 +637,7 @@ fn verify_released_vectors() -> Result<usize, String> {
             identity,
             hops,
             app_data,
+            ..
         }) => {
             require(
                 destination.as_slice() == announce_dest,
@@ -795,6 +797,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         Some(ApplicationEvent::DataReceived {
             destination,
             payload,
+            ..
         }) => {
             require(
                 *destination == *announce_dest_hash.as_bytes(),
@@ -1116,6 +1119,7 @@ fn verify_released_vectors() -> Result<usize, String> {
                 binding,
                 data,
                 context,
+                ..
             }]
                 if binding.link() == link_id.as_bytes()
                     && binding.destination() == link_responder.destination_hash().as_bytes()
@@ -1267,7 +1271,7 @@ fn verify_released_vectors() -> Result<usize, String> {
         "channel proof did not emit ProofReceived",
     )?;
     let received_packet_hash = match received_proof.actions.events.as_slice() {
-        [ApplicationEvent::ProofReceived { packet_hash }] => *packet_hash,
+        [ApplicationEvent::ProofReceived { packet_hash, .. }] => *packet_hash,
         _ => unreachable!("ProofReceived shape was checked above"),
     };
     require(

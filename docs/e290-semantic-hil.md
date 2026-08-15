@@ -93,9 +93,11 @@ cargo test --locked \
 cargo run --locked -p xtask -- graph-policy
 
 source ~/export-esp.sh
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-semantic-hil \
   --target xtensa-esp32s3-none-elf
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles' \
 cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-semantic-hil \
   --target xtensa-esp32s3-none-elf -- -D warnings
@@ -117,7 +119,7 @@ partition. It is not the product partition layout.
 is the fail-closed verifier for this image. The older
 `verify_semantic_roundtrip_hil_logs.py` is intentionally Tracker-specific and
 must not be used to claim an E290 result. The E290 verifier requires the exact
-physical MAC/role pair, fixed radio profile, runtime patch, two clear and
+physical MAC/role pair, fixed radio profile, runtime-source identity, two clear and
 monotonically timestamped CAD observations, two transmissions per board, all
 four cross-bound packet hashes and receipts, explicit semantic ingress events,
 one successful terminal, and subsequent RF shutdown. Nineteen verifier tests

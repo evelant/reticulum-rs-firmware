@@ -4,7 +4,8 @@ var FRAME_WRITE = 1;
 var FRAME_INDICATION = 2;
 var MAX_SOCKET_BUFFER_BYTES = 64 * 1024;
 var MAX_PRE_READY_INDICATION_FRAMES = 32;
-var MAX_PRE_READY_INDICATION_BYTES = MAX_PRE_READY_INDICATION_FRAMES * (20 + 2);
+var MAXIMUM_PROFILE_FRAGMENT_BYTES = 248;
+var MAX_PRE_READY_INDICATION_BYTES = MAX_PRE_READY_INDICATION_FRAMES * (MAXIMUM_PROFILE_FRAGMENT_BYTES + 2);
 function sendBounded(sender, frame) {
   if (sender.bufferedAmount + frame.byteLength > MAX_SOCKET_BUFFER_BYTES) {
     throw new Error("browser bridge WebSocket send buffer exceeded its bound");
@@ -61,7 +62,7 @@ function parseBridgeProfile(value) {
   if (bridgeProtocol !== BRIDGE_PROTOCOL_VERSION) {
     throw new Error(`unsupported bridge protocol ${bridgeProtocol}`);
   }
-  const maximumFragmentBytes = requireInteger(profile.maximumFragmentBytes, "maximumFragmentBytes", 1, 20);
+  const maximumFragmentBytes = requireInteger(profile.maximumFragmentBytes, "maximumFragmentBytes", 1, MAXIMUM_PROFILE_FRAGMENT_BYTES);
   const operationTimeoutMs = requireInteger(profile.operationTimeoutMs, "operationTimeoutMs", 1, 60000);
   if (profile.writeType !== "with_response") {
     throw new Error("profile does not require write-with-response");
@@ -374,7 +375,7 @@ async function connectGatt() {
       return;
     }
     try {
-      indications.push(binarySender(), characteristicValue(event), profile.maximumFragmentBytes);
+      indications.push(binarySender(), characteristicValue(event), MAXIMUM_PROFILE_FRAGMENT_BYTES);
     } catch (error) {
       fail(error);
     }

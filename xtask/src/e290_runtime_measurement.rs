@@ -343,7 +343,8 @@ const HISTORICAL_MINIMUM_CONSERVATIVE_STACK_MARGIN_BYTES: u64 =
 // poll wrapper, the ROM flash implementation, and interrupt entry that the
 // selected path or ELF's `.stack_sizes` section cannot describe.
 const STORAGE_PATH_STACK_RESERVE_BYTES: u64 = 4_096;
-const STARTUP_STACK_COMPONENT_COUNT: usize = 2;
+const STARTUP_NODE_PATH_COMPONENT_COUNT: usize = 7;
+const STARTUP_SUPERVISOR_PATH_COMPONENT_COUNT: usize = 3;
 const PRE_USB_MOUNT_STACK_COMPONENT_COUNT: usize = 9;
 const LIVE_APPEND_STACK_COMPONENT_COUNT: usize = 9;
 const LIVE_COMPACT_STACK_COMPONENT_COUNT: usize = 10;
@@ -362,15 +363,67 @@ struct StackSymbolSelector {
     rejected_fragments: &'static [&'static str],
 }
 
-const STARTUP_STACK_SELECTORS: [StackSymbolSelector; STARTUP_STACK_COMPONENT_COUNT] = [
+const STARTUP_NODE_PATH_SELECTORS: [StackSymbolSelector; STARTUP_NODE_PATH_COMPONENT_COUNT] = [
     StackSymbolSelector {
         output_name: "product_main_poll",
         required_fragments: &["___product_main_task_inner_function"],
-        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP"],
+        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP", "__do_print"],
     },
     StackSymbolSelector {
-        output_name: "node_core_new",
-        required_fragments: &["reticulum_node_core", "NodeCore", "3new"],
+        output_name: "construct_node",
+        required_fragments: &["construct_node_or_inert"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "begin_node_in",
+        required_fragments: &[
+            "reticulum_tx_supervisor",
+            "NodeInterfaceSupervisor",
+            "13begin_node_in",
+        ],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "node_core_new_in",
+        required_fragments: &["reticulum_node_core", "NodeCore", "6new_in"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "rns_node_new_in",
+        required_fragments: &["reticulum_rns_rete", "EmbeddedNode", "6new_in"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "rete_node_core_new_in",
+        required_fragments: &["rete_stack", "node_core", "NodeCore", "6new_in"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "rete_transport_new_in",
+        required_fragments: &["rete_transport", "Transport", "6new_in"],
+        rejected_fragments: &[],
+    },
+];
+
+const STARTUP_SUPERVISOR_PATH_SELECTORS: [StackSymbolSelector;
+    STARTUP_SUPERVISOR_PATH_COMPONENT_COUNT] = [
+    StackSymbolSelector {
+        output_name: "product_main_poll",
+        required_fragments: &["___product_main_task_inner_function"],
+        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP", "__do_print"],
+    },
+    StackSymbolSelector {
+        output_name: "construct_supervisor",
+        required_fragments: &["construct_supervisor_or_inert"],
+        rejected_fragments: &[],
+    },
+    StackSymbolSelector {
+        output_name: "supervisor_stage_finish",
+        required_fragments: &[
+            "reticulum_tx_supervisor",
+            "NodeInterfaceSupervisorInit",
+            "6finish",
+        ],
         rejected_fragments: &[],
     },
 ];
@@ -383,7 +436,7 @@ const PRE_USB_MOUNT_STACK_SELECTORS: [StackSymbolSelector; PRE_USB_MOUNT_STACK_C
     StackSymbolSelector {
         output_name: "product_main_poll",
         required_fragments: &["___product_main_task_inner_function"],
-        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP"],
+        rejected_fragments: &["UninitCell", "TaskStorage", "HEAP", "__do_print"],
     },
     StackSymbolSelector {
         output_name: "mount_node_runtime",
@@ -815,7 +868,8 @@ struct DefinedSupervisorStatic {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StartupElfInspection {
     stack_sizes: StackSizeInventory,
-    startup_stack: LiveMutationStack<STARTUP_STACK_COMPONENT_COUNT>,
+    node_path: LiveMutationStack<STARTUP_NODE_PATH_COMPONENT_COUNT>,
+    supervisor_path: LiveMutationStack<STARTUP_SUPERVISOR_PATH_COMPONENT_COUNT>,
     stack: StackLayout,
     supervisor_statics: Vec<DefinedSupervisorStatic>,
 }
@@ -2047,20 +2101,29 @@ fn inspect_startup_elf(
     })?;
     let object = parse_xtensa_elf(&bytes, &options.elf, LABEL)?;
     let stack_sizes = stack_size_records(&object, &options.elf, LABEL)?;
-    let startup_stack = inspect_live_mutation_stack(
+    let node_path = inspect_live_mutation_stack(
         &object,
         &stack_sizes.records,
         &options.elf,
         LABEL,
-        "startup",
-        &STARTUP_STACK_SELECTORS,
+        "startup node construction",
+        &STARTUP_NODE_PATH_SELECTORS,
+    )?;
+    let supervisor_path = inspect_live_mutation_stack(
+        &object,
+        &stack_sizes.records,
+        &options.elf,
+        LABEL,
+        "startup supervisor construction",
+        &STARTUP_SUPERVISOR_PATH_SELECTORS,
     )?;
     let stack_end = unique_symbol_address(&object, &options.elf, LABEL, "_stack_end_cpu0")?;
     let stack_guard = unique_symbol_address(&object, &options.elf, LABEL, "__stack_chk_guard")?;
     let stack_start = unique_symbol_address(&object, &options.elf, LABEL, "_stack_start_cpu0")?;
     let inspection = StartupElfInspection {
         stack_sizes: stack_sizes.inventory,
-        startup_stack,
+        node_path,
+        supervisor_path,
         stack: calculate_stack_layout(LABEL, stack_end, stack_guard, stack_start)?,
         supervisor_statics: defined_internal_supervisor_statics(&object, &options.elf, LABEL)?,
     };
@@ -2625,8 +2688,9 @@ fn stack_size_records(
         .filter(|section| section.name().is_ok_and(|name| name == ".stack_sizes"));
     let section = sections.next().ok_or_else(|| {
         format!(
-            "{label} ELF {} has no .stack_sizes section; build the final linked image with RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes'",
-            path.display()
+            "{label} ELF {} has no .stack_sizes section; build the final linked image with RUSTFLAGS={:?}",
+            path.display(),
+            crate::phase1_tooling::XTENSA_FINAL_LINK_RUSTFLAGS,
         )
     })?;
     if sections.next().is_some() {
@@ -3029,15 +3093,16 @@ impl StartupElfInspection {
             ));
         }
         let selected_maximum_frame = self
-            .startup_stack
+            .node_path
             .frame_bytes
             .iter()
+            .chain(self.supervisor_path.frame_bytes.iter())
             .copied()
             .max()
-            .expect("startup stack has two selected frames");
+            .expect("startup paths contain selected frames");
         if self.stack_sizes.maximum_frame_bytes != selected_maximum_frame {
             return Err(format!(
-                "startup E290 largest compiler-emitted frame {} is not the audited product_main/NodeCore::new maximum {selected_maximum_frame}",
+                "startup E290 largest compiler-emitted frame {} is not the audited node/supervisor startup-path maximum {selected_maximum_frame}",
                 self.stack_sizes.maximum_frame_bytes
             ));
         }
@@ -3055,27 +3120,39 @@ impl StartupElfInspection {
                 self.supervisor_statics.len()
             ));
         }
-        let required_stack_bytes = self.startup_stack.required_stack_bytes("startup")?;
-        if required_stack_bytes > self.stack.usable_bytes {
-            return Err(format!(
-                "startup E290 product_main poll and NodeCore::new compiler-emitted frames total {} bytes plus the reviewed {STORAGE_PATH_STACK_RESERVE_BYTES}-byte ROM/interrupt reserve require {required_stack_bytes} bytes, exceeding the {}-byte usable CPU0 stack by {} bytes",
-                self.startup_stack.cumulative_frame_bytes,
-                self.stack.usable_bytes,
-                required_stack_bytes - self.stack.usable_bytes,
-            ));
-        }
+        validate_live_mutation_stack(
+            "startup E290",
+            "node construction path",
+            self.node_path,
+            self.stack.usable_bytes,
+        )?;
+        validate_live_mutation_stack(
+            "startup E290",
+            "supervisor construction path",
+            self.supervisor_path,
+            self.stack.usable_bytes,
+        )?;
         Ok(())
     }
 
     fn render(&self) -> String {
-        let required_stack_bytes = self
-            .startup_stack
-            .required_stack_bytes("startup")
-            .expect("validated startup stack requirement cannot overflow");
+        let node_required_stack_bytes = self
+            .node_path
+            .required_stack_bytes("node construction path")
+            .expect("validated startup node path cannot overflow");
+        let supervisor_required_stack_bytes = self
+            .supervisor_path
+            .required_stack_bytes("supervisor construction path")
+            .expect("validated startup supervisor path cannot overflow");
+        let required_stack_bytes = node_required_stack_bytes.max(supervisor_required_stack_bytes);
+        let maximum_cumulative_frame_bytes = self
+            .node_path
+            .cumulative_frame_bytes
+            .max(self.supervisor_path.cumulative_frame_bytes);
         let raw_headroom_bytes = self
             .stack
             .usable_bytes
-            .checked_sub(self.startup_stack.cumulative_frame_bytes)
+            .checked_sub(maximum_cumulative_frame_bytes)
             .expect("validated startup compiler frames must fit usable stack");
         let policy_headroom_bytes = self
             .stack
@@ -3083,16 +3160,25 @@ impl StartupElfInspection {
             .checked_sub(required_stack_bytes)
             .expect("validated startup requirement must fit usable stack");
         format!(
-            "startup.stack_size_records={}\nstartup.maximum_frame_bytes={}\nstartup.stack_reserved_bytes={}\nstartup.stack_usable_bytes={}\nstartup.stack_guard_offset_bytes={}\nstartup.supervisor_static_symbol_count={}\nstartup.product_main_poll_frame_bytes={}\nstartup.node_core_new_frame_bytes={}\nstartup.cumulative_frame_bytes={}\nstartup.reserve_bytes={}\nstartup.required_stack_bytes={required_stack_bytes}\nstartup.raw_headroom_bytes={raw_headroom_bytes}\nstartup.policy_headroom_bytes={policy_headroom_bytes}",
+            "startup.stack_size_records={}\nstartup.maximum_frame_bytes={}\nstartup.stack_reserved_bytes={}\nstartup.stack_usable_bytes={}\nstartup.stack_guard_offset_bytes={}\nstartup.supervisor_static_symbol_count={}\nstartup.node_path.product_main_poll_frame_bytes={}\nstartup.node_path.construct_node_frame_bytes={}\nstartup.node_path.begin_node_in_frame_bytes={}\nstartup.node_path.node_core_new_in_frame_bytes={}\nstartup.node_path.rns_node_new_in_frame_bytes={}\nstartup.node_path.rete_node_core_new_in_frame_bytes={}\nstartup.node_path.rete_transport_new_in_frame_bytes={}\nstartup.node_path.cumulative_frame_bytes={}\nstartup.node_path.required_stack_bytes={node_required_stack_bytes}\nstartup.supervisor_path.product_main_poll_frame_bytes={}\nstartup.supervisor_path.construct_supervisor_frame_bytes={}\nstartup.supervisor_path.supervisor_stage_finish_frame_bytes={}\nstartup.supervisor_path.cumulative_frame_bytes={}\nstartup.supervisor_path.required_stack_bytes={supervisor_required_stack_bytes}\nstartup.reserve_bytes={}\nstartup.maximum_cumulative_frame_bytes={maximum_cumulative_frame_bytes}\nstartup.required_stack_bytes={required_stack_bytes}\nstartup.raw_headroom_bytes={raw_headroom_bytes}\nstartup.policy_headroom_bytes={policy_headroom_bytes}",
             self.stack_sizes.record_count,
             self.stack_sizes.maximum_frame_bytes,
             self.stack.reserved_bytes,
             self.stack.usable_bytes,
             self.stack.guard_offset_bytes,
             self.supervisor_statics.len(),
-            self.startup_stack.frame_bytes[0],
-            self.startup_stack.frame_bytes[1],
-            self.startup_stack.cumulative_frame_bytes,
+            self.node_path.frame_bytes[0],
+            self.node_path.frame_bytes[1],
+            self.node_path.frame_bytes[2],
+            self.node_path.frame_bytes[3],
+            self.node_path.frame_bytes[4],
+            self.node_path.frame_bytes[5],
+            self.node_path.frame_bytes[6],
+            self.node_path.cumulative_frame_bytes,
+            self.supervisor_path.frame_bytes[0],
+            self.supervisor_path.frame_bytes[1],
+            self.supervisor_path.frame_bytes[2],
+            self.supervisor_path.cumulative_frame_bytes,
             STORAGE_PATH_STACK_RESERVE_BYTES,
         )
     }
@@ -5162,8 +5248,9 @@ mod tests {
 
     #[test]
     fn storage_path_selectors_and_frame_resolution_fail_closed() {
-        for selector in STARTUP_STACK_SELECTORS
+        for selector in STARTUP_NODE_PATH_SELECTORS
             .into_iter()
+            .chain(STARTUP_SUPERVISOR_PATH_SELECTORS)
             .chain(PRE_USB_MOUNT_STACK_SELECTORS)
             .chain(LIVE_APPEND_STACK_SELECTORS)
             .chain(LIVE_COMPACT_STACK_SELECTORS)
@@ -5300,46 +5387,69 @@ mod tests {
     fn startup_elf_policy_gates_the_cumulative_constructor_path_and_static_owner() {
         let reviewed = StartupElfInspection {
             stack_sizes: StackSizeInventory {
-                record_count: 1_322,
-                maximum_frame_bytes: 64_288,
+                record_count: 1_854,
+                maximum_frame_bytes: 49_776,
             },
-            startup_stack: LiveMutationStack::from_frame_bytes("startup", [62_016, 64_288])
-                .unwrap(),
+            node_path: LiveMutationStack::from_frame_bytes(
+                "node construction path",
+                [49_776, 32, 32, 192, 48, 528, 32],
+            )
+            .unwrap(),
+            supervisor_path: LiveMutationStack::from_frame_bytes(
+                "supervisor construction path",
+                [49_776, 144, 592],
+            )
+            .unwrap(),
             stack: StackLayout {
-                reserved_bytes: 149_320,
-                usable_bytes: 149_256,
+                reserved_bytes: 169_916,
+                usable_bytes: 169_852,
                 guard_offset_bytes: 60,
             },
             supervisor_statics: Vec::new(),
         };
         reviewed.validate().unwrap();
         let output = reviewed.render();
-        assert!(output.contains("startup.stack_size_records=1322\n"));
-        assert!(output.contains("startup.maximum_frame_bytes=64288\n"));
-        assert!(output.contains("startup.stack_reserved_bytes=149320\n"));
-        assert!(output.contains("startup.stack_usable_bytes=149256\n"));
+        assert!(output.contains("startup.stack_size_records=1854\n"));
+        assert!(output.contains("startup.maximum_frame_bytes=49776\n"));
+        assert!(output.contains("startup.stack_reserved_bytes=169916\n"));
+        assert!(output.contains("startup.stack_usable_bytes=169852\n"));
         assert!(output.contains("startup.stack_guard_offset_bytes=60\n"));
         assert!(output.contains("startup.supervisor_static_symbol_count=0\n"));
-        assert!(output.contains("startup.product_main_poll_frame_bytes=62016\n"));
-        assert!(output.contains("startup.node_core_new_frame_bytes=64288\n"));
-        assert!(output.contains("startup.cumulative_frame_bytes=126304\n"));
+        assert!(output.contains("startup.node_path.product_main_poll_frame_bytes=49776\n"));
+        assert!(output.contains("startup.node_path.construct_node_frame_bytes=32\n"));
+        assert!(output.contains("startup.node_path.begin_node_in_frame_bytes=32\n"));
+        assert!(output.contains("startup.node_path.node_core_new_in_frame_bytes=192\n"));
+        assert!(output.contains("startup.node_path.rns_node_new_in_frame_bytes=48\n"));
+        assert!(output.contains("startup.node_path.rete_node_core_new_in_frame_bytes=528\n"));
+        assert!(output.contains("startup.node_path.rete_transport_new_in_frame_bytes=32\n"));
+        assert!(output.contains("startup.node_path.cumulative_frame_bytes=50640\n"));
+        assert!(output.contains("startup.node_path.required_stack_bytes=54736\n"));
+        assert!(output.contains("startup.supervisor_path.product_main_poll_frame_bytes=49776\n"));
+        assert!(output.contains("startup.supervisor_path.construct_supervisor_frame_bytes=144\n"));
+        assert!(
+            output.contains("startup.supervisor_path.supervisor_stage_finish_frame_bytes=592\n")
+        );
+        assert!(output.contains("startup.supervisor_path.cumulative_frame_bytes=50512\n"));
+        assert!(output.contains("startup.supervisor_path.required_stack_bytes=54608\n"));
         assert!(output.contains("startup.reserve_bytes=4096\n"));
-        assert!(output.contains("startup.required_stack_bytes=130400\n"));
-        assert!(output.contains("startup.raw_headroom_bytes=22952\n"));
-        assert!(output.ends_with("startup.policy_headroom_bytes=18856"));
+        assert!(output.contains("startup.maximum_cumulative_frame_bytes=50640\n"));
+        assert!(output.contains("startup.required_stack_bytes=54736\n"));
+        assert!(output.contains("startup.raw_headroom_bytes=119212\n"));
+        assert!(output.ends_with("startup.policy_headroom_bytes=115116"));
 
-        // This command intentionally replaces the stale individual-frame
-        // ceiling for the startup boundary with the measured cumulative path.
+        // The recursive in-place path drops the largest selected startup frame
+        // below the historical per-frame ceiling while retaining the stronger
+        // cumulative-path proof.
         assert!(
             reviewed.stack_sizes.maximum_frame_bytes
-                > HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES
+                < HISTORICAL_QUALIFIED_MAXIMUM_STACK_FRAME_BYTES
         );
 
         let mut regressed = reviewed.clone();
         regressed.stack_sizes.maximum_frame_bytes += 1;
         let error = regressed.validate().unwrap_err();
-        assert!(error.contains("largest compiler-emitted frame 64289"));
-        assert!(error.contains("audited product_main/NodeCore::new maximum 64288"));
+        assert!(error.contains("largest compiler-emitted frame 49777"));
+        assert!(error.contains("audited node/supervisor startup-path maximum 49776"));
 
         let mut regressed = reviewed.clone();
         regressed.stack.guard_offset_bytes = 64;
@@ -5360,10 +5470,10 @@ mod tests {
         assert!(error.contains("_RNvProduct10SUPERVISOR@0x3fc98188"));
 
         let mut regressed = reviewed.clone();
-        regressed.stack.usable_bytes = 130_399;
+        regressed.stack.usable_bytes = 54_735;
         let error = regressed.validate().unwrap_err();
-        assert!(error.contains("product_main poll and NodeCore::new"));
-        assert!(error.contains("exceeding the 130399-byte usable CPU0 stack by 1 bytes"));
+        assert!(error.contains("node construction path"));
+        assert!(error.contains("exceeding the 54735-byte usable stack by 1 bytes"));
 
         let mut empty = reviewed;
         empty.stack_sizes.record_count = 0;

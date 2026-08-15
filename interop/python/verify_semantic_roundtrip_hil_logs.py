@@ -48,7 +48,7 @@ EXPECTED_ROM_BOOT = "ESP-ROM:esp32s3-20210327"
 EXPECTED_COUNTED_RESET = (
     "rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)"
 )
-EXPECTED_RUNTIME_PATCH = "esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2"
+EXPECTED_RUNTIME_SOURCE = "esp-rtos-upstream-b50efcb-stack-words-v1"
 EXPECTED_PACKET_LENGTHS = {
     "InitiatorAnnounce": (167, 168),
     "ResponderAnnounce": (167, 168),
@@ -373,9 +373,9 @@ def _common_prefix(
     )
     verifier.exact("semantic-roundtrip NA915 profile", EXPECTED_PROFILE)
     verifier.exact(
-        "runtime patch identity",
-        "tx-hil stage=runtime-patch "
-        f"esp_rtos_main_stack_slice={EXPECTED_RUNTIME_PATCH}",
+        "runtime source identity",
+        "tx-hil stage=runtime-source "
+        f"esp_rtos_source={EXPECTED_RUNTIME_SOURCE}",
     )
     verifier.exact(
         "radio readiness",

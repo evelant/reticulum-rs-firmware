@@ -1,5 +1,9 @@
 # Usable-firmware POC: known limits and deferred work
 
+> This is the detailed engineering backlog, including source-level limits and
+> historical defect narratives. Use [current alpha status](status.md) for the
+> concise user-visible capability and limitation summary.
+
 This file records deliberate proof-of-concept limits that must not be mistaken
 for the intended final product boundary. The architecture remains
 transport-neutral and the full feature set is not constrained to boards without
@@ -39,25 +43,42 @@ proof unless a failing test promotes one into a release blocker.
   [powered repeat](e290-lxmf-chat-alpha-proof.md) reached `Delivered` and exact
   peer import in both directions; long-running contention and pressure remain
   unqualified.
-- The durable LXMF inbox has no delete, acknowledgement, compaction, or
-  retention-policy operation. Its stable handles are designed to survive a
-  future compactor, but the current store only appends.
+- The durable LXMF inbox now has an identity-bound, power-loss-safe
+  acknowledged-through watermark used for appliance notification state. The
+  app advances it only after durable local import, and boot rebaselines it when
+  an erased/recreated LXMF store reuses a numeric handle for different content.
+  The store still has no delete, compaction, or retention-policy operation and
+  only appends. Physical format 2 reads legacy format-1 records and writes new
+  first-arrival evidence in previously reserved header space. Once it appends
+  any format-2 record, format-1 firmware cannot safely roll back and mount that
+  mixed store; there is no downgrade migration. Collection acknowledgement is
+  not human read/unread state.
 - Received normalized LXMF and raw RNS inbox plaintext are stored unencrypted
   in their dedicated flash partitions. The selected outbound LXMF carrier and
   destination are likewise retained as plaintext intent in the durable
   submission journal. API authentication protects access over a bearer; it does
   not provide encryption at rest.
-- LXMF enumeration and reads are currently global to every authenticated
-  principal. They require no persisted permission bit and provide no
-  per-principal mailbox ACL or ownership filtering.
+- LXMF enumeration, reads, and collection acknowledgement are currently global
+  to every authenticated principal. They require no persisted permission bit
+  and provide no per-principal mailbox ACL, watermark, or ownership filtering.
 - A host read verifies the final normalized-wire SHA-256 from committed
   metadata. Individual flash chunks revalidate their extent headers but do not
   independently hash the complete message on every read.
+- An inbound LXMF message whose source identity has not yet been announced
+  retains its exact application-event authority so it can be admitted later.
+  The former one-second reacquire loop is closed: periodic retries use a
+  five-second initial base plus at most 20 percent deterministic jitter,
+  exponential bases whose complete interval stays below five minutes, and an
+  authenticated exact-source announce wakes matching entries
+  immediately. There is intentionally still no age expiry, so sixteen hostile
+  or permanently unresolved sources can occupy the bounded event profile until
+  reboot; selecting a retention/expiry policy remains production hardening.
 
 ## Basic outbound LXMF subset
 
 - The first semantic send operation composes only Python-compatible basic LXMF:
-  binary title and content, an empty fields map, and no stamp. It durably
+  binary title and content, no stamp, and either an empty fields map or the one
+  typed API-1.17 Sideband-compatible location field. It durably
   retains one exact complete signed LXMF wire through 431 bytes without
   selecting a delivery method; generic RNS destination DATA remains a separate
   383-byte intent. The current automatic policy uses the destination-stripped
@@ -66,7 +87,7 @@ proof unless a failing test promotes one into a release blocker.
   product-initiated outbound Links from a registry bounded to the native
   product table and prepares the exact complete wire as one Link DATA packet
   when required.
-  Propagated, Resource, ticket, stamp, attachment, and nonempty-fields sends
+  Propagated, Resource, ticket, stamp, attachment, and arbitrary-fields sends
   remain deferred. Empty title and empty content together are supported and
   match the independent Python vector.
 - The signing source is always the node's registered inbound Single
@@ -112,9 +133,10 @@ proof unless a failing test promotes one into a release blocker.
   DATA. The alpha has no generic capacity-pressure or LRU eviction policy, so
   maintenance is not otherwise guaranteed to free a slot. Exact direct
   Link-DATA `DeliveryTimeout` is narrower: current source evicts that precise
-  reusable handle and routes normal authenticated close, allowing a later
-  submission to establish a fresh Link. The failed submission itself remains
-  terminal and is not automatically retried.
+  reusable handle and routes normal authenticated close after the attempt's
+  exact terminal acknowledgement. The same accepted LXMF submission remains
+  durably `Preparing` and may establish a fresh Link on a later board-owned
+  attempt.
 - Direct DATA is now single-flight per exact Link from Active attempt through
   durable acknowledgement of its Terminal owner. A later direct-required or
   routed-overflow submission for the busy destination remains durably
@@ -145,18 +167,19 @@ proof unless a failing test promotes one into a release blocker.
 - The registry cannot yet map a responder-side Link to the remote
   `lxmf.delivery` identity, so responder/backchannel reuse is deferred. Link
   transactions, registry contents, path and deadline clocks, retry history, and
-  the Resource-wait marker are boot-volatile. Although the exact LXMF wire
-  remains journaled, current boot recovery conservatively finalizes
-  `Preparing` and `AwaitingDelivery` as `InterruptedByReset`; it does not resume
-  even provably pre-frame path discovery or Link establishment. Safe pre-I/O
-  resume needs a future durable state/schema distinction from work that may
-  have exposed a frame.
+  the Resource-wait marker are boot-volatile. The durable LXMF obligation is
+  not: current boot recovery restores an LXMF submission already in
+  `Preparing`, then arms a fresh carrier attempt after 15 seconds plus
+  deterministic jitter of at most 20 percent. It retains the same signed wire
+  and message ID but does not attempt to rehydrate the old receipt, ciphertext,
+  or Link. Raw RNS DATA still conservatively finalizes ambiguous `Preparing` or
+  `AwaitingDelivery` work as `InterruptedByReset`.
 - Link establishment expiry or loss clears the volatile transaction and the
   E290 firmware retries the still-`Preparing` message after one second. This can
   repeat indefinitely in the same boot: there is no boot-local attempt ceiling
   and no persisted retry budget. Within that boot, Link-MDU overflow remains
-  `Preparing` until Resource has bounded durable ownership and recovery; reset
-  applies the conservative `InterruptedByReset` rule above.
+  `Preparing` until Resource has bounded durable ownership and recovery; reboot
+  restores that obligation but does not add Resource support.
 - Basic composition currently uses allocation-backed Rete LXMF packing and
   signing before copying into caller storage. The E290 POC must measure heap
   high-water behavior. A bounded `encoded_len`/`pack_into` composer remains
@@ -165,6 +188,50 @@ proof unless a failing test promotes one into a release blocker.
   product range `1..=8_796_093_022_207_999` and must retain it across retries.
   This is a deliberately narrower, JavaScript-friendly subset of Python LXMF's
   binary64 timestamp. The firmware has no trusted wall clock yet.
+- Unknown destinations no longer terminalize after two path requests. The
+  device retains the same durable `Preparing` submission, runs throttled
+  two-request discovery cycles one minute apart, and bypasses the wait as soon
+  as a usable path is learned. This keeps no-path retry autonomous while the
+  board is powered, and boot restores the same `Preparing` obligation after its
+  delayed retry arm.
+- Each submission path-request offer is correlated with the exact ordinary
+  packet slot and reuse generation. Its response clock starts only after a
+  concrete interface reports a complete transmission: all LoRa frames reached
+  TxDone or the complete TCP frame was written. CAD denial, expiry, rejection,
+  partial transmission, and interface failure do not consume the request
+  ordinal; if every eligible hop returns without confirmation, the same offer
+  is retried after a bounded delay. Link-establishment and Nomad request timing
+  still use their existing router-admission correlation and need the same
+  physical-completion audit before adverse-link qualification.
+- Opportunistic and direct LXMF receipt expiry now retire only the volatile RNS
+  attempt. The logical submission stays in its one durable `Preparing` loop;
+  the next attempt cannot start until the old receipt/packet terminal has been
+  exactly acknowledged. Backoff bases are 5 seconds, 15 seconds, 60 seconds,
+  5 minutes, and then a capped 15 minutes, with deterministic additive jitter
+  no greater than 20 percent. One automatic retry may run globally, fresh sends
+  are preferred, and an exact destination path transition from unusable to
+  usable wakes only that destination. The signed LXMF wire and message ID stay
+  fixed while every RNS attempt gets fresh ciphertext and a fresh token.
+- The client no longer runs automatic rearm timers or wakes terminal rows on
+  startup, reconnect, Sync, or Nearby observations. Commit-before-send
+  reconciliation and status polling remain. Explicit same-row **Retry now** is
+  retained as a transitional action for legacy or permanently terminal rows;
+  it is not used to drive a current board-owned `Preparing` obligation. Source
+  and host regressions cover the autonomous policy, but receipt timeout,
+  disconnected-app retry, path wake, and reboot recovery still need powered
+  E290 qualification.
+- Persistent same-boot preparation pressure can currently return `NoAction`
+  while the runtime still reports a completed step. A continuously saturated
+  direct-Link or internal preparation resource may therefore make the firmware
+  poll that obligation without a retry delay. This does not lose the durable
+  LXMF message, but the pressure path still needs an explicit wake or bounded
+  delay before soak qualification.
+- Generic builds must provision at least as many projected-event slots as
+  durable submission slots. Boot recovery can otherwise encounter more pending
+  LXMF obligations than the projected-event FIFO can represent and make no
+  further recovery progress. The E290 production profile uses 128 slots for
+  both capacities; a compile-time relation or overflow recovery policy remains
+  future hardening for other board profiles.
 
 ## Static Nomad node responder
 
@@ -201,10 +268,78 @@ proof unless a failing test promotes one into a release blocker.
 
 ## Discovery and multiple transports
 
-- LoRa is the first active Reticulum transport, but submission, inbox, API, and
-  routing ports do not name LoRa or SX1262. USB is connected only as the local
-  client bearer; BLE, Wi-Fi, USB packet transport, and simultaneous
-  multi-interface routing have not yet been connected as Reticulum interfaces.
+- LoRa remains the only fully powered-qualified Reticulum transport, but
+  submission, inbox, API, and routing ports do not name LoRa or SX1262. The
+  `wifi-tcp-proof` composition adds an independent outbound TCP packet actor as
+  interface 2. Bounded powered evidence now covers BLE/Wi-Fi coexistence,
+  association and DHCP, a public-peer stream, native ingress, local announce
+  writes, DNS through the DHCP resolver, and one 420-second stable diagnostic
+  run. After the 2026-08-14 coherent upstream esp-rs jump, e13e88 restored its
+  existing station/peer configuration and reached the public TCP interface on
+  three consecutive boots; `rmap.world` resolved in 49, 72, and 33 ms, and the
+  first run admitted an announce observed nine hops away. The third run stayed
+  online through 25 bonded BLE connect/authenticate/drop cycles and ongoing
+  LoRa transmissions without a logged Wi-Fi, DNS, TCP, or reset failure.
+  Complete two-way LoRa/TCP forwarding, induced association-loss recovery, and
+  long soak remain unqualified. BLE, USB, and the Wi-Fi SoftAP proof remain
+  local management bearers rather than Reticulum packet interfaces.
+- The board retains at most four Wi-Fi profiles and exactly one active outbound
+  TCP peer. The peer may be literal IPv4 or a bounded hostname; DNS is resolved
+  again at each reconnect, with no multi-address racing or persisted last-known
+  address. The embedded resolver first gets one bounded attempt using DHCP DNS.
+  On failure, the actor raw-queries each DHCP-provided resolver, then gives
+  globally plausible dotted names bounded `1.1.1.1` and `9.9.9.9` attempts.
+  Common local/private suffixes never reach the public resolvers. API 1.10 and
+  the Expo Network card retain the gateway, DHCP list, built-in outcome,
+  raw-socket setup, per-resolver stage/result, response code, and successful
+  source/address so a system-resolver fault is distinguishable from UDP send,
+  route, response, and parse failures. The fallback parser validates the source
+  endpoint, transaction ID, response shape, and echoed question, but currently
+  accepts the first answer-section A record without proving that its owner
+  follows the requested-name/CNAME chain. That is a hardening defect, not a
+  blocker for the observed direct-A `rmap.world` response. A global Wi-Fi
+  switch suppresses station/TCP startup after reboot without deleting saved
+  profiles or the peer. Every material change still requires reboot. The app's
+  three source-linked public presets are convenience metadata only: they have
+  no health service, automatic failover, or cryptographic transport-ID pin.
+  Public peers are untrusted carriers under Reticulum's
+  [trustless-network model][rns-trust]; they can observe source IP, timing,
+  volume, and availability and can delay or drop traffic.
+- Automatic primary/LXMF/Nomad service announces have a durable switch separate
+  from Wi-Fi and RMAP. An authenticated manual request remains available when
+  that switch is off, but success means only that one spacing-aware service
+  cycle was queued. Repeated requests coalesce until the primary, optional
+  `lxmf.delivery`, and Nomad items have been consumed; the operation is not a
+  synchronous radio receipt. When RMAP is enabled, the same request also makes
+  its cached stamped discovery payload due. Queue, reset-between-items, and
+  RF-pressure behavior are host/source-qualified only.
+- Opt-in RMAP support registers an announce-only
+  `rnstransport.discovery.interface` destination and constructs the
+  [RMAP v4][rmap-info] flags, MessagePack `RNodeInterface` map, and 32-byte
+  cost-16 proof-of-work stamp without a resident expanded workblock. Stamp
+  search is cooperative and the cached payload is scheduled every six hours.
+  When a public TCP peer is configured, the initial due event remains pending
+  until interface 2 is online; LoRa-only configurations retain immediate
+  publication. This avoids consuming the six-hour cadence before the public
+  uplink can carry the announce.
+  Public ingestion, map presentation, proof-of-work timing under real load, and
+  interaction with ordinary LoRa traffic remain unpowered. There is no
+  withdrawal operation; after disabling discovery or location, the prior
+  marker can remain visible for RMAP's documented seven-day retention window.
+- Optional RMAP location comes from one explicit foreground phone capture, not
+  continuous tracking or onboard GNSS. The app defaults to roughly 100-metre
+  rounding before the board stores fixed E6 latitude/longitude. Firmware
+  retains no accuracy, capture time, phone identity, or altitude. The last
+  coordinate may remain stored while sharing is off, and changing or clearing
+  it takes effect only after reboot; an already published position remains
+  subject to the RMAP retention limit.
+- The app's RMAP radio-profile importer is local paste handling, not a live
+  RMAP lookup. It accepts exactly one copied Reticulum `RNodeInterface` block,
+  normalizes supported numeric values, applies the E290-facing validation, and
+  updates only an unsaved preview. Missing `txpower` retains the current draft
+  power; an explicit **Save for next restart** remains necessary. A successful
+  preview is neither regulatory authorization nor powered interoperability
+  evidence for that tuple.
 - Current source projects only authenticated `lxmf.delivery` announces into a
   volatile 32-peer table, with at most 256 application-data bytes per peer.
   API 1.5 pages one boot-scoped record at a time through the already
@@ -215,8 +350,22 @@ proof unless a failing test promotes one into a release blocker.
   fresh-contact **Add** remains unqualified; the direct-Link path was
   [qualified separately](e290-direct-link-powered-proof.md) with a forced
   oversize one-packet message.
-  The table expires no peers by age, and its current LoRa provenance has no
-  RSSI/SNR observation to report.
+  The table expires no peers by age. Current source carries the weakest
+  complete-packet LoRa RSSI/SNR observation through sealed ingress and records
+  the authoritative observing interface instead of assuming LoRa. TCP and
+  future non-radio interfaces explicitly report unknown signal values. The app
+  groups these authenticated observations by interface, including peers not
+  saved as contacts; it does not claim that this is a connected-peer roster or
+  an enumerable Reticulum route table. While the app is foregrounded and the
+  connected **Nearby** surface is visible, it refreshes this bounded projection
+  every ten seconds and advances observation ages locally from the successful
+  fetch time. Reads do not overlap: the next delay starts only after the
+  previous bounded page walk settles, and hiding the surface cancels its
+  pending timer. The host retry scheduler retains the table's boot incarnation
+  and generation: repeated reads of unchanged nonempty history do not wake
+  terminal retries, while a strictly newer same-incarnation observation does.
+  A board reboot establishes a new incomparable baseline rather than
+  fabricating freshness.
 - Nearby contact discovery is not appliance authorization. The current path
   does not scan phone-to-phone BLE, publish a public E290 share service, or
   implement the signed contact-card fallback reserved by ADR 0017. QR/deep
@@ -228,9 +377,44 @@ proof unless a failing test promotes one into a release blocker.
   workaround. Moving ownership into Rete requires a separately reviewed
   upstream/local commit and a deliberate dependency-pin update.
 - The wrapper suppresses rebroadcast of locally generated path responses and
-  is qualified for the current one-interface product. It does not yet retain
-  Python-style per-interface pending path-request forwarding state, so it must
-  be revisited before enabling simultaneous LoRa, Wi-Fi, and BLE routing.
+  is qualified for the current one-interface powered product. It does not yet
+  retain Python-style per-interface pending path-request forwarding state, so
+  it must be revisited before qualifying simultaneous LoRa and TCP routing.
+- Ingress-derived broadcasts now use the authoritative interface topology and
+  exact packet identity: a received announce or unknown path request from a
+  point-to-point TCP peer becomes `AllExcept` only for its matching forward,
+  while unrelated due/local announces in the same envelope remain `All`.
+  Shared-medium LoRa preserves same-interface forwarding and Rete's delayed
+  announce retry. Current source additionally marks LoRa `Internal` and TCP
+  `Boundary`, derives the exact allowed announce-egress ID set from the
+  authoritative registry, and applies that set only to the matching
+  ingress-derived announce. A public TCP announce therefore cannot enter LoRa;
+  local and LoRa announces may still reach TCP, and DATA, proofs, Links, and
+  path requests keep their ordinary targets. Any point-to-point announce whose
+  target is changed or suppressed has only its exact nonlocal native retry
+  removed, since Rete's pending queue does not retain the ingress role needed
+  to route that delayed copy safely. Restoring redundant delayed forwarding
+  requires Rete to carry per-entry ingress routing provenance.
+- `AllExcept` also has a known single-interface waiting limit: when the excluded
+  source is the only eligible interface, the ordinary router has no dispatch
+  candidate. The current alpha border profile therefore qualifies this policy
+  only with another eligible interface (normally LoRa); clean no-route
+  completion remains follow-up work.
+- The project-owned Full/Boundary/Internal announce subset does not implement
+  the complete mode-specific rules Reticulum documents for Access Point,
+  roaming, gateway, recursive path discovery, and per-egress announce caps
+  [interface][rns-interface-modes]. True border routing therefore remains
+  unqualified until those semantics and a powered two-direction gate pass.
+- The outbound TCP stream currently implements Reticulum's standard HDLC
+  framing but not Python Reticulum's TCP tunnel-synthesis/restoration behavior.
+  A first connection can exchange packets and announces, but learned-path
+  restoration across reconnects is not release-qualified until the tunnel
+  mechanism is implemented and interoperable.
+- The embedded TCP decoder currently accepts native Reticulum frames only up
+  to the 500-byte Rete core MTU. Python's TCP interface and hosted Rete TCP
+  transports allow larger stream frames. Oversized upstream frames are
+  therefore a known interoperability gap even though they do not prevent the
+  initial TCP connection or a small RMAP announce.
 - A queued LINKREQUEST remains bound to the retained route selected when it was
   created. If that route's interface becomes ineligible before first dispatch
   while another transport remains usable, the ordinary router can wait
@@ -240,6 +424,19 @@ proof unless a failing test promotes one into a release blocker.
   powered proof is unaffected, but route re-resolution and a bounded
   pre-dispatch establishment deadline are required before simultaneous
   multi-transport Link establishment is release-ready.
+- A retained route is considered usable when its selected local interface is
+  online; that check does not prove that a remote peer or retained repeater is
+  still reachable. Opportunistic LXMF DATA removes its exact retained path
+  after a delivery timeout is durably projected, so several already-active
+  attempts can still reuse the same stale route. There is no proactive
+  next-hop reachability check before dispatch.
+- Pinned Rete performs announce replay/dedup rejection before comparing the
+  candidate's hop count or ingress interface with the retained path. If the
+  same announce arrives over TCP and LoRa, whichever copy is accepted first
+  can suppress a later copy that would have produced the more useful route.
+  This did not affect the LoRa-only field configuration with no enabled TCP
+  peer, but it must be corrected or explicitly qualified before simultaneous
+  multi-interface route selection is release-ready.
 
 ## Client and product surface
 
@@ -295,28 +492,43 @@ proof unless a failing test promotes one into a release blocker.
   `SplashScreen` image. They did not prevent the bounded foreground BLE proofs,
   but the app configuration and launch artwork must be reconciled before
   claiming polished launch or background behavior.
+- Native iOS and Android builds now reconcile the app's durable inbound-import
+  activity journal into deduplicated local notifications while JavaScript is
+  foregrounded or resumes. A per-profile atomic watermark prevents historical
+  replay, exact-conversation foreground views are suppressed, and notification
+  taps select the owning appliance and sender. This does not provide reliable
+  locked-phone delivery: the BLE byte pump remains foreground-owned. Native
+  Core Bluetooth restoration/AccessorySetupKit and Android companion-device
+  lifecycle integration remain a separate phase.
 - Native first-run BLE discovery lists bounded service advertisements and
   requires explicit selection without connecting. The production display now
   renders the same exact six-character board suffix as the app card, so an
   operator can match a selected appliance without guessing which GPIO21 button
   belongs to it. The suffix and advertisement remain unauthenticated selection
   hints; only the credential-bound suite-3 session authenticates the device.
-- The permanent display actor now owns a static Home snapshot after its physical
-  boot-completion gate: board suffix, configured `LORA NA915` transport, BLE
+- The permanent display actor now owns a coordinated Home snapshot after its
+  physical boot-completion gate: board suffix, configured `LORA NA915`
+  transport, BLE
   local-app bearer, configured LXMF/Nomad services, and application setup
-  guidance. `PAIRED` is derived only from the active credential count in
-  publishable application authority, never from the BLE bond. An empty
-  authority, or pre-authority media with a resident initialization/recovery
-  pairing policy, shows pairing guidance; only the absence of both authority
-  and a pairing path reports the local API unavailable. A durably successful
-  application activation updates the cached setup fact before fallible client
-  response delivery and queues Paired Home; failures and timeouts remain
-  terminal. This snapshot is deliberately composition, not task-spawn
+  guidance. Application authority is composed first; an active authority with
+  a usable BLE bearer but no durable bond is then refined to
+  `BLE RECOVERY - OPEN APP`, while an empty authority continues to show initial
+  pairing guidance. `READY - OPEN APP` therefore no longer conflates a
+  preserved application credential with a missing Bluetooth bond. A durably
+  successful application activation updates the cached setup fact before
+  fallible client response delivery, and a successful replacement bond clears
+  the recovery presentation without claiming application reactivation;
+  failures and timeouts remain terminal. A durable uncollected-message count is
+  reconstructed at boot and projected as `NEW n`/`NEW 99+`; the transition to
+  nonzero and acknowledgement back to zero refresh promptly, while further
+  nonzero bursts are coalesced for five seconds. Pairing, recovery, boot, and
+  terminal pairing views retain priority over message telemetry. The remaining
+  Home fields are deliberately composition, not task-spawn
   completion or live health:
   `LORA`, `BLE`, `LXMF`, and `NOMAD` do not assert that an actor remains online
-  or connected. Live link state, queue/message counts, RF signal metadata,
-  storage pressure, and post-boot faults need a sole display-status coordinator
-  before they can be shown truthfully. Only the initial Home render has a
+  or connected. Live link state, outbound queue state, RF signal metadata,
+  storage pressure, and post-boot faults remain future display inputs. Only the
+  initial Home render has a
   physical completion gate. Pairing-success Home and timeout/failure terminal
   commands are accepted into the coalescing handoff without waiting for panel
   completion; a render fault can therefore leave stale e-paper pixels until a
@@ -381,15 +593,25 @@ proof unless a failing test promotes one into a release blocker.
   the latter value, but a later wire-version break should make the field names
   transport-neutral.
 - The native Rust bridge owns an app-private SQLite chat runtime and exposes
-  contacts, timelines, idempotent durable outbox writes, snapshots, sync, and
-  close through generated shared Rust DTOs. USB Serial/JTAG and USB OTG remain
-  deliberate native-app connector stubs. The foreground BLE central, native
-  Rust command/ack pump, and suite-3 connector are implemented with bounded
-  queues, one serialized write-with-response, indication subscription before
-  readiness, generation-bound disconnect ownership, and a web unsupported
-  stub. A separate Rust-owned browser qualifier uses Web Bluetooth only as an
-  opaque bounded GATT-byte relay. Host protocol fakes and native platform builds
-  pass. On 2026-07-23, the final disconnect-barrier production image,
+  contacts, the union of saved contacts and durable conversation peers,
+  timelines, bounded message-activity queries, idempotent durable outbox
+  writes, snapshots, sync, and close through generated shared Rust DTOs. The
+  Expo client can rename a saved contact without retargeting its authenticated
+  destination. An authenticated inbound message from an unsaved sender creates
+  a message request that can be opened and replied to before the sender is
+  saved; no reciprocal contact is required. Outbound-only unsaved history is
+  kept distinct so it is not mislabeled as authenticated inbound contact.
+  Saving either kind only adds phone-local display metadata and does not grant
+  device authority or change remote state. These client behaviors are
+  source/host-qualified, not yet covered by a dedicated powered two-phone
+  qualification. USB Serial/JTAG and USB OTG remain deliberate native-app
+  connector stubs. The foreground BLE central, native Rust command/ack pump,
+  and suite-3 connector are implemented with bounded queues, one serialized
+  write-with-response, indication subscription before readiness,
+  generation-bound disconnect ownership, and a web unsupported stub. A
+  separate Rust-owned browser qualifier uses Web Bluetooth only as an opaque
+  bounded GATT-byte relay. Host protocol fakes and native platform builds pass.
+  On 2026-07-23, the final disconnect-barrier production image,
   SHA-256 `74ce5f8a8ef5ddb1eec105a843c4fd633753585eaf81b592738f3f7b5c14b8ea`,
   was identity-safely flashed and read back on both 16 MiB `HT-RA62-HF` E290s.
   Board B (`AC:A7:04:E1:3F:88`) completed three consecutive direct macOS
@@ -421,11 +643,12 @@ proof unless a failing test promotes one into a release blocker.
   owner require the tracked module-wide/cross-instance ownership epoch (P2)
   before qualification. The app-private profile store can retain multiple
   device-keyed credentials and SQLite databases, but the alpha profile manager
-  still opens only one board at a time. A nearby candidate whose advertised name
-  matches a stored credential's expected BLE name must be presented as already
-  known and route to **Switch**, not a new pairing ceremony. That name is only an
-  unauthenticated discovery hint; same-device re-pairing when the name is absent
-  or misleading is not qualified. The board can activate a fresh credential
+  still opens only one board at a time. A nearby candidate whose normal or
+  recovery advertised name matches a stored credential must be presented as
+  already known and route to **Switch** or **Repair Bluetooth**, not a new
+  pairing ceremony. Those names are only unauthenticated discovery hints;
+  same-device re-pairing when both are absent or misleading is not qualified.
+  The board can activate a fresh credential
   before the create-only mobile profile rejects replacing a different
   credential for the same device ID, leaving explicit reconciliation work
   rather than a safe implicit rotation. Canonical Active scratch artifacts from
@@ -435,16 +658,31 @@ proof unless a failing test promotes one into a release blocker.
   one board is a separate limit: the device credential authority can retain
   independent application credentials, while the current E290 BLE profile
   retains one durable phone bond and a newly admitted phone replaces it. The
-  profile manager has no delete, credential revocation, or
-  credential-replacement action yet; switching back recovers the prior local
-  database after choosing the wrong board but does not revoke the authority
-  created on that board. The profile flow also has no factory-reprovision
-  recovery yet. A full board erase rotates the identity-derived BLE address but
-  retains the MAC-derived advertised name and device-API ID; the saved-name
-  guard correctly refuses to start a second pairing ceremony, while create-only
-  storage cannot replace the old credential. Until an explicit
-  remove/revoke/reprovision action exists, clearing this alpha app's complete
-  private data is the only local recovery. This must be fixed before a
+  profile manager now separates ordinary reconnect, replacement of a stale iOS
+  Bluetooth bond while retaining the appliance credential/database, and
+  confirmed deletion of an inactive local profile. Board-only recovery now
+  clears only the durable BLE bond after a continuous GPIO21 reset-time hold.
+  A bondless board advertises `reticulum-pair-<suffix>` while ordinary saved
+  profiles target only `reticulum-e290-<suffix>`, preventing their reconnect
+  loops from monopolizing the sole controller slot. Repair explicitly uses the
+  recovery name for both the SMP leg and the replacement phone's first
+  authenticated RDA1 session, then firmware returns to the normal name. GPIO21
+  remains released during discovery and is held again after the recovery link
+  opens. Powered qualification of this complete replacement-bond path remains
+  pending. The recovery-advertising phase is currently RAM-only: a reboot after
+  durable bond commit but before the first authenticated RDA1 session restores
+  the bond and normal name. Persisting that one transitional fact is required
+  for crash-complete recovery. iOS also requires the operator to use **Forget
+  This Device** when the current phone itself caches the stale platform bond,
+  because the BLE API cannot remove it.
+  Local profile deletion removes that phone's credential, messages, contacts,
+  and outbox, but does not revoke board authority or clear either side's
+  Bluetooth bond. Credential revocation, credential replacement, and
+  factory-reprovision recovery remain absent. A full board erase rotates the
+  identity-derived BLE address but retains the MAC-derived advertised name and
+  device-API ID; the saved-name guard correctly refuses to start a second
+  credential-creation ceremony, while create-only storage cannot replace the
+  old credential. Explicit revoke/reprovision must be implemented before a
   user-facing factory-reset operation ships. A bond command that times out after
   crossing to the flash owner correctly disables BLE until reboot, but the
   e-paper terminal still says `PAIR FAILED / PRESS 21 TO TRY AGAIN`; that rare
@@ -481,7 +719,7 @@ proof unless a failing test promotes one into a release blocker.
   [`ACCESS_LOCAL_NETWORK`](https://developer.android.com/privacy-and-security/local-network-permission);
   Android 17 otherwise blocks the connector's outgoing raw-LAN TCP traffic by
   default.
-- The application connection limit remains one, but esp-radio 0.18
+- The application connection limit remains one, but the pinned esp-radio
   `Config::with_max_connections` writes Espressif's total `ble_max_act`
   controller-activity count. Espressif's official
   [`CONFIG_BT_CTRL_BLE_MAX_ACT` reference](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32s3/api-reference/kconfig-reference.html#config-bt-ctrl-ble-max-act)
@@ -522,14 +760,83 @@ proof unless a failing test promotes one into a release blocker.
   LoRa node. `BleConnector::new` returns a recoverable error only for
   configuration validation; pinned esp-radio controller and esp-rtos paths can
   still panic/assert on scheduler, strict-internal allocation, or controller
-  initialization faults. Every ordinary production profile keeps the logger as
-  a no-op, including BLE/Wi-Fi profiles that retain native USB electrically and
-  at runtime as a diagnostics-only sink, so such a panic is silent. The
-  separately named diagnostic image enables USB Serial/JTAG output. Its powered
+  initialization faults. BLE/Wi-Fi production profiles now initialize USB
+  Serial/JTAG logging at `Info`, so alpha startup and lifecycle faults have a
+  persistent observation path whenever USB remains functional. The legacy
+  no-wireless profile still leaves logging uninitialized because its framed
+  RDA1 bearer owns the same FIFO. The powered
   activity-budget diagnosis closed the historical controller-budget blocker,
   and the later USB-visible stack diagnostic separately found and closed the
   observed `NodeCore::new` construction overflow described under the hardware
   profile. Neither bounded diagnosis closes this general hardening residual.
+- The Wi-Fi/BLE stack and runtime esp-rs crates are coherently pinned to
+  exact upstream revision
+  `b50efcb0dcd94b58ec337e511891057aa1f2e8fb`. It includes
+  [esp-hal #5776](https://github.com/esp-rs/esp-hal/pull/5776), which pairs
+  ESP32-S3 combo-PHY initialization with Wi-Fi RX enable/disable, and the
+  upstream `esp-rtos 0.3.0` source contains the corrected main-task stack-slice
+  element counts. No local esp-radio, esp-phy, or esp-rtos backport is selected.
+  The product explicitly sets the Wi-Fi station maximum to 60 quarter-dBm
+  (15 dBm) instead of relying on the controller default.
+- ESP32-S3 Wi-Fi station plus connected BLE is an
+  [officially supported coexistence mode](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/coexist.html),
+  not a mutually exclusive hardware configuration. The observed station
+  failure was instead bounded by strict internal memory: the former 72 KiB
+  image left 4,092 bytes after controller construction and roughly 3--4 KiB
+  after association/DHCP, then stopped producing Ethernet RX while association,
+  IPv4 configuration, and transmit-token availability remained healthy.
+  Wi-Fi driver and dynamic RX allocation cannot use the board's PSRAM through
+  the current esp-radio adapter. Station builds now add 48 KiB ordinary DRAM
+  for 120 KiB total internal heap. A 2026-08-14 A/B retained 53,244 bytes after
+  controller construction, 52,440 after DHCP, and 51,368 at authenticated BLE
+  application-session readiness; it then received public Reticulum announces
+  over TCP interface 2 for more than ten active-BLE minutes with no DNS, TCP,
+  RX, BLE, or station failure. Longer pressure, AP loss/recovery, and reconnect
+  churn remain required gates.
+- A 2026-08-14 powered run predating the boundary filter completed 282 LoRa
+  transmissions in 618 seconds after public TCP came online and rejected 24
+  additional ordinary owners whose deadlines were already insufficient. This
+  established that public announce propagation, not heap or SX1262 failure,
+  saturated LoRa. Current source blocks the high-volume Boundary-to-Internal
+  direction before ordinary dispatch and has host regressions for the exact
+  packet and interface IDs, but still needs powered qualification. It also
+  retains accepted public announces in Rete's bounded 64-entry path/identity
+  tables. Python's Boundary semantics likewise learns those routes, but its
+  hosted storage does not impose this embedded eviction profile. Public churn
+  can therefore still evict a useful LoRa-learned sender identity even though
+  it no longer consumes LoRa airtime. Reserve/protect Internal-learned entries
+  or otherwise bound Boundary occupancy before public-border operation is
+  release-qualified; future allowed high-speed-to-Full egresses also require a
+  Python-style per-egress announce cap.
+- The local post-boot announce schedule is bounded but airtime-heavy at slow
+  LoRa profiles. A 2026-08-14 two-board run showed the expected primary, LXMF,
+  and NomadNet startup sequence settle completely before three minutes. Each
+  destination is emitted in three identity-phased bootstrap cycles and Rete
+  retransmits every emission once, for 18 baseline ordinary transmissions per
+  boot before received-announce forwarding, path traffic, or proofs. At the
+  qualified SF10/BW125/CR4/5 profile, those full announces consume roughly 31
+  seconds of aggregate RF airtime and simultaneous boots can materially delay
+  DATA even though no scheduler loop is unbounded. Revisit the bootstrap count,
+  cadence, or profile-aware airtime budget before calling dense-network startup
+  efficient. Production logs also collapse local announces, retransmissions,
+  relays, path requests/responses, and proofs into `family=Ordinary`; add an
+  ordinary-packet purpose field before relying on USB logs for exact airtime
+  attribution.
+- Current upstream's
+  [`WifiTxToken::consume_token`](https://github.com/esp-rs/esp-hal/blob/b50efcb0dcd94b58ec337e511891057aa1f2e8fb/esp-radio/src/wifi/mod.rs#L1801-L1817)
+  still increments the global Wi-Fi TX in-flight count before the send path
+  validates that the station remains connected. If disconnect wins that race,
+  no completion callback returns the credit. Both RX and TX admission require
+  the count to remain below the configured queue size; this product uses three
+  credits, so three stranded credits can wedge traffic while association and
+  DHCP status still look healthy. The existing
+  [`embassy_wifi_drop` test](https://github.com/esp-rs/esp-hal/blob/b50efcb0dcd94b58ec337e511891057aa1f2e8fb/qa-test/src/bin/embassy_wifi_drop.rs#L40-L102)
+  exercises only one leak and therefore does not cover this terminal state.
+  The combo-PHY fix in #5776 does not close this separate lifecycle defect.
+  Reconnect churn, repeated DNS/TCP failure, and recovery remain required
+  hardware gates; do not claim the border interface reliable until the credit
+  lifecycle is corrected upstream or an explicitly reviewed alternative is
+  selected.
 - The host service has no operating-system single-instance lock, notification
   service, account migration, database encryption, activation-ambiguous repair,
   or cross-platform disconnect/host-suspend matrix. Managed profiles currently
@@ -539,26 +846,140 @@ proof unless a failing test promotes one into a release blocker.
   Current firmware accepts a canonical replacement handshake when the old
   session is idle, but a busy owner is never displaced and a terminal session
   fault still requires USB reset/re-enumeration.
-- SQLite schema 2 can bind a database to the authenticated device ID, primary
-  destination, and local LXMF destination. The host service performs and
-  enforces that binding; the foreground CLI does not yet. A schema-1 migration
-  starts unbound because the old rows cannot prove their source, so migrate only
-  a database already known to belong to that board. One database per paired
-  board remains mandatory.
-- GNSS/location integration is intentionally a stub. Location must later be an
-  optional service and must not couple core Reticulum routing to this board.
+- Current SQLite schema 9 retains schema 2's authenticated device ID, primary
+  destination, and local LXMF destination binding, schema 3's legacy persisted
+  automatic-rearm count, and schema 4's one-based app-submission field plus an
+  immutable message-activity journal. Schema 5 adds nullable first-arrival
+  interface/RSSI/SNR columns for inbound messages. Schema 6 gives every initial
+  outbound commit and successful explicit manual replacement a closed
+  phone-location stamp: either the validated phone fix and capture metadata
+  supplied at queue time or an explicit unavailable reason. The journal records
+  only durable application mutations: a novel inbound import; outbound commit,
+  device acceptance, or advanced device state; and a successful explicit
+  manual replacement. Historical automatic-rearm rows remain readable, but the
+  current app runtime creates no automatic rearm events. Replays and
+  unchanged/stale status polls do not fabricate events.
+  Queries are newest first, globally or scoped to one timeline sequence, with
+  pages bounded to 100 events and total retention bounded to 10,000 events.
+  The host service performs and enforces the device binding; the foreground CLI
+  does not yet. A schema-1 migration starts unbound because the old rows cannot
+  prove their source, so migrate only a database already known to belong to
+  that board. Any pre-schema-4 migration creates an empty journal alongside
+  existing current message state and permanently marks activity history
+  incomplete; pruning the oldest activity at the retention ceiling sets the
+  same honest marker. Pre-schema-5 inbound rows keep unknown ingress; no
+  historical signal is inferred. Migrating schema 5 marks legacy attempt
+  locations `not_observed` and history incomplete rather than inventing a fix.
+  Schema 7 adds idempotent boot/event radio-trace side tables without rebuilding
+  schema-6 message/activity/location state. Schema 8 adds all-or-none message-
+  location columns to inbound and outbox rows without inventing values for
+  legacy messages. Schema 9 adds an optional first-import receiver-phone fix to
+  inbound rows and preserves optional altitude plus vertical accuracy in phone
+  observations. It does not invent a receiver fix for legacy rows. The
+  in-memory restart image is schema 8 and accepts no older image schema.
+  One database per paired board remains mandatory.
+- Onboard GNSS integration is intentionally a stub. The current optional RMAP
+  coordinate is supplied by a one-shot phone action through the board-owned
+  configuration model; it does not couple location acquisition to core
+  Reticulum routing. Continuous refresh, onboard fixes, validated
+  mean-sea-level height, and powered public-location qualification remain open.
 - The current API exposes normalized LXMF bytes plus authenticated metadata.
   The chat alpha adds host-local contacts and timelines, but device-synchronized
   contacts, threading, delivery receipts at the LXMF layer, message deletion,
   propagation-node selection, attachments, and human-friendly error recovery
   remain application-layer work.
-- Unlike `submit-and-wait` and the raw-inbox qualification commands, current
-  LXMF list/read/send, chat-alpha, and appliance-service operations do not write
-  a structured evidence sidecar. The
-  [completed powered proof](e290-api14-lxmf-poc.md) manually retained the
-  authenticated stdout records, private read files, exact retry inputs, and
-  independently recorded hashes; product tooling should generate that bundle
-  atomically.
+- Timeline rows currently expose direction, message timestamp, message ID,
+  local outbox ID, current submission ID, one-based attempt number, consumed
+  legacy automatic-rearm count, lifecycle status, title, content, and current
+  packet length/SHA-256 evidence when projected by the device. Board-owned RNS
+  attempts do not become separate outbox rows; packet-correlated trace entries
+  expose their attempt tokens. The global Activity
+  surface and per-message details use the same durable journal to show queue,
+  acceptance, status, and retry transitions. Each journal timestamp is the
+  best-effort time at which the local app store observed and committed that
+  transition, not an RF time, remote-delivery time, or peer clock.
+  Inbound timeline rows now retain the exact first-arrival interface and
+  optional paired RSSI/SNR reported by the receiving appliance. Schema 9 can
+  additionally retain the receiver phone's latest available location when the
+  foreground app first imports that message. Both observations are immutable
+  receiver-local evidence; signal may describe a relay, while location is an
+  import-time phone fix rather than the appliance or exact RF-arrival position.
+  Outbound rows, legacy records, and transports without radio signal retain no
+  such ingress values. Activity events still do not duplicate the observation,
+  and no row contains end-to-end hop telemetry or remote receiver signal. The
+  separate schema-7 radio trace can correlate a local outbound attempt with
+  route, dispatcher, physical `TxDone`, proof-ingress, and terminal evidence.
+  Nearby announce readings describe a different packet and are never
+  substituted.
+- Field location telemetry is a durable phone-local opt-in. Once enabled it
+  remains enabled across app restarts and appliance switches until explicitly
+  turned off; only the boolean preference is stored outside the per-appliance
+  activity database. When enabled, the app durably stamps every initial send
+  and explicit manual replacement with the latest phone-location state,
+  including capture time,
+  accuracy, authorization precision, source, and mocked-device indication when
+  available. This is the phone position when the attempt was queued, not the
+  exact RF emission position or time and not board GNSS. Autonomous board
+  attempts reuse the existing submission observation without waking the app or
+  sampling the phone again, so field analysis must inspect capture time and
+  sample age. The Activity surfaces
+  expose these stamps locally, and correlated radio-trace JSON/CSV exports
+  include them. The Map plots the loaded history and, when an inbound message
+  has both a sender-attached location and the schema-9 receiver fix, draws a
+  solid endpoint line with horizontal distance, both reported phone elevations,
+  elevation delta, optional three-dimensional separation, and final-hop signal.
+  It remains endpoint evidence—not a measured RF path, board track, or Reticulum
+  route—and legacy inbound rows have no inferred receiver endpoint.
+- Sender-attached message location is a separate optional LXMF field. Each new
+  composer inherits a durable phone-local default but can override it. When
+  selected, the app requires a fresh foreground fix before committing the
+  outbox row; the board encodes only Sideband `FIELD_TELEMETRY` (`0x02`) and
+  signs it into the immutable message. Automatic and explicit retries retain
+  that original location and message ID instead of sampling again. Incoming
+  recognized locations are retained with the message and the app exposes full
+  details plus an OpenStreetMap action. Malformed optional telemetry is ignored
+  rather than making authenticated title/content unusable. The fields map can
+  occupy 52 bytes instead of the one-byte empty map, reducing the available
+  title/content budget by up to 51 bytes; arbitrary LXMF fields, attachments,
+  Resources, and field editing remain deferred.
+- Firmware now retains a 32-event boot-scoped trace ring and API 1.16 serves it
+  through a boot-aware three-event cursor. The app incrementally imports route
+  selection, DATA dispatch, physical `TxDone`, logical LoRa RX signal, and
+  proof/timeout terminal evidence into additive SQLite schema 7. Import is
+  idempotent, and a durable submission ID plus Reticulum attempt token correlates
+  each local message attempt even when identical payloads are retried. The
+  global Activity surface and per-message details read the same durable trace;
+  complete paginated JSON and RFC 4180 CSV export are available.
+- The board trace remains a bounded volatile handoff rather than a flight
+  recorder. More than 32 events while the app is disconnected can overwrite
+  evidence; a reboot before import loses the remaining ring. Both cases are
+  surfaced as incomplete history instead of silently filling gaps. Board event
+  times are monotonic since boot, app import time is a separate wall clock, and
+  the joined phone location is sampled when the attempt was queued—not at exact
+  RF emission. An outgoing trace cannot provide remote receiver RSSI; collect
+  and export the receiving appliance's logical-RX trace for that evidence.
+- The current trace is deliberately strongest for durable destination-DATA and
+  complete logical LoRa receive. It does not claim complete event coverage for
+  ordinary announces, all forwarding/control traffic, Link internals, or TCP,
+  whose transports have different evidence. Missing trace rows must therefore
+  not be interpreted as proof that no Reticulum traffic occurred.
+- The API 1.14 proof probe is one volatile, principal-owned, boot-scoped slot
+  and is not a monitoring service or durable test log. Success proves only
+  Reticulum path-and-proof reachability to an enabled `rnstransport.probe`
+  responder. It does not prove LXMF availability or throughput, and its RSSI/SNR
+  is measured at the initiating appliance on the returning proof's final hop,
+  which may be a relay—not at the remote receiver for the request. Public nodes
+  may disable the responder. A timeout currently leaves the retained route in
+  place, so another probe can repeat a stale-path failure; unlike a timed-out
+  opportunistic LXMF DATA attempt, it is not route repair. The source/host path
+  is qualified; powered cross-interface, multihop, pressure, reset, and
+  third-party responder tests remain open.
+- The app's radio-trace export is a structured local evidence snapshot, not an
+  atomic two-appliance field-test bundle. A rigorous range run must still
+  export both ends, record placement and antenna orientation, and preserve the
+  exact profile and device association. The
+  [completed powered proof](e290-api14-lxmf-poc.md) remains an example of
+  manually retaining authenticated evidence across both sides.
 - The identity-safe flash helper intentionally leaves native-USB E290s in the
   ROM loader after exact readback. Starting the application is still a separate
   operator step using the dependency set pinned in
@@ -574,17 +995,53 @@ proof unless a failing test promotes one into a release blocker.
 
 ## Hardware profile
 
+- The E290 owner admits one atomic frequency/BW/SF/CR/power tuple for the next
+  boot. It requires the complete occupied channel to fit the HT-RA62-HF
+  863--928 MHz path, SF7--12, CR 4/5--4/8, one of the supported canonical
+  SX1262 bandwidths, and a bandwidth/SF combination whose low-data-rate
+  optimization is qualified against RNode. Direct LoRa peers must match the
+  four modulation fields; power may differ. These product checks do not decide
+  regional frequency, bandwidth, duty-cycle, antenna, or EIRP legality.
+- DATA and ordinary packet owners still receive a fixed 30-second lease rather
+  than a lease derived from the selected radio profile. At the admitted
+  SF12/BW125/CR4/8 extreme, a 500-byte logical packet has 28,852,224 us of
+  exact RF airtime; setup, turnaround, reconciliation, maximum initial backoff,
+  and the configured CAD allowance raise the bounded path to 29,899,368 us
+  before earlier owner-handoff latency. That leaves only about 101 ms and
+  cannot accommodate the configured post-busy holdoff and another CAD attempt.
+  Profile-derived owner leases are required before the full advertised slow-
+  profile range can be considered outbound-reliable.
+- Power remains limited to the Semtech-optimal requested +14, +17, +20, and +22
+  dBm SX1262 high-power PA rows, with exact command-log coverage for each.
+  There is no separate +21 dBm row. +22 dBm requires adequate voltage and
+  current at the module, and no conducted-power, EIRP, thermal, interference,
+  configurable-modulation, or range qualification has yet been performed.
+  Follow the
+  [controlled range procedure](development/e290-range-testing.md)
+  rather than treating one roughly 500-metre failure or one successful packet
+  as a range result.
+- Network-configuration semantic formats 1 and 2 mount with the historical
+  915 MHz/BW125/SF7/CR4/5/+14 dBm profile; format 3 retains its power with that
+  historical modulation. Every material current mutation writes semantic
+  format 4 with the full tuple, which pre-format-4 firmware cannot mount. Erase
+  the network-configuration store before such a downgrade; the normal
+  merged-image flash preserves it. Legacy device-API key 9 and mutation kind 6
+  remain as a power projection and power-only update, while key 10 and kind 7
+  carry the atomic tuple. Saving any accepted profile changes only the
+  after-restart state; the active radio remains immutable until reboot.
 - The full E290 profile assumes external PSRAM. The resident submission runtime
   is initialized in place there. The current 128-entry target runtime is
   375,544 bytes; its 64-bit host fixture is 375,568 bytes. That includes an
   actor-owned replay scratch index which keeps boot, append validation, and
   compaction replay off the CPU stack while preserving the live index until a
   durable outcome. The complete permanent supervisor, including `NodeCore`, is
-  now also validated, boxed, and leaked in PSRAM before radio initialization.
+  now also validated, boxed, and leaked in PSRAM during boot composition.
   Channels, packet buffers, permit stores, Embassy task pools, and
   IRQ/DMA/cache-off state remain internal. The node's private identity now
   resides in PSRAM with that owner; this is not encryption or
-  physical-extraction resistance.
+  physical-extraction resistance. The Xtensa CPU stack itself cannot be placed
+  in PSRAM, so constructor frames remain internal and are audited from each
+  exact linked ELF.
 - The current final linked-path gate records default mount/append/compact sums
   of 79,376/54,320/54,112 bytes and runtime-measurement-HIL sums of
   54,352/54,656/54,448 bytes. Each path must additionally fit a 4,096-byte
@@ -594,22 +1051,31 @@ proof unless a failing test promotes one into a release blocker.
   allocator, stack-watermark, fill/pressure, and timing qualification before a
   release claim.
 - The installed ESP 15.2.0 toolchain emits a 64,288-byte compiler frame for
-  `NodeCore::new`. In the old production BLE ELF it nested beneath the
-  62,016-byte `product_main` poll frame against only 122,808 usable CPU0 stack
-  bytes: 126,304 bytes crossed the guard by 3,496 bytes before the reviewed
-  4,096-byte reserve. A powered diagnostic captured that exact stack-guard
-  panic at `main.rs:954`. Removing the duplicate internal supervisor
-  `StaticCell` and moving the complete supervisor to `ExternalMemory` before
-  the radio await leaves the frames unchanged but raises the fixed production
-  BLE ELF to 149,320 raw/149,256 usable stack bytes. The 130,400-byte
-  frames-plus-reserve requirement therefore has 18,856 bytes of linked-policy
-  headroom. The fixed diagnostic reached advertising with 40,996 internal-heap
-  bytes free and no panic; the fixed production image independently
-  advertised, authenticated over macOS CoreBluetooth, and returned identities.
-  This closes the specific startup defect, not powered flash/readback plus
-  simultaneous BLE/LoRa/cache-disabled interaction, pressure, or soak
-  qualification. The private node identity's new PSRAM residence also needs
-  explicit security review.
-- Non-PSRAM ESP32 boards may compile reduced profiles with services disabled.
-  They do not define the maximum product feature set, and fitting the complete
-  stack on the Tracker V2 is not a requirement.
+  `NodeCore::new`. The Wi-Fi/TCP image originally retained that construction
+  beneath an oversized async composition owner and overflowed CPU0 before the
+  node or BLE tasks could start. Isolating the mutually exclusive constructor
+  paths and returning only the PSRAM-backed supervisor reference reduces the
+  permanent `product_main` task pool from 110,096 to 30,496 bytes. The exact
+  corrected Wi-Fi/TCP ELF has 165,692 usable stack bytes, a 144,592-byte
+  maximum constructor-path requirement including the reviewed 4,096-byte
+  reserve, and 21,100 bytes of policy headroom. The corresponding BLE and
+  headless profiles have 74,008 and 118,744 bytes of policy headroom. CI
+  relinks and audits all three exact ELFs with compiler-emitted stack sizes.
+  This closes the specific startup overflow, not simultaneous
+  BLE/Wi-Fi/LoRa/cache-disabled pressure or soak qualification. The private
+  node identity's PSRAM residence also needs explicit security review.
+- The display's first Home/READY render deliberately precedes final
+  supervisor/interface/task composition so its large boot frame is dead before
+  the largest constructor paths. A rare later allocation, invariant, or task
+  token failure enters the synchronous fail-stop and can therefore leave the
+  e-paper showing stale READY rather than a terminal fault. Add a bounded
+  post-composition display transition when doing so no longer regresses the
+  linked startup-stack policy.
+- The full E290 image rejects less than 8 MiB of detected PSRAM at boot. Smaller
+  boards may retain separately selected reduced profiles, but non-PSRAM support
+  is not a requirement for the full appliance and must not constrain its
+  feature set.
+
+[rmap-info]: https://rmap.world/info.html
+[rns-interface-modes]: https://reticulum.network/manual/interfaces.html#interface-modes
+[rns-trust]: https://reticulum.network/manual/networks.html#trustless-networking

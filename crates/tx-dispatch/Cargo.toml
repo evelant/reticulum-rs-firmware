@@ -19,6 +19,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 embassy-futures.workspace = true
+reticulum-rns-rete = { path = "../rns-rete", default-features = false }
 static_cell.workspace = true
 
 [lib]

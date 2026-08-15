@@ -538,10 +538,13 @@ mod tests {
         coordinator
             .try_accept_completion(completion)
             .unwrap_or_else(|failure| panic!("completion failed: {:?}", failure.reason()));
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(30)),
-            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned { slot })
-        );
+            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
+                slot: returned_slot,
+                ..
+            }) if returned_slot == slot
+        ));
         assert_eq!(coordinator.parked_count(), 1);
     }
 

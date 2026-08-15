@@ -9,9 +9,9 @@ import { assertNativeBridgeContract } from "./native-contract.ts";
 
 const EXPECTED_CONTRACT = {
   bridgeApiMajor: 1,
-  bridgeApiMinor: 10,
+  bridgeApiMinor: 23,
   deviceApiMajor: 1,
-  deviceApiMinor: 6,
+  deviceApiMinor: 18,
   maxMessageBytes: 512,
   maxLxmfReadChunkBytes: 416,
   maxLxmfBasicTitleBytes: 295,
@@ -32,7 +32,7 @@ describe("native Rust bridge contract", () => {
         ...EXPECTED_CONTRACT,
         deviceApiMinor: EXPECTED_CONTRACT.deviceApiMinor + 1,
       }),
-    ).toThrow("deviceApiMinor: expected 6, observed 7");
+    ).toThrow("deviceApiMinor: expected 18, observed 19");
   });
 
   test("keeps BLE onboarding progress coarse and free of secret or path fields", () => {

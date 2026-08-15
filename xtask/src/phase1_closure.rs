@@ -20,9 +20,8 @@ const COMPLETE_CONTENT: &str = "reticulum.phase1-rx-closure-artifacts.v2\n";
 const MANIFEST_FILE: &str = "closure-artifact-preparation.json";
 const PREPARED_HASH_FILE: &str = "closure-prepared-artifacts.sha256";
 
-const FULL_STACK_RUSTFLAGS: &str = "-C link-arg=-nostartfiles -Z emit-stack-sizes";
-const FULL_STACK_RUSTFLAG_ARGUMENTS: &[&str] =
-    &["-C", "link-arg=-nostartfiles", "-Z", "emit-stack-sizes"];
+const FULL_STACK_RUSTFLAGS: &str = phase1_tooling::XTENSA_FINAL_LINK_RUSTFLAGS;
+const FULL_STACK_RUSTFLAG_ARGUMENTS: &[&str] = phase1_tooling::XTENSA_FINAL_LINK_RUSTFLAG_ARGUMENTS;
 const PACKAGE: &str = "reticulum-heltec-tracker-v2";
 const TARGET: &str = "xtensa-esp32s3-none-elf";
 
@@ -2251,8 +2250,10 @@ mod tests {
             assert!(encoded.contains(phase1_tooling::RUSTUP_HOME_REMAP));
             if id.full_stack() {
                 assert!(encoded.contains("emit-stack-sizes"));
+                assert!(encoded.contains("code-model=large"));
             } else {
                 assert!(!encoded.contains("emit-stack-sizes"));
+                assert!(!encoded.contains("code-model=large"));
                 for (name, _) in PROFILE_ENV {
                     assert!(!build.env.contains_key(*name));
                 }

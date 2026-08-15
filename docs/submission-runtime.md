@@ -86,14 +86,17 @@ in `Recovering`. Firmware must call `recover_boot_step()` until it reports
 2. commit one pending projector record;
 3. emit one ready post-durability Link-retirement control step, whose firmware
    consumer must synchronously close or retain every resulting ordinary action;
-4. attempt one acknowledgement unlocked by a durable record;
+4. attempt one acknowledgement unlocked by a durable record or by the
+   already-durable LXMF logical delivery obligation;
 5. observe one terminal owner, recovered owner, or new quarantine;
 6. prepare one intent whose `Preparing` barrier is already durable; or
 7. begin the durable `Queued -> Preparing` barrier for one queued intent.
 
 This guarantees that packet entropy and attempt ownership are not created
-before the no-replay barrier is committed, and that terminal or recovered
-owners are not released before their disposition or audit is committed. The
+before the no-replay barrier is committed. Generic terminal or recovered
+owners are not released before their disposition or audit is committed;
+coherent LXMF recovered owners are instead covered by the durable `Preparing`
+obligation and retain exact volatile acknowledgement correlation. The
 E290 scheduler exposes a ready retirement only with an empty local ordinary
 action-retention lane; a retained DATA frame may bypass quiescence only for
 persistence, never for this control consequence.

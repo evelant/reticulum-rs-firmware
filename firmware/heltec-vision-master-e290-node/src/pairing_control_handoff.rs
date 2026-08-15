@@ -174,11 +174,7 @@ impl ButtonObservationFlight {
         }
     }
 
-    /// Retain one exact observation for nonblocking transfer.
-    ///
-    /// Returns `false` without changing ownership when another observation is
-    /// already in flight.
-    pub fn try_schedule(
+    fn try_schedule(
         &mut self,
         at: PairingMillis,
         connection: ConnectionId,
@@ -193,6 +189,35 @@ impl ButtonObservationFlight {
             level,
         };
         true
+    }
+
+    /// Retain and immediately enqueue one observation before the bearer can
+    /// yield to another clock-owning task.
+    ///
+    /// The node pairing policy also polls timeouts from its own task. Merely
+    /// retaining an observation and waiting for a later bearer turn can let
+    /// that policy observe a newer timestamp first, making the otherwise
+    /// valid button observation look like a clock regression. This combined
+    /// operation makes the first command-transfer attempt in the same
+    /// non-yielding turn as timestamp capture while preserving the ordinary
+    /// retained-pressure behavior when the depth-one channel is occupied.
+    ///
+    /// `Ok(None)` means another observation was already owned. Otherwise the
+    /// returned progress is the result of the immediate transfer attempt.
+    pub fn try_schedule_and_poll<M>(
+        &mut self,
+        handoff: &mut UsbPairingHandoff<M>,
+        at: PairingMillis,
+        connection: ConnectionId,
+        level: ActiveLowButton,
+    ) -> Result<Option<ButtonObservationFlightProgress>, ButtonObservationReplyMismatch>
+    where
+        M: RawMutex + 'static,
+    {
+        if !self.try_schedule(at, connection, level) {
+            return Ok(None);
+        }
+        self.poll(handoff).map(Some)
     }
 
     /// Make one immediate command/reply transfer attempt without awaiting.
@@ -533,14 +558,14 @@ mod tests {
         assert!(usb.try_send_command(occupied).is_ok());
 
         let mut flight = ButtonObservationFlight::new();
-        assert!(flight.try_schedule(
-            PairingMillis::new(2),
-            active_connection,
-            ActiveLowButton::High
-        ));
         assert_eq!(
-            flight.poll(&mut usb),
-            Ok(ButtonObservationFlightProgress::Pending)
+            flight.try_schedule_and_poll(
+                &mut usb,
+                PairingMillis::new(2),
+                active_connection,
+                ActiveLowButton::High,
+            ),
+            Ok(Some(ButtonObservationFlightProgress::Pending))
         );
         assert_eq!(node.try_receive_command(), Some(occupied));
         assert_eq!(
@@ -579,6 +604,62 @@ mod tests {
     }
 
     #[test]
+    fn scheduling_enqueues_before_node_time_can_overtake_the_observation() {
+        let connection = connection(8);
+
+        let mut delayed_policy = PairingPolicy::new(PendingState::None);
+        assert_eq!(
+            delayed_policy.connected(PairingMillis::new(0), connection),
+            Ok(None)
+        );
+        let _ = delayed_policy.poll_timeout(PairingMillis::new(2));
+        assert!(matches!(
+            delayed_policy.observe_button(PairingMillis::new(1), ActiveLowButton::High),
+            ButtonEffect::Fault(_)
+        ));
+
+        let (mut bearer, mut node) = handoff();
+        let mut flight = ButtonObservationFlight::new();
+        assert_eq!(
+            flight.try_schedule_and_poll(
+                &mut bearer,
+                PairingMillis::new(1),
+                connection,
+                ActiveLowButton::High,
+            ),
+            Ok(Some(ButtonObservationFlightProgress::Pending))
+        );
+        let command = node
+            .try_receive_command()
+            .expect("the timestamped observation must be visible before the bearer yields");
+        let PairingControlCommand::ObserveButton {
+            at,
+            connection: routed,
+            level,
+        } = command
+        else {
+            panic!("the immediate command must be the scheduled observation");
+        };
+        assert_eq!(at, PairingMillis::new(1));
+        assert_eq!(routed, connection);
+        assert_eq!(level, ActiveLowButton::High);
+
+        let mut ordered_policy = PairingPolicy::new(PendingState::None);
+        assert_eq!(
+            ordered_policy.connected(PairingMillis::new(0), connection),
+            Ok(None)
+        );
+        assert!(matches!(
+            ordered_policy.observe_button(at, level),
+            ButtonEffect::None
+        ));
+        assert!(!matches!(
+            ordered_policy.poll_timeout(PairingMillis::new(2)),
+            reticulum_device_api_pairing_policy::PolicyEvent::Fault(_)
+        ));
+    }
+
+    #[test]
     fn delayed_button_replies_do_not_pause_raw_sampling_or_hide_one_hold() {
         let (mut usb, mut node) = handoff();
         let connection = connection(3);
@@ -593,12 +674,16 @@ mod tests {
         let mut last_publication = 0_u64;
         let mut acquisitions = 0_u8;
 
-        assert!(flight.try_schedule(PairingMillis::new(0), connection, ActiveLowButton::High));
-        publication.publication_queued();
         assert_eq!(
-            flight.poll(&mut usb),
-            Ok(ButtonObservationFlightProgress::Pending)
+            flight.try_schedule_and_poll(
+                &mut usb,
+                PairingMillis::new(0),
+                connection,
+                ActiveLowButton::High,
+            ),
+            Ok(Some(ButtonObservationFlightProgress::Pending))
         );
+        publication.publication_queued();
         let initial = node
             .try_receive_command()
             .expect("the initial release publication must cross the handoff");
@@ -665,13 +750,17 @@ mod tests {
                 && (publication.publication_due(now.saturating_sub(last_publication) >= 20))
             {
                 let level = publication.policy_level(debouncer.current());
-                assert!(flight.try_schedule(PairingMillis::new(now), connection, level));
+                assert_eq!(
+                    flight.try_schedule_and_poll(
+                        &mut usb,
+                        PairingMillis::new(now),
+                        connection,
+                        level,
+                    ),
+                    Ok(Some(ButtonObservationFlightProgress::Pending))
+                );
                 publication.publication_queued();
                 last_publication = now;
-                assert_eq!(
-                    flight.poll(&mut usb),
-                    Ok(ButtonObservationFlightProgress::Pending)
-                );
                 let command = node
                     .try_receive_command()
                     .expect("each scheduled observation must cross immediately");

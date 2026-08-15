@@ -14,20 +14,39 @@ import type {
   ApplianceSnapshot,
   ContactRequest,
   ContactView,
+  ConversationPeerView,
+  ManualServiceAnnounceDisposition,
+  MessageActivityPageRequest,
+  MessageActivityPageView,
   MutationResponse,
   NearbyPeerView,
+  NetworkConfigMutationOutcome,
+  NetworkConfigMutationRequest,
+  NetworkConfigView,
+  NetworkRuntimeStatusView,
   NoContent,
   NomadFetchPollRequest,
   NomadFetchPollResponse,
   NomadFetchStartRequest,
   NomadFetchStartResponse,
   OnboardingView,
+  PhoneLocationObservationView,
+  RadioRoutesStatusView,
+  RadioTracePageRequest,
+  RadioTracePageView,
   RecoveryRequest,
+  ReticulumProbePollRequest,
+  ReticulumProbePollResponse,
+  ReticulumProbeStartRequest,
+  ReticulumProbeStartResponse,
+  RetrySendRequest,
+  RetrySendResponse,
   SendRequest,
   SendResponse,
   TimelineView,
 } from "../generated/api.ts";
 import type { ApplianceClient } from "./appliance-client.ts";
+import type { BleBondRepairProgress } from "./ble-bond-repair.ts";
 import type { BleCandidate, BleGattProfile, BleScanOptions } from "./ble-central-types.ts";
 import { acquireExclusiveResource, type ExclusiveResource } from "./exclusive-resource.ts";
 import { nativePathFromFileUri } from "./file-uri.ts";
@@ -70,6 +89,10 @@ export interface NativeApplianceBridge {
   credentialStatus(appliance: NativeApplianceLike): NativeCredentialState;
   destroy(appliance: NativeApplianceLike): void;
   destroyProfileStore(profileStore: NativeProfileStoreLike): void;
+  forgetProfile?(
+    profileStore: NativeProfileStoreLike,
+    profileKey: string,
+  ): NativeProfileStoreSnapshot;
   importCredential(appliance: NativeApplianceLike, stagingPath: string): NativeCredentialSummary;
   open(profileStore: NativeProfileStoreLike): NativeApplianceLike;
   profileSnapshot(profileStore: NativeProfileStoreLike): NativeProfileStoreSnapshot;
@@ -161,7 +184,7 @@ type NativeBleOnboardingAction = "pair" | "resume" | "abort";
 export function bleGattProfileFromNative(profile: NativeBleGattProfile): BleGattProfile {
   return {
     indicateCharacteristicUuid: profile.txUuid,
-    maximumWriteValueBytes: profile.initialAttValueBytes,
+    maximumWriteValueBytes: profile.maximumAttValueBytes,
     securityConfirmationCharacteristicUuid: profile.securityConfirmationUuid,
     securityConfirmationReadyValue: new Uint8Array(profile.securityConfirmationReadyValue),
     serviceUuid: profile.serviceUuid,
@@ -528,6 +551,9 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
       destroyProfileStore(store): void {
         if (bindings.NativeProfileStore.instanceOf(store)) store.uniffiDestroy();
       },
+      forgetProfile(store, profileKey): NativeProfileStoreSnapshot {
+        return store.deleteInactiveProfile(profileKey);
+      },
       importCredential(appliance, stagingPath): NativeCredentialSummary {
         return appliance.importActivatedCredential(stagingPath);
       },
@@ -662,6 +688,20 @@ export class NativeApplianceClient implements ApplianceClient {
     return undefined;
   }
 
+  async forgetProfile(profileKey: string): Promise<NoContent> {
+    const normalizedProfileKey = profileKey.trim().toLowerCase();
+    const forgetting = this.#profileSwitchTail.then(
+      () => this.#forgetProfileSerialized(normalizedProfileKey),
+      () => this.#forgetProfileSerialized(normalizedProfileKey),
+    );
+    this.#profileSwitchTail = forgetting.then(
+      () => undefined,
+      () => undefined,
+    );
+    await forgetting;
+    return undefined;
+  }
+
   async #activateProfileSerialized(profileKey: string): Promise<void> {
     if (this.#disposed) throw new Error("native appliance client has been disposed");
     await this.#awaitReopening();
@@ -689,6 +729,62 @@ export class NativeApplianceClient implements ApplianceClient {
 
     await this.#switchProfile(runtime, catalog.activeProfileKey, target.profileKey);
     this.#lastBleOnboardingView = null;
+  }
+
+  async #forgetProfileSerialized(profileKey: string): Promise<void> {
+    if (this.#disposed) throw new Error("native appliance client has been disposed");
+    await this.#awaitReopening();
+    if (this.#ownerFault !== null) throw this.#ownerFault;
+    if (this.#bleOnboarding !== null || this.#additionalAppliance !== null) {
+      throw new Error("finish or cancel secure appliance pairing before forgetting a profile");
+    }
+    const runtime = this.#runtime;
+    if (runtime === null) throw new Error("native appliance client has not been bootstrapped");
+    const forget = runtime.bridge.forgetProfile;
+    if (forget === undefined) {
+      throw new Error("the installed native bridge cannot forget appliance profiles");
+    }
+
+    let catalog: NativeProfileStoreSnapshot;
+    try {
+      catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
+    } catch (error) {
+      throw normalizeNativeError(error, runtime.bridge.isNativeError);
+    }
+    const target = catalog.profiles.find((profile) => profile.profileKey === profileKey);
+    if (target === undefined) {
+      throw new Error("the selected appliance profile no longer exists");
+    }
+    if (catalog.activeProfileKey === target.profileKey) {
+      throw new Error("switch to another appliance before forgetting the active profile");
+    }
+
+    try {
+      const updated = forget.call(runtime.bridge, runtime.profileStore, target.profileKey);
+      if (updated.activeProfileKey !== catalog.activeProfileKey) {
+        throw new Error("forgetting an inactive profile unexpectedly changed the active appliance");
+      }
+      if (updated.profiles.some((profile) => profile.profileKey === target.profileKey)) {
+        throw new Error("the native profile store still lists the forgotten appliance");
+      }
+    } catch (error) {
+      const normalized = normalizeNativeError(error, runtime.bridge.isNativeError);
+      try {
+        const reconciled = runtime.bridge.profileSnapshot(runtime.profileStore);
+        if (
+          reconciled.activeProfileKey === catalog.activeProfileKey &&
+          !reconciled.profiles.some((profile) => profile.profileKey === target.profileKey)
+        ) {
+          return;
+        }
+      } catch (snapshotError) {
+        throw new AggregateError(
+          [normalized, normalizeNativeError(snapshotError, runtime.bridge.isNativeError)],
+          "The appliance profile could not be forgotten and its authoritative state could not be read back.",
+        );
+      }
+      throw normalized;
+    }
   }
 
   async beginAddAppliance(): Promise<NoContent> {
@@ -846,10 +942,63 @@ export class NativeApplianceClient implements ApplianceClient {
     return parseNativeJson("contacts", await this.#call((appliance) => appliance.contactsJson()));
   }
 
+  async conversationPeers(): Promise<ConversationPeerView[]> {
+    return parseNativeJson(
+      "conversation peers",
+      await this.#call((appliance) => appliance.conversationPeersJson()),
+    );
+  }
+
   async nearbyPeers(): Promise<NearbyPeerView[]> {
     return parseNativeJson(
       "nearby peers",
       await this.#call((appliance) => appliance.nearbyPeersJson()),
+    );
+  }
+
+  async networkConfig(): Promise<NetworkConfigView> {
+    return parseNativeJson(
+      "network configuration",
+      await this.#call((appliance) => appliance.networkConfigJson()),
+    );
+  }
+
+  async manualServiceAnnounce(): Promise<ManualServiceAnnounceDisposition> {
+    return parseNativeJson(
+      "manual service announce",
+      await this.#call((appliance) => appliance.manualServiceAnnounceJson()),
+    );
+  }
+
+  async networkStatus(): Promise<NetworkRuntimeStatusView> {
+    return parseNativeJson(
+      "network status",
+      await this.#call((appliance) => appliance.networkStatusJson()),
+    );
+  }
+
+  async radioRoutesStatus(): Promise<RadioRoutesStatusView> {
+    return parseNativeJson(
+      "radio and route diagnostics",
+      await this.#call((appliance) => appliance.radioRoutesStatusJson()),
+    );
+  }
+
+  async radioTrace(request: RadioTracePageRequest): Promise<RadioTracePageView> {
+    return parseNativeJson(
+      "radio trace",
+      await this.#call((appliance) => appliance.radioTraceJson(JSON.stringify(request))),
+    );
+  }
+
+  async mutateNetworkConfig(
+    request: NetworkConfigMutationRequest,
+  ): Promise<NetworkConfigMutationOutcome> {
+    // The serialized request can contain a passphrase. It is passed directly
+    // into Rust's zeroizing decoder and is never logged or retained here.
+    return parseNativeJson(
+      "network configuration mutation",
+      await this.#call((appliance) => appliance.mutateNetworkConfigJson(JSON.stringify(request))),
     );
   }
 
@@ -867,10 +1016,53 @@ export class NativeApplianceClient implements ApplianceClient {
     );
   }
 
+  async reticulumProbeStart(
+    request: ReticulumProbeStartRequest,
+  ): Promise<ReticulumProbeStartResponse> {
+    return parseNativeJson(
+      "Reticulum probe start response",
+      await this.#call((appliance) => appliance.reticulumProbeStartJson(JSON.stringify(request))),
+    );
+  }
+
+  async reticulumProbePoll(
+    request: ReticulumProbePollRequest,
+  ): Promise<ReticulumProbePollResponse> {
+    return parseNativeJson(
+      "Reticulum probe poll response",
+      await this.#call((appliance) => appliance.reticulumProbePollJson(JSON.stringify(request))),
+    );
+  }
+
   async timeline(destination: string): Promise<TimelineView[]> {
     return parseNativeJson(
       "timeline",
       await this.#call((appliance) => appliance.timelineJson(destination)),
+    );
+  }
+
+  async messageActivity(request: MessageActivityPageRequest): Promise<MessageActivityPageView> {
+    return parseNativeJson(
+      "message activity",
+      await this.#call((appliance) => appliance.messageActivityJson(JSON.stringify(request))),
+    );
+  }
+
+  async phoneLocationObservation(): Promise<PhoneLocationObservationView> {
+    return parseNativeJson(
+      "phone location observation",
+      await this.#call((appliance) => appliance.phoneLocationObservationJson()),
+    );
+  }
+
+  async updatePhoneLocationObservation(
+    observation: PhoneLocationObservationView,
+  ): Promise<PhoneLocationObservationView> {
+    return parseNativeJson(
+      "phone location observation update",
+      await this.#call((appliance) =>
+        appliance.updatePhoneLocationObservationJson(JSON.stringify(observation)),
+      ),
     );
   }
 
@@ -890,6 +1082,13 @@ export class NativeApplianceClient implements ApplianceClient {
     );
   }
 
+  async retryMessage(request: RetrySendRequest): Promise<RetrySendResponse> {
+    return parseNativeJson(
+      "retry send response",
+      await this.#call((appliance) => appliance.retryMessageJson(JSON.stringify(request))),
+    );
+  }
+
   async startOnboarding(candidate?: BleCandidate): Promise<NoContent> {
     await this.#awaitReopening();
     if (this.#additionalAppliance !== null) {
@@ -906,11 +1105,15 @@ export class NativeApplianceClient implements ApplianceClient {
         } catch (error) {
           throw normalizeNativeError(error, runtime.bridge.isNativeError);
         }
-        const known = catalog.profiles.find(
-          (profile) =>
-            normalizeBlePeripheralName(profile.credential.expectedBleLocalName)?.toLowerCase() ===
-            advertisedName,
-        );
+        const known = catalog.profiles.find((profile) => {
+          const normalName = normalizeBlePeripheralName(
+            profile.credential.expectedBleLocalName,
+          )?.toLowerCase();
+          const recoveryName = normalizeBlePeripheralName(
+            profile.credential.expectedBleRecoveryLocalName,
+          )?.toLowerCase();
+          return normalName === advertisedName || recoveryName === advertisedName;
+        });
         if (known !== undefined) {
           throw new Error(
             "This advertised appliance is already stored. Cancel adding and switch to its existing profile.",
@@ -1098,6 +1301,41 @@ export class NativeApplianceClient implements ApplianceClient {
     return undefined;
   }
 
+  /**
+   * Start or wake the active connector without invalidating a usable BLE GATT
+   * generation. This is the automatic foreground-recovery path.
+   */
+  async ensureConnected(): Promise<NoContent> {
+    await this.#awaitReopening();
+    const { appliance, ble, bridge } = this.#active();
+    const credential = this.#credentialState();
+    if (credential.state !== "active") {
+      throw new Error("Import an activated device credential before connecting.");
+    }
+    if (
+      ble !== null &&
+      credential.summary.expectedBleLocalName === undefined &&
+      !ble.hasPeripheralName
+    ) {
+      throw new Error(
+        "The active credential does not identify an exact BLE advertising name; refusing an untargeted scan.",
+      );
+    }
+    try {
+      if (ble === null) {
+        await appliance.ensureConnected();
+      } else {
+        if (credential.summary.expectedBleLocalName !== undefined) {
+          ble.configurePeripheralName(credential.summary.expectedBleLocalName);
+        }
+        await ble.ensureLink();
+      }
+    } catch (error) {
+      throw normalizeNativeError(error, bridge.isNativeError);
+    }
+    return undefined;
+  }
+
   async reconnect(): Promise<NoContent> {
     await this.#awaitReopening();
     const { appliance, ble, bridge } = this.#active();
@@ -1123,6 +1361,36 @@ export class NativeApplianceClient implements ApplianceClient {
         }
         await ble.reconnect();
       }
+    } catch (error) {
+      throw normalizeNativeError(error, bridge.isNativeError);
+    }
+    return undefined;
+  }
+
+  async repairBleBond(onProgress?: BleBondRepairProgress): Promise<NoContent> {
+    await this.#awaitReopening();
+    const { ble, bridge } = this.#active();
+    const credential = this.#credentialState();
+    if (credential.state !== "active") {
+      throw new Error("Complete appliance setup before repairing its Bluetooth bond.");
+    }
+    if (ble === null) {
+      throw new Error("Bluetooth bond repair is unavailable for this transport.");
+    }
+    if (
+      credential.summary.expectedBleLocalName === undefined ||
+      credential.summary.expectedBleRecoveryLocalName === undefined
+    ) {
+      throw new Error(
+        "The active credential does not identify exact normal and recovery BLE advertising names; refusing an untargeted bond repair.",
+      );
+    }
+    ble.configurePeripheralNames(
+      credential.summary.expectedBleLocalName,
+      credential.summary.expectedBleRecoveryLocalName,
+    );
+    try {
+      await ble.repairBond(onProgress);
     } catch (error) {
       throw normalizeNativeError(error, bridge.isNativeError);
     }
@@ -1441,7 +1709,10 @@ export class NativeApplianceClient implements ApplianceClient {
               bleConfig === undefined ? null : new NativeBleTransport(appliance, bleConfig);
             if (ble !== null && credential.state === "active") {
               if (credential.summary.expectedBleLocalName !== undefined) {
-                ble.configurePeripheralName(credential.summary.expectedBleLocalName);
+                ble.configurePeripheralNames(
+                  credential.summary.expectedBleLocalName,
+                  credential.summary.expectedBleRecoveryLocalName,
+                );
               }
               if (ble.hasPeripheralName) ble.start();
             }

@@ -11,10 +11,34 @@ The selected integration is UniFFI `0.31.0` through the pinned
 builds compile this crate and have executed its immutable contract query.
 Platform packaging belongs to the Expo client, while this crate remains
 independent of React Native, iOS, Android, and application UI lifecycles.
-Contacts, timelines, and idempotent outbox writes work offline immediately.
+Contacts, saved-or-unsaved conversation peers, timelines with optional
+receiver-local first-arrival evidence and authenticated message location,
+bounded durable message-activity queries, and idempotent outbox writes work
+offline immediately.
 Nearby-peer refreshes page the authenticated device's volatile discovery
 projection through the same single-owner actor. Rust handles boot-scoped
 cursors and LXMF announce metadata, then returns only semantic JSON to Expo.
+The same actor owns redacted network-configuration reads, live network status,
+and compare-and-swap Wi-Fi/Reticulum-TCP mutations. Secret-bearing mutation
+JSON and its parsed runtime DTO are zeroized at the native boundary; generated
+bindings expose only an opaque JSON string rather than a second copy of the
+protocol model.
+Message location crosses the native boundary only through the generated shared
+request and timeline DTOs. Rust durably binds it to the outbox material; the
+TypeScript composer supplies the validated phone fix but does not duplicate the
+device-API or persistence wire model.
+
+`radio_routes_status_json` returns the same generated, bounded diagnostics
+projection used by the loopback HTTP service. Rust aggregates stable route
+pages; TypeScript receives lowercase public hashes and semantic local state,
+not pagination cursors or claims that retained routes are connected peers.
+The generated `reticulum_probe_start_json` and `reticulum_probe_poll_json`
+methods serialize one volatile API 1.14 probe through the same actor-owned
+authenticated session. They do not write the chat or activity stores; a
+successful return is Reticulum proof evidence, not an LXMF or throughput test.
+`radio_trace_json` exposes the runtime's validated API-1.16 durable trace query
+without duplicating its DTOs across the native bridge. It is a local SQLite
+read; background session synchronization owns board pagination and import.
 USB serial/JTAG and USB OTG remain explicit unavailable connector stubs: their
 stable variants and errors reserve the boundary without claiming that a bearer
 works or silently selecting another one.
@@ -47,9 +71,11 @@ time and advances Rust I/O only after write-with-response succeeds. Indications
 feed the same RDA1 stream without a second fragmentation protocol. Link loss,
 overflow, an ambiguous write deadline, and session-lease release all wake
 blocked operations and require explicit GATT teardown before another generation
-can replace the link. The platform reports its write-with-response capability,
-but GATT 1.0 caps every emitted characteristic value to the firmware profile's
-fixed 20-byte initial-ATT bound.
+can replace the link. The platform reports one conservative single-write
+capability. The native bridge retains that negotiated value, caps it at the
+generated 248-byte profile maximum, and keeps 20 bytes as the mandatory ATT
+fallback. On iOS the capability is the lower of CoreBluetooth's with-response
+and without-response maxima; on Android it follows the requested ATT MTU.
 
 `NativeBleOnboarding` is a separate native owner with a separate BLE byte hub,
 so the ordinary authenticated appliance actor cannot claim a pre-authentication
@@ -75,7 +101,10 @@ reports the old generation, calls destructive `reconnect` while no replacement
 can be claimed, then registers the fresh generation and calls
 `ensure_connected`. Preserving that order prevents the actor from racing ahead
 and acquiring a new link that a late destructive reconnect would immediately
-release.
+release. Automatic foreground recovery uses the same non-destructive ensure
+path: retries coalesce during GATT setup and retain an already usable generation
+while the actor is still reaching ClientHello. Only an explicit operator
+reconnect replaces that generation.
 
 These proof suites provide authentication and integrity, not confidentiality.
 Future adapters should preserve this composition rather than reimplementing

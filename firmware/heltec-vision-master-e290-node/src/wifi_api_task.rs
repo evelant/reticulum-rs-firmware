@@ -5,6 +5,10 @@
 //! live pairing: the board must already own an Active credential provisioned
 //! by the ordinary USB profile. Only one TCP connection is accepted at a time.
 //! The bearer is a local administration edge, not a Reticulum interface.
+#![allow(
+    clippy::too_many_arguments,
+    reason = "Embassy task macro expansion retains the eight independently owned capabilities at this module boundary"
+)]
 
 use core::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -77,7 +81,7 @@ impl WifiHandoffs {
 pub(crate) struct WifiComposition {
     controller: WifiController<'static>,
     stack: Stack<'static>,
-    runner: Runner<'static, Interface<'static>>,
+    runner: Runner<'static, Interface>,
 }
 
 impl WifiComposition {
@@ -86,7 +90,7 @@ impl WifiComposition {
     ) -> (
         WifiController<'static>,
         Stack<'static>,
-        Runner<'static, Interface<'static>>,
+        Runner<'static, Interface>,
     ) {
         (self.controller, self.stack, self.runner)
     }
@@ -105,7 +109,8 @@ pub(crate) fn compose(
         .with_auth_method(AuthenticationMethod::Wpa2Personal)
         .with_password(profile::SOFTAP_DEVELOPMENT_PASSPHRASE.into())
         .with_max_connections(profile::SOFTAP_MAX_STATIONS);
-    let (controller, interfaces) = esp_radio::wifi::new(
+    let access_point_interface = Interface::access_point();
+    let controller = WifiController::new(
         wifi,
         ControllerConfig::default().with_initial_config(WifiConfig::AccessPoint(access_point)),
     )?;
@@ -118,8 +123,7 @@ pub(crate) fn compose(
     });
     let resources =
         NETWORK_RESOURCES.init(StackResources::<{ profile::NETWORK_STACK_RESOURCES }>::new());
-    let (stack, runner) =
-        embassy_net::new(interfaces.access_point, network, resources, random_seed);
+    let (stack, runner) = embassy_net::new(access_point_interface, network, resources, random_seed);
 
     Ok(WifiComposition {
         controller,
@@ -178,7 +182,7 @@ pub async fn run(
 
 /// Drive the Embassy network stack forever.
 #[embassy_executor::task]
-pub async fn run_network(mut runner: Runner<'static, Interface<'static>>) {
+pub async fn run_network(mut runner: Runner<'static, Interface>) {
     runner.run().await
 }
 

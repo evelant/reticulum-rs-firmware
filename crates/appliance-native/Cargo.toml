@@ -12,7 +12,7 @@ getrandom.workspace = true
 hex.workspace = true
 rand_core.workspace = true
 reticulum-device-client = { path = "../device-client" }
-reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad", "experimental-network-config"] }
 reticulum-device-api-ble = { path = "../device-api-ble" }
 reticulum-device-api-pairing = { path = "../device-api-pairing", default-features = false }
 reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
@@ -23,11 +23,12 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 uniffi = { workspace = true, features = ["tokio"] }
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
 reticulum-device-api-framing = { path = "../device-api-framing" }
 reticulum-device-api-session = { path = "../device-api-session" }
+reticulum-lxmf-chat-core = { path = "../lxmf-chat-core" }
 
 [lib]
 crate-type = ["lib", "staticlib"]

@@ -78,6 +78,7 @@ fn event(fixture: &MessageFixture) -> ApplicationEvent {
     ApplicationEvent::DataReceived {
         destination: array(&fixture.destination_hash_hex),
         payload: decode(&fixture.ingress.payload_hex),
+        ingress: None,
     }
 }
 
@@ -459,6 +460,7 @@ fn link_data_actions_for_role(
         binding,
         data,
         context,
+        ..
     } = &received.actions.events[0]
     else {
         panic!("fixture receiver must emit Link DATA")
@@ -521,12 +523,13 @@ fn rebind_reports_typed_event_carrier_mismatch_without_revalidating_wire() {
         panic!("basic Python fixture must validate")
     };
     let evidence = validated.evidence();
-    let metadata = metadata_from_evidence(evidence).expect("validated metadata is portable");
+    let metadata = metadata_from_evidence(evidence, None).expect("validated metadata is portable");
     drop(validated);
 
     let wrong_destination = ApplicationEvent::DataReceived {
         destination: [0xa5; 16],
         payload: decode(&fixture.ingress.payload_hex),
+        ingress: None,
     };
     assert_eq!(
         rebind_candidate(&wrong_destination, evidence, metadata),
@@ -538,6 +541,7 @@ fn rebind_reports_typed_event_carrier_mismatch_without_revalidating_wire() {
     let wrong_length = ApplicationEvent::DataReceived {
         destination: array(&fixture.destination_hash_hex),
         payload: vec![0; evidence.carrier_payload_len() - 1],
+        ingress: None,
     };
     assert_eq!(
         rebind_candidate(&wrong_length, evidence, metadata),
@@ -568,8 +572,8 @@ fn rebind_reports_typed_event_carrier_mismatch_without_revalidating_wire() {
         panic!("direct Python fixture must validate")
     };
     let direct_evidence = direct_validated.evidence();
-    let direct_metadata =
-        metadata_from_evidence(direct_evidence).expect("validated direct metadata is portable");
+    let direct_metadata = metadata_from_evidence(direct_evidence, None)
+        .expect("validated direct metadata is portable");
     drop(direct_validated);
     let direct_event = direct_lease
         .acknowledge()
@@ -581,6 +585,7 @@ fn rebind_reports_typed_event_carrier_mismatch_without_revalidating_wire() {
         binding,
         data,
         context: 0x5a,
+        ingress: None,
     };
     assert_eq!(
         rebind_candidate(&wrong_context, direct_evidence, direct_metadata),
@@ -708,7 +713,7 @@ fn retained_responder_link_exact_replay_over_one_active_link_is_durable_before_e
     .enumerate()
     {
         let now = 5 + ordinal as u64;
-        let (actions, packet_hash) = retained_link_data_over_active_link(
+        let (mut actions, packet_hash) = retained_link_data_over_active_link(
             &mut sender,
             &mut receiver,
             &link_id,
@@ -716,6 +721,7 @@ fn retained_responder_link_exact_replay_over_one_active_link_is_durable_before_e
             now,
             &mut rng,
         );
+        actions.attach_ingress_observation(7, Some((-94 + ordinal as i16, 3)));
         let lease = offer_actions(&mut event_owner, actions);
         assert!(lease.has_retained_proof());
         let event_id = lease.id();
@@ -724,6 +730,7 @@ fn retained_responder_link_exact_replay_over_one_active_link_is_durable_before_e
                 binding,
                 data,
                 context,
+                ..
             } => {
                 assert_eq!(binding.link(), link_id.as_bytes());
                 assert_eq!(binding.role(), ApplicationLinkRole::Responder);
@@ -779,6 +786,14 @@ fn retained_responder_link_exact_replay_over_one_active_link_is_durable_before_e
         assert_eq!(
             metadata.lengths().carrier_payload() as usize,
             decode(&fixture.ingress.payload_hex).len()
+        );
+        assert_eq!(
+            metadata.ingress_observation(),
+            Some(InboundTransportObservation::new(
+                InboundInterfaceId::new(7),
+                Some(InboundSignalObservation::new(-94, 3)),
+            )),
+            "the first durable Link carrier remains authoritative"
         );
         assert!(!payload_pointer.is_null());
         assert_eq!(sender.link_state(&link_id), Some(LinkState::Active));
@@ -907,6 +922,78 @@ fn retained_proof_is_preclassified_then_capacity_checked_before_store_io() {
     lease.quarantine(ApplicationEventQuarantineReason::ConsumerDeferred);
     assert_eq!(store.message_count(), 0);
     assert_eq!(event_owner.counters().acknowledged_events, 0);
+}
+
+#[test]
+fn opportunistic_replay_preserves_first_arrival_interface_and_signal() {
+    let fixture = basic_fixture();
+    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
+    let source = array::<16>(&fixture.source_hash_hex);
+    let public_key = array::<64>(&fixture.source_public_key_hex);
+    let resolver = |candidate: &[u8; 16]| (candidate == &source).then_some(public_key);
+    let mut access = BoundLxmfStore::new(FakeNor::erased(), binding());
+    let mut index = store_index::<1>();
+    let mut store = mount(&mut access, &mut index).expect("empty store mounts");
+    let mut event_slots = [ApplicationEventSlot::new()];
+    let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+    let mut proof_slots = [DelayedProofSlot::new(), DelayedProofSlot::new()];
+    let mut delayed_proofs = DelayedProofOwner::new(&mut proof_slots);
+
+    let mut first_actions = proof_bearing_actions_on(&fixture, InterfaceId(7));
+    first_actions.attach_ingress_observation(7, Some((-101, -4)));
+    let first = offer_actions(&mut event_owner, first_actions);
+    let DurableIngressOutcome::Durable(first) = commit_application_event(
+        first,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("first observed carrier must commit")
+    };
+    assert_eq!(first.kind(), DurableIngressCommitKind::New);
+    let handle = first.receipt().handle();
+    let first_observation = InboundTransportObservation::new(
+        InboundInterfaceId::new(7),
+        Some(InboundSignalObservation::new(-101, -4)),
+    );
+    assert_eq!(
+        store
+            .metadata(handle)
+            .expect("committed message metadata")
+            .ingress_observation(),
+        Some(first_observation)
+    );
+
+    let mut replay_actions = proof_bearing_actions_on(&fixture, InterfaceId(9));
+    replay_actions.attach_ingress_observation(9, Some((-72, 11)));
+    let replay = offer_actions(&mut event_owner, replay_actions);
+    let DurableIngressOutcome::Durable(replay) = commit_application_event(
+        replay,
+        DurableIngressProofMode::Required,
+        &mut delayed_proofs,
+        local,
+        limits(),
+        &resolver,
+        StampPolicy::NotRequired,
+        &mut store,
+        &mut access,
+    ) else {
+        panic!("replayed carrier must reconcile")
+    };
+    assert_eq!(replay.kind(), DurableIngressCommitKind::Replay);
+    assert_eq!(replay.receipt().handle(), handle);
+    assert_eq!(
+        store
+            .metadata(handle)
+            .expect("first committed metadata remains authoritative")
+            .ingress_observation(),
+        Some(first_observation)
+    );
 }
 
 #[test]
@@ -1710,7 +1797,7 @@ fn same_id_different_authenticated_material_collision_returns_exact_lease() {
         panic!("seed fixture must validate")
     };
     let evidence = validated.evidence();
-    let authentic_metadata = metadata_from_evidence(evidence).expect("validated metadata");
+    let authentic_metadata = metadata_from_evidence(evidence, None).expect("validated metadata");
     let conflicting_material = AuthenticatedMaterialFingerprint::new([0xa5; 32]);
     assert_ne!(
         conflicting_material,

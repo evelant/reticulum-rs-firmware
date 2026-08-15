@@ -1,0 +1,27 @@
+[package]
+name        = "rete-stack"
+description = "Runtime-agnostic async interface traits for rete"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+keywords.workspace   = true
+categories.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = []
+hosted = ["rete-transport/hosted"]
+serde = ["dep:serde", "rete-transport/serde", "rete-core/serde"]
+
+[dependencies]
+rete-core = { workspace = true }
+rete-transport = { workspace = true }
+serde = { workspace = true, optional = true }
+embedded-io-async = { workspace = true }
+rand_core = { workspace = true }
+heapless = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+rand = "0.8"

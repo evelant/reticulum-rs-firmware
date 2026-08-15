@@ -553,8 +553,8 @@ the formal powered qualification matrix.
 
 The safe image remains below its reviewed cap and its final defined-symbol
 inventory retains no name matching a LoRa/SX126x radio operation. It also
-retains the exact local `esp-rtos` stack-unit patch identity while keeping all
-lab-only retained state absent.
+retains the exact reviewed upstream `esp-rtos` runtime-source identity while
+keeping all lab-only retained state absent.
 
 Relative to the earlier 312,967/9,348/463,480/785,795 lab baseline, the current
 receive-only façade, radio/fault/heap telemetry, raw-packet SHA-256, bounded
@@ -756,8 +756,9 @@ gates.
 - Both the unchanged default `safe-idle` image and the explicit lab RX image
   build from one locked workspace for `xtensa-esp32s3-none-elf`.
 - Every qualifying `esp-rtos`-based Tracker ELF contains the exact identity
-  marker `esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2`, proving it was built
-  with the reviewed CPU0 and CPU1 main-stack unit corrections. This applies to `safe-idle`, normal,
+  marker `esp-rtos-upstream-b50efcb-stack-words-v1`, proving it was built with
+  the reviewed upstream source containing the CPU0 and CPU1 main-stack unit
+  corrections. This applies to `safe-idle`, normal,
   pressure, electrical and returned-fault images. The RF-inert reset-journal
   HIL binaries use `esp_hal::main` instead and must not be rejected for lacking
   that marker.

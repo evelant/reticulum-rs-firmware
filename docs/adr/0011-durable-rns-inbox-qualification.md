@@ -461,7 +461,7 @@ addresses resolved from the exact HIL ELF. For those immediate raw-RNS proofs,
 receiver generated tags must correlate with sender Delivered or timeout tags,
 and durable payload readback remains the inbox success oracle.
 The complete artifact naming and counter/tag acceptance matrix are frozen in
-the [E290 runbook](../e290-node.md#decisive-proof-correlation-trial-runbook).
+the [E290 runbook](../e290-node.md#historical-decisive-proof-correlation-trial-runbook).
 Board `3f:88` must first be physically re-enumerated and recovered from its
 interrupted pre-write reset at this checkpoint; no result is claimed from the
 one-board baseline.

@@ -8,6 +8,7 @@ import type {
   NativeBridgeContract,
   NativeCredentialSummary,
   NativeProfileStoreLike,
+  NativeProfileStoreSnapshot,
   NativeProfileSummary,
   NativeTransport,
 } from "@reticulum/appliance-native";
@@ -60,6 +61,7 @@ const E290_CREDENTIAL: NativeCredentialSummary = {
   credentialId: "cd".repeat(16),
   deviceId: "653239302d6170692d31e13e88",
   expectedBleLocalName: "reticulum-e290-e13e88",
+  expectedBleRecoveryLocalName: "reticulum-pair-e13e88",
   generation: 1n,
 };
 const E290_PROFILE: NativeProfileSummary = {
@@ -87,8 +89,111 @@ function emptyBleScan(): Promise<readonly BleCandidate[]> {
   return Promise.resolve([]);
 }
 
+function networkApiStubs() {
+  return {
+    async phoneLocationObservationJson(): Promise<string> {
+      return JSON.stringify({ state: "unavailable", reason: "not_observed" });
+    },
+    async updatePhoneLocationObservationJson(observationJson: string): Promise<string> {
+      return observationJson;
+    },
+    async conversationPeersJson(): Promise<string> {
+      return "[]";
+    },
+    async messageActivityJson(_requestJson: string): Promise<string> {
+      return JSON.stringify({
+        events: [],
+        next_before_event_id: null,
+        history_incomplete: false,
+      });
+    },
+    async manualServiceAnnounceJson(): Promise<string> {
+      return JSON.stringify("queued");
+    },
+    async mutateNetworkConfigJson(): Promise<string> {
+      return JSON.stringify({ outcome: "applied", reboot_required: false, revision: 0 });
+    },
+    async networkConfigJson(): Promise<string> {
+      return JSON.stringify({
+        automatic_announces_enabled: true,
+        lora_profile: {
+          bandwidth_hz: 125_000,
+          coding_rate_denominator: 5,
+          frequency_hz: 915_000_000,
+          spreading_factor: 7,
+          tx_power_dbm: 14,
+        },
+        lora_tx_power_dbm: 14,
+        revision: 0,
+        rmap_discovery_enabled: false,
+        rmap_phone_location: null,
+        rmap_share_location: false,
+        tcp_peer: null,
+        wifi_profiles: [],
+        wifi_transport_enabled: true,
+      });
+    },
+    async networkStatusJson(): Promise<string> {
+      return JSON.stringify({
+        active_wifi_profile: null,
+        applied_revision: 0,
+        configured_revision: 0,
+        connected_ssid: null,
+        dns_diagnostics: null,
+        ipv4_address: null,
+        last_tcp_failure: null,
+        rssi_dbm: null,
+        tcp_peer_state: "disabled",
+        wifi_state: "disabled",
+      });
+    },
+    async radioRoutesStatusJson(): Promise<string> {
+      return JSON.stringify({
+        interfaces: [],
+        lora: null,
+        observed_peer_count: 0,
+        retained_route_count: 0,
+        rns: {
+          announces_received: 0,
+          dedup_drops: 0,
+          forwarded: 0,
+          invalid_drops: 0,
+          links_closed: 0,
+          links_established: 0,
+          links_failed: 0,
+          paths_expired: 0,
+          paths_learned: 0,
+          received: 0,
+        },
+        route_table_revision: 0,
+        routes: [],
+        uptime_ms: 0,
+        usable_route_count: 0,
+      });
+    },
+    async radioTraceJson(_requestJson: string): Promise<string> {
+      return JSON.stringify({
+        events: [],
+        next_before_event_id: null,
+        history_incomplete: false,
+      });
+    },
+    async retryMessageJson(requestJson: string): Promise<string> {
+      const request = JSON.parse(requestJson) as { outbox_id: number };
+      return JSON.stringify({ outbox_id: request.outbox_id, outcome: "requeued" });
+    },
+    async reticulumProbeStartJson(): Promise<string> {
+      return JSON.stringify({ id: "44".repeat(16), outcome: "accepted" });
+    },
+    async reticulumProbePollJson(): Promise<string> {
+      return JSON.stringify({ state: "pending", phase: "path_lookup" });
+    },
+  };
+}
+
 function offlineBleAppliance(): NativeApplianceLike {
   return {
+    ...networkApiStubs(),
     bleDisconnected(): void {},
     bleIngestIndication(): void {},
     bleLinkConnected(): bigint {
@@ -246,6 +351,7 @@ describe("native appliance adapter loading", () => {
       inner: { transport: 0, reason: "USB serial adapter is unavailable" },
     } as unknown as NativeApplianceError;
     const appliance: NativeApplianceLike = {
+      ...networkApiStubs(),
       bleDisconnected(): void {},
       bleIngestIndication(): void {},
       bleLinkConnected(): bigint {
@@ -264,6 +370,75 @@ describe("native appliance adapter loading", () => {
       },
       async contactsJson(): Promise<string> {
         return JSON.stringify([{ destination: "ab".repeat(16), name: "Field node" }]);
+      },
+      async conversationPeersJson(): Promise<string> {
+        return JSON.stringify([
+          {
+            destination: "ab".repeat(16),
+            name: "Field node",
+            message_count: 1,
+            inbound_message_count: 1,
+            last_message: {
+              sequence: 1,
+              direction: "inbound",
+              timestamp_ms: 1_000,
+              message_id: "cd".repeat(32),
+              outbox_id: null,
+              submission_id: null,
+              current_attempt_number: null,
+              automatic_retry_count: null,
+              packet_evidence: null,
+              ingress_observation: {
+                interface_id: 7,
+                signal: { rssi_dbm: -97, snr_db: 4 },
+              },
+              receiver_location: null,
+              location: {
+                latitude_e6: 42_357_111,
+                longitude_e6: -71_061_924,
+                altitude_cm: 0,
+                speed_cm_per_second: 0,
+                bearing_centidegrees: 0,
+                accuracy_cm: 825,
+                updated_at_unix_seconds: 1_785_084_000,
+              },
+              status: null,
+              title: { encoding: "utf8", value: "hello" },
+              content: { encoding: "utf8", value: "from the field" },
+            },
+          },
+        ]);
+      },
+      async messageActivityJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({
+          events: [
+            {
+              event_id: 4,
+              observed_at_unix_ms: 1_250,
+              timeline_sequence: 1,
+              peer: "ab".repeat(16),
+              direction: "outbound",
+              outbox_id: 7,
+              attempt_number: 1,
+              attempt_location: null,
+              ingress_observation: null,
+              message_location: null,
+              receiver_location: null,
+              activity: { kind: "outbound_queued" },
+            },
+          ],
+          next_before_event_id: null,
+          history_incomplete: false,
+        });
+      },
+      async radioTraceJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({
+          events: [],
+          next_before_event_id: null,
+          history_incomplete: false,
+        });
       },
       async ensureConnected(): Promise<void> {},
       importActivatedCredential(): NativeCredentialSummary {
@@ -285,6 +460,52 @@ describe("native appliance adapter loading", () => {
           },
         ]);
       },
+      async networkConfigJson(): Promise<string> {
+        return JSON.stringify({
+          automatic_announces_enabled: true,
+          lora_profile: {
+            bandwidth_hz: 125_000,
+            coding_rate_denominator: 5,
+            frequency_hz: 915_000_000,
+            spreading_factor: 8,
+            tx_power_dbm: 22,
+          },
+          lora_tx_power_dbm: 22,
+          revision: 4,
+          rmap_discovery_enabled: false,
+          rmap_phone_location: null,
+          rmap_share_location: false,
+          tcp_peer: null,
+          wifi_profiles: [
+            {
+              credential_configured: true,
+              enabled: true,
+              priority: 180,
+              profile_id: "12".repeat(16),
+              ssid: { encoding: "utf8", value: "Field Mesh" },
+            },
+          ],
+          wifi_transport_enabled: true,
+        });
+      },
+      async networkStatusJson(): Promise<string> {
+        return JSON.stringify({
+          active_wifi_profile: "12".repeat(16),
+          applied_revision: 3,
+          configured_revision: 4,
+          connected_ssid: null,
+          dns_diagnostics: null,
+          ipv4_address: null,
+          last_tcp_failure: "dns_timeout",
+          rssi_dbm: null,
+          tcp_peer_state: "waiting_for_network",
+          wifi_state: "connecting",
+        });
+      },
+      async mutateNetworkConfigJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({ outcome: "applied", reboot_required: true, revision: 5 });
+      },
       async nomadFetchStartJson(requestJson): Promise<string> {
         requests.push(requestJson);
         return JSON.stringify({
@@ -296,8 +517,30 @@ describe("native appliance adapter loading", () => {
         requests.push(requestJson);
         return JSON.stringify({ state: "ready", page: ">Metalbeard" });
       },
+      async reticulumProbeStartJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({ id: "44".repeat(16), outcome: "accepted" });
+      },
+      async reticulumProbePollJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({
+          state: "succeeded",
+          result: {
+            round_trip_ms: 1_234,
+            hops: 2,
+            ingress_observation: {
+              interface_id: 7,
+              signal: { rssi_dbm: -91, snr_db: 7 },
+            },
+          },
+        });
+      },
       async reconnect(): Promise<void> {
         throw bridgeError;
+      },
+      async retryMessageJson(requestJson): Promise<string> {
+        requests.push(requestJson);
+        return JSON.stringify({ outbox_id: 7, outcome: "requeued" });
       },
       async sendMessageJson(requestJson): Promise<string> {
         requests.push(requestJson);
@@ -360,6 +603,104 @@ describe("native appliance adapter loading", () => {
       transport: "usb_serial",
     });
     expect(await client.contacts()).toEqual([{ destination: "ab".repeat(16), name: "Field node" }]);
+    expect(await client.conversationPeers()).toEqual([
+      {
+        destination: "ab".repeat(16),
+        name: "Field node",
+        message_count: 1,
+        inbound_message_count: 1,
+        last_message: {
+          sequence: 1,
+          direction: "inbound",
+          timestamp_ms: 1_000,
+          message_id: "cd".repeat(32),
+          outbox_id: null,
+          submission_id: null,
+          current_attempt_number: null,
+          automatic_retry_count: null,
+          packet_evidence: null,
+          ingress_observation: {
+            interface_id: 7,
+            signal: { rssi_dbm: -97, snr_db: 4 },
+          },
+          receiver_location: null,
+          location: {
+            latitude_e6: 42_357_111,
+            longitude_e6: -71_061_924,
+            altitude_cm: 0,
+            speed_cm_per_second: 0,
+            bearing_centidegrees: 0,
+            accuracy_cm: 825,
+            updated_at_unix_seconds: 1_785_084_000,
+          },
+          status: null,
+          title: { encoding: "utf8", value: "hello" },
+          content: { encoding: "utf8", value: "from the field" },
+        },
+      },
+    ]);
+    expect(
+      await client.messageActivity({
+        before_event_id: null,
+        limit: 20,
+        timeline_sequence: 1,
+      }),
+    ).toEqual({
+      events: [
+        {
+          event_id: 4,
+          observed_at_unix_ms: 1_250,
+          timeline_sequence: 1,
+          peer: "ab".repeat(16),
+          direction: "outbound",
+          outbox_id: 7,
+          attempt_number: 1,
+          attempt_location: null,
+          ingress_observation: null,
+          message_location: null,
+          receiver_location: null,
+          activity: { kind: "outbound_queued" },
+        },
+      ],
+      next_before_event_id: null,
+      history_incomplete: false,
+    });
+    expect(await client.phoneLocationObservation()).toEqual({
+      state: "unavailable",
+      reason: "not_observed",
+    });
+    expect(
+      await client.radioTrace({
+        before_event_id: null,
+        limit: 20,
+        timeline_sequence: 1,
+      }),
+    ).toEqual({ events: [], next_before_event_id: null, history_incomplete: false });
+    expect(
+      await client.updatePhoneLocationObservation({
+        state: "available",
+        latitude_e6: 42_357_111,
+        longitude_e6: -71_061_924,
+        altitude_mm: 17_234,
+        horizontal_accuracy_mm: 8_250,
+        vertical_accuracy_mm: 12_500,
+        captured_at_unix_ms: 1_785_084_000_123,
+        authorization: "precise",
+        source: "foreground_stream",
+        mocked: false,
+      }),
+    ).toEqual({
+      state: "available",
+      latitude_e6: 42_357_111,
+      longitude_e6: -71_061_924,
+      altitude_mm: 17_234,
+      horizontal_accuracy_mm: 8_250,
+      vertical_accuracy_mm: 12_500,
+      captured_at_unix_ms: 1_785_084_000_123,
+      authorization: "precise",
+      source: "foreground_stream",
+      mocked: false,
+    });
     expect(await client.nearbyPeers()).toEqual([
       {
         associated_nomad_destination: "ce".repeat(16),
@@ -374,6 +715,41 @@ describe("native appliance adapter loading", () => {
         snr_db: 7,
       },
     ]);
+    expect(await client.manualServiceAnnounce()).toBe("queued");
+    expect(await client.networkConfig()).toMatchObject({
+      lora_profile: {
+        bandwidth_hz: 125_000,
+        coding_rate_denominator: 5,
+        frequency_hz: 915_000_000,
+        spreading_factor: 8,
+        tx_power_dbm: 22,
+      },
+      lora_tx_power_dbm: 22,
+      revision: 4,
+      wifi_profiles: [{ priority: 180, ssid: { encoding: "utf8", value: "Field Mesh" } }],
+    });
+    expect(await client.networkStatus()).toMatchObject({
+      applied_revision: 3,
+      configured_revision: 4,
+      dns_diagnostics: null,
+      last_tcp_failure: "dns_timeout",
+      tcp_peer_state: "waiting_for_network",
+      wifi_state: "connecting",
+    });
+    expect(
+      await client.mutateNetworkConfig({
+        expected_revision: 4,
+        idempotency_key: "13".repeat(16),
+        mutation: {
+          credential: { kind: "keep" },
+          enabled: true,
+          kind: "upsert_wifi",
+          priority: 200,
+          profile_id: "12".repeat(16),
+          ssid: { encoding: "utf8", value: "Field Mesh" },
+        },
+      }),
+    ).toEqual({ outcome: "applied", reboot_required: true, revision: 5 });
     const fetchId = `${"33".repeat(8)}0000000000000001`;
     expect(
       await client.nomadFetchStart({
@@ -387,6 +763,24 @@ describe("native appliance adapter loading", () => {
       state: "ready",
       page: ">Metalbeard",
     });
+    const probeId = "44".repeat(16);
+    expect(
+      await client.reticulumProbeStart({
+        destination: "de".repeat(16),
+        idempotency_key: "f0".repeat(16),
+      }),
+    ).toEqual({ id: probeId, outcome: "accepted" });
+    expect(await client.reticulumProbePoll({ id: probeId })).toEqual({
+      state: "succeeded",
+      result: {
+        round_trip_ms: 1_234,
+        hops: 2,
+        ingress_observation: {
+          interface_id: 7,
+          signal: { rssi_dbm: -91, snr_db: 7 },
+        },
+      },
+    });
     expect(await client.upsertContact("ab".repeat(16), { name: "Updated field node" })).toEqual({
       outcome: "inserted",
     });
@@ -397,9 +791,46 @@ describe("native appliance adapter loading", () => {
         idempotency_key: "cd".repeat(16),
         title: "",
         content: "hello",
+        location: {
+          latitude_e6: 42_357_111,
+          longitude_e6: -71_061_924,
+          altitude_cm: 1_723,
+          speed_cm_per_second: 346,
+          bearing_centidegrees: 12_345,
+          accuracy_cm: 826,
+          updated_at_unix_seconds: 1_785_084_000,
+        },
       }),
     ).toEqual({ outbox_id: 7, outcome: "inserted" });
+    expect(
+      await client.retryMessage({
+        outbox_id: 7,
+        idempotency_key: "ce".repeat(16),
+      }),
+    ).toEqual({ outbox_id: 7, outcome: "requeued" });
     expect(requests.map((request) => JSON.parse(request))).toEqual([
+      {
+        before_event_id: null,
+        limit: 20,
+        timeline_sequence: 1,
+      },
+      {
+        before_event_id: null,
+        limit: 20,
+        timeline_sequence: 1,
+      },
+      {
+        expected_revision: 4,
+        idempotency_key: "13".repeat(16),
+        mutation: {
+          credential: { kind: "keep" },
+          enabled: true,
+          kind: "upsert_wifi",
+          priority: 200,
+          profile_id: "12".repeat(16),
+          ssid: { encoding: "utf8", value: "Field Mesh" },
+        },
+      },
       {
         destination: "de".repeat(16),
         path: "/page/index.mu",
@@ -407,6 +838,11 @@ describe("native appliance adapter loading", () => {
         idempotency_key: "ef".repeat(16),
       },
       { id: fetchId },
+      {
+        destination: "de".repeat(16),
+        idempotency_key: "f0".repeat(16),
+      },
+      { id: probeId },
       { name: "Updated field node" },
       {
         destination: "ab".repeat(16),
@@ -414,6 +850,19 @@ describe("native appliance adapter loading", () => {
         idempotency_key: "cd".repeat(16),
         title: "",
         content: "hello",
+        location: {
+          latitude_e6: 42_357_111,
+          longitude_e6: -71_061_924,
+          altitude_cm: 1_723,
+          speed_cm_per_second: 346,
+          bearing_centidegrees: 12_345,
+          accuracy_cm: 826,
+          updated_at_unix_seconds: 1_785_084_000,
+        },
+      },
+      {
+        outbox_id: 7,
+        idempotency_key: "ce".repeat(16),
       },
     ]);
     await expect(client.reconnect()).rejects.toThrow(
@@ -434,7 +883,7 @@ describe("native appliance adapter loading", () => {
       txUuid: "generated-tx",
       securityConfirmationUuid: "generated-security-confirmation",
       securityConfirmationReadyValue: Uint8Array.of(0x52, 0x44, 0x59, 0x31).buffer,
-      initialAttValueBytes: 41,
+      maximumAttValueBytes: 41,
     };
 
     expect(bleGattProfileFromNative(generated)).toEqual({
@@ -463,6 +912,7 @@ describe("native appliance adapter loading", () => {
       },
     };
     const appliance: NativeApplianceLike = {
+      ...networkApiStubs(),
       bleDisconnected(): void {},
       bleIngestIndication(): void {},
       bleLinkConnected(): bigint {
@@ -574,6 +1024,7 @@ describe("native appliance profile management", () => {
     credentialId: "ef".repeat(16),
     deviceId: "653239302d6170692d31aca704e13f88",
     expectedBleLocalName: "reticulum-e290-e13f88",
+    expectedBleRecoveryLocalName: "reticulum-pair-e13f88",
     generation: 2n,
   };
   const SECOND_PROFILE: NativeProfileSummary = {
@@ -584,6 +1035,7 @@ describe("native appliance profile management", () => {
     credentialId: "f0".repeat(16),
     deviceId: "653239302d6170692d31aca704e14088",
     expectedBleLocalName: "reticulum-e290-e14088",
+    expectedBleRecoveryLocalName: "reticulum-pair-e14088",
     generation: 3n,
   };
   const THIRD_PROFILE: NativeProfileSummary = {
@@ -655,6 +1107,107 @@ describe("native appliance profile management", () => {
     expect((await client.profiles()).activeProfileKey).toBe(SECOND_PROFILE.profileKey);
 
     client.dispose();
+  });
+
+  test("forgets only an inactive profile without closing the active appliance owner", async () => {
+    const events: string[] = [];
+    let profiles = [E290_PROFILE, SECOND_PROFILE];
+    const runtime: NativeApplianceRuntime = {
+      bridge: {
+        contract: CONTRACT,
+        activateProfile(): NativeProfileSummary {
+          throw new Error("profile activation must not run while forgetting an inactive profile");
+        },
+        credentialStatus: () => ({ state: "active", summary: E290_CREDENTIAL }),
+        destroy(): void {
+          events.push("destroy");
+        },
+        destroyProfileStore(): void {},
+        forgetProfile(_store, profileKey): NativeProfileStoreSnapshot {
+          events.push(`forget ${profileKey}`);
+          profiles = profiles.filter((profile) => profile.profileKey !== profileKey);
+          return {
+            activeProfileKey: E290_PROFILE.profileKey,
+            profiles,
+          };
+        },
+        isNativeError: (_value): _value is NativeApplianceError => false,
+        importCredential: () => E290_CREDENTIAL,
+        open(): NativeApplianceLike {
+          events.push("open");
+          return {
+            ...offlineBleAppliance(),
+            async close(): Promise<void> {
+              events.push("close");
+            },
+          };
+        },
+        profileSnapshot: () => ({
+          activeProfileKey: E290_PROFILE.profileKey,
+          profiles,
+        }),
+      },
+      profileStore: PROFILE_STORE,
+    };
+    const client = new NativeApplianceClient(async () => runtime);
+    await client.bootstrapSession();
+
+    await client.forgetProfile(SECOND_PROFILE.profileKey);
+
+    expect(events).toEqual(["open", `forget ${SECOND_PROFILE.profileKey}`]);
+    expect(await client.profiles()).toEqual({
+      activeProfileKey: E290_PROFILE.profileKey,
+      profiles: [E290_PROFILE],
+    });
+    client.dispose();
+  });
+
+  test("rejects forgetting the active, unknown, or unsupported profile before mutation", async () => {
+    let forgetCalls = 0;
+    const runtime: NativeApplianceRuntime = {
+      bridge: {
+        contract: CONTRACT,
+        activateProfile(): NativeProfileSummary {
+          return E290_PROFILE;
+        },
+        credentialStatus: () => ({ state: "active", summary: E290_CREDENTIAL }),
+        destroy(): void {},
+        destroyProfileStore(): void {},
+        forgetProfile(): NativeProfileStoreSnapshot {
+          forgetCalls += 1;
+          return e290ProfileSnapshot();
+        },
+        isNativeError: (_value): _value is NativeApplianceError => false,
+        importCredential: () => E290_CREDENTIAL,
+        open: offlineBleAppliance,
+        profileSnapshot: () => ({
+          activeProfileKey: E290_PROFILE.profileKey,
+          profiles: [E290_PROFILE, SECOND_PROFILE],
+        }),
+      },
+      profileStore: PROFILE_STORE,
+    };
+    const client = new NativeApplianceClient(async () => runtime);
+    await client.bootstrapSession();
+
+    await expect(client.forgetProfile(E290_PROFILE.profileKey)).rejects.toThrow(
+      "switch to another appliance",
+    );
+    await expect(client.forgetProfile("ff".repeat(16))).rejects.toThrow(
+      "selected appliance profile no longer exists",
+    );
+    expect(forgetCalls).toBe(0);
+    client.dispose();
+
+    const unsupported = new NativeApplianceClient(async () => ({
+      ...runtime,
+      bridge: { ...runtime.bridge, forgetProfile: undefined },
+    }));
+    await unsupported.bootstrapSession();
+    await expect(unsupported.forgetProfile(SECOND_PROFILE.profileKey)).rejects.toThrow(
+      "installed native bridge cannot forget appliance profiles",
+    );
+    unsupported.dispose();
   });
 
   test("validates before teardown and restores the prior owner after activation failure", async () => {
@@ -990,7 +1543,7 @@ describe("native appliance profile management", () => {
             return [
               {
                 peripheralId: "known-board",
-                peripheralName: E290_CREDENTIAL.expectedBleLocalName,
+                peripheralName: E290_CREDENTIAL.expectedBleRecoveryLocalName,
               },
             ];
           },
@@ -1330,6 +1883,7 @@ describe("native BLE profile-publication reconciliation", () => {
     credentialId: "a5".repeat(16),
     deviceId: "653239302d6170692d31aca704e15088",
     expectedBleLocalName: "reticulum-e290-e15088",
+    expectedBleRecoveryLocalName: "reticulum-pair-e15088",
     generation: 4n,
   };
   const PUBLISHED_PROFILE: NativeProfileSummary = {

@@ -11,8 +11,7 @@ authoritative in the lockfile.
 | Project-owned crates | This repository | current tree | MIT OR Apache-2.0 | Product and shared tooling |
 | Rete integration fork | <https://github.com/evelant/rete> | `dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08` on `codex/responder-handshake-reclaim`, descending through `ba73ee426a3211951f5abb400c5728dd359272be`, `354b8757bea63b9d1e27dec14f109fe6c7e03c5a`, `338251b285a2447beb10d390d3e7f53694a1a916`, `a443173b0829c2637ce23531a8cde15fdfec185e`, `2d0781838aa03370b739d4003bcd1bdd5bbb0c6c` on `codex/link-data-receipts`, then `90570cafc812b3025011cb690ec74a27f287cb3f` (tagged predecessor `firmware-pin-90570ca`) and upstream `9bcb7d3e482b7df100622f2a0d9e53ba3bb7a743`; the current revision has no designated durable tag | Apache-2.0 option from retained upstream declaration | Provisional RNS foundation and firmware compile graph; includes canonical local LINKREQUEST validation, transactional owned- and relay-Link admission, endpoint announce policy, caller-owned DATA preparation, bounded receipt backpressure, allocation-atomic proof/timeout terminals, transactional channel send/retry receipt replacement, full-hash/Link-ID-bound DATA/channel terminal candidates, ordinary Link-DATA receipts with destination proof-policy enforcement, exact path/reverse/link forwarding, typed reverse-full/conflict admission, owned HEADER_2 local dispatch, narrow exact-path HEADER_2 DATA/LINKREQUEST relay, foreign-H2 filtering, fail-closed LRPROOF validation, authenticated owned-Link interface binding and pre-dedup wrong-interface rejection, pending-Link expected-hop enforcement, Python-compatible keepalive lifecycle, microsecond/binary64 LRRTT timing with dispatch confirmation, Handshake/Active/Stale LRRTT lifecycle updates and authenticated-malformed teardown, Python-compatible responder-Handshake timeout reclamation, bounded canonical MessagePack request values including anonymous `nil` at `338251b`, prepared-versus-confirmed request ownership with timeout start at exact first dispatch at `354b875`, validated inbound encoded-value events with their original request timestamp at `ba73ee4`, phase-agnostic exact request-dispatch reclaim keyed by request and Link IDs with prior native-phase reporting at `dfcaa36`, identities-only snapshot restoration, and LXMF attempt correlation. These request primitives do not constitute full NomadNet or Resource support. The first three generic changes were already offered in upstream PRs 7, 9 and 11; the newer lifecycle, routing, Link-DATA receipt, responder-timeout, and request work remains fork-local unless the user directly approves an upstream issue or PR. |
 | Leviculum | <https://codeberg.org/Lew_Palm/leviculum> | `5fb1db0e5e5a490291ee5f6b81312cf0c9de622a` | AGPL-3.0-or-later | Separate protocol oracle and fallback package |
-| esp-hal family | <https://github.com/esp-rs/esp-hal> | crates.io versions in lockfile | MIT OR Apache-2.0 | ESP32-S3 platform |
-| esp-rtos | Published crates.io 0.3.0 source vendored at `vendor/esp-rtos-0.3.0` | archive SHA-256 `551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712`; crate-recorded upstream commit `347003de8a48320bb7724f53045be3afa9204411`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0, with canonical license texts added as project provenance files | Local CPU0 and CPU1 main-stack slice unit corrections; exact edits, mechanical integrity guard and removal condition are recorded in `PATCHES.md` |
+| esp-rs platform family, including esp-rtos | <https://github.com/esp-rs/esp-hal> | exact Git revision `b50efcb0dcd94b58ec337e511891057aa1f2e8fb` in the workspace and lockfile | MIT OR Apache-2.0 | Coherent ESP32-S3 HAL, radio, runtime, bootloader, logging, and storage graph; this upstream revision contains both CPU0/CPU1 stack-slice element-count corrections and the ESP32-S3 combo-PHY fix from esp-hal #5776, so no local esp-rtos overlay is active |
 | lora-phy | Published crates.io 3.0.1 source vendored at `vendor/lora-phy-3.0.1` | archive SHA-256 `61471c3b2909789e3332083577f6cf6c41a4fcf37674ef15156bcbb20504ac65`; crate-recorded upstream commit `ca04c2284eb00e015528933ea5159cd1ff36142d`; exact tree and pristine/patched hashes in `VENDOR-HASHES.json` | MIT OR Apache-2.0 | SX126x radio owner with atomic board PA/FEM hooks, arm-once continuous-RX IRQ draining, terminal receive classification, synchronized standby, and explicit IRQ quiescence before mode changes; exact edits, integrity guard, and removal condition are recorded in `PATCHES.md` |
 | embedded-hal / embedded-hal-async / embedded-hal-bus / lora-modulation | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Portable pin/SPI/profile contracts and the target-exclusive async SPI device |
 | Embassy futures/sync/time, static_cell and zeroize | crates.io | exact versions in workspace and lockfile | MIT OR Apache-2.0 | Bounded target coordination, in-place protocol ownership and temporary key cleanup |
@@ -249,28 +248,22 @@ one authorized transmission. The feature-free TX HIL remains the invalid
 sentinel graph and resolves no Rete packages. Neither HIL mode supplies a
 production identity, entropy source, clock, announce scheduler or TX policy.
 
-Published `esp-rtos` 0.3.0 constructs both CPU0 and CPU1 main-task
-`*mut [MaybeUninit<u32>]` slices with stack byte counts as their element counts,
-representing four times each actual stack reservation. The vendored patch
-divides the CPU0 symbol difference and CPU1 `STACK_SIZE` by
-`size_of::<MaybeUninit<u32>>()` before slice construction. The checked vendor
-manifest records the published archive, exact base inventory, pristine hashes,
-project provenance files and both reviewed source replacements. `xtask
-graph-policy` verifies that exact tree and reconstructs the pristine
-`src/lib.rs` by reversing only those two replacements. The firmware build also
-verifies both corrected source shapes and embeds
-`esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2` in every `esp-rtos`-based
-Tracker ELF. The RF-inert retained-journal HIL binaries use `esp_hal::main` and
-do not carry that runtime identity. Remove the path dependency only after an
-upstream release contains both equivalent fixes and the regression guard is
-updated.
+### Historical esp-rtos overlay (removed)
 
-The published crate README retains repository-layout links to
-`../LICENSE-APACHE` and `../LICENSE-MIT`; those links do not resolve from the
-package-local vendor directory. The canonical texts intentionally added at
-`vendor/esp-rtos-0.3.0/LICENSE-APACHE` and `LICENSE-MIT` are the applicable
-copies. The upstream-marked README remains byte-identical to the registry
-archive so the vendor reconstruction check stays meaningful.
+Earlier builds temporarily carried a local patch over published `esp-rtos`
+0.3.0 because that package constructed the CPU0 and CPU1 main-task
+`*mut [MaybeUninit<u32>]` slices with byte counts instead of element counts.
+Those archived builds embedded
+`esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2`; the old vendor manifest and
+source-shape guard described that historical overlay only.
+
+Canonical builds now resolve `esp-rtos` directly from exact upstream esp-rs
+revision `b50efcb0dcd94b58ec337e511891057aa1f2e8fb`, which includes both
+equivalent stack-slice corrections. `xtask graph-policy` verifies the resolved
+Git source and revision. Firmware embeds
+`esp-rtos-upstream-b50efcb-stack-words-v1` as runtime evidence, and no build
+script reads or requires a local esp-rtos source tree. The obsolete vendor
+directory, inventory reconstruction, and local-license copies were removed.
 
 Published `lora-phy` 3.0.1 derives every SX1262 high-power PA command from the
 requested output power and calls `do_rx()` from every `LoRa::rx()` invocation,

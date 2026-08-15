@@ -13,6 +13,7 @@ conformance = []
 
 [dependencies]
 reticulum-rns-conformance = { path = "../rns-conformance" }
+reticulum-lxmf-wire = { path = "../lxmf-wire", default-features = false }
 rete-core.workspace = true
 rete-lxmf-core.workspace = true
 rete-stack = { workspace = true, features = ["alloc"] }

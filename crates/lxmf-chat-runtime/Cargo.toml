@@ -12,8 +12,8 @@ test-support = []
 
 [dependencies]
 hex.workspace = true
-reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad"] }
-reticulum-device-client = { path = "../device-client" }
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad", "experimental-network-config"] }
+reticulum-device-client = { path = "../device-client", features = ["experimental-network-config"] }
 reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
 reticulum-lxmf-chat-core = { path = "../lxmf-chat-core" }
 reticulum-lxmf-wire = { path = "../lxmf-wire" }
@@ -21,6 +21,7 @@ rete-core.workspace = true
 serde.workspace = true
 tokio.workspace = true
 ts-rs.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

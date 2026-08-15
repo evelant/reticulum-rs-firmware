@@ -379,6 +379,8 @@ pub enum AcceptanceProgress {
 pub enum BootRecoveryProgress {
     /// Queued intent remains replay-safe and may be submitted again.
     ReplayQueued,
+    /// A durable LXMF message remains pending and should resume its delivery loop.
+    ReplayPendingLxmf,
     /// The replayed submission was already durably final.
     AlreadyFinal,
     /// Replay-unsafe interrupted work is now durably final.
@@ -649,6 +651,20 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
         self.map_projector_operation(result)
     }
 
+    /// Restore volatile correlation for one replayed durable LXMF delivery loop.
+    ///
+    /// Complete journal replay and the model's LXMF-specific boot decision must
+    /// precede this backend-free operation. It appends no record and grants no
+    /// preparation authority to generic RNS DATA.
+    pub fn resume_lxmf_delivery_loop(
+        &mut self,
+        id: SubmissionId,
+    ) -> Result<ProjectionProgress, ProjectorOperationError> {
+        self.ensure_projector_operation()?;
+        let result = self.projector.resume_lxmf_delivery_loop(&self.index, id);
+        self.map_projector_operation(result)
+    }
+
     /// Project one transport-neutral permanent-node preparation observation.
     ///
     /// This is the product integration seam for every interface supervisor.
@@ -692,8 +708,9 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
 
     /// Project one exact recovered packet-owner observation.
     ///
-    /// Its release acknowledgement is exposed only after the transport audit
-    /// is durable.
+    /// Generic submissions expose its release acknowledgement only after the
+    /// transport audit is durable. A durable LXMF delivery loop instead covers
+    /// volatile carrier-owner recovery without consuming an attempt record.
     pub fn observe_recovered(
         &mut self,
         observation: TxRecoveryObservation,
@@ -819,11 +836,12 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
 
     /// Resolve one completely replayed submission before services are enabled.
     ///
-    /// Queued work and already-final work require no physical mutation and
-    /// return immediately. Preparing or awaiting-delivery work is converted to
-    /// the model's conservative interrupted-by-reset final state, then becomes
-    /// visible in the live index only after its exact planned record is
-    /// durably appended or proved already equivalent.
+    /// Queued work, pending LXMF delivery obligations, and already-final work
+    /// require no physical mutation and return immediately. Preparing or
+    /// awaiting-delivery generic RNS work is converted to the model's
+    /// conservative interrupted-by-reset final state, then becomes visible in
+    /// the live index only after its exact planned record is durably appended
+    /// or proved already equivalent.
     ///
     /// A backend error retains the complete plan together with `id` and
     /// `boot_sequence`. An exact retry or [`Self::drive_pending`] reconciles
@@ -857,6 +875,9 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize> StorageActor<SUBMISSIONS,
                 let transition = match decision {
                     BootRecoveryDecision::ReplayQueued => {
                         return Ok(BootRecoveryProgress::ReplayQueued);
+                    }
+                    BootRecoveryDecision::ReplayPendingLxmf => {
+                        return Ok(BootRecoveryProgress::ReplayPendingLxmf);
                     }
                     BootRecoveryDecision::AlreadyFinal => {
                         return Ok(BootRecoveryProgress::AlreadyFinal);

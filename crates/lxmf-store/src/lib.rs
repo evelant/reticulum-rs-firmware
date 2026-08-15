@@ -17,8 +17,9 @@
 use embedded_storage::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
 use reticulum_lxmf_model::{
     AuthenticatedMaterialFingerprint, CarrierProvenance, DestinationHash, DurableMessageReceipt,
-    ExactWireDigest, InboundMessageCandidate, InboundMessageLengths, InboundMessageMetadata,
-    MessageHandle, MessageId, ReplayFingerprint, ReplayRelation, RequiredStampCost, SourceHash,
+    ExactWireDigest, InboundInterfaceId, InboundMessageCandidate, InboundMessageLengths,
+    InboundMessageMetadata, InboundSignalObservation, InboundTransportObservation, MessageHandle,
+    MessageId, ReplayFingerprint, ReplayRelation, RequiredStampCost, SourceHash,
     StampAdmissionProvenance,
 };
 use sha2::{Digest, Sha256};
@@ -26,10 +27,11 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 mod tests;
 
-/// Physical erase extent used by format version 1.
+/// Physical erase extent used by every supported format version.
 pub const EXTENT_SIZE: usize = 4096;
 /// Current physical format version.
-pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
+pub const PHYSICAL_FORMAT_VERSION: u16 = 2;
+const LEGACY_PHYSICAL_FORMAT_VERSION: u16 = 1;
 /// Bytes occupied by the repeated header in every extent.
 pub const EXTENT_HEADER_SIZE: usize = 512;
 /// Bytes occupied by the footer in the final extent.
@@ -78,6 +80,11 @@ const HEADER_STAMP_OBSERVED_OFFSET: usize = 196;
 const HEADER_LENGTHS_OFFSET: usize = 200;
 const HEADER_EXACT_WIRE_DIGEST_OFFSET: usize = 220;
 const HEADER_PADDING_OFFSET: usize = 252;
+const HEADER_INGRESS_KIND_OFFSET: usize = HEADER_PADDING_OFFSET;
+const HEADER_INGRESS_INTERFACE_OFFSET: usize = 253;
+const HEADER_INGRESS_SIGNAL_KIND_OFFSET: usize = 254;
+const HEADER_INGRESS_RSSI_OFFSET: usize = 256;
+const HEADER_INGRESS_SNR_OFFSET: usize = 258;
 
 const FOOTER_MAGIC_OFFSET: usize = 0;
 const FOOTER_VERSION_OFFSET: usize = 8;
@@ -597,6 +604,7 @@ struct IndexEntry {
     first_extent: u32,
     extent_count: u16,
     wire_len: u32,
+    format_version: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -711,6 +719,19 @@ impl MountedLxmfStore<'_> {
             .iter()
             .filter_map(|slot| slot.entry.as_ref())
             .map(|entry| entry.receipt)
+    }
+
+    /// Latest committed receipt without physical I/O.
+    pub fn latest_receipt(&self) -> Option<DurableMessageReceipt> {
+        self.entries[..self.entry_count]
+            .last()
+            .and_then(|slot| slot.entry.as_ref())
+            .map(|entry| entry.receipt)
+    }
+
+    /// Latest committed logical handle without physical I/O.
+    pub fn latest_handle(&self) -> Option<MessageHandle> {
+        self.latest_receipt().map(|receipt| receipt.handle())
     }
 
     /// Read one caller-bounded chunk of exact committed normalized wire bytes.
@@ -940,6 +961,7 @@ impl MountedLxmfStore<'_> {
 
         let first_header = encode_header(
             self.binding,
+            PHYSICAL_FORMAT_VERSION,
             handle,
             0,
             extent_count,
@@ -952,6 +974,7 @@ impl MountedLxmfStore<'_> {
             } else {
                 encode_header(
                     self.binding,
+                    PHYSICAL_FORMAT_VERSION,
                     handle,
                     extent_index,
                     extent_count,
@@ -994,6 +1017,7 @@ impl MountedLxmfStore<'_> {
         }
         let record_digest = digest_candidate_record(&first_header, candidate);
         let footer_before_commit = encode_footer(
+            PHYSICAL_FORMAT_VERSION,
             handle,
             extent_count,
             wire_len as u32,
@@ -1009,6 +1033,7 @@ impl MountedLxmfStore<'_> {
             return Err(LxmfCommitFailure::new(candidate, error));
         }
         let footer_committed = encode_footer(
+            PHYSICAL_FORMAT_VERSION,
             handle,
             extent_count,
             wire_len as u32,
@@ -1184,6 +1209,7 @@ where
                 .unwrap_or(max_handle);
             let expected = encode_header(
                 binding,
+                header.format_version,
                 header.handle,
                 index as u16,
                 header.extent_count,
@@ -1313,6 +1339,7 @@ enum CommitMarkerState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HeaderFields {
+    format_version: u16,
     handle: MessageHandle,
     extent_index: u16,
     extent_count: u16,
@@ -1398,6 +1425,7 @@ where
                 .map_err(LxmfWireReadError::Backend)?;
             let expected = encode_header(
                 binding,
+                entry.format_version,
                 entry.receipt.handle(),
                 extent_index as u16,
                 entry.extent_count,
@@ -1474,6 +1502,7 @@ fn digest_candidate_record(
 
 fn encode_header(
     binding: LxmfStoreBinding,
+    format_version: u16,
     handle: MessageHandle,
     extent_index: u16,
     extent_count: u16,
@@ -1483,7 +1512,7 @@ fn encode_header(
     let mut header = [0_u8; EXTENT_HEADER_SIZE];
     header[HEADER_CLAIM_OFFSET..HEADER_MAGIC_OFFSET].copy_from_slice(&CLAIM_MARKER);
     header[HEADER_MAGIC_OFFSET..HEADER_VERSION_OFFSET].copy_from_slice(HEADER_MAGIC);
-    write_u16(&mut header, HEADER_VERSION_OFFSET, PHYSICAL_FORMAT_VERSION);
+    write_u16(&mut header, HEADER_VERSION_OFFSET, format_version);
     write_u16(&mut header, HEADER_SIZE_OFFSET, EXTENT_HEADER_SIZE as u16);
     write_u16(&mut header, HEADER_EXTENT_INDEX_OFFSET, extent_index);
     write_u16(&mut header, HEADER_EXTENT_COUNT_OFFSET, extent_count);
@@ -1533,6 +1562,17 @@ fn encode_header(
     }
     header[HEADER_EXACT_WIRE_DIGEST_OFFSET..HEADER_PADDING_OFFSET]
         .copy_from_slice(exact_wire_digest.as_bytes());
+    if format_version >= 2
+        && let Some(ingress) = metadata.ingress_observation()
+    {
+        header[HEADER_INGRESS_KIND_OFFSET] = 1;
+        header[HEADER_INGRESS_INTERFACE_OFFSET] = ingress.interface().get();
+        if let Some(signal) = ingress.signal() {
+            header[HEADER_INGRESS_SIGNAL_KIND_OFFSET] = 1;
+            write_i16(&mut header, HEADER_INGRESS_RSSI_OFFSET, signal.rssi_dbm());
+            write_i16(&mut header, HEADER_INGRESS_SNR_OFFSET, signal.snr_db());
+        }
+    }
     let mut digest = Sha256::new();
     digest.update(HEADER_DIGEST_DOMAIN);
     digest.update(&header[..HEADER_DIGEST_OFFSET]);
@@ -1550,7 +1590,7 @@ fn decode_header(
         return Err(HeaderDecodeError::Invalid);
     }
     let version = read_u16(header, HEADER_VERSION_OFFSET);
-    if version != PHYSICAL_FORMAT_VERSION {
+    if version != LEGACY_PHYSICAL_FORMAT_VERSION && version != PHYSICAL_FORMAT_VERSION {
         return Err(HeaderDecodeError::UnsupportedVersion(version));
     }
     if read_u16(header, HEADER_SIZE_OFFSET) != EXTENT_HEADER_SIZE as u16 {
@@ -1568,7 +1608,10 @@ fn decode_header(
         length,
         version,
     );
-    if actual_binding != expected_binding {
+    if actual_binding.device() != expected_binding.device()
+        || actual_binding.absolute_offset() != expected_binding.absolute_offset()
+        || actual_binding.length() != expected_binding.length()
+    {
         return Err(HeaderDecodeError::BindingMismatch(actual_binding));
     }
     let extent_index = read_u16(header, HEADER_EXTENT_INDEX_OFFSET);
@@ -1604,6 +1647,26 @@ fn decode_header(
         read_u32(header, HEADER_LENGTHS_OFFSET + 16) as usize,
     )
     .map_err(|_| HeaderDecodeError::Invalid)?;
+    let ingress = match (version, header[HEADER_INGRESS_KIND_OFFSET]) {
+        (LEGACY_PHYSICAL_FORMAT_VERSION, 0) => None,
+        (LEGACY_PHYSICAL_FORMAT_VERSION, _) => return Err(HeaderDecodeError::Invalid),
+        (_, 0) => None,
+        (_, 1) => {
+            let signal = match header[HEADER_INGRESS_SIGNAL_KIND_OFFSET] {
+                0 => None,
+                1 => Some(InboundSignalObservation::new(
+                    read_i16(header, HEADER_INGRESS_RSSI_OFFSET),
+                    read_i16(header, HEADER_INGRESS_SNR_OFFSET),
+                )),
+                _ => return Err(HeaderDecodeError::Invalid),
+            };
+            Some(InboundTransportObservation::new(
+                InboundInterfaceId::new(header[HEADER_INGRESS_INTERFACE_OFFSET]),
+                signal,
+            ))
+        }
+        _ => return Err(HeaderDecodeError::Invalid),
+    };
     let metadata = InboundMessageMetadata::new(
         MessageId::new(message_id),
         AuthenticatedMaterialFingerprint::new(authenticated_material),
@@ -1614,7 +1677,8 @@ fn decode_header(
         stamp,
         lengths,
     )
-    .map_err(|_| HeaderDecodeError::Invalid)?;
+    .map_err(|_| HeaderDecodeError::Invalid)?
+    .with_ingress_observation(ingress);
     let mut exact_digest = [0_u8; 32];
     exact_digest.copy_from_slice(&header[HEADER_EXACT_WIRE_DIGEST_OFFSET..HEADER_PADDING_OFFSET]);
     if required_extents(metadata.lengths().normalized_wire() as usize)
@@ -1623,6 +1687,7 @@ fn decode_header(
         return Err(HeaderDecodeError::Invalid);
     }
     let fields = HeaderFields {
+        format_version: version,
         handle,
         extent_index,
         extent_count,
@@ -1632,6 +1697,7 @@ fn decode_header(
     if *header
         != encode_header(
             expected_binding,
+            version,
             handle,
             extent_index,
             extent_count,
@@ -1645,6 +1711,7 @@ fn decode_header(
 }
 
 fn encode_footer(
+    format_version: u16,
     handle: MessageHandle,
     extent_count: u16,
     wire_len: u32,
@@ -1654,7 +1721,7 @@ fn encode_footer(
 ) -> [u8; RECORD_FOOTER_SIZE] {
     let mut footer = [0_u8; RECORD_FOOTER_SIZE];
     footer[FOOTER_MAGIC_OFFSET..FOOTER_VERSION_OFFSET].copy_from_slice(FOOTER_MAGIC);
-    write_u16(&mut footer, FOOTER_VERSION_OFFSET, PHYSICAL_FORMAT_VERSION);
+    write_u16(&mut footer, FOOTER_VERSION_OFFSET, format_version);
     write_u64(&mut footer, FOOTER_HANDLE_OFFSET, handle.get());
     write_u16(&mut footer, FOOTER_EXTENT_COUNT_OFFSET, extent_count);
     write_u32(&mut footer, FOOTER_WIRE_LENGTH_OFFSET, wire_len);
@@ -1869,6 +1936,7 @@ where
             read_extent_snapshot(access, first_extent + index).map_err(InspectError::Backend)?;
         let expected = encode_header(
             binding,
+            header.format_version,
             header.handle,
             index as u16,
             header.extent_count,
@@ -1937,7 +2005,7 @@ where
     A: BoundLxmfStoreReadAccess,
 {
     if &footer[FOOTER_MAGIC_OFFSET..FOOTER_VERSION_OFFSET] != FOOTER_MAGIC
-        || read_u16(footer, FOOTER_VERSION_OFFSET) != PHYSICAL_FORMAT_VERSION
+        || read_u16(footer, FOOTER_VERSION_OFFSET) != header.format_version
         || read_u64(footer, FOOTER_HANDLE_OFFSET) != header.handle.get()
         || read_u16(footer, FOOTER_EXTENT_COUNT_OFFSET) != header.extent_count
         || read_u32(footer, FOOTER_WIRE_LENGTH_OFFSET)
@@ -1993,6 +2061,7 @@ where
         first_extent: first_extent as u32,
         extent_count: header.extent_count,
         wire_len: header.metadata.lengths().normalized_wire(),
+        format_version: header.format_version,
     })
 }
 
@@ -2318,6 +2387,10 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
 
+fn read_i16(bytes: &[u8], offset: usize) -> i16 {
+    i16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([
         bytes[offset],
@@ -2334,6 +2407,10 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 }
 
 fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_i16(bytes: &mut [u8], offset: usize, value: i16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 

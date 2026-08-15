@@ -305,7 +305,9 @@ qualification bundle.
 
 Every qualifying `esp-rtos`-based Tracker ELF—safe-idle, normal, pressure,
 electrical and returned-fault—must contain the exact
-`esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2` runtime identity. The RF-inert
+`esp-rtos-upstream-b50efcb-stack-words-v1` runtime-source identity. It binds
+the ELF to the reviewed upstream revision containing the corrected CPU0 and
+CPU1 stack-slice element counts. The RF-inert
 reset-journal binaries use `esp_hal::main` and are intentionally exempt; do not
 misclassify their missing marker as a failure.
 

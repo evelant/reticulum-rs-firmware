@@ -241,6 +241,35 @@ impl LabRxProfile {
         self.iq_inverted
     }
 
+    /// Conservative whole-microsecond duration of one configured LoRa symbol.
+    ///
+    /// The SX1262 bandwidth register encodes an exact divisor of its 32 MHz
+    /// clock. Public bandwidth names such as 7.81 kHz are rounded labels, so
+    /// watchdogs must use the register divisor and round the resulting symbol
+    /// duration up instead of dividing by the displayed whole-Hz value.
+    pub const fn symbol_time_us_ceil(self) -> u64 {
+        let symbols_per_chirp = match 1_u64.checked_shl(self.spreading_factor.factor()) {
+            Some(symbols) => symbols,
+            // Validated spreading factors cannot reach this path.
+            None => return u64::MAX,
+        };
+        let bandwidth_scaled =
+            match symbols_per_chirp.checked_mul(sx126x_bandwidth_divisor(self.bandwidth)) {
+                Some(value) => value,
+                None => return u64::MAX,
+            };
+        let numerator = match bandwidth_scaled.checked_mul(1_000_000) {
+            Some(numerator) => numerator,
+            // Validated profiles cannot overflow this calculation. Remaining
+            // fail-conservative keeps the timing helper infallible.
+            None => return u64::MAX,
+        };
+        match checked_ceil_div(numerator, 32_000_000) {
+            Some(duration_us) => duration_us,
+            None => u64::MAX,
+        }
+    }
+
     /// Conservative deadline interval for a matching split continuation.
     ///
     /// RNode sends the second physical frame immediately after the first. The
@@ -525,6 +554,23 @@ mod tests {
             assert!((conservative_whole_hz as u64) * divisor >= 32_000_000);
             assert!((conservative_whole_hz as u64 - 1) * divisor < 32_000_000);
         }
+    }
+
+    #[test]
+    fn symbol_time_uses_exact_sx126x_bandwidth_divisors_and_rounds_up() {
+        let profile = LabRxProfile::validate(valid_config(), TRACKER_RANGE).unwrap();
+        assert_eq!(profile.symbol_time_us_ceil(), 1_024);
+
+        let mut rounded_bandwidth = valid_config();
+        rounded_bandwidth.bandwidth_hz = 10_400;
+        let rounded = LabRxProfile::validate(rounded_bandwidth, TRACKER_RANGE).unwrap();
+        // SF7 at the exact SX1262 32 MHz / 3072 bandwidth is 12.288 ms.
+        assert_eq!(rounded.symbol_time_us_ceil(), 12_288);
+
+        let mut slow = valid_config();
+        slow.spreading_factor = 12;
+        let slow = LabRxProfile::validate(slow, TRACKER_RANGE).unwrap();
+        assert_eq!(slow.symbol_time_us_ceil(), 32_768);
     }
 
     #[test]

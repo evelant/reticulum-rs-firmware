@@ -3,9 +3,10 @@ extern crate std;
 use core::mem::MaybeUninit;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_node_core::{
-    AttemptOutcome, DestinationHash as NodeDestinationHash, InterfaceSet, MonotonicMillis,
-    MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId, PrepareDataRequest,
-    RoutedTxJob, TxCompletionDisposition, TxLeaseDeadline, TxPacketBuffer,
+    AttemptOutcome, AttemptToken, DestinationHash as NodeDestinationHash, InterfaceSet,
+    MonotonicMillis, MonotonicSeconds, NodeConfig, NodeCore, NodeIdentity, NodeInstanceId,
+    PacketInterfaceId, PrepareDataRequest, RoutedTxJob, TxCompletionDisposition, TxLeaseDeadline,
+    TxPacketBuffer,
 };
 use std::{boxed::Box, vec, vec::Vec};
 
@@ -21,7 +22,8 @@ use reticulum_storage_model::{
     AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
     AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AuthorizationSnapshot, DestinationHash,
     ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
-    LifecycleState, PrincipalId, SubmissionFailure, SubmissionIndex, SubmissionReplay,
+    LifecycleState, LxmfMessageIntent, PrincipalId, SubmissionFailure, SubmissionIndex,
+    SubmissionReplay,
 };
 use reticulum_submission_projector::{
     AcknowledgementKind, AcknowledgementReply, PersistenceReply, PreparedFrameObservation,
@@ -66,6 +68,17 @@ impl CryptoRng for CounterRng {}
 
 fn identity(tag: u8) -> NodeIdentity {
     NodeIdentity::from_private_key(&[tag; 64]).unwrap()
+}
+
+fn proof_for(receiver_tag: u8, attempt: AttemptToken) -> Vec<u8> {
+    let identity = reticulum_rns_rete::identity_from_private_key(&[receiver_tag; 64]).unwrap();
+    let signature = identity.sign(attempt.as_bytes()).unwrap();
+    let mut proof = vec![0u8; 19 + 32 + 64];
+    proof[0] = 0x03;
+    proof[2..18].copy_from_slice(&attempt.as_bytes()[..16]);
+    proof[19..51].copy_from_slice(attempt.as_bytes());
+    proof[51..].copy_from_slice(&signature);
+    proof
 }
 
 fn prepared_job(tag: u8, owner_deadline_ms: u64) -> (TestNode, RoutedTxJob<'static>) {
@@ -298,6 +311,28 @@ fn candidate(tag: u8, payload: &[u8]) -> AcceptanceCandidate {
         IdempotencyKey::new([tag.wrapping_add(1); 16]),
         ExperimentalRnsDataIntent::new(DestinationHash::new([tag.wrapping_add(2); 16]), payload)
             .unwrap(),
+        authorization,
+    )
+}
+
+fn lxmf_candidate(tag: u8, trailing: &[u8]) -> AcceptanceCandidate {
+    let mut credential_id = [0xA5; 16];
+    credential_id[0] = tag;
+    let authorization = AuthorizationSnapshot::new(
+        credential_id,
+        7,
+        9,
+        1,
+        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+    )
+    .unwrap();
+    let mut wire = vec![tag.wrapping_add(2); 16];
+    wire.extend_from_slice(trailing);
+    AcceptanceCandidate::new(
+        PrincipalId::new([tag; 16]),
+        IdempotencyKey::new([tag.wrapping_add(1); 16]),
+        LxmfMessageIntent::new(&wire).unwrap(),
         authorization,
     )
 }
@@ -725,6 +760,32 @@ fn boot_recovery_returns_typed_outcomes_and_commits_before_final_visibility() {
 }
 
 #[test]
+fn boot_recovery_replays_pending_lxmf_without_writing_or_finalizing() {
+    let (mut initial, mut journal) = mounted::<2, 1>(FakeNor::formatted(), 33);
+    let id = match initial.accept(&mut journal, lxmf_candidate(18, b"pending lxmf")) {
+        Ok(AcceptanceProgress::Accepted(id)) => id,
+        other => panic!("acceptance failed: {other:?}"),
+    };
+    let request = request_for(&mut initial, id);
+    assert_eq!(
+        initial.persist_projector(&mut journal, request),
+        Ok(PersistenceProgress::Committed)
+    );
+
+    let mut recovered = StorageActor::<2, 1>::mount(&mut journal, SubmissionId::new(33)).unwrap();
+    let state_before = recovered.state();
+    let indexed_before = recovered.index().get(id).unwrap();
+    let io_before = io_counts(&journal);
+    assert_eq!(
+        recovered.finalize_boot_recovery(&mut journal, id, 73),
+        Ok(BootRecoveryProgress::ReplayPendingLxmf)
+    );
+    assert_eq!(recovered.state(), state_before);
+    assert_eq!(recovered.index().get(id), Some(indexed_before));
+    assert_eq!(io_counts(&journal), io_before);
+}
+
+#[test]
 fn ambiguous_boot_finalization_retains_exact_plan_and_blocks_mismatched_identity() {
     let (mut initial, mut journal) = mounted::<4, 1>(FakeNor::formatted(), 34);
     let interrupted = match initial.accept(&mut journal, candidate(15, b"interrupted")) {
@@ -898,13 +959,15 @@ fn actor_projects_preparation_frame_terminal_and_exact_acknowledgement() {
         LifecycleState::AwaitingDelivery(_)
     ));
 
-    assert_eq!(
-        node.tick(MonotonicSeconds::new(132), &mut CounterRng::default())
-            .timed_out_attempts,
-        1
-    );
+    node.ingest(
+        &proof_for(22, prepared.attempt()),
+        MonotonicSeconds::new(132),
+        PacketInterfaceId::new(1),
+        &mut CounterRng::default(),
+    )
+    .unwrap();
     let terminal = node.terminal_attempts().next().unwrap();
-    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+    assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
     let progress = actor.observe_terminal(terminal).unwrap();
     assert_eq!(actor.pending_acknowledgements().count(), 0);
     persist_projection(&mut actor, &mut journal, progress);

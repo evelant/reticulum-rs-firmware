@@ -6,12 +6,21 @@ use std::{
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
-    ApiErrorResponse, ApiVersion, DecodeError, DestinationHash, DeviceRequest, DeviceResponse,
-    EncodeError, IdempotencyKey, IdentitySummary, LxmfBasicSendAccepted, LxmfMessageHandle,
+    ApiErrorResponse, ApiVersion, CapabilityAvailability, CapabilitySnapshot, DecodeError,
+    DestinationHash, DeviceRequest, DeviceResponse, EncodeError, IdempotencyKey, IdentitySummary,
+    LxmfBasicSendAccepted, LxmfMailboxStatus, LxmfMessageHandle, LxmfMessageLocation,
     LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryPage, LxmfReadLength,
-    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, NomadFetchId, NomadFetchPollRequest,
-    NomadFetchPollResponse, NomadFetchStartAccepted, NomadFetchStartRequest, RequestEnvelope,
-    RequestId, SubmissionId, SubmissionStatus, decode_response, encode_request,
+    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, ManualServiceAnnounceDisposition,
+    NodeDiagnosticsSnapshot, NomadFetchId, NomadFetchPollRequest, NomadFetchPollResponse,
+    NomadFetchStartAccepted, NomadFetchStartRequest, ProbeId, ProbePollRequest, ProbePollResponse,
+    ProbeStartAccepted, ProbeStartRequest, RadioTracePage, RadioTracePageRequest, RequestEnvelope,
+    RequestId, RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionId, SubmissionStatus,
+    decode_response, encode_request,
+};
+#[cfg(feature = "experimental-network-config")]
+use reticulum_device_api::{
+    NetworkConfigMutationOutcome, NetworkConfigMutationRequest, NetworkConfigSnapshot,
+    NetworkRuntimeStatus,
 };
 use reticulum_device_api_framing::{DecodeEvent, Record, StreamDecoder, TxAdvanceError};
 use reticulum_device_api_handoff::{MessageLength, OwnedMessage};
@@ -136,6 +145,8 @@ impl ClientSessionProfile {
 /// Logical operation associated with a typed response or error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
+    /// `system.capabilities`.
+    SystemCapabilities,
     /// `identity.summary`.
     IdentitySummary,
     /// `submission.status`.
@@ -144,6 +155,10 @@ pub enum Operation {
     LxmfNext,
     /// `experimental.lxmf.read`.
     LxmfRead,
+    /// `experimental.lxmf.mailbox_status`.
+    LxmfMailboxStatus,
+    /// `experimental.lxmf.mailbox_acknowledge`.
+    LxmfMailboxAcknowledge,
     /// `experimental.lxmf.basic_send`.
     LxmfBasicSend,
     /// `experimental.lxmf.peer_next`.
@@ -152,19 +167,55 @@ pub enum Operation {
     NomadFetchStart,
     /// `experimental.nomad.fetch_poll`.
     NomadFetchPoll,
+    /// `experimental.reticulum_probe.start`.
+    ReticulumProbeStart,
+    /// `experimental.reticulum_probe.poll`.
+    ReticulumProbePoll,
+    /// `experimental.network_config.get`.
+    #[cfg(feature = "experimental-network-config")]
+    NetworkConfigGet,
+    /// `experimental.network_config.mutate`.
+    #[cfg(feature = "experimental-network-config")]
+    NetworkConfigMutate,
+    /// `experimental.network.status`.
+    #[cfg(feature = "experimental-network-config")]
+    NetworkStatus,
+    /// `experimental.node.diagnostics`.
+    NodeDiagnostics,
+    /// `experimental.route_diagnostics.page`.
+    RouteDiagnosticsPage,
+    /// `experimental.radio_trace.page`.
+    RadioTracePage,
+    /// `experimental.manual_service_announce`.
+    ManualServiceAnnounce,
 }
 
 impl Operation {
     const fn name(self) -> &'static str {
         match self {
+            Self::SystemCapabilities => "system.capabilities",
             Self::IdentitySummary => "identity.summary",
             Self::SubmissionStatus => "submission.status",
             Self::LxmfNext => "experimental.lxmf.next",
             Self::LxmfRead => "experimental.lxmf.read",
+            Self::LxmfMailboxStatus => "experimental.lxmf.mailbox_status",
+            Self::LxmfMailboxAcknowledge => "experimental.lxmf.mailbox_acknowledge",
             Self::LxmfBasicSend => "experimental.lxmf.basic_send",
             Self::LxmfPeerNext => "experimental.lxmf.peer_next",
             Self::NomadFetchStart => "experimental.nomad.fetch_start",
             Self::NomadFetchPoll => "experimental.nomad.fetch_poll",
+            Self::ReticulumProbeStart => "experimental.reticulum_probe.start",
+            Self::ReticulumProbePoll => "experimental.reticulum_probe.poll",
+            #[cfg(feature = "experimental-network-config")]
+            Self::NetworkConfigGet => "experimental.network_config.get",
+            #[cfg(feature = "experimental-network-config")]
+            Self::NetworkConfigMutate => "experimental.network_config.mutate",
+            #[cfg(feature = "experimental-network-config")]
+            Self::NetworkStatus => "experimental.network.status",
+            Self::NodeDiagnostics => "experimental.node.diagnostics",
+            Self::RouteDiagnosticsPage => "experimental.route_diagnostics.page",
+            Self::RadioTracePage => "experimental.radio_trace.page",
+            Self::ManualServiceAnnounce => "experimental.manual_service_announce",
         }
     }
 }
@@ -231,6 +282,15 @@ pub enum ClientError {
         /// Device-selected version.
         observed: ApiVersion,
     },
+    /// A requested backward-compatible feature needs a newer API minor revision.
+    ApiMinorTooOld {
+        /// Human-readable feature withheld by the client.
+        feature: &'static str,
+        /// First API minor revision implementing the feature.
+        required: u16,
+        /// Authenticated device-selected version.
+        observed: ApiVersion,
+    },
     /// Device echoed a different logical request ID.
     RequestIdMismatch {
         /// ID sent by this client.
@@ -242,6 +302,13 @@ pub enum ClientError {
     RequestIdExhausted,
     /// A previous transport/session fault consumed the connection.
     SessionUnavailable,
+    /// A capability preflight reported that the requested operation is unavailable.
+    CapabilityUnavailable {
+        /// Operation withheld by the client.
+        operation: Operation,
+        /// Device-reported build or runtime availability.
+        availability: CapabilityAvailability,
+    },
     /// Device returned a typed logical API error.
     Api {
         /// Operation that was rejected.
@@ -330,6 +397,17 @@ impl fmt::Display for ClientError {
                 observed.minor,
                 ApiVersion::CURRENT.major
             ),
+            Self::ApiMinorTooOld {
+                feature,
+                required,
+                observed,
+            } => write!(
+                formatter,
+                "{feature} requires device API {}.{required}, but the device reports {}.{}",
+                ApiVersion::CURRENT.major,
+                observed.major,
+                observed.minor,
+            ),
             Self::RequestIdMismatch { expected, observed } => write!(
                 formatter,
                 "device returned request ID {} instead of {}",
@@ -337,6 +415,14 @@ impl fmt::Display for ClientError {
             ),
             Self::RequestIdExhausted => formatter.write_str("logical request ID space exhausted"),
             Self::SessionUnavailable => formatter.write_str("authenticated session is unavailable"),
+            Self::CapabilityUnavailable {
+                operation,
+                availability,
+            } => write!(
+                formatter,
+                "device reports {} as {availability:?}",
+                operation.name()
+            ),
             Self::Api { operation, error } => write!(
                 formatter,
                 "device rejected {}: code={} operation={:?}",
@@ -401,6 +487,7 @@ pub struct BasicLxmfSend<'a> {
     timestamp_unix_ms: u64,
     title: &'a [u8],
     content: &'a [u8],
+    location: Option<LxmfMessageLocation>,
     idempotency_key: IdempotencyKey,
 }
 
@@ -418,8 +505,15 @@ impl<'a> BasicLxmfSend<'a> {
             timestamp_unix_ms,
             title,
             content,
+            location: None,
             idempotency_key,
         }
+    }
+
+    /// Attach one immutable phone-location snapshot to this message.
+    pub const fn with_location(mut self, location: LxmfMessageLocation) -> Self {
+        self.location = Some(location);
+        self
     }
 
     /// Remote `lxmf.delivery` destination.
@@ -440,6 +534,11 @@ impl<'a> BasicLxmfSend<'a> {
     /// Binary LXMF content.
     pub const fn content(self) -> &'a [u8] {
         self.content
+    }
+
+    /// Optional Sideband-compatible message location.
+    pub const fn location(self) -> Option<LxmfMessageLocation> {
+        self.location
     }
 
     /// Principal-scoped replay key.
@@ -480,6 +579,7 @@ pub struct DeviceClient<T> {
     device_id: DeviceId,
     session_id: SessionId,
     next_request_id: Option<u64>,
+    observed_api_version: Option<ApiVersion>,
     config: ClientConfig,
 }
 
@@ -560,6 +660,7 @@ impl<T: ClientTransport> DeviceClient<T> {
             device_id,
             session_id,
             next_request_id: Some(1),
+            observed_api_version: None,
             config,
         })
     }
@@ -582,6 +683,21 @@ impl<T: ClientTransport> DeviceClient<T> {
     /// Recover the underlying transport, ending this session without a close record.
     pub fn into_transport(self) -> T {
         self.transport
+    }
+
+    /// Read device-owned runtime capabilities and logical codec limits.
+    pub fn system_capabilities(&mut self) -> Result<CapabilitySnapshot, ClientError> {
+        match self.exchange(DeviceRequest::SystemCapabilities)? {
+            DeviceResponse::SystemCapabilities(capabilities) => Ok(capabilities),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::SystemCapabilities,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::SystemCapabilities,
+                kind: other.kind(),
+            }),
+        }
     }
 
     /// Read the node's public primary and optional LXMF delivery destinations.
@@ -661,6 +777,39 @@ impl<T: ClientTransport> DeviceClient<T> {
             summaries.push(summary);
         }
         Ok(summaries)
+    }
+
+    /// Read the durable device-side LXMF collection watermark.
+    pub fn lxmf_mailbox_status(&mut self) -> Result<LxmfMailboxStatus, ClientError> {
+        match self.exchange(DeviceRequest::LxmfMailboxStatus)? {
+            DeviceResponse::LxmfMailboxStatus(status) => Ok(status),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::LxmfMailboxStatus,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::LxmfMailboxStatus,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Idempotently advance the device-side collection watermark.
+    pub fn lxmf_mailbox_acknowledge(
+        &mut self,
+        through: LxmfMessageHandle,
+    ) -> Result<LxmfMailboxStatus, ClientError> {
+        match self.exchange(DeviceRequest::LxmfMailboxAcknowledge { through })? {
+            DeviceResponse::LxmfMailboxAcknowledged(status) => Ok(status),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::LxmfMailboxAcknowledge,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::LxmfMailboxAcknowledge,
+                kind: other.kind(),
+            }),
+        }
     }
 
     /// Find, download, digest-check, parse, and cross-check one committed LXMF message.
@@ -765,11 +914,15 @@ impl<T: ClientTransport> DeviceClient<T> {
         &mut self,
         send: BasicLxmfSend<'_>,
     ) -> Result<LxmfBasicSendAccepted, ClientError> {
+        if send.location.is_some() {
+            self.require_api_minor(17, "LXMF message location")?;
+        }
         match self.exchange(DeviceRequest::LxmfBasicSend {
             destination: send.destination,
             timestamp_unix_ms: send.timestamp_unix_ms,
             title: send.title,
             content: send.content,
+            location: send.location,
             idempotency_key: send.idempotency_key,
         })? {
             DeviceResponse::LxmfBasicSendAccepted(accepted) => Ok(accepted),
@@ -836,6 +989,174 @@ impl<T: ClientTransport> DeviceClient<T> {
                 kind: other.kind(),
             }),
         }
+    }
+
+    /// Begin or idempotently replay one boot-scoped Reticulum proof probe.
+    pub fn reticulum_probe_start(
+        &mut self,
+        request: ProbeStartRequest,
+    ) -> Result<ProbeStartAccepted, ClientError> {
+        match self.exchange(DeviceRequest::ReticulumProbeStart(request))? {
+            DeviceResponse::ReticulumProbeStartAccepted(accepted) => Ok(accepted),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::ReticulumProbeStart,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::ReticulumProbeStart,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Poll one principal-owned boot-scoped Reticulum proof probe.
+    pub fn reticulum_probe_poll(&mut self, id: ProbeId) -> Result<ProbePollResponse, ClientError> {
+        match self.exchange(DeviceRequest::ReticulumProbePoll(ProbePollRequest::new(id)))? {
+            DeviceResponse::ReticulumProbePoll(response) => Ok(response),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::ReticulumProbePoll,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::ReticulumProbePoll,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Read the complete redacted desired network configuration.
+    #[cfg(feature = "experimental-network-config")]
+    pub fn network_config_get(&mut self) -> Result<NetworkConfigSnapshot, ClientError> {
+        match self.exchange(DeviceRequest::NetworkConfigGet)? {
+            DeviceResponse::NetworkConfig(config) => Ok(config),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::NetworkConfigGet,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::NetworkConfigGet,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Apply one compare-and-swap desired-network mutation.
+    #[cfg(feature = "experimental-network-config")]
+    pub fn network_config_mutate(
+        &mut self,
+        request: NetworkConfigMutationRequest<'_>,
+    ) -> Result<NetworkConfigMutationOutcome, ClientError> {
+        match self.exchange(DeviceRequest::NetworkConfigMutate(request))? {
+            DeviceResponse::NetworkConfigMutation(outcome) => Ok(outcome),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::NetworkConfigMutate,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::NetworkConfigMutate,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Read current secret-free Wi-Fi station and Reticulum TCP state.
+    #[cfg(feature = "experimental-network-config")]
+    pub fn network_status(&mut self) -> Result<NetworkRuntimeStatus, ClientError> {
+        match self.exchange(DeviceRequest::NetworkStatus)? {
+            DeviceResponse::NetworkStatus(status) => Ok(status),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::NetworkStatus,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::NetworkStatus,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Read one authenticated bounded cross-interface node diagnostics snapshot.
+    pub fn node_diagnostics(&mut self) -> Result<NodeDiagnosticsSnapshot, ClientError> {
+        match self.exchange(DeviceRequest::NodeDiagnostics)? {
+            DeviceResponse::NodeDiagnostics(snapshot) => Ok(snapshot),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::NodeDiagnostics,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::NodeDiagnostics,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Read one authenticated bounded lexicographically ordered route page.
+    pub fn route_diagnostics_page(
+        &mut self,
+        request: RouteDiagnosticsRequest,
+    ) -> Result<RouteDiagnosticsPage, ClientError> {
+        match self.exchange(DeviceRequest::RouteDiagnosticsPage(request))? {
+            DeviceResponse::RouteDiagnosticsPage(page) => Ok(page),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::RouteDiagnosticsPage,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::RouteDiagnosticsPage,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Read one authenticated bounded boot-scoped packet-correlated radio trace page.
+    pub fn radio_trace_page(
+        &mut self,
+        request: RadioTracePageRequest,
+    ) -> Result<RadioTracePage, ClientError> {
+        match self.exchange(DeviceRequest::RadioTracePage(request))? {
+            DeviceResponse::RadioTracePage(page) => Ok(page),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::RadioTracePage,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::RadioTracePage,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Capability-check and queue ordinary primary, LXMF, and NomadNet announces.
+    ///
+    /// This performs a fresh capability query before the mutating request so an
+    /// older, disabled, or profile-limited device is never asked to schedule
+    /// output it did not advertise.
+    pub fn manual_service_announce(
+        &mut self,
+    ) -> Result<ManualServiceAnnounceDisposition, ClientError> {
+        let availability = self.system_capabilities()?.manual_service_announce();
+        if availability != CapabilityAvailability::Available {
+            return Err(ClientError::CapabilityUnavailable {
+                operation: Operation::ManualServiceAnnounce,
+                availability,
+            });
+        }
+        match self.exchange(DeviceRequest::ManualServiceAnnounce)? {
+            DeviceResponse::ManualServiceAnnounce(disposition) => Ok(disposition),
+            DeviceResponse::Error(error) => Err(ClientError::Api {
+                operation: Operation::ManualServiceAnnounce,
+                error,
+            }),
+            other => Err(ClientError::UnexpectedResponse {
+                operation: Operation::ManualServiceAnnounce,
+                kind: other.kind(),
+            }),
+        }
+    }
+
+    /// Ergonomic alias for [`Self::manual_service_announce`].
+    pub fn announce_now(&mut self) -> Result<ManualServiceAnnounceDisposition, ClientError> {
+        self.manual_service_announce()
     }
 
     fn find_lxmf_summary(
@@ -918,7 +1239,32 @@ impl<T: ClientTransport> DeviceClient<T> {
                 observed: response.request_id,
             });
         }
+        self.observed_api_version = Some(response.version);
         Ok(response.response)
+    }
+
+    fn require_api_minor(
+        &mut self,
+        required: u16,
+        feature: &'static str,
+    ) -> Result<(), ClientError> {
+        let observed = match self.observed_api_version {
+            Some(version) => version,
+            None => {
+                self.system_capabilities()?;
+                self.observed_api_version
+                    .expect("a valid capabilities response records its envelope version")
+            }
+        };
+        if observed.minor < required {
+            Err(ClientError::ApiMinorTooOld {
+                feature,
+                required,
+                observed,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     fn allocate_request_id(&mut self) -> Result<RequestId, ClientError> {

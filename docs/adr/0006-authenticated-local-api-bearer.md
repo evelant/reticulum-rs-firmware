@@ -200,7 +200,7 @@ committed and validated a complete durable snapshot.
 
 Physical presence authorizes pairing but does not prove which local host
 process received a secret. ADR 0009 fixes the first lab profile: a continuous
-roughly two-second GPIO21 hold opens one exclusive 60-second USB Serial/JTAG
+roughly two-second GPIO21 hold opens one exclusive five-minute USB Serial/JTAG
 window with at most three begin/proof attempts and one pending enrollment.
 That profile explicitly trusts the connected USB host. Before shipping a
 turnkey client, pairing adds an independently confirmed display/code/QR

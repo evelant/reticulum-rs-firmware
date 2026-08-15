@@ -1,28 +1,56 @@
-#[cfg(any(
-    feature = "experimental-rns-data",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad"
-))]
-use reticulum_device_api::IdempotencyKey;
 use reticulum_device_api::{
     API_VERSION_MAJOR, API_VERSION_MINOR, ApiErrorCode, ApiErrorResponse, ApiVersion,
     AuthorizationError, CapabilityAvailability, CapabilitySnapshot, DecodeError, DestinationHash,
-    DeviceRequest, DeviceResponse, DispatchContext, DispatchProvenance, DispatchProvenanceError,
-    EncodeError, EncodedPacketSha256, IdentitySummary, MAX_BODY_BYTES, MAX_CBOR_NESTING_DEPTH,
+    DeviceRequest, DeviceResponse, DiagnosticInterfaceKind, DiagnosticInterfaceRecord,
+    DiagnosticInterfaceState, DiagnosticLoraDataTxEvidence, DiagnosticLoraLastDataTx,
+    DiagnosticLoraLastRx, DiagnosticLoraLastTx, DiagnosticLoraTxFamily, DiagnosticLoraTxOutcome,
+    DispatchContext, DispatchProvenance, DispatchProvenanceError, EncodeError, EncodedPacketSha256,
+    IdempotencyKey, IdentityHash, IdentitySummary, IngressObservation, IngressSignal,
+    LoraDiagnostics, MAX_BODY_BYTES, MAX_CBOR_NESTING_DEPTH, MAX_DIAGNOSTIC_INTERFACES,
     MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_PEER_APP_DATA_BYTES,
     MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES,
-    MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_IDENTITY_SUMMARY, OP_SUBMISSION_STATUS, Permissions,
-    PreparedPacketDetails, PrincipalId, RequestEnvelope, RequestId, RequiredField,
-    RequiredPermission, ResponseEnvelope, SubmissionFailure, SubmissionId, SubmissionState,
-    SubmissionStatus, authorize_request, decode_request, decode_response, encode_request,
-    encode_response,
+    MAX_RADIO_TRACE_PAGE_ENTRIES, MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES,
+    MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, ManualServiceAnnounceDisposition, NodeDiagnosticsSnapshot,
+    OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE, OP_EXPERIMENTAL_NODE_DIAGNOSTICS,
+    OP_EXPERIMENTAL_RADIO_TRACE_PAGE, OP_EXPERIMENTAL_RETICULUM_PROBE_POLL,
+    OP_EXPERIMENTAL_RETICULUM_PROBE_START, OP_EXPERIMENTAL_ROUTE_DIAGNOSTICS_PAGE,
+    OP_IDENTITY_SUMMARY, OP_SUBMISSION_STATUS, Permissions, PreparedPacketDetails, PrincipalId,
+    ProbeFailure, ProbeId, ProbePhase, ProbePollRequest, ProbePollResponse, ProbeStartAccepted,
+    ProbeStartOutcome, ProbeStartRequest, ProbeSuccess, RadioTraceAppliedLoraProfile,
+    RadioTraceAttemptOutcome, RadioTraceAttemptTerminal, RadioTraceAttemptToken, RadioTraceCursor,
+    RadioTraceDataTx, RadioTraceEvent, RadioTraceEventKind, RadioTraceLogicalRx,
+    RadioTracePacketEvidence, RadioTracePage, RadioTracePageRequest, RadioTraceRouteSelected,
+    RadioTraceTxOutcome, RequestEnvelope, RequestId, RequiredField, RequiredPermission,
+    ResponseEnvelope, RnsDiagnostics, RouteDiagnosticEntry, RouteDiagnosticResolution,
+    RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionFailure, SubmissionId,
+    SubmissionState, SubmissionStatus, authorize_request, decode_request, decode_response,
+    encode_request, encode_response,
+};
+#[cfg(feature = "experimental-network-config")]
+use reticulum_device_api::{
+    DEFAULT_RETICULUM_TCP_PORT, GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm,
+    MAX_RETICULUM_DNS_DHCP_SERVERS, MAX_RETICULUM_DNS_RAW_ATTEMPTS,
+    MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES, MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_PASSPHRASE_BYTES,
+    MAX_WIFI_SSID_BYTES, MIN_WIFI_PASSPHRASE_BYTES, NetworkConfigMutation,
+    NetworkConfigMutationOutcome, NetworkConfigMutationRequest, NetworkConfigSnapshot,
+    NetworkRuntimeStatus, OP_EXPERIMENTAL_NETWORK_CONFIG_GET,
+    OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE, OP_EXPERIMENTAL_NETWORK_STATUS, ReticulumDnsDiagnostics,
+    ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt, ReticulumDnsRawOutcome,
+    ReticulumDnsRawSetupState, ReticulumDnsRawSource, ReticulumDnsResolution,
+    ReticulumDnsResolutionSource, ReticulumTcpFailure, ReticulumTcpPeerConfigSummary,
+    ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate, ReticulumTcpPeerHostname,
+    ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState, ReticulumTcpPeerUpdate, RmapConfig,
+    RmapLocation, WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId,
+    WifiNetworkUpdate, WifiStationState,
 };
 #[cfg(feature = "experimental-lxmf")]
 use reticulum_device_api::{
-    IdentityHash, LxmfBasicSendAccepted, LxmfDiscoveredPeer, LxmfMessageHandle, LxmfMessageSummary,
+    LxmfBasicSendAccepted, LxmfDiscoveredPeer, LxmfIngressObservation, LxmfIngressSignal,
+    LxmfMailboxStatus, LxmfMessageHandle, LxmfMessageLocation, LxmfMessageSummary,
     LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation, LxmfPeerDiscoveryPage,
     LxmfPeerGeneration, LxmfReadChunk, LxmfReadLength, MAX_LXMF_READ_CHUNK_BYTES,
-    OP_EXPERIMENTAL_LXMF_BASIC_SEND, OP_EXPERIMENTAL_LXMF_NEXT, OP_EXPERIMENTAL_LXMF_PEER_NEXT,
+    OP_EXPERIMENTAL_LXMF_BASIC_SEND, OP_EXPERIMENTAL_LXMF_MAILBOX_ACKNOWLEDGE,
+    OP_EXPERIMENTAL_LXMF_MAILBOX_STATUS, OP_EXPERIMENTAL_LXMF_NEXT, OP_EXPERIMENTAL_LXMF_PEER_NEXT,
     OP_EXPERIMENTAL_LXMF_READ,
 };
 #[cfg(feature = "experimental-nomad")]
@@ -41,13 +69,24 @@ use reticulum_device_api::{
 use reticulum_device_api::{OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted};
 
 const GOLDEN_CAPABILITIES_REQUEST: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+];
+const GOLDEN_PROBE_START_REQUEST: &[u8] = &[
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03, 0xa2,
+    0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+    0x0e, 0x0f, 0x01, 0x50, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb,
+    0xfc, 0xfd, 0xfe, 0xff,
+];
+const GOLDEN_PROBE_POLL_REQUEST: &[u8] = &[
+    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x13, 0x03, 0xa1,
+    0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad,
+    0xae, 0xaf,
 ];
 
 fn golden_capabilities_response() -> Vec<u8> {
     let mut encoded = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xb3, 0x00,
-        0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0xf4, 0x02, 0x00, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xb6, 0x00,
+        0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0xf4, 0x02, 0x00, 0x03,
     ];
     encoded.push(if cfg!(feature = "experimental-rns-data") {
         0xf5
@@ -136,6 +175,18 @@ fn golden_capabilities_response() -> Vec<u8> {
     } else {
         encoded.push(0x00);
     }
+    encoded.extend_from_slice(&[
+        0x13,
+        if cfg!(feature = "experimental-network-config") {
+            0x02
+        } else {
+            0x00
+        },
+        0x14,
+        0x02,
+        0x15,
+        0x02,
+    ]);
     encoded
 }
 
@@ -153,6 +204,31 @@ const PRIMARY_DESTINATION: DestinationHash = DestinationHash([
 const LXMF_DELIVERY_DESTINATION: DestinationHash = DestinationHash([
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ]);
+const PROBE_DESTINATION: DestinationHash = DestinationHash([
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+]);
+
+fn probe_id() -> ProbeId {
+    ProbeId::new([
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae,
+        0xaf,
+    ])
+    .unwrap()
+}
+
+fn probe_start_request() -> RequestEnvelope<'static> {
+    RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::ReticulumProbeStart(ProbeStartRequest::new(
+            PROBE_DESTINATION,
+            IdempotencyKey([
+                0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
+                0xfe, 0xff,
+            ]),
+        )),
+    }
+}
 
 fn identity_request() -> RequestEnvelope<'static> {
     RequestEnvelope {
@@ -231,6 +307,14 @@ fn legacy_capabilities_default_absent_inbox_and_lxmf_fields() {
             CapabilityAvailability::Unavailable
         );
         assert_eq!(capabilities.max_lxmf_peer_app_data_bytes(), 0);
+        assert_eq!(
+            capabilities.manual_service_announce(),
+            CapabilityAvailability::Unavailable
+        );
+        assert_eq!(
+            capabilities.experimental_reticulum_probe(),
+            CapabilityAvailability::Unavailable
+        );
     }
 }
 
@@ -287,10 +371,10 @@ fn lxmf_capability_availability_is_a_closed_wire_vocabulary() {
 #[test]
 fn exact_identity_summary_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f,
     ];
@@ -311,7 +395,7 @@ fn exact_identity_summary_goldens_round_trip() {
 #[test]
 fn exact_identity_summary_with_lxmf_destination_golden_round_trip() {
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x01, 0x50, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
         0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
@@ -340,7 +424,7 @@ fn exact_identity_summary_with_lxmf_destination_golden_round_trip() {
 fn identity_summary_is_copy_only_public_and_read_only() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<IdentitySummary>();
-    assert_eq!(API_VERSION_MINOR, 6);
+    assert_eq!(API_VERSION_MINOR, 18);
     assert_eq!(OP_IDENTITY_SUMMARY, 0x0003);
 
     let summary = IdentitySummary::new(PRIMARY_DESTINATION);
@@ -369,13 +453,1234 @@ fn identity_summary_is_copy_only_public_and_read_only() {
 }
 
 #[test]
+fn manual_service_announce_is_authenticated_coalescing_and_wire_stable() {
+    const REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0d, 0x03,
+        0xa0,
+    ];
+    const QUEUED_RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0d, 0x03,
+        0xa1, 0x00, 0x00,
+    ];
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::ManualServiceAnnounce,
+    };
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::ManualServiceAnnounce(ManualServiceAnnounceDisposition::Queued),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..written], REQUEST);
+    assert_eq!(decode_request(REQUEST).unwrap(), request);
+    let written = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..written], QUEUED_RESPONSE);
+    assert_eq!(decode_response(QUEUED_RESPONSE).unwrap(), response);
+
+    let pending = ResponseEnvelope {
+        response: DeviceResponse::ManualServiceAnnounce(
+            ManualServiceAnnounceDisposition::AlreadyPending,
+        ),
+        ..response
+    };
+    let written = encode_response(&pending, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), pending);
+
+    assert_eq!(OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE, 0xf00d);
+    assert_eq!(
+        request.request.operation(),
+        OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE
+    );
+    assert!(request.request.is_mutating());
+    assert_eq!(
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &request.request),
+        Err(AuthorizationError::AuthenticationRequired)
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(
+                PrincipalId([0x19; 16]),
+                Permissions::NONE,
+                dispatch_provenance(),
+            ),
+            &request.request,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn manual_service_announce_capability_and_disposition_are_strict() {
+    assert_eq!(
+        CapabilitySnapshot::current().manual_service_announce(),
+        CapabilityAvailability::Available
+    );
+    assert_eq!(
+        CapabilitySnapshot::for_dispatch(false).manual_service_announce(),
+        CapabilityAvailability::Unavailable
+    );
+    assert_eq!(
+        CapabilitySnapshot::for_dispatch(false)
+            .with_dispatch_manual_service_announce(CapabilityAvailability::Disabled)
+            .manual_service_announce(),
+        CapabilityAvailability::Disabled
+    );
+
+    let mut invalid_capability = golden_capabilities_response();
+    let capability_key = invalid_capability
+        .windows(2)
+        .rposition(|window| window == [0x14, 0x02])
+        .expect("manual announce capability key");
+    invalid_capability.splice(capability_key + 1..=capability_key + 1, [0x18, 99]);
+    assert_eq!(
+        decode_response(&invalid_capability),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::CapabilityManualServiceAnnounce,
+            value: 99,
+        })
+    );
+
+    let invalid_disposition = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0d, 0x03, 0xa1,
+        0x00, 0x02,
+    ];
+    assert_eq!(
+        decode_response(&invalid_disposition),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::ManualServiceAnnounceDisposition,
+            value: 2,
+        })
+    );
+
+    let duplicate_disposition = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0d, 0x03, 0xa2,
+        0x00, 0x00, 0x00, 0x01,
+    ];
+    assert_eq!(
+        decode_response(&duplicate_disposition),
+        Err(DecodeError::DuplicateField(
+            RequiredField::ManualServiceAnnounceDisposition,
+        ))
+    );
+}
+
+#[test]
+fn exact_reticulum_probe_start_request_is_mutating_and_permission_gated() {
+    let expected = probe_start_request();
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&expected, &mut output).unwrap();
+    assert_eq!(&output[..written], GOLDEN_PROBE_START_REQUEST);
+    assert_eq!(
+        decode_request(GOLDEN_PROBE_START_REQUEST).unwrap(),
+        expected
+    );
+    assert_eq!(OP_EXPERIMENTAL_RETICULUM_PROBE_START, 0xf012);
+    assert_eq!(
+        expected.request.operation(),
+        OP_EXPERIMENTAL_RETICULUM_PROBE_START
+    );
+    assert!(expected.request.is_mutating());
+    assert_eq!(
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &expected.request),
+        Err(AuthorizationError::AuthenticationRequired)
+    );
+    let principal = PrincipalId([0x31; 16]);
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(principal, Permissions::NONE, dispatch_provenance(),),
+            &expected.request,
+        ),
+        Err(AuthorizationError::PermissionDenied(
+            RequiredPermission::ExperimentalSubmitRnsData
+        ))
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(
+                principal,
+                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                dispatch_provenance(),
+            ),
+            &expected.request,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn exact_reticulum_probe_start_responses_distinguish_fresh_and_replayed() {
+    const ACCEPTED: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03,
+        0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
+        0xac, 0xad, 0xae, 0xaf, 0x01, 0x00,
+    ];
+    const REPLAYED: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03,
+        0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
+        0xac, 0xad, 0xae, 0xaf, 0x01, 0x01,
+    ];
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    for (outcome, golden) in [
+        (ProbeStartOutcome::Accepted, ACCEPTED),
+        (ProbeStartOutcome::Replayed, REPLAYED),
+    ] {
+        let expected = ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: RequestId(42),
+            response: DeviceResponse::ReticulumProbeStartAccepted(ProbeStartAccepted::new(
+                probe_id(),
+                outcome,
+            )),
+        };
+        let written = encode_response(&expected, &mut output).unwrap();
+        assert_eq!(&output[..written], golden);
+        assert_eq!(decode_response(golden).unwrap(), expected);
+        assert!(written <= MAX_MESSAGE_BYTES);
+    }
+}
+
+#[test]
+fn exact_reticulum_probe_poll_request_is_authenticated_read_only() {
+    let expected = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::ReticulumProbePoll(ProbePollRequest::new(probe_id())),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&expected, &mut output).unwrap();
+    assert_eq!(&output[..written], GOLDEN_PROBE_POLL_REQUEST);
+    assert_eq!(decode_request(GOLDEN_PROBE_POLL_REQUEST).unwrap(), expected);
+    assert_eq!(OP_EXPERIMENTAL_RETICULUM_PROBE_POLL, 0xf013);
+    assert_eq!(
+        expected.request.operation(),
+        OP_EXPERIMENTAL_RETICULUM_PROBE_POLL
+    );
+    assert!(!expected.request.is_mutating());
+    assert_eq!(
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &expected.request),
+        Err(AuthorizationError::AuthenticationRequired)
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(
+                PrincipalId([0x31; 16]),
+                Permissions::NONE,
+                dispatch_provenance(),
+            ),
+            &expected.request,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn reticulum_probe_poll_round_trips_all_pending_and_failure_values() {
+    let phases = [
+        ProbePhase::PathLookup,
+        ProbePhase::AwaitingDispatch,
+        ProbePhase::AwaitingProof,
+    ];
+    let failures = [
+        ProbeFailure::IdentityUnavailable,
+        ProbeFailure::NoPath,
+        ProbeFailure::Dispatch,
+        ProbeFailure::Timeout,
+        ProbeFailure::Internal,
+    ];
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    for response in phases
+        .map(ProbePollResponse::Pending)
+        .into_iter()
+        .chain(failures.map(ProbePollResponse::Failed))
+    {
+        let expected = ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: RequestId(42),
+            response: DeviceResponse::ReticulumProbePoll(response),
+        };
+        let written = encode_response(&expected, &mut output).unwrap();
+        assert!(written <= MAX_MESSAGE_BYTES);
+        assert_eq!(decode_response(&output[..written]).unwrap(), expected);
+    }
+}
+
+#[test]
+fn exact_reticulum_probe_success_preserves_final_hop_signal_pair() {
+    const SUCCESS: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x13, 0x03,
+        0xa2, 0x00, 0x01, 0x01, 0xa3, 0x00, 0x19, 0x04, 0xd2, 0x01, 0x02, 0x02, 0xa3, 0x00, 0x07,
+        0x01, 0x38, 0x60, 0x02, 0x04,
+    ];
+    let success = ProbeSuccess::new(
+        1_234,
+        2,
+        IngressObservation::new(7, Some(IngressSignal::new(-97, 4))),
+    );
+    let expected = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::ReticulumProbePoll(ProbePollResponse::Succeeded(success)),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&expected, &mut output).unwrap();
+    assert_eq!(&output[..written], SUCCESS);
+    assert_eq!(decode_response(SUCCESS).unwrap(), expected);
+
+    let interface_only = ResponseEnvelope {
+        response: DeviceResponse::ReticulumProbePoll(ProbePollResponse::Succeeded(
+            ProbeSuccess::new(0, 0, IngressObservation::new(4, None)),
+        )),
+        ..expected
+    };
+    let written = encode_response(&interface_only, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), interface_only);
+}
+
+#[test]
+fn reticulum_probe_capability_is_optional_and_strict() {
+    assert_eq!(
+        CapabilitySnapshot::current().experimental_reticulum_probe(),
+        CapabilityAvailability::Available
+    );
+    assert_eq!(
+        CapabilitySnapshot::for_dispatch(false).experimental_reticulum_probe(),
+        CapabilityAvailability::Unavailable
+    );
+    assert_eq!(
+        CapabilitySnapshot::for_dispatch(false)
+            .with_dispatch_reticulum_probe(CapabilityAvailability::Disabled)
+            .experimental_reticulum_probe(),
+        CapabilityAvailability::Disabled
+    );
+
+    let mut legacy = golden_capabilities_response();
+    legacy[13] = 0xb5;
+    legacy.truncate(legacy.len() - 2);
+    let decoded = decode_response(&legacy).unwrap();
+    let DeviceResponse::SystemCapabilities(capabilities) = decoded.response else {
+        panic!("expected capabilities response")
+    };
+    assert_eq!(
+        capabilities.experimental_reticulum_probe(),
+        CapabilityAvailability::Unavailable
+    );
+
+    let mut invalid = golden_capabilities_response();
+    invalid.splice(invalid.len() - 1.., [0x18, 99]);
+    assert_eq!(
+        decode_response(&invalid),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::CapabilityExperimentalReticulumProbe,
+            value: 99,
+        })
+    );
+
+    let mut duplicate = golden_capabilities_response();
+    duplicate[13] = 0xb7;
+    duplicate.extend_from_slice(&[0x15, 0x02]);
+    assert_eq!(
+        decode_response(&duplicate),
+        Err(DecodeError::DuplicateField(
+            RequiredField::CapabilityExperimentalReticulumProbe
+        ))
+    );
+}
+
+#[test]
+fn reticulum_probe_rejects_zero_ids_duplicates_and_half_signal_observations() {
+    assert!(ProbeId::new([0; 16]).is_err());
+    assert!(ProbeId::new([0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_ok());
+
+    let mut zero_id = GOLDEN_PROBE_POLL_REQUEST.to_vec();
+    let id_start = zero_id.len() - 16;
+    zero_id[id_start..].fill(0);
+    assert_eq!(decode_request(&zero_id), Err(DecodeError::InvalidProbeId));
+
+    let mut wrong_width_id = GOLDEN_PROBE_POLL_REQUEST.to_vec();
+    let id_header = wrong_width_id.len() - 17;
+    wrong_width_id[id_header] = 0x4f;
+    wrong_width_id.pop();
+    assert_eq!(
+        decode_request(&wrong_width_id),
+        Err(DecodeError::InvalidByteStringLength {
+            field: RequiredField::ProbeId,
+            expected: 16,
+            actual: 15,
+        })
+    );
+
+    let mut missing_idempotency = GOLDEN_PROBE_START_REQUEST.to_vec();
+    let body_header = missing_idempotency
+        .windows(2)
+        .position(|window| window == [0x03, 0xa2])
+        .expect("probe start body")
+        + 1;
+    missing_idempotency[body_header] = 0xa1;
+    missing_idempotency.truncate(missing_idempotency.len() - 18);
+    assert_eq!(
+        decode_request(&missing_idempotency),
+        Err(DecodeError::MissingField(
+            RequiredField::ProbeStartIdempotencyKey
+        ))
+    );
+
+    let mut duplicate_destination = GOLDEN_PROBE_START_REQUEST.to_vec();
+    let body_header = duplicate_destination
+        .windows(2)
+        .position(|window| window == [0x03, 0xa2])
+        .expect("probe start body")
+        + 1;
+    duplicate_destination[body_header] = 0xa3;
+    duplicate_destination.extend_from_slice(&[
+        0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+        0x0d, 0x0e, 0x0f,
+    ]);
+    assert_eq!(
+        decode_request(&duplicate_destination),
+        Err(DecodeError::DuplicateField(
+            RequiredField::ProbeStartDestination
+        ))
+    );
+
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::ReticulumProbePoll(ProbePollResponse::Succeeded(
+            ProbeSuccess::new(
+                1_234,
+                2,
+                IngressObservation::new(7, Some(IngressSignal::new(-97, 4))),
+            ),
+        )),
+    };
+    let mut encoded = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&response, &mut encoded).unwrap();
+    let encoded = &encoded[..written];
+    let observation = encoded
+        .windows(6)
+        .position(|window| window == [0x02, 0xa3, 0x00, 0x07, 0x01, 0x38])
+        .expect("probe ingress observation");
+    let mut missing_snr = encoded.to_vec();
+    missing_snr[observation + 1] = 0xa2;
+    missing_snr.truncate(missing_snr.len() - 2);
+    assert_eq!(
+        decode_response(&missing_snr),
+        Err(DecodeError::InvalidProbePollResponse)
+    );
+}
+
+#[test]
+fn reticulum_probe_closed_states_and_duplicate_poll_fields_are_rejected() {
+    let start = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::ReticulumProbeStartAccepted(ProbeStartAccepted::new(
+            probe_id(),
+            ProbeStartOutcome::Accepted,
+        )),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&start, &mut output).unwrap();
+    let mut invalid_start = output[..written].to_vec();
+    *invalid_start.last_mut().unwrap() = 2;
+    assert_eq!(
+        decode_response(&invalid_start),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::ProbeStartOutcome,
+            value: 2,
+        })
+    );
+
+    let pending = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::ReticulumProbePoll(ProbePollResponse::Pending(
+            ProbePhase::PathLookup,
+        )),
+    };
+    let written = encode_response(&pending, &mut output).unwrap();
+    let mut invalid_phase = output[..written].to_vec();
+    *invalid_phase.last_mut().unwrap() = 3;
+    assert_eq!(
+        decode_response(&invalid_phase),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::ProbePhase,
+            value: 3,
+        })
+    );
+
+    let mut invalid_state = output[..written].to_vec();
+    let state_index = invalid_state.len() - 3;
+    invalid_state[state_index] = 3;
+    assert_eq!(
+        decode_response(&invalid_state),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::ProbePollState,
+            value: 3,
+        })
+    );
+
+    let mut duplicate_state = output[..written].to_vec();
+    let body_header = duplicate_state
+        .windows(5)
+        .position(|window| window == [0x03, 0xa2, 0x00, 0x00, 0x01])
+        .expect("probe poll body")
+        + 1;
+    duplicate_state[body_header] = 0xa3;
+    duplicate_state.extend_from_slice(&[0x00, 0x00]);
+    assert_eq!(
+        decode_response(&duplicate_state),
+        Err(DecodeError::DuplicateField(RequiredField::ProbePollState))
+    );
+
+    let failed = ResponseEnvelope {
+        response: DeviceResponse::ReticulumProbePoll(ProbePollResponse::Failed(
+            ProbeFailure::Internal,
+        )),
+        ..pending
+    };
+    let written = encode_response(&failed, &mut output).unwrap();
+    let mut invalid_failure = output[..written].to_vec();
+    *invalid_failure.last_mut().unwrap() = 5;
+    assert_eq!(
+        decode_response(&invalid_failure),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::ProbeFailure,
+            value: 5,
+        })
+    );
+}
+
+fn sample_rns_diagnostics() -> RnsDiagnostics {
+    RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+}
+
+fn sample_node_diagnostics() -> NodeDiagnosticsSnapshot {
+    NodeDiagnosticsSnapshot::new(
+        1_000,
+        [
+            Some(DiagnosticInterfaceRecord::new(
+                1,
+                DiagnosticInterfaceKind::LoRa,
+                DiagnosticInterfaceState::Online,
+                2,
+                500,
+                Some(125_000),
+            )),
+            None,
+            None,
+            None,
+        ],
+        None,
+        sample_rns_diagnostics(),
+        2,
+        3,
+        1,
+    )
+}
+
+#[test]
+fn diagnostics_operations_have_exact_authenticated_read_only_wire_shapes() {
+    const NODE_REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0e, 0x03,
+        0xa0,
+    ];
+    const NODE_RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0e, 0x03,
+        0xa6, 0x00, 0x19, 0x03, 0xe8, 0x01, 0x84, 0xa6, 0x00, 0x01, 0x01, 0x00, 0x02, 0x01, 0x03,
+        0x02, 0x04, 0x19, 0x01, 0xf4, 0x05, 0x1a, 0x00, 0x01, 0xe8, 0x48, 0xf6, 0xf6, 0xf6, 0x03,
+        0xaa, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x06, 0x07,
+        0x07, 0x08, 0x08, 0x09, 0x09, 0x0a, 0x04, 0x02, 0x05, 0x03, 0x06, 0x01,
+    ];
+    const ROUTE_REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0f, 0x03,
+        0xa1, 0x00, 0x50, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        0x20, 0x20, 0x20, 0x20,
+    ];
+    const ROUTE_RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0f, 0x03,
+        0xa3, 0x00, 0x09, 0x01, 0x01, 0x02, 0x84, 0xa4, 0x00, 0x50, 0x10, 0x10, 0x10, 0x10, 0x10,
+        0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x02, 0x02, 0x03, 0x03,
+        0x04, 0x00, 0xf6, 0xf6, 0xf6,
+    ];
+
+    let node_request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::NodeDiagnostics,
+    };
+    let node_response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::NodeDiagnostics(sample_node_diagnostics()),
+    };
+    let route_request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::RouteDiagnosticsPage(RouteDiagnosticsRequest::new(Some(
+            DestinationHash([0x20; 16]),
+        ))),
+    };
+    let route_entry = RouteDiagnosticEntry::new(
+        DestinationHash([0x10; 16]),
+        None,
+        2,
+        Some(3),
+        RouteDiagnosticResolution::ExactReady,
+        None,
+        None,
+        None,
+    );
+    let route_response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::RouteDiagnosticsPage(
+            RouteDiagnosticsPage::new(9, 1, [Some(route_entry), None, None, None], None).unwrap(),
+        ),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    for (request, golden) in [(node_request, NODE_REQUEST), (route_request, ROUTE_REQUEST)] {
+        let written = encode_request(&request, &mut output).unwrap();
+        assert_eq!(&output[..written], golden);
+        assert_eq!(decode_request(golden).unwrap(), request);
+        assert!(!request.request.is_mutating());
+        assert_eq!(
+            authorize_request(&DispatchContext::UNAUTHENTICATED, &request.request),
+            Err(AuthorizationError::AuthenticationRequired)
+        );
+        assert_eq!(
+            authorize_request(
+                &DispatchContext::authenticated(
+                    PrincipalId([0x31; 16]),
+                    Permissions::NONE,
+                    dispatch_provenance(),
+                ),
+                &request.request,
+            ),
+            Ok(())
+        );
+    }
+    for (response, golden) in [
+        (node_response, NODE_RESPONSE),
+        (route_response, ROUTE_RESPONSE),
+    ] {
+        let written = encode_response(&response, &mut output).unwrap();
+        assert_eq!(&output[..written], golden);
+        assert_eq!(decode_response(golden).unwrap(), response);
+    }
+    assert_eq!(OP_EXPERIMENTAL_NODE_DIAGNOSTICS, 0xf00e);
+    assert_eq!(OP_EXPERIMENTAL_ROUTE_DIAGNOSTICS_PAGE, 0xf00f);
+}
+
+#[test]
+fn diagnostics_models_enforce_route_page_order_and_cursor_invariants() {
+    let route = |destination| {
+        RouteDiagnosticEntry::new(
+            DestinationHash([destination; 16]),
+            None,
+            1,
+            None,
+            RouteDiagnosticResolution::BroadcastReady,
+            None,
+            None,
+            None,
+        )
+    };
+    assert_eq!(MAX_DIAGNOSTIC_INTERFACES, 4);
+    assert_eq!(MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES, 4);
+    assert_eq!(sample_rns_diagnostics().route_revision(), 13);
+    assert_eq!(
+        RnsDiagnostics::new(0, 0, 0, 0, 0, u64::MAX, 1, 0, 0, 0).route_revision(),
+        u64::MAX
+    );
+    assert!(matches!(
+        RouteDiagnosticsPage::new(1, 2, [Some(route(1)), None, Some(route(2)), None], None,),
+        Err(reticulum_device_api::InvalidRouteDiagnosticsPage::SparseEntries)
+    ));
+    assert!(matches!(
+        RouteDiagnosticsPage::new(1, 2, [Some(route(2)), Some(route(1)), None, None], None,),
+        Err(reticulum_device_api::InvalidRouteDiagnosticsPage::NotStrictlyOrdered)
+    ));
+    assert!(matches!(
+        RouteDiagnosticsPage::new(
+            1,
+            1,
+            [Some(route(1)), None, None, None],
+            Some(DestinationHash([2; 16])),
+        ),
+        Err(reticulum_device_api::InvalidRouteDiagnosticsPage::InvalidNextCursor)
+    ));
+}
+
+fn sample_radio_trace_profile() -> RadioTraceAppliedLoraProfile {
+    RadioTraceAppliedLoraProfile::new(
+        [0x91; 16],
+        915_000_000,
+        125_000,
+        12,
+        22,
+        10,
+        5,
+        true,
+        true,
+        false,
+    )
+}
+
+fn radio_trace_packet(seed: u8, with_attempt: bool) -> RadioTracePacketEvidence {
+    RadioTracePacketEvidence::try_new(
+        1,
+        500,
+        EncodedPacketSha256::new([seed; 32]),
+        with_attempt.then(|| RadioTraceAttemptToken::new([seed.wrapping_add(1); 32])),
+    )
+    .unwrap()
+}
+
+#[test]
+fn radio_trace_request_has_an_exact_boot_bound_authenticated_read_only_wire_shape() {
+    const REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x14, 0x03,
+        0xa1, 0x00, 0x82, 0x18, 0x63, 0x18, 0x27,
+    ];
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::RadioTracePage(RadioTracePageRequest::new(Some(
+            RadioTraceCursor::new(99, 39),
+        ))),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..written], REQUEST);
+    assert_eq!(decode_request(REQUEST).unwrap(), request);
+    assert!(!request.request.is_mutating());
+    assert_eq!(
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &request.request),
+        Err(AuthorizationError::AuthenticationRequired)
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(
+                PrincipalId([0x31; 16]),
+                Permissions::NONE,
+                dispatch_provenance(),
+            ),
+            &request.request,
+        ),
+        Ok(())
+    );
+    assert_eq!(OP_EXPERIMENTAL_RADIO_TRACE_PAGE, 0xf014);
+
+    let partial_cursor = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x14, 0x03,
+        0xa1, 0x00, 0x81, 0x18, 0x63,
+    ];
+    assert_eq!(
+        decode_request(&partial_cursor),
+        Err(DecodeError::InvalidArrayLength {
+            field: RequiredField::RadioTraceAfterCursor,
+            expected: 2,
+            actual: 1,
+        })
+    );
+}
+
+#[test]
+fn all_radio_trace_event_variants_round_trip_with_packet_and_proof_correlation() {
+    let tx = RadioTraceEventKind::DataTx(
+        RadioTraceDataTx::try_new(
+            radio_trace_packet(0x11, true),
+            RadioTraceTxOutcome::Transmitted,
+            2,
+            2,
+            true,
+            [Some(1_010), Some(1_020)],
+        )
+        .unwrap(),
+    );
+    let rx = RadioTraceEventKind::LogicalRx(RadioTraceLogicalRx::new(
+        radio_trace_packet(0x21, false),
+        -104,
+        7,
+    ));
+    let route = RadioTraceEventKind::RouteSelected(
+        RadioTraceRouteSelected::try_new(
+            SubmissionId(77),
+            DestinationHash([0x31; 16]),
+            Some(IdentityHash::new([0x41; 16])),
+            2,
+            RouteDiagnosticResolution::ExactReady,
+            radio_trace_packet(0x31, true),
+        )
+        .unwrap(),
+    );
+    let terminal = RadioTraceEventKind::AttemptTerminal(RadioTraceAttemptTerminal::new(
+        RadioTraceAttemptToken::new([0x32; 32]),
+        RadioTraceAttemptOutcome::Delivered,
+        Some(IngressObservation::new(1, Some(IngressSignal::new(-99, 4)))),
+    ));
+
+    for (offset, kind) in [tx, rx, route, terminal].into_iter().enumerate() {
+        let sequence = 40 + offset as u64;
+        let page = RadioTracePage::new(
+            99,
+            sample_radio_trace_profile(),
+            sequence,
+            sequence + 1,
+            false,
+            [
+                Some(RadioTraceEvent::new(sequence, 1_000 + sequence, kind)),
+                None,
+                None,
+            ],
+            None,
+        )
+        .unwrap();
+        let response = ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: RequestId(42),
+            response: DeviceResponse::RadioTracePage(page),
+        };
+        let mut output = [0_u8; MAX_MESSAGE_BYTES];
+        let written = encode_response(&response, &mut output).unwrap();
+        assert_eq!(decode_response(&output[..written]).unwrap(), response);
+    }
+}
+
+#[test]
+fn maximum_three_entry_radio_trace_page_fits_the_frozen_transport_body() {
+    const ENVELOPE_PREFIX_BYTES: usize = 22;
+    let packet = RadioTracePacketEvidence::try_new(
+        u8::MAX,
+        u16::MAX,
+        EncodedPacketSha256::new([0xff; 32]),
+        Some(RadioTraceAttemptToken::new([0xfe; 32])),
+    )
+    .unwrap();
+    let tx = RadioTraceDataTx::try_new(
+        packet,
+        RadioTraceTxOutcome::CancelledRadioOperation,
+        2,
+        2,
+        true,
+        [Some(u64::MAX - 1), Some(u64::MAX)],
+    )
+    .unwrap();
+    let events = [
+        Some(RadioTraceEvent::new(
+            u64::MAX - 3,
+            u64::MAX,
+            RadioTraceEventKind::DataTx(tx),
+        )),
+        Some(RadioTraceEvent::new(
+            u64::MAX - 2,
+            u64::MAX,
+            RadioTraceEventKind::DataTx(tx),
+        )),
+        Some(RadioTraceEvent::new(
+            u64::MAX - 1,
+            u64::MAX,
+            RadioTraceEventKind::DataTx(tx),
+        )),
+    ];
+    let maximum_profile = RadioTraceAppliedLoraProfile::new(
+        [0xff; 16],
+        u32::MAX,
+        u32::MAX,
+        u16::MAX,
+        i16::MIN,
+        u8::MAX,
+        u8::MAX,
+        true,
+        true,
+        true,
+    );
+    let page = RadioTracePage::new(
+        u64::MAX,
+        maximum_profile,
+        u64::MAX - 3,
+        u64::MAX,
+        true,
+        events,
+        Some(RadioTraceCursor::new(u64::MAX, u64::MAX - 1)),
+    )
+    .unwrap();
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(u64::MAX),
+        response: DeviceResponse::RadioTracePage(page),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&response, &mut output).unwrap();
+    assert!(written <= MAX_MESSAGE_BYTES);
+    assert!(written - ENVELOPE_PREFIX_BYTES <= MAX_BODY_BYTES);
+    assert_eq!(decode_response(&output[..written]).unwrap(), response);
+
+    let route = RadioTraceRouteSelected::try_new(
+        SubmissionId(u64::MAX),
+        DestinationHash([0xff; 16]),
+        Some(IdentityHash::new([0xfe; 16])),
+        u8::MAX,
+        RouteDiagnosticResolution::BroadcastUnavailable,
+        packet,
+    )
+    .unwrap();
+    let rx = RadioTraceLogicalRx::new(packet, i16::MIN, i16::MIN);
+    let mixed_events = [
+        Some(RadioTraceEvent::new(
+            u64::MAX - 3,
+            u64::MAX,
+            RadioTraceEventKind::RouteSelected(route),
+        )),
+        Some(RadioTraceEvent::new(
+            u64::MAX - 2,
+            u64::MAX,
+            RadioTraceEventKind::DataTx(tx),
+        )),
+        Some(RadioTraceEvent::new(
+            u64::MAX - 1,
+            u64::MAX,
+            RadioTraceEventKind::LogicalRx(rx),
+        )),
+    ];
+    let mixed_page = RadioTracePage::new(
+        u64::MAX,
+        maximum_profile,
+        u64::MAX - 3,
+        u64::MAX,
+        true,
+        mixed_events,
+        Some(RadioTraceCursor::new(u64::MAX, u64::MAX - 1)),
+    )
+    .unwrap();
+    let mixed_response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(u64::MAX),
+        response: DeviceResponse::RadioTracePage(mixed_page),
+    };
+    let written = encode_response(&mixed_response, &mut output).unwrap();
+    assert!(written - ENVELOPE_PREFIX_BYTES <= MAX_BODY_BYTES);
+    assert_eq!(decode_response(&output[..written]).unwrap(), mixed_response);
+
+    let too_large = [
+        Some(RadioTraceEvent::new(
+            u64::MAX - 3,
+            u64::MAX,
+            RadioTraceEventKind::RouteSelected(route),
+        )),
+        Some(RadioTraceEvent::new(
+            u64::MAX - 2,
+            u64::MAX,
+            RadioTraceEventKind::RouteSelected(route),
+        )),
+        Some(RadioTraceEvent::new(
+            u64::MAX - 1,
+            u64::MAX,
+            RadioTraceEventKind::RouteSelected(route),
+        )),
+    ];
+    assert!(matches!(
+        RadioTracePage::new(
+            u64::MAX,
+            maximum_profile,
+            u64::MAX - 3,
+            u64::MAX,
+            true,
+            too_large,
+            Some(RadioTraceCursor::new(u64::MAX, u64::MAX - 1)),
+        ),
+        Err(reticulum_device_api::InvalidRadioTracePage::EventCombinationExceedsWireBudget)
+    ));
+}
+
+#[test]
+fn radio_trace_models_reject_ambiguous_pages_and_tx_timestamps() {
+    let event = RadioTraceEvent::new(
+        7,
+        100,
+        RadioTraceEventKind::LogicalRx(RadioTraceLogicalRx::new(
+            radio_trace_packet(1, false),
+            -100,
+            3,
+        )),
+    );
+    assert!(matches!(
+        RadioTracePage::new(
+            9,
+            sample_radio_trace_profile(),
+            7,
+            8,
+            false,
+            [Some(event), None, None],
+            Some(RadioTraceCursor::new(10, 7)),
+        ),
+        Err(reticulum_device_api::InvalidRadioTracePage::InvalidNextCursor)
+    ));
+    assert!(matches!(
+        RadioTraceDataTx::try_new(
+            radio_trace_packet(2, true),
+            RadioTraceTxOutcome::Transmitted,
+            2,
+            1,
+            true,
+            [Some(10), Some(20)],
+        ),
+        Err(reticulum_device_api::InvalidRadioTraceDataTx::CompletionTimestampCountMismatch)
+    ));
+    assert!(matches!(
+        RadioTraceRouteSelected::try_new(
+            SubmissionId(0),
+            DestinationHash([1; 16]),
+            None,
+            1,
+            RouteDiagnosticResolution::BroadcastReady,
+            radio_trace_packet(3, true),
+        ),
+        Err(reticulum_device_api::InvalidRadioTraceRouteSelected::ZeroSubmissionId)
+    ));
+    assert_eq!(MAX_RADIO_TRACE_PAGE_ENTRIES, 3);
+}
+
+#[test]
+fn maximum_diagnostics_responses_fit_message_and_body_limits() {
+    const ENVELOPE_PREFIX_BYTES: usize = 22;
+    let interfaces = [
+        Some(DiagnosticInterfaceRecord::new(
+            u8::MAX,
+            DiagnosticInterfaceKind::LoRa,
+            DiagnosticInterfaceState::Online,
+            u64::MAX,
+            u16::MAX,
+            Some(u32::MAX),
+        )),
+        Some(DiagnosticInterfaceRecord::new(
+            u8::MAX - 1,
+            DiagnosticInterfaceKind::Tcp,
+            DiagnosticInterfaceState::Offline,
+            u64::MAX,
+            u16::MAX,
+            Some(u32::MAX),
+        )),
+        Some(DiagnosticInterfaceRecord::new(
+            u8::MAX - 2,
+            DiagnosticInterfaceKind::Other,
+            DiagnosticInterfaceState::Faulted,
+            u64::MAX,
+            u16::MAX,
+            Some(u32::MAX),
+        )),
+        Some(DiagnosticInterfaceRecord::new(
+            u8::MAX - 3,
+            DiagnosticInterfaceKind::Other,
+            DiagnosticInterfaceState::Online,
+            u64::MAX,
+            u16::MAX,
+            Some(u32::MAX),
+        )),
+    ];
+    let lora = LoraDiagnostics::new(
+        i16::MIN,
+        u32::MAX,
+        u32::MAX,
+        u8::MAX,
+        u8::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        Some(DiagnosticLoraLastRx::new(u64::MAX, i16::MIN, i16::MAX)),
+        Some(DiagnosticLoraLastTx::ordinary(
+            u64::MAX,
+            DiagnosticLoraTxOutcome::Failed,
+        )),
+        None,
+    );
+    let node = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(u64::MAX),
+        response: DeviceResponse::NodeDiagnostics(NodeDiagnosticsSnapshot::new(
+            u64::MAX,
+            interfaces,
+            Some(lora),
+            RnsDiagnostics::new(
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+            ),
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+        )),
+    };
+
+    let route = |byte, resolution| {
+        RouteDiagnosticEntry::new(
+            DestinationHash([byte; 16]),
+            Some(IdentityHash::new([u8::MAX - byte; 16])),
+            u8::MAX,
+            Some(u8::MAX),
+            resolution,
+            Some(u64::MAX),
+            Some(u64::MAX),
+            Some(u64::MAX),
+        )
+    };
+    let route_page = RouteDiagnosticsPage::new(
+        u64::MAX,
+        u32::MAX,
+        [
+            Some(route(1, RouteDiagnosticResolution::ExactReady)),
+            Some(route(2, RouteDiagnosticResolution::ExactOffline)),
+            Some(route(3, RouteDiagnosticResolution::ExactMissing)),
+            Some(route(4, RouteDiagnosticResolution::BroadcastUnavailable)),
+        ],
+        Some(DestinationHash([4; 16])),
+    )
+    .unwrap();
+    let routes = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(u64::MAX),
+        response: DeviceResponse::RouteDiagnosticsPage(route_page),
+    };
+
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    for (envelope, expected_body_bytes, expected_message_bytes) in
+        [(node, 415, 437), (routes, 337, 359)]
+    {
+        let written = encode_response(&envelope, &mut output).unwrap();
+        assert_eq!(written, expected_message_bytes);
+        assert_eq!(written - ENVELOPE_PREFIX_BYTES, expected_body_bytes);
+        assert!(written <= MAX_MESSAGE_BYTES);
+        assert!(written - ENVELOPE_PREFIX_BYTES <= MAX_BODY_BYTES);
+        assert_eq!(decode_response(&output[..written]).unwrap(), envelope);
+    }
+}
+
+#[test]
+fn lora_data_tx_evidence_round_trips_and_retained_slot_rejects_ordinary_records() {
+    assert!(
+        DiagnosticLoraDataTxEvidence::try_new(7, 0, EncodedPacketSha256::new([0xab; 32])).is_none()
+    );
+    let evidence =
+        DiagnosticLoraDataTxEvidence::try_new(7, 183, EncodedPacketSha256::new([0xab; 32]))
+            .unwrap();
+    let lora = LoraDiagnostics::new(
+        22,
+        915_000_000,
+        125_000,
+        10,
+        5,
+        8,
+        3,
+        1,
+        2,
+        5,
+        2,
+        2,
+        2,
+        1,
+        4,
+        6,
+        None,
+        Some(DiagnosticLoraLastTx::ordinary(
+            5,
+            DiagnosticLoraTxOutcome::Completed,
+        )),
+        Some(DiagnosticLoraLastDataTx::new(
+            8,
+            DiagnosticLoraTxOutcome::AccessRejected,
+            evidence,
+        )),
+    );
+    let envelope = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::NodeDiagnostics(NodeDiagnosticsSnapshot::new(
+            10_000,
+            [None; MAX_DIAGNOSTIC_INTERFACES],
+            Some(lora),
+            RnsDiagnostics::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            0,
+            0,
+            0,
+        )),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&envelope, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), envelope);
+    assert!(written <= MAX_MESSAGE_BYTES);
+
+    let DeviceResponse::NodeDiagnostics(decoded) =
+        decode_response(&output[..written]).unwrap().response
+    else {
+        panic!("expected node diagnostics")
+    };
+    let decoded = decoded.lora().expect("LoRa diagnostics");
+    assert_eq!(
+        decoded.last_tx().and_then(|last_tx| last_tx.family()),
+        Some(DiagnosticLoraTxFamily::Ordinary)
+    );
+    let retained = decoded.last_data_tx().expect("retained DATA TX");
+    assert_eq!(retained.data_evidence(), evidence);
+
+    let marker = [0x12, 0xa6, 0x00, 0x08, 0x01, 0x01, 0x02, 0x00];
+    let family = output[..written]
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("retained DATA TX map")
+        + marker.len()
+        - 1;
+    let mut ordinary_in_data_slot = output[..written].to_vec();
+    ordinary_in_data_slot[family] = DiagnosticLoraTxFamily::Ordinary.wire_code();
+    assert_eq!(
+        decode_response(&ordinary_in_data_slot),
+        Err(DecodeError::InvalidLoraLastTx)
+    );
+}
+
+#[test]
+fn route_diagnostics_request_rejects_duplicate_cursor() {
+    let mut bytes = vec![
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0f, 0x03, 0xa2,
+        0x00, 0x50,
+    ];
+    bytes.extend_from_slice(&[0x11; 16]);
+    bytes.extend_from_slice(&[0x00, 0x50]);
+    bytes.extend_from_slice(&[0x22; 16]);
+    assert_eq!(
+        decode_request(&bytes),
+        Err(DecodeError::DuplicateField(
+            RequiredField::RouteDiagnosticsAfter
+        ))
+    );
+}
+
+#[test]
 fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     const UNKNOWN_REQUEST_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
         0x63, 0x82, 0x01, 0x02,
     ];
     const UNKNOWN_RESPONSE_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
@@ -445,11 +1750,11 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
 #[test]
 fn exact_experimental_inbox_status_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
         0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
         0xa5, 0x00, 0x03, 0x01, 0x18, 0x20, 0x02, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
         0x08, 0x03, 0x19, 0x01, 0x7f, 0x04, 0xf5,
     ];
@@ -484,11 +1789,11 @@ fn exact_experimental_inbox_status_goldens_round_trip() {
 #[test]
 fn exact_experimental_inbox_peek_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
         0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
         0xa3, 0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x50, 0x10, 0x11,
         0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x02,
         0x43, 0x61, 0x62, 0x63,
@@ -674,11 +1979,11 @@ fn lxmf_summary() -> LxmfMessageSummary {
 #[test]
 fn exact_experimental_lxmf_next_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
         0xa1, 0x00, 0x07,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
         0xaa, 0x00, 0x07, 0x01, 0x58, 0x20, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22,
@@ -714,13 +2019,93 @@ fn exact_experimental_lxmf_next_goldens_round_trip() {
 
 #[cfg(feature = "experimental-lxmf")]
 #[test]
+fn lxmf_summary_round_trips_optional_first_arrival_evidence() {
+    const RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xab, 0x00, 0x07, 0x01, 0x58, 0x20, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x03, 0x50, 0x33, 0x33,
+        0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x04,
+        0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x05, 0x19, 0x01, 0x23, 0x06, 0x05,
+        0x07, 0x09, 0x08, 0x01, 0x09, 0x58, 0x20, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+        0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+        0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x0a, 0xa3, 0x00, 0x07, 0x01, 0x38,
+        0x68, 0x02, 0x07,
+    ];
+    let summary = lxmf_summary().with_ingress_observation(Some(LxmfIngressObservation::new(
+        7,
+        Some(LxmfIngressSignal::new(-105, 7)),
+    )));
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::LxmfNext(summary),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let response_len = encode_response(&response, &mut output).unwrap();
+    assert_eq!(&output[..response_len], RESPONSE);
+    assert_eq!(decode_response(RESPONSE).unwrap(), response);
+
+    let interface_only =
+        lxmf_summary().with_ingress_observation(Some(LxmfIngressObservation::new(4, None)));
+    let interface_only_response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::LxmfNext(interface_only),
+    };
+    let response_len = encode_response(&interface_only_response, &mut output).unwrap();
+    assert_eq!(
+        decode_response(&output[..response_len]).unwrap(),
+        interface_only_response
+    );
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
+fn lxmf_summary_rejects_half_present_signal_observations() {
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::LxmfNext(lxmf_summary().with_ingress_observation(Some(
+            LxmfIngressObservation::new(7, Some(LxmfIngressSignal::new(-105, 7))),
+        ))),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let response_len = encode_response(&response, &mut output).unwrap();
+    let encoded = &output[..response_len];
+    let observation = encoded
+        .windows(6)
+        .position(|window| window == [0x0a, 0xa3, 0x00, 0x07, 0x01, 0x38])
+        .expect("encoded ingress observation");
+    let observation_map = observation + 1;
+
+    let mut missing_snr = encoded.to_vec();
+    missing_snr[observation_map] = 0xa2;
+    missing_snr.truncate(missing_snr.len() - 2);
+    assert_eq!(
+        decode_response(&missing_snr),
+        Err(DecodeError::InvalidLxmfMessageSummary)
+    );
+
+    let mut missing_rssi = encoded.to_vec();
+    missing_rssi[observation_map] = 0xa2;
+    missing_rssi.drain(observation_map + 3..observation_map + 6);
+    assert_eq!(
+        decode_response(&missing_rssi),
+        Err(DecodeError::InvalidLxmfMessageSummary)
+    );
+}
+
+#[cfg(feature = "experimental-lxmf")]
+#[test]
 fn exact_experimental_lxmf_read_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
         0xa3, 0x00, 0x07, 0x01, 0x19, 0x01, 0x00, 0x02, 0x19, 0x01, 0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
         0xa4, 0x00, 0x07, 0x01, 0x19, 0x01, 0x00, 0x02, 0x19, 0x02, 0x00, 0x03, 0x43, 0x61, 0x62,
         0x63,
     ];
@@ -751,6 +2136,105 @@ fn exact_experimental_lxmf_read_goldens_round_trip() {
 }
 
 #[cfg(feature = "experimental-lxmf")]
+#[test]
+fn exact_experimental_lxmf_mailbox_goldens_are_authenticated_and_strict() {
+    const STATUS_REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x10, 0x03,
+        0xa0,
+    ];
+    const STATUS_RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x10, 0x03,
+        0xa3, 0x00, 0x09, 0x01, 0x07, 0x02, 0x02,
+    ];
+    const ACKNOWLEDGE_REQUEST: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x11, 0x03,
+        0xa1, 0x00, 0x09,
+    ];
+    const ACKNOWLEDGE_RESPONSE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x11, 0x03,
+        0xa3, 0x00, 0x09, 0x01, 0x09, 0x02, 0x00,
+    ];
+    let latest = LxmfMessageHandle::new(9).unwrap();
+    let acknowledged = LxmfMessageHandle::new(7).unwrap();
+    let status = LxmfMailboxStatus::new(Some(latest), Some(acknowledged)).unwrap();
+    let status_request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::LxmfMailboxStatus,
+    };
+    let status_response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::LxmfMailboxStatus(status),
+    };
+    let acknowledge_request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        request: DeviceRequest::LxmfMailboxAcknowledge { through: latest },
+    };
+    let acknowledge_response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(42),
+        response: DeviceResponse::LxmfMailboxAcknowledged(
+            LxmfMailboxStatus::new(Some(latest), Some(latest)).unwrap(),
+        ),
+    };
+
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    for (request, golden) in [
+        (status_request, STATUS_REQUEST),
+        (acknowledge_request, ACKNOWLEDGE_REQUEST),
+    ] {
+        let length = encode_request(&request, &mut output).unwrap();
+        assert_eq!(&output[..length], golden);
+        assert_eq!(decode_request(golden).unwrap(), request);
+        assert_eq!(
+            authorize_request(&DispatchContext::UNAUTHENTICATED, &request.request),
+            Err(AuthorizationError::AuthenticationRequired)
+        );
+        assert_eq!(
+            authorize_request(
+                &DispatchContext::authenticated(
+                    PrincipalId([0x72; 16]),
+                    Permissions::NONE,
+                    dispatch_provenance(),
+                ),
+                &request.request,
+            ),
+            Ok(())
+        );
+    }
+    for (response, golden) in [
+        (status_response, STATUS_RESPONSE),
+        (acknowledge_response, ACKNOWLEDGE_RESPONSE),
+    ] {
+        let length = encode_response(&response, &mut output).unwrap();
+        assert_eq!(&output[..length], golden);
+        assert_eq!(decode_response(golden).unwrap(), response);
+    }
+
+    assert!(!status_request.request.is_mutating());
+    assert!(acknowledge_request.request.is_mutating());
+    assert_eq!(
+        status_request.request.operation(),
+        OP_EXPERIMENTAL_LXMF_MAILBOX_STATUS
+    );
+    assert_eq!(
+        acknowledge_request.request.operation(),
+        OP_EXPERIMENTAL_LXMF_MAILBOX_ACKNOWLEDGE
+    );
+    assert_eq!(status.uncollected_count(), 2);
+    assert!(LxmfMailboxStatus::new(Some(acknowledged), Some(latest)).is_err());
+
+    let mut contradictory_count = STATUS_RESPONSE.to_vec();
+    *contradictory_count.last_mut().unwrap() = 3;
+    assert_eq!(
+        decode_response(&contradictory_count),
+        Err(DecodeError::InvalidLxmfMailboxStatus)
+    );
+}
+
+#[cfg(feature = "experimental-lxmf")]
 fn basic_lxmf_send_request(
     title: &'static [u8],
     content: &'static [u8],
@@ -766,6 +2250,7 @@ fn basic_lxmf_send_request(
             timestamp_unix_ms: u64::MAX,
             title,
             content,
+            location: None,
             idempotency_key: IdempotencyKey([
                 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
                 0xfe, 0xff,
@@ -778,14 +2263,14 @@ fn basic_lxmf_send_request(
 #[test]
 fn exact_basic_lxmf_send_goldens_are_source_free_and_borrowed() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
         0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
         0x0d, 0x0e, 0x0f, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0x43,
         0x74, 0x74, 0x6c, 0x03, 0x47, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x04, 0x50, 0xf0,
         0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa2,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa2,
         0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x58, 0x20, 0x20, 0x21,
         0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
         0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
@@ -828,6 +2313,46 @@ fn exact_basic_lxmf_send_goldens_are_source_free_and_borrowed() {
 }
 
 #[cfg(feature = "experimental-lxmf")]
+#[test]
+fn basic_lxmf_send_round_trips_optional_message_location() {
+    let location = LxmfMessageLocation::new(
+        44_123_456,
+        -73_987_654,
+        12_345,
+        678,
+        12_345,
+        250,
+        1_785_700_123,
+    )
+    .unwrap();
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(10),
+        request: DeviceRequest::LxmfBasicSend {
+            destination: DestinationHash([0x31; 16]),
+            timestamp_unix_ms: 1_785_700_123_456,
+            title: b"where",
+            content: b"meet me here",
+            location: Some(location),
+            idempotency_key: IdempotencyKey([0x42; 16]),
+        },
+    };
+    let mut encoded = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&request, &mut encoded).unwrap();
+    assert_eq!(decode_request(&encoded[..written]).unwrap(), request);
+    let DeviceRequest::LxmfBasicSend {
+        location: Some(decoded),
+        ..
+    } = decode_request(&encoded[..written]).unwrap().request
+    else {
+        panic!("location was not retained")
+    };
+    assert_eq!(decoded, location);
+    assert!(LxmfMessageLocation::new(90_000_001, 0, 0, 0, 0, 0, 0).is_err());
+    assert!(LxmfMessageLocation::new(0, 180_000_001, 0, 0, 0, 0, 0).is_err());
+}
+
+#[cfg(feature = "experimental-lxmf")]
 fn discovered_peer(app_data: &[u8]) -> LxmfDiscoveredPeer {
     LxmfDiscoveredPeer::new(
         DestinationHash(core::array::from_fn(|index| 0x10 + index as u8)),
@@ -847,15 +2372,15 @@ fn discovered_peer(app_data: &[u8]) -> LxmfDiscoveredPeer {
 #[test]
 fn exact_nearby_lxmf_peer_goldens_use_complete_boot_scoped_cursors() {
     const FIRST_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
         0xa0,
     ];
     const NEXT_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
         0xa2, 0x00, 0x48, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x09,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
         0xa6, 0x00, 0x48, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x09, 0x02, 0x0b,
         0x03, 0x03, 0x04, 0xf5, 0x05, 0xa9, 0x00, 0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
         0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x01, 0x50, 0x20, 0x21, 0x22, 0x23,
@@ -913,15 +2438,15 @@ fn exact_nearby_lxmf_peer_goldens_use_complete_boot_scoped_cursors() {
 #[test]
 fn nearby_lxmf_peer_cursor_and_response_shapes_are_strict() {
     const ONLY_INCARNATION: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
         0x00, 0x48, 0, 1, 2, 3, 4, 5, 6, 7,
     ];
     const ONLY_GENERATION: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
         0x01, 0x00,
     ];
     const SHORT_INCARNATION: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa2,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa2,
         0x00, 0x47, 0, 1, 2, 3, 4, 5, 6, 0x01, 0x00,
     ];
     assert_eq!(
@@ -1088,7 +2613,7 @@ fn maximum_nearby_peer_record_fits_the_frozen_message_and_body_limits() {
 #[cfg(feature = "experimental-lxmf")]
 fn raw_basic_lxmf_send(title: &[u8], content: &[u8]) -> Vec<u8> {
     let mut encoded = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
         0x00, 0x50,
     ];
     encoded.extend_from_slice(&[0; 16]);
@@ -1485,7 +3010,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
 #[test]
 fn exact_typed_error_response_golden_round_trip() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x04, 0x01, 0x02,
     ];
     let envelope = ResponseEnvelope {
@@ -1506,16 +3031,21 @@ fn exact_typed_error_response_golden_round_trip() {
 fn immediate_submission_rejections_have_distinct_error_goldens() {
     const MUTATING_OPERATION: u16 = 0xf001;
     const CAPACITY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x09, 0x01, 0x19, 0xf0, 0x01,
     ];
     const IDEMPOTENCY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x0a, 0x01, 0x19, 0xf0, 0x01,
+    ];
+    const RETRY_LATER_GOLDEN: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0x0b, 0x01, 0x19, 0xf0, 0x01,
     ];
     for (code, golden) in [
         (ApiErrorCode::CapacityExhausted, CAPACITY_GOLDEN),
         (ApiErrorCode::IdempotencyConflict, IDEMPOTENCY_GOLDEN),
+        (ApiErrorCode::RetryLater, RETRY_LATER_GOLDEN),
     ] {
         let envelope = ResponseEnvelope {
             version: ApiVersion::CURRENT,
@@ -1622,7 +3152,7 @@ fn contradictory_submission_status_wire_shapes_are_rejected() {
 fn unknown_envelope_version_and_body_fields_are_skipped() {
     // Envelope key 99, version key 7, and empty-body key 55 are all unknown.
     let bytes = [
-        0xa5, 0x00, 0xa3, 0x00, 0x01, 0x01, 0x06, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
+        0xa5, 0x00, 0xa3, 0x00, 0x01, 0x01, 0x12, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
         0x01, 0x03, 0xa1, 0x18, 0x37, 0xa1, 0x00, 0xf5, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
     assert_eq!(decode_request(&bytes).unwrap(), capabilities_request());
@@ -1860,8 +3390,38 @@ fn api_v1_numeric_enum_vocabularies_are_closed_and_frozen() {
             ApiErrorCode::Internal.wire_code(),
             ApiErrorCode::CapacityExhausted.wire_code(),
             ApiErrorCode::IdempotencyConflict.wire_code(),
+            ApiErrorCode::RetryLater.wire_code(),
         ],
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
+    assert_eq!(
+        [
+            RadioTraceTxOutcome::Transmitted.wire_code(),
+            RadioTraceTxOutcome::AccessRejected.wire_code(),
+            RadioTraceTxOutcome::PermitDenied.wire_code(),
+            RadioTraceTxOutcome::AuthorizationExpired.wire_code(),
+            RadioTraceTxOutcome::PostGrantAccessRejected.wire_code(),
+            RadioTraceTxOutcome::AirtimeRejected.wire_code(),
+            RadioTraceTxOutcome::DeadlineConversionOverflow.wire_code(),
+            RadioTraceTxOutcome::RadioInactive.wire_code(),
+            RadioTraceTxOutcome::InterfaceConfigurationMismatch.wire_code(),
+            RadioTraceTxOutcome::RadioConfigurationChangedBeforePermit.wire_code(),
+            RadioTraceTxOutcome::RadioConfigurationChangedAfterPermit.wire_code(),
+            RadioTraceTxOutcome::CadFault.wire_code(),
+            RadioTraceTxOutcome::TxFault.wire_code(),
+            RadioTraceTxOutcome::ControlPlaneRecovery.wire_code(),
+            RadioTraceTxOutcome::FrameInvariantRecovery.wire_code(),
+            RadioTraceTxOutcome::CancelledRadioOperation.wire_code(),
+        ],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    );
+    assert_eq!(
+        [
+            RadioTraceAttemptOutcome::Delivered.wire_code(),
+            RadioTraceAttemptOutcome::DeliveryTimeout.wire_code(),
+            RadioTraceAttemptOutcome::Unsent.wire_code(),
+        ],
+        [0, 1, 2]
     );
 
     let unknown_state = [
@@ -2203,6 +3763,14 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
             0
         }
     );
+    assert_eq!(
+        capabilities.experimental_network_config(),
+        if cfg!(feature = "experimental-network-config") {
+            CapabilityAvailability::Available
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
 
     let legacy_dispatch = CapabilitySnapshot::for_dispatch(true);
     assert_eq!(
@@ -2236,6 +3804,10 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(legacy_dispatch.max_nomad_page_path_bytes(), 0);
     assert_eq!(legacy_dispatch.max_nomad_page_bytes(), 0);
+    assert_eq!(
+        legacy_dispatch.experimental_network_config(),
+        CapabilityAvailability::Unavailable
+    );
     assert!(!CapabilitySnapshot::for_dispatch(false).experimental_submit_rns_data());
 
     let inbox_dispatch =
@@ -2382,6 +3954,17 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
             0
         }
     );
+
+    let network_dispatch =
+        composed_dispatch.with_dispatch_network_config(CapabilityAvailability::Disabled);
+    assert_eq!(
+        network_dispatch.experimental_network_config(),
+        if cfg!(feature = "experimental-network-config") {
+            CapabilityAvailability::Disabled
+        } else {
+            CapabilityAvailability::Unavailable
+        }
+    );
 }
 
 #[cfg(feature = "experimental-rns-data")]
@@ -2407,7 +3990,7 @@ fn submit_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
 #[test]
 fn exact_experimental_submit_golden_and_borrowed_payload() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
         0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
         0x0d, 0x0e, 0x0f, 0x01, 0x43, 0x61, 0x62, 0x63, 0x02, 0x50, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4,
         0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
@@ -2433,7 +4016,7 @@ fn exact_experimental_submit_golden_and_borrowed_payload() {
 #[test]
 fn exact_experimental_submit_accepted_response_has_only_submission_id() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
         0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     ];
     let envelope = ResponseEnvelope {
@@ -2558,7 +4141,7 @@ fn nomad_fetch_id() -> NomadFetchId {
 #[cfg(feature = "experimental-nomad")]
 fn nomad_fetch_start_wire(encoded_path: &[u8], encoded_timestamp: &[u8]) -> Vec<u8> {
     let mut wire = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa4, 0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
         0x0c, 0x0d, 0x0e, 0x0f, 0x01,
     ];
@@ -2646,7 +4229,7 @@ fn nomad_value_types_enforce_exact_logical_bounds() {
 #[test]
 fn exact_nomad_fetch_start_request_golden_and_authorization() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa4, 0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
         0x0c, 0x0d, 0x0e, 0x0f, 0x01, 0x65, 0x2f, 0x70, 0x61, 0x67, 0x65, 0x02, 0x01, 0x03, 0x50,
         0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe,
@@ -2683,12 +4266,12 @@ fn exact_nomad_fetch_start_request_golden_and_authorization() {
 #[test]
 fn exact_nomad_fetch_start_response_distinguishes_fresh_and_replayed() {
     const ACCEPTED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08, 0x01, 0x00,
     ];
     const REPLAYED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
     ];
@@ -2715,20 +4298,20 @@ fn exact_nomad_fetch_start_response_distinguishes_fresh_and_replayed() {
 #[test]
 fn exact_nomad_fetch_poll_request_and_states_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa1, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08,
     ];
     const PENDING: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x00, 0x01, 0x04,
     ];
     const READY: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x01, 0x01, 0x45, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
     ];
     const FAILED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x02, 0x01, 0x03,
     ];
     let request = RequestEnvelope {
@@ -2781,7 +4364,7 @@ fn exact_nomad_fetch_poll_request_and_states_round_trip() {
 #[test]
 fn maximum_nomad_page_has_exact_bounded_body_and_message_sizes() {
     const ENVELOPE_PREFIX: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         0xff, 0xff, 0x02, 0x19, 0xf0, 0x09, 0x03,
     ];
     let page = NomadPage::new(&[b'x'; MAX_NOMAD_PAGE_BYTES]).unwrap();
@@ -2805,7 +4388,7 @@ fn maximum_nomad_page_has_exact_bounded_body_and_message_sizes() {
 #[test]
 fn nomad_fetch_decoder_rejects_zero_sequence_and_invalid_state_values() {
     let zero_sequence = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa1, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
     ];
@@ -2815,7 +4398,7 @@ fn nomad_fetch_decoder_rejects_zero_sequence_and_invalid_state_values() {
     );
 
     let invalid_state = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x03, 0x01, 0x00,
     ];
     assert_eq!(
@@ -2831,7 +4414,7 @@ fn nomad_fetch_decoder_rejects_zero_sequence_and_invalid_state_values() {
 #[test]
 fn nomad_fetch_decoder_rejects_unknown_closed_outcome_phase_and_failure_values() {
     let unknown_start_outcome = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08, 0x01, 0x02,
     ];
@@ -2844,7 +4427,7 @@ fn nomad_fetch_decoder_rejects_unknown_closed_outcome_phase_and_failure_values()
     );
 
     let unknown_pending_phase = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x00, 0x01, 0x05,
     ];
     assert_eq!(
@@ -2856,7 +4439,7 @@ fn nomad_fetch_decoder_rejects_unknown_closed_outcome_phase_and_failure_values()
     );
 
     let unknown_terminal_failure = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x02, 0x01, 0x07,
     ];
     assert_eq!(
@@ -2925,7 +4508,7 @@ fn nomad_fetch_start_decoder_enforces_path_and_timestamp_semantics() {
 #[test]
 fn nomad_ready_page_decoder_rejects_invalid_utf8_and_oversize_values() {
     let invalid_utf8 = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x01, 0x01, 0x41, 0xff,
     ];
     assert_eq!(
@@ -2934,7 +4517,7 @@ fn nomad_ready_page_decoder_rejects_invalid_utf8_and_oversize_values() {
     );
 
     let mut oversized_page = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x06, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x01, 0x01, 0x59, 0x01, 0x91,
     ];
     oversized_page.extend(core::iter::repeat_n(b'x', MAX_NOMAD_PAGE_BYTES + 1));
@@ -2943,6 +4526,1076 @@ fn nomad_ready_page_decoder_rejects_invalid_utf8_and_oversize_values() {
         Err(DecodeError::NomadPageTooLarge {
             actual: MAX_NOMAD_PAGE_BYTES + 1,
             max: MAX_NOMAD_PAGE_BYTES,
+        })
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+fn network_upsert_request() -> RequestEnvelope<'static> {
+    let wifi = WifiNetworkUpdate::new(
+        true,
+        10,
+        reticulum_device_api::WifiSsid::new(b"mesh").unwrap(),
+        WifiCredentialUpdate::replace(b"password").unwrap(),
+    );
+    RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(9),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::UpsertWifi {
+                profile_id: WifiNetworkProfileId::new([0x22; 16]).unwrap(),
+                network: wifi,
+            },
+            7,
+            IdempotencyKey([0xa5; 16]),
+        )),
+    }
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_wifi_upsert_is_borrowed_redacted_bounded_and_authorized() {
+    let request = network_upsert_request();
+    let expected = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
+        0x00, 0x00, 0x01, 0xa2, 0x00, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x01, 0xa4, 0x00, 0xf5, 0x01, 0x44, b'm', b'e',
+        b's', b'h', 0x02, 0xa2, 0x00, 0x01, 0x01, 0x48, b'p', b'a', b's', b's', b'w', b'o', b'r',
+        b'd', 0x03, 0x0a, 0x02, 0x07, 0x03, 0x50, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+        0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+    ];
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&request, &mut output).unwrap();
+    assert_eq!(&output[..written], &expected);
+    assert_eq!(decode_request(&output[..written]).unwrap(), request);
+    assert!(written <= MAX_MESSAGE_BYTES);
+
+    let debug = format!("{request:?}");
+    assert!(!debug.contains("password"));
+    assert!(debug.contains("<redacted>"));
+
+    assert!(request.request.is_mutating());
+    assert_eq!(
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &request.request),
+        Err(AuthorizationError::AuthenticationRequired)
+    );
+    let principal = PrincipalId([0x11; 16]);
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(principal, Permissions::NONE, dispatch_provenance()),
+            &request.request,
+        ),
+        Err(AuthorizationError::PermissionDenied(
+            RequiredPermission::ManageNetworkConfig
+        ))
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(
+                principal,
+                Permissions::MANAGE_NETWORK_CONFIG,
+                dispatch_provenance(),
+            ),
+            &request.request,
+        ),
+        Ok(())
+    );
+    assert_eq!(Permissions::MANAGE_NETWORK_CONFIG.bits(), 1 << 2);
+    assert!(Permissions::from_bits(0b111).is_ok());
+    assert_eq!(
+        Permissions::from_bits(0b1000).unwrap_err().unknown(),
+        0b1000
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_config_read_owns_four_redacted_profiles_and_one_tcp_peer() {
+    let profiles = [
+        Some(
+            WifiNetworkConfigSummary::new(
+                WifiNetworkProfileId::new([1; 16]).unwrap(),
+                true,
+                0,
+                b"first",
+                true,
+            )
+            .unwrap(),
+        ),
+        Some(
+            WifiNetworkConfigSummary::new(
+                WifiNetworkProfileId::new([2; 16]).unwrap(),
+                false,
+                10,
+                b"\xffopaque",
+                true,
+            )
+            .unwrap(),
+        ),
+        Some(
+            WifiNetworkConfigSummary::new(
+                WifiNetworkProfileId::new([3; 16]).unwrap(),
+                true,
+                20,
+                &[b'x'; MAX_WIFI_SSID_BYTES],
+                true,
+            )
+            .unwrap(),
+        ),
+        Some(
+            WifiNetworkConfigSummary::new(
+                WifiNetworkProfileId::new([4; 16]).unwrap(),
+                true,
+                u8::MAX,
+                b"fourth",
+                true,
+            )
+            .unwrap(),
+        ),
+    ];
+    let tcp_peer = ReticulumTcpPeerConfigSummary::new(
+        true,
+        ReticulumTcpPeerIpv4Address::new([192, 0, 2, 1]).unwrap(),
+        DEFAULT_RETICULUM_TCP_PORT,
+    )
+    .unwrap();
+    let expected = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(10),
+        response: DeviceResponse::NetworkConfig(
+            NetworkConfigSnapshot::new(12, profiles, Some(tcp_peer)).unwrap(),
+        ),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&expected, &mut output).unwrap();
+    assert!(written <= MAX_MESSAGE_BYTES);
+    assert_eq!(decode_response(&output[..written]).unwrap(), expected);
+    assert!(
+        !output[..written]
+            .windows(b"password".len())
+            .any(|window| window == b"password")
+    );
+
+    let DeviceResponse::NetworkConfig(decoded) =
+        decode_response(&output[..written]).unwrap().response
+    else {
+        panic!("unexpected response");
+    };
+    assert_eq!(
+        decoded
+            .wifi_profile(WifiNetworkProfileId::new([4; 16]).unwrap())
+            .unwrap()
+            .ssid()
+            .as_bytes(),
+        b"fourth"
+    );
+    assert_eq!(
+        decoded.tcp_peer().unwrap().ipv4_address().octets(),
+        [192, 0, 2, 1]
+    );
+
+    let read = DeviceRequest::NetworkConfigGet;
+    assert!(!read.is_mutating());
+    assert_eq!(
+        authorize_request(&DispatchContext::UNAUTHENTICATED, &read),
+        Err(AuthorizationError::AuthenticationRequired)
+    );
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(
+                PrincipalId([0x44; 16]),
+                Permissions::NONE,
+                dispatch_provenance(),
+            ),
+            &read,
+        ),
+        Ok(())
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_mutations_and_live_status_round_trip() {
+    let principal = PrincipalId([0x33; 16]);
+    let peer = ReticulumTcpPeerUpdate::new(
+        true,
+        ReticulumTcpPeerIpv4Address::new([192, 0, 2, 1]).unwrap(),
+        DEFAULT_RETICULUM_TCP_PORT,
+    )
+    .unwrap();
+    let host_peer = ReticulumTcpPeerHostUpdate::new(
+        true,
+        ReticulumTcpPeerHostname::new("rmap.world").unwrap(),
+        DEFAULT_RETICULUM_TCP_PORT,
+    )
+    .unwrap();
+    let location = RmapLocation::new(42_360_100, -71_058_900).unwrap();
+    for mutation in [
+        NetworkConfigMutation::RemoveWifi {
+            profile_id: WifiNetworkProfileId::new([3; 16]).unwrap(),
+        },
+        NetworkConfigMutation::ReplaceTcpPeer(Some(peer)),
+        NetworkConfigMutation::ReplaceTcpPeer(None),
+        NetworkConfigMutation::ReplaceTcpHostPeer(Some(host_peer)),
+        NetworkConfigMutation::ReplaceTcpHostPeer(None),
+        NetworkConfigMutation::SetGatewayPolicy(GatewayPolicy::new(false, true)),
+        NetworkConfigMutation::SetRmapConfig(RmapConfig::new(true, true, Some(location))),
+        NetworkConfigMutation::SetLoraTxPower(LoraTransmitPowerDbm::DBM_22),
+    ] {
+        let expected = RequestEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: RequestId(11),
+            request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+                mutation,
+                12,
+                IdempotencyKey([0x5a; 16]),
+            )),
+        };
+        let mut output = [0_u8; MAX_MESSAGE_BYTES];
+        let written = encode_request(&expected, &mut output).unwrap();
+        assert_eq!(decode_request(&output[..written]).unwrap(), expected);
+        assert_eq!(
+            authorize_request(
+                &DispatchContext::authenticated(
+                    principal,
+                    Permissions::MANAGE_NETWORK_CONFIG,
+                    dispatch_provenance(),
+                ),
+                &expected.request,
+            ),
+            Ok(())
+        );
+    }
+
+    let applied = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(11),
+        response: DeviceResponse::NetworkConfigMutation(NetworkConfigMutationOutcome::Applied {
+            revision: 13,
+            reboot_required: true,
+        }),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&applied, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), applied);
+
+    let conflict = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(11),
+        response: DeviceResponse::NetworkConfigMutation(
+            NetworkConfigMutationOutcome::RevisionConflict {
+                current_revision: 14,
+            },
+        ),
+    };
+    let written = encode_response(&conflict, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), conflict);
+
+    let status = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(12),
+        response: DeviceResponse::NetworkStatus(
+            NetworkRuntimeStatus::new(
+                13,
+                12,
+                WifiStationState::Connected,
+                Some(WifiNetworkProfileId::new([3; 16]).unwrap()),
+                Some(b"mesh"),
+                Some([192, 0, 2, 42]),
+                Some(-61),
+                ReticulumTcpPeerState::Connected,
+            )
+            .unwrap(),
+        ),
+    };
+    let written = encode_response(&status, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), status);
+    let faulted_status = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(13),
+        response: DeviceResponse::NetworkStatus(
+            NetworkRuntimeStatus::new(
+                13,
+                13,
+                WifiStationState::Connected,
+                Some(WifiNetworkProfileId::new([3; 16]).unwrap()),
+                Some(b"mesh"),
+                Some([192, 0, 2, 42]),
+                Some(-61),
+                ReticulumTcpPeerState::Faulted,
+            )
+            .unwrap(),
+        ),
+    };
+    let written = encode_response(&faulted_status, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), faulted_status);
+    assert_eq!(
+        authorize_request(
+            &DispatchContext::authenticated(principal, Permissions::NONE, dispatch_provenance(),),
+            &DeviceRequest::NetworkStatus,
+        ),
+        Ok(())
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_status_v19_tcp_diagnostics_have_exact_backward_compatible_wire_codes() {
+    const LEGACY_V18_STATUS: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x08, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa8,
+        0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
+        0x04,
+    ];
+    let legacy = ResponseEnvelope {
+        version: ApiVersion { major: 1, minor: 8 },
+        request_id: RequestId(1),
+        response: DeviceResponse::NetworkStatus(
+            NetworkRuntimeStatus::new(
+                1,
+                1,
+                WifiStationState::Disconnected,
+                None,
+                None,
+                None,
+                None,
+                ReticulumTcpPeerState::Faulted,
+            )
+            .unwrap(),
+        ),
+    };
+    assert_eq!(decode_response(LEGACY_V18_STATUS).unwrap(), legacy);
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&legacy, &mut output).unwrap();
+    assert_eq!(&output[..written], LEGACY_V18_STATUS);
+
+    let failures = [
+        (ReticulumTcpFailure::DnsTimeout, 0),
+        (ReticulumTcpFailure::DnsLookupFailed, 1),
+        (ReticulumTcpFailure::DnsNoIpv4Result, 2),
+        (ReticulumTcpFailure::ConnectInvalidState, 3),
+        (ReticulumTcpFailure::ConnectReset, 4),
+        (ReticulumTcpFailure::ConnectTimeout, 5),
+        (ReticulumTcpFailure::ConnectNoRoute, 6),
+        (ReticulumTcpFailure::SocketClosed, 7),
+        (ReticulumTcpFailure::TransmitFailed, 8),
+    ];
+    for (failure, wire_code) in failures {
+        let expected = ResponseEnvelope {
+            version: ApiVersion::CURRENT,
+            request_id: RequestId(1),
+            response: DeviceResponse::NetworkStatus(
+                NetworkRuntimeStatus::new_with_tcp_failure(
+                    1,
+                    1,
+                    WifiStationState::Disconnected,
+                    None,
+                    None,
+                    None,
+                    None,
+                    ReticulumTcpPeerState::Backoff,
+                    Some(failure),
+                )
+                .unwrap(),
+            ),
+        };
+        let mut exact = [
+            0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03,
+            0xa9, 0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06,
+            0xf6, 0x07, 0x05, 0x08, 0x00,
+        ];
+        *exact.last_mut().unwrap() = wire_code;
+
+        let written = encode_response(&expected, &mut output).unwrap();
+        assert_eq!(&output[..written], &exact);
+        assert_eq!(decode_response(&exact).unwrap(), expected);
+        assert_eq!(failure.wire_code(), wire_code);
+    }
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_status_v19_rejects_duplicate_unknown_and_malformed_tcp_diagnostics() {
+    const DUPLICATE_FAILURE: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xaa,
+        0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
+        0x05, 0x08, 0x00, 0x08, 0x01,
+    ];
+    assert_eq!(
+        decode_response(DUPLICATE_FAILURE),
+        Err(DecodeError::DuplicateField(
+            RequiredField::NetworkLastTcpFailure
+        ))
+    );
+
+    let mut unknown_failure = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa9,
+        0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
+        0x05, 0x08, 0x09,
+    ];
+    assert_eq!(
+        decode_response(&unknown_failure),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::NetworkLastTcpFailure,
+            value: 9,
+        })
+    );
+
+    *unknown_failure.last_mut().unwrap() = 0xf5;
+    assert_eq!(
+        decode_response(&unknown_failure),
+        Err(DecodeError::Malformed)
+    );
+
+    let mut unknown_state = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa8,
+        0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
+        0x06,
+    ];
+    assert_eq!(
+        decode_response(&unknown_state),
+        Err(DecodeError::InvalidValue {
+            field: RequiredField::NetworkTcpPeerState,
+            value: 6,
+        })
+    );
+
+    *unknown_state.last_mut().unwrap() = ReticulumTcpPeerState::Backoff.wire_code();
+    let decoded = decode_response(&unknown_state).unwrap();
+    let DeviceResponse::NetworkStatus(status) = decoded.response else {
+        panic!("unexpected response kind");
+    };
+    assert_eq!(status.tcp_peer_state, ReticulumTcpPeerState::Backoff);
+    assert_eq!(status.last_tcp_failure, None);
+}
+
+#[cfg(feature = "experimental-network-config")]
+fn dns_diagnostics_fixture() -> ReticulumDnsDiagnostics {
+    let response_code =
+        ReticulumDnsRawOutcome::response_code_outcome(3).expect("nonzero DNS response code");
+    ReticulumDnsDiagnostics::new(
+        Some([192, 168, 50, 1]),
+        [Some([192, 168, 50, 1]), Some([8, 8, 8, 8]), None],
+        ReticulumDnsPrimaryOutcome::LookupFailed,
+        ReticulumDnsRawSetupState::Ready,
+        [
+            Some(ReticulumDnsRawAttempt::new(
+                ReticulumDnsRawSource::Dhcp,
+                [192, 168, 50, 1],
+                ReticulumDnsRawOutcome::AwaitingResponse,
+            )),
+            Some(ReticulumDnsRawAttempt::new(
+                ReticulumDnsRawSource::Dhcp,
+                [192, 168, 50, 2],
+                ReticulumDnsRawOutcome::Timeout,
+            )),
+            Some(ReticulumDnsRawAttempt::new(
+                ReticulumDnsRawSource::Public,
+                [1, 1, 1, 1],
+                response_code,
+            )),
+            Some(ReticulumDnsRawAttempt::new(
+                ReticulumDnsRawSource::Public,
+                [9, 9, 9, 9],
+                ReticulumDnsRawOutcome::Resolved,
+            )),
+            None,
+        ],
+        Some(ReticulumDnsResolution::new(
+            [217, 154, 9, 220],
+            ReticulumDnsResolutionSource::RawPublic,
+            Some([9, 9, 9, 9]),
+        )),
+    )
+}
+
+#[cfg(feature = "experimental-network-config")]
+fn dns_diagnostic_status() -> ResponseEnvelope {
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(1),
+        response: DeviceResponse::NetworkStatus(
+            NetworkRuntimeStatus::new_with_tcp_diagnostics(
+                1,
+                1,
+                WifiStationState::Connected,
+                None,
+                None,
+                Some([192, 168, 50, 99]),
+                Some(-60),
+                ReticulumTcpPeerState::Backoff,
+                Some(ReticulumTcpFailure::DnsLookupFailed),
+                Some(dns_diagnostics_fixture()),
+            )
+            .unwrap(),
+        ),
+    }
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_status_v110_dns_diagnostics_have_exact_bounded_wire_shape() {
+    const EXACT: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xaa,
+        0x00, 0x01, 0x01, 0x01, 0x02, 0x03, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0x44, 0xc0, 0xa8, 0x32,
+        0x63, 0x06, 0x38, 0x3b, 0x07, 0x05, 0x08, 0x01, 0x09, 0xa6, 0x00, 0x44, 0xc0, 0xa8, 0x32,
+        0x01, 0x01, 0x83, 0x44, 0xc0, 0xa8, 0x32, 0x01, 0x44, 0x08, 0x08, 0x08, 0x08, 0xf6, 0x02,
+        0x05, 0x03, 0x02, 0x04, 0x85, 0xa3, 0x00, 0x00, 0x01, 0x44, 0xc0, 0xa8, 0x32, 0x01, 0x02,
+        0x04, 0xa3, 0x00, 0x00, 0x01, 0x44, 0xc0, 0xa8, 0x32, 0x02, 0x02, 0x07, 0xa4, 0x00, 0x01,
+        0x01, 0x44, 0x01, 0x01, 0x01, 0x01, 0x02, 0x0a, 0x03, 0x03, 0xa3, 0x00, 0x01, 0x01, 0x44,
+        0x09, 0x09, 0x09, 0x09, 0x02, 0x05, 0xf6, 0x05, 0xa3, 0x00, 0x44, 0xd9, 0x9a, 0x09, 0xdc,
+        0x01, 0x02, 0x02, 0x44, 0x09, 0x09, 0x09, 0x09,
+    ];
+    let expected = dns_diagnostic_status();
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&expected, &mut output).unwrap();
+    assert_eq!(&output[..written], EXACT);
+    assert_eq!(decode_response(EXACT).unwrap(), expected);
+    assert!(written < MAX_BODY_BYTES);
+
+    let DeviceResponse::NetworkStatus(status) = expected.response else {
+        panic!("unexpected response kind");
+    };
+    let diagnostics = status.dns_diagnostics.unwrap();
+    assert_eq!(
+        diagnostics.dhcp_servers.len(),
+        MAX_RETICULUM_DNS_DHCP_SERVERS
+    );
+    assert_eq!(
+        diagnostics.raw_attempts.len(),
+        MAX_RETICULUM_DNS_RAW_ATTEMPTS
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_status_v110_accepts_v19_without_dns_diagnostics() {
+    const LEGACY_V19_STATUS: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa9,
+        0x00, 0x01, 0x01, 0x01, 0x02, 0x03, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
+        0x05, 0x08, 0x01,
+    ];
+    let decoded = decode_response(LEGACY_V19_STATUS).unwrap();
+    assert_eq!(decoded.version, ApiVersion { major: 1, minor: 9 });
+    let DeviceResponse::NetworkStatus(status) = decoded.response else {
+        panic!("unexpected response kind");
+    };
+    assert_eq!(
+        status.last_tcp_failure,
+        Some(ReticulumTcpFailure::DnsLookupFailed)
+    );
+    assert_eq!(status.dns_diagnostics, None);
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_status_v110_dns_diagnostics_reject_bad_slot_and_response_code_shapes() {
+    let mut encoded = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&dns_diagnostic_status(), &mut encoded).unwrap();
+    let exact = &encoded[..written];
+
+    let mut wrong_dhcp_slots = exact.to_vec();
+    let dhcp_array = wrong_dhcp_slots
+        .windows(3)
+        .position(|window| window == [0x01, 0x83, 0x44])
+        .expect("diagnostic DHCP array");
+    wrong_dhcp_slots[dhcp_array + 1] = 0x82;
+    wrong_dhcp_slots.remove(dhcp_array + 12);
+    assert_eq!(
+        decode_response(&wrong_dhcp_slots),
+        Err(DecodeError::InvalidArrayLength {
+            field: RequiredField::ReticulumDnsDhcpServers,
+            expected: MAX_RETICULUM_DNS_DHCP_SERVERS as u64,
+            actual: 2,
+        })
+    );
+
+    let response_code = exact
+        .windows(4)
+        .position(|window| window == [0x02, 0x0a, 0x03, 0x03])
+        .expect("typed DNS response code");
+    let mut zero_response_code = exact.to_vec();
+    zero_response_code[response_code + 3] = 0;
+    assert_eq!(
+        decode_response(&zero_response_code),
+        Err(DecodeError::InvalidReticulumDnsDiagnostics)
+    );
+
+    let mut contradictory_response_code = exact.to_vec();
+    contradictory_response_code[response_code + 1] = ReticulumDnsRawOutcome::Timeout.wire_code();
+    assert_eq!(
+        decode_response(&contradictory_response_code),
+        Err(DecodeError::InvalidReticulumDnsDiagnostics)
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_config_v18_round_trips_gateway_rmap_and_hostname_peer() {
+    let location = RmapLocation::new(42_360_100, -71_058_900).unwrap();
+    let host_peer =
+        ReticulumTcpPeerHostConfigSummary::new(true, "rmap.world", DEFAULT_RETICULUM_TCP_PORT)
+            .unwrap();
+    let snapshot = NetworkConfigSnapshot::new_full(
+        9,
+        [None; MAX_WIFI_NETWORK_PROFILES],
+        None,
+        Some(host_peer),
+        GatewayPolicy::new(false, false),
+        RmapConfig::new(true, true, Some(location)),
+    )
+    .unwrap();
+    let expected = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(80),
+        response: DeviceResponse::NetworkConfig(snapshot),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&expected, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), expected);
+    assert_eq!(snapshot.tcp_peer(), None);
+    assert_eq!(
+        snapshot.tcp_host_peer().unwrap().hostname().as_str(),
+        "rmap.world"
+    );
+    assert!(!snapshot.wifi_transport_enabled());
+    assert!(!snapshot.automatic_announces_enabled());
+    assert!(snapshot.rmap_discovery_enabled());
+    assert!(snapshot.rmap_share_location());
+    assert_eq!(snapshot.rmap_phone_location(), Some(location));
+    assert_eq!(snapshot.lora_tx_power_dbm(), LoraTransmitPowerDbm::DEFAULT);
+
+    const LEGACY_V17_EMPTY: &[u8] = &[
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0a, 0x03, 0xa3,
+        0x00, 0x01, 0x01, 0x80, 0x02, 0xf6,
+    ];
+    let DeviceResponse::NetworkConfig(legacy) = decode_response(LEGACY_V17_EMPTY).unwrap().response
+    else {
+        panic!("expected legacy network configuration")
+    };
+    assert!(legacy.wifi_transport_enabled());
+    assert!(legacy.automatic_announces_enabled());
+    assert!(!legacy.rmap_discovery_enabled());
+    assert!(!legacy.rmap_share_location());
+    assert_eq!(legacy.rmap_phone_location(), None);
+    assert_eq!(legacy.tcp_host_peer(), None);
+    assert_eq!(legacy.lora_tx_power_dbm(), LoraTransmitPowerDbm::DEFAULT);
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn lora_transmit_power_is_validated_round_trips_and_defaults_for_api_110() {
+    for value in [14, 17, 20, 22] {
+        let power = LoraTransmitPowerDbm::new(value).expect("qualified power");
+        assert_eq!(power.get(), value);
+    }
+    for value in [0, 13, 15, 16, 18, 19, 21, 23, u8::MAX] {
+        let error = LoraTransmitPowerDbm::new(value).expect_err("unqualified power");
+        assert_eq!(error.actual(), value);
+    }
+    assert_eq!(
+        LoraTransmitPowerDbm::default(),
+        LoraTransmitPowerDbm::DBM_14
+    );
+
+    let snapshot = NetworkConfigSnapshot::new_complete(
+        17,
+        [None; MAX_WIFI_NETWORK_PROFILES],
+        None,
+        None,
+        GatewayPolicy::new(false, true),
+        RmapConfig::new(false, false, None),
+        LoraTransmitPowerDbm::DBM_20,
+    )
+    .unwrap();
+    let expected = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(83),
+        response: DeviceResponse::NetworkConfig(snapshot),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&expected, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), expected);
+    assert_eq!(snapshot.lora_tx_power_dbm(), LoraTransmitPowerDbm::DBM_20);
+
+    let power_field = output[..written]
+        .windows(2)
+        .rposition(|window| window == [0x09, 0x14])
+        .expect("canonical key 9 and 20 dBm value");
+    let mut invalid_power = output[..written].to_vec();
+    invalid_power[power_field + 1] = 15;
+    assert_eq!(
+        decode_response(&invalid_power),
+        Err(DecodeError::InvalidLoraTransmitPowerDbm)
+    );
+
+    let body_map = output[..written]
+        .windows(3)
+        .position(|window| window == [0x03, 0xab, 0x00])
+        .expect("eleven-field network configuration body");
+    let mut duplicate_power = output[..written].to_vec();
+    duplicate_power[body_map + 1] = 0xac;
+    duplicate_power.extend_from_slice(&[0x09, 0x0e]);
+    assert_eq!(
+        decode_response(&duplicate_power),
+        Err(DecodeError::DuplicateField(
+            RequiredField::NetworkConfigLoraTxPowerDbm,
+        ))
+    );
+
+    let mut api_110 = output[..power_field].to_vec();
+    api_110[body_map + 1] = 0xa9;
+    let version_minor = api_110
+        .windows(5)
+        .position(|window| window == [0xa2, 0x00, 0x01, 0x01, 0x12])
+        .expect("current API version map");
+    api_110[version_minor + 4] = 0x0a;
+    let decoded = decode_response(&api_110).unwrap();
+    assert_eq!(
+        decoded.version,
+        ApiVersion {
+            major: 1,
+            minor: 10,
+        }
+    );
+    let DeviceResponse::NetworkConfig(legacy) = decoded.response else {
+        panic!("expected legacy network configuration")
+    };
+    assert_eq!(legacy.lora_tx_power_dbm(), LoraTransmitPowerDbm::DEFAULT);
+    assert!(!legacy.wifi_transport_enabled());
+    assert!(legacy.automatic_announces_enabled());
+
+    assert!(
+        NetworkConfigSnapshot::new_complete(
+            0,
+            [None; MAX_WIFI_NETWORK_PROFILES],
+            None,
+            None,
+            GatewayPolicy::new(true, true),
+            RmapConfig::new(false, false, None),
+            LoraTransmitPowerDbm::DBM_17,
+        )
+        .is_err()
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn lora_radio_profile_round_trips_atomically_and_uses_mutation_kind_seven() {
+    let profile = LoraRadioProfile::new(914_875_000, 250_000, 9, 7, LoraTransmitPowerDbm::DBM_22)
+        .expect("valid profile");
+    let snapshot = NetworkConfigSnapshot::new_with_lora_profile(
+        18,
+        [None; MAX_WIFI_NETWORK_PROFILES],
+        None,
+        None,
+        GatewayPolicy::new(true, true),
+        RmapConfig::new(false, false, None),
+        profile,
+    )
+    .expect("valid snapshot");
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(85),
+        response: DeviceResponse::NetworkConfig(snapshot),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&response, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), response);
+    assert_eq!(snapshot.lora_profile(), profile);
+    assert_eq!(snapshot.lora_tx_power_dbm(), LoraTransmitPowerDbm::DBM_22);
+
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(86),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::SetLoraProfile(profile),
+            18,
+            IdempotencyKey([0x86; 16]),
+        )),
+    };
+    let written = encode_request(&request, &mut output).unwrap();
+    assert_eq!(decode_request(&output[..written]).unwrap(), request);
+    assert!(
+        output[..written]
+            .windows(3)
+            .any(|window| window == [0x00, 0x07, 0x01])
+    );
+
+    assert!(LoraRadioProfile::new(0, 125_000, 7, 5, LoraTransmitPowerDbm::DBM_14).is_err());
+    assert!(
+        LoraRadioProfile::new(915_000_000, 100_000, 7, 5, LoraTransmitPowerDbm::DBM_14,).is_err()
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn lora_transmit_power_mutation_uses_kind_six_and_rejects_unknown_power() {
+    let request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(84),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::SetLoraTxPower(LoraTransmitPowerDbm::DBM_22),
+            7,
+            IdempotencyKey([0x84; 16]),
+        )),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&request, &mut output).unwrap();
+    assert_eq!(decode_request(&output[..written]).unwrap(), request);
+    let mutation = output[..written]
+        .windows(4)
+        .position(|window| window == [0x00, 0x06, 0x01, 0x16])
+        .expect("kind 6 and 22 dBm scalar value");
+    let mut invalid = output[..written].to_vec();
+    invalid[mutation + 3] = 21;
+    assert_eq!(
+        decode_request(&invalid),
+        Err(DecodeError::InvalidLoraTransmitPowerDbm)
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
+    assert_eq!(MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES, 96);
+    assert!(ReticulumTcpPeerHostname::new("rmap.world").is_ok());
+    for invalid in [
+        "",
+        "-rmap.world",
+        "rmap-.world",
+        "rmap..world",
+        "rmap_world",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+    ] {
+        assert!(
+            ReticulumTcpPeerHostname::new(invalid).is_err(),
+            "{invalid:?} unexpectedly accepted"
+        );
+    }
+    let maximum_hostname = format!("{}.{}", "a".repeat(63), "b".repeat(32));
+    assert_eq!(
+        maximum_hostname.len(),
+        MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES
+    );
+    assert!(ReticulumTcpPeerHostname::new(&maximum_hostname).is_ok());
+    let oversized_hostname = format!("{maximum_hostname}.c");
+    assert!(ReticulumTcpPeerHostname::new(&oversized_hostname).is_err());
+    assert!(RmapLocation::new(-90_000_000, -180_000_000).is_ok());
+    assert!(RmapLocation::new(90_000_000, 180_000_000).is_ok());
+    assert!(RmapLocation::new(90_000_001, 0).is_err());
+    assert!(RmapLocation::new(0, -180_000_001).is_err());
+
+    let ipv4 = ReticulumTcpPeerConfigSummary::new(
+        true,
+        ReticulumTcpPeerIpv4Address::new([192, 0, 2, 1]).unwrap(),
+        DEFAULT_RETICULUM_TCP_PORT,
+    )
+    .unwrap();
+    let hostname =
+        ReticulumTcpPeerHostConfigSummary::new(true, "rmap.world", DEFAULT_RETICULUM_TCP_PORT)
+            .unwrap();
+    assert!(
+        NetworkConfigSnapshot::new_full(
+            1,
+            [None; MAX_WIFI_NETWORK_PROFILES],
+            Some(ipv4),
+            Some(hostname),
+            GatewayPolicy::new(true, true),
+            RmapConfig::new(false, false, None),
+        )
+        .is_err()
+    );
+
+    let host_request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(81),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::ReplaceTcpHostPeer(Some(
+                ReticulumTcpPeerHostUpdate::new(
+                    true,
+                    ReticulumTcpPeerHostname::new("rmap.world").unwrap(),
+                    DEFAULT_RETICULUM_TCP_PORT,
+                )
+                .unwrap(),
+            )),
+            1,
+            IdempotencyKey([0x81; 16]),
+        )),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&host_request, &mut output).unwrap();
+    let mut invalid_host = output[..written].to_vec();
+    let host_start = invalid_host
+        .windows(b"rmap.world".len())
+        .position(|window| window == b"rmap.world")
+        .unwrap();
+    invalid_host[host_start + 4] = b'_';
+    assert_eq!(
+        decode_request(&invalid_host),
+        Err(DecodeError::InvalidReticulumTcpPeerHostname)
+    );
+
+    let location_request = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(82),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::SetRmapConfig(RmapConfig::new(
+                true,
+                true,
+                Some(RmapLocation::new(90_000_000, 0).unwrap()),
+            )),
+            1,
+            IdempotencyKey([0x82; 16]),
+        )),
+    };
+    let written = encode_request(&location_request, &mut output).unwrap();
+    let mut invalid_location = output[..written].to_vec();
+    let latitude = 90_000_000_i32.to_be_bytes();
+    let latitude_start = invalid_location
+        .windows(latitude.len())
+        .position(|window| window == latitude)
+        .unwrap();
+    invalid_location[latitude_start..latitude_start + latitude.len()]
+        .copy_from_slice(&90_000_001_i32.to_be_bytes());
+    assert_eq!(
+        decode_request(&invalid_location),
+        Err(DecodeError::InvalidRmapLocation)
+    );
+
+    let missing_gateway_field = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
+        0x00, 0x04, 0x01, 0xa1, 0x00, 0xf5, 0x02, 0x01, 0x03, 0x50, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    ];
+    assert_eq!(
+        decode_request(&missing_gateway_field),
+        Err(DecodeError::MissingField(
+            RequiredField::GatewayPolicyAutomaticAnnouncesEnabled,
+        ))
+    );
+
+    let missing_rmap_location_field = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
+        0x00, 0x05, 0x01, 0xa2, 0x00, 0xf5, 0x01, 0xf4, 0x02, 0x01, 0x03, 0x50, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+    ];
+    assert_eq!(
+        decode_request(&missing_rmap_location_field),
+        Err(DecodeError::MissingField(RequiredField::RmapPhoneLocation))
+    );
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_value_bounds_reject_invalid_profiles_and_secrets() {
+    assert_eq!(OP_EXPERIMENTAL_NETWORK_CONFIG_GET, 0xf00a);
+    assert_eq!(OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE, 0xf00b);
+    assert_eq!(OP_EXPERIMENTAL_NETWORK_STATUS, 0xf00c);
+    assert_eq!(MAX_WIFI_NETWORK_PROFILES, 4);
+    assert_eq!(MAX_WIFI_SSID_BYTES, 32);
+    assert_eq!(MIN_WIFI_PASSPHRASE_BYTES, 8);
+    assert_eq!(MAX_WIFI_PASSPHRASE_BYTES, 63);
+    assert!(WifiNetworkProfileId::new([1; 16]).is_ok());
+    assert!(WifiNetworkProfileId::new([0; 16]).is_err());
+    assert!(reticulum_device_api::WifiSsid::new(&[0xff; MAX_WIFI_SSID_BYTES]).is_ok());
+    assert!(reticulum_device_api::WifiSsid::new(&[]).is_err());
+    assert!(reticulum_device_api::WifiSsid::new(&[b'x'; MAX_WIFI_SSID_BYTES + 1]).is_err());
+    assert!(WifiCredentialUpdate::replace(b"1234567").is_err());
+    assert!(WifiCredentialUpdate::replace(&[b'x'; MAX_WIFI_PASSPHRASE_BYTES]).is_ok());
+    assert!(WifiCredentialUpdate::replace(&[b'x'; MAX_WIFI_PASSPHRASE_BYTES + 1]).is_err());
+    assert!(WifiCredentialUpdate::replace(b"valid\nbad").is_err());
+    assert!(ReticulumTcpPeerIpv4Address::new([0, 1, 2, 3]).is_err());
+    assert!(ReticulumTcpPeerIpv4Address::new([127, 0, 0, 1]).is_err());
+    assert!(ReticulumTcpPeerIpv4Address::new([224, 0, 0, 1]).is_err());
+    assert!(ReticulumTcpPeerIpv4Address::new([240, 0, 0, 1]).is_err());
+    assert!(ReticulumTcpPeerIpv4Address::new([255, 255, 255, 255]).is_err());
+    assert!(ReticulumTcpPeerIpv4Address::new([192, 0, 2, 1]).is_ok());
+
+    let profile = WifiNetworkConfigSummary::new(
+        WifiNetworkProfileId::new([1; 16]).unwrap(),
+        true,
+        0,
+        b"mesh",
+        true,
+    )
+    .unwrap();
+    assert!(NetworkConfigSnapshot::new(0, [Some(profile), None, None, None], None).is_err());
+    assert!(NetworkConfigSnapshot::new(1, [None, Some(profile), None, None], None).is_err());
+    assert!(
+        NetworkConfigSnapshot::new(1, [Some(profile), Some(profile), None, None], None).is_err()
+    );
+
+    let maximum = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(99),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::UpsertWifi {
+                profile_id: WifiNetworkProfileId::new([0xff; 16]).unwrap(),
+                network: WifiNetworkUpdate::new(
+                    true,
+                    u8::MAX,
+                    reticulum_device_api::WifiSsid::new(&[0xff; MAX_WIFI_SSID_BYTES]).unwrap(),
+                    WifiCredentialUpdate::replace(&[b'~'; MAX_WIFI_PASSPHRASE_BYTES]).unwrap(),
+                ),
+            },
+            u64::MAX,
+            IdempotencyKey([0xff; 16]),
+        )),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&maximum, &mut output).unwrap();
+    assert!(written <= MAX_MESSAGE_BYTES);
+    assert_eq!(decode_request(&output[..written]).unwrap(), maximum);
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[test]
+fn network_wire_rejects_zero_ids_invalid_secrets_and_contradictory_results() {
+    let request = network_upsert_request();
+    let mut wire = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_request(&request, &mut wire).unwrap();
+
+    let id_marker = [0x22_u8; 16];
+    let id_start = wire[..written]
+        .windows(id_marker.len())
+        .position(|window| window == id_marker)
+        .unwrap();
+    let mut zero_id = wire[..written].to_vec();
+    zero_id[id_start..id_start + id_marker.len()].fill(0);
+    assert_eq!(
+        decode_request(&zero_id),
+        Err(DecodeError::InvalidWifiNetworkProfileId)
+    );
+
+    let secret_start = wire[..written]
+        .windows(b"password".len())
+        .position(|window| window == b"password")
+        .unwrap();
+    let mut invalid_secret = wire[..written].to_vec();
+    invalid_secret[secret_start] = b'\n';
+    assert_eq!(
+        decode_request(&invalid_secret),
+        Err(DecodeError::InvalidWifiPassphrase)
+    );
+
+    let contradictory_conflict = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa3,
+        0x00, 0x01, 0x01, 0x0e, 0x02, 0xf5,
+    ];
+    assert_eq!(
+        decode_response(&contradictory_conflict),
+        Err(DecodeError::InvalidNetworkConfigMutationOutcome)
+    );
+
+    let too_many_profiles = [
+        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0a, 0x03, 0xa3,
+        0x00, 0x01, 0x01, 0x85, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0x02, 0xf6,
+    ];
+    assert_eq!(
+        decode_response(&too_many_profiles),
+        Err(DecodeError::TooManyWifiNetworkProfiles {
+            actual: 5,
+            max: MAX_WIFI_NETWORK_PROFILES as u64,
         })
     );
 }
@@ -3041,6 +5694,36 @@ fn experimental_operation_is_unavailable_without_feature() {
             0x01,
             0x01,
             0x06,
+            0x01,
+            0x09,
+            0x02,
+            0x19,
+            encoded_operation[0],
+            encoded_operation[1],
+            0x03,
+            0xa0,
+        ];
+        assert_eq!(
+            decode_request(&envelope),
+            Err(DecodeError::UnsupportedOperation(operation))
+        );
+        assert_eq!(
+            decode_response(&envelope),
+            Err(DecodeError::UnsupportedResponseKind(operation))
+        );
+    }
+
+    #[cfg(not(feature = "experimental-network-config"))]
+    for operation in [0xf00a_u16, 0xf00b, 0xf00c] {
+        let encoded_operation = operation.to_be_bytes();
+        let envelope = [
+            0xa4,
+            0x00,
+            0xa2,
+            0x00,
+            0x01,
+            0x01,
+            0x07,
             0x01,
             0x09,
             0x02,

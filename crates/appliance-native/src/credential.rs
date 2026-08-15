@@ -7,7 +7,9 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use rand_core::{CryptoRng, RngCore};
-use reticulum_device_api_ble::local_name_for_device_api_id;
+use reticulum_device_api_ble::{
+    local_name_for_device_api_id, recovery_local_name_for_device_api_id,
+};
 use reticulum_device_client::{ACTIVATED_CREDENTIAL_STATE_BYTES, ActivatedCredential};
 use zeroize::Zeroizing;
 
@@ -55,6 +57,9 @@ pub struct NativeCredentialSummary {
     pub generation: u64,
     /// Stable E290 BLE advertising name when the device ID uses that namespace.
     pub expected_ble_local_name: Option<String>,
+    /// Stable E290 physical-recovery BLE advertising name when the device ID
+    /// uses that namespace.
+    pub expected_ble_recovery_local_name: Option<String>,
 }
 
 /// App-private activated-credential state without exposing secret bytes.
@@ -379,6 +384,7 @@ fn credential_summary(credential: &ActivatedCredential) -> NativeCredentialSumma
         credential_id: hex::encode(credential.credential_id().as_bytes()),
         generation: credential.generation().get(),
         expected_ble_local_name: e290_ble_advertised_name(device_id.as_bytes()),
+        expected_ble_recovery_local_name: e290_ble_recovery_advertised_name(device_id.as_bytes()),
     }
 }
 
@@ -410,6 +416,11 @@ fn verify_exact_credential_readback(path: &Path, expected: &[u8]) -> Result<(), 
 
 fn e290_ble_advertised_name(device_id: &[u8; 16]) -> Option<String> {
     local_name_for_device_api_id(*device_id).and_then(|name| String::from_utf8(name.to_vec()).ok())
+}
+
+fn e290_ble_recovery_advertised_name(device_id: &[u8; 16]) -> Option<String> {
+    recovery_local_name_for_device_api_id(*device_id)
+        .and_then(|name| String::from_utf8(name.to_vec()).ok())
 }
 
 pub(crate) struct HostRng;
@@ -509,6 +520,10 @@ mod tests {
             Some("reticulum-e290-e13e88")
         );
         assert_eq!(
+            summary.expected_ble_recovery_local_name.as_deref(),
+            Some("reticulum-pair-e13e88")
+        );
+        assert_eq!(
             inspect_credential(&path),
             NativeCredentialStatus::Active { summary }
         );
@@ -603,6 +618,10 @@ mod tests {
             credential_summary(&credential).expected_ble_local_name,
             None
         );
+        assert_eq!(
+            credential_summary(&credential).expected_ble_recovery_local_name,
+            None
+        );
     }
 
     #[test]
@@ -627,6 +646,7 @@ mod tests {
         let summary = install_credential(&destination, &bytes, CredentialImportPolicy::AnyDevice)
             .expect("generic connector policy retains future-board compatibility");
         assert_eq!(summary.expected_ble_local_name, None);
+        assert_eq!(summary.expected_ble_recovery_local_name, None);
     }
 
     #[test]
@@ -646,6 +666,10 @@ mod tests {
         assert_eq!(
             summary.expected_ble_local_name.as_deref(),
             Some("reticulum-e290-e13f88")
+        );
+        assert_eq!(
+            summary.expected_ble_recovery_local_name.as_deref(),
+            Some("reticulum-pair-e13f88")
         );
         assert!(staging.exists());
         assert!(destination.exists());

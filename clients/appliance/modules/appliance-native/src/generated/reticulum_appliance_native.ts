@@ -147,9 +147,9 @@ export type NativeBleGattProfile = {
      */
     securityConfirmationReadyValue: ArrayBuffer,
     /**
-     * Universally safe initial ATT value size.
+     * Largest characteristic value permitted by the firmware profile.
      */
-    initialAttValueBytes: number
+    maximumAttValueBytes: number
 }
 
 /**
@@ -180,7 +180,7 @@ const FfiConverterTypeNativeBleGattProfile = (() => {
                 txUuid: FfiConverterString.read(from),
                 securityConfirmationUuid: FfiConverterString.read(from),
                 securityConfirmationReadyValue: FfiConverterArrayBuffer.read(from),
-                initialAttValueBytes: FfiConverterUInt32.read(from)
+                maximumAttValueBytes: FfiConverterUInt32.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -191,7 +191,7 @@ const FfiConverterTypeNativeBleGattProfile = (() => {
             FfiConverterString.write(value.txUuid, into);
             FfiConverterString.write(value.securityConfirmationUuid, into);
             FfiConverterArrayBuffer.write(value.securityConfirmationReadyValue, into);
-            FfiConverterUInt32.write(value.initialAttValueBytes, into);
+            FfiConverterUInt32.write(value.maximumAttValueBytes, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterUInt16.allocationSize(value.major) +
@@ -201,7 +201,7 @@ const FfiConverterTypeNativeBleGattProfile = (() => {
              FfiConverterString.allocationSize(value.txUuid) +
              FfiConverterString.allocationSize(value.securityConfirmationUuid) +
              FfiConverterArrayBuffer.allocationSize(value.securityConfirmationReadyValue) +
-             FfiConverterUInt32.allocationSize(value.initialAttValueBytes);
+             FfiConverterUInt32.allocationSize(value.maximumAttValueBytes);
 
         }
     };
@@ -406,7 +406,12 @@ export type NativeCredentialSummary = {
     /**
      * Stable E290 BLE advertising name when the device ID uses that namespace.
      */
-    expectedBleLocalName?: string
+    expectedBleLocalName?: string,
+    /**
+     * Stable E290 physical-recovery BLE advertising name when the device ID
+     * uses that namespace.
+     */
+    expectedBleRecoveryLocalName?: string
 }
 
 /**
@@ -433,7 +438,8 @@ const FfiConverterTypeNativeCredentialSummary = (() => {
                 deviceId: FfiConverterString.read(from),
                 credentialId: FfiConverterString.read(from),
                 generation: FfiConverterUInt64.read(from),
-                expectedBleLocalName: FfiConverterOptionalString.read(from)
+                expectedBleLocalName: FfiConverterOptionalString.read(from),
+                expectedBleRecoveryLocalName: FfiConverterOptionalString.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -441,12 +447,14 @@ const FfiConverterTypeNativeCredentialSummary = (() => {
             FfiConverterString.write(value.credentialId, into);
             FfiConverterUInt64.write(value.generation, into);
             FfiConverterOptionalString.write(value.expectedBleLocalName, into);
+            FfiConverterOptionalString.write(value.expectedBleRecoveryLocalName, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterString.allocationSize(value.deviceId) +
              FfiConverterString.allocationSize(value.credentialId) +
              FfiConverterUInt64.allocationSize(value.generation) +
-             FfiConverterOptionalString.allocationSize(value.expectedBleLocalName);
+             FfiConverterOptionalString.allocationSize(value.expectedBleLocalName) +
+             FfiConverterOptionalString.allocationSize(value.expectedBleRecoveryLocalName);
 
         }
     };
@@ -2693,9 +2701,9 @@ export interface NativeApplianceLike {
  * A prior generation must first be reported through
  * [`Self::ble_disconnected`]; this prevents silently orphaning its GATT
  * ownership. `max_write_bytes` must be the platform-reported
- * write-with-response value bound, not the negotiated ATT MTU. The bridge
- * validates that the platform supports the GATT 1.0 20-byte value, then
- * caps every emitted fragment to that fixed profile bound.
+ * conservative single-write value bound, not the negotiated ATT MTU. The
+ * bridge validates that the platform supports the mandatory 20-byte ATT
+ * value, then caps every emitted fragment to the generated profile maximum.
  */
     bleLinkConnected(peripheralId: string, maxWriteBytes: number) /*throws*/: bigint;
 /**
@@ -2725,6 +2733,10 @@ export interface NativeApplianceLike {
  * Return durable contacts as canonical JSON.
  */
     contactsJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Return saved contacts and otherwise-unknown durable message peers.
+ */
+    conversationPeersJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
 /**
  * Inspect the configured app-private activated credential without
  * returning any secret bytes.
@@ -2759,6 +2771,27 @@ export interface NativeApplianceLike {
  */
     importActivatedCredential(stagingPath: string) /*throws*/: NativeCredentialSummary;
 /**
+ * Queue ordinary primary, LXMF, and NomadNet service announces.
+ *
+ * Repeated requests are successful and return `already_pending` when the
+ * board has already retained an equivalent announce schedule.
+ */
+    manualServiceAnnounceJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Return one validated, bounded page of durable message activity as
+ * canonical JSON.
+ */
+    messageActivityJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Validate and apply one compare-and-swap desired-network mutation.
+ *
+ * The input can contain a WPA2-Personal passphrase. Both the incoming JSON
+ * buffer and the shared runtime DTO zeroize their secret-bearing storage
+ * when dropped. Validation failures use the runtime's fixed safe
+ * vocabulary and never include caller-supplied fields.
+ */
+    mutateNetworkConfigJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
  * Return the bounded semantic projection of authenticated nearby
  * `lxmf.delivery` announces as canonical JSON.
  *
@@ -2768,6 +2801,16 @@ export interface NativeApplianceLike {
  */
     nearbyPeersJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
 /**
+ * Return the board-owned desired Wi-Fi and Reticulum TCP configuration as
+ * canonical JSON with all credentials redacted.
+ */
+    networkConfigJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Return current secret-free Wi-Fi station and Reticulum TCP interface
+ * state as canonical JSON.
+ */
+    networkStatusJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
  * Validate and poll one boot-scoped NomadNet page fetch.
  */
     nomadFetchPollJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
@@ -2776,6 +2819,25 @@ export interface NativeApplianceLike {
  */
     nomadFetchStartJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
 /**
+ * Return the phone-location state that will stamp the next local outbound
+ * attempt. This reads only the app-owned runtime and never contacts the
+ * appliance.
+ */
+    phoneLocationObservationJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Return one coherent bounded local radio, interface, and retained-route
+ * diagnostics snapshot as canonical JSON.
+ *
+ * Retained routes are route-table state rather than a list of connected
+ * or necessarily reachable peers.
+ */
+    radioRoutesStatusJson(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Return one validated, bounded page of durable packet-correlated RF
+ * trace as canonical JSON.
+ */
+    radioTraceJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
  * Request a fresh device connection.
  *
  * Configured Wi-Fi and BLE owners schedule a fresh connection attempt.
@@ -2783,6 +2845,19 @@ export interface NativeApplianceLike {
  * silently falling back to another bearer.
  */
     reconnect(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
+/**
+ * Validate and poll one boot-scoped Reticulum path-and-proof probe.
+ */
+    reticulumProbePollJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Validate and begin or replay one bounded Reticulum path-and-proof probe.
+ */
+    reticulumProbeStartJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
+/**
+ * Rearm one retryable terminal message while preserving its timeline and
+ * semantic LXMF identity.
+ */
+    retryMessageJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
 /**
  * Validate and durably enqueue a message using the shared request DTO.
  */
@@ -2803,6 +2878,11 @@ export interface NativeApplianceLike {
  * Selected bearer, including future transports that are not available yet.
  */
     transport(): NativeTransport;
+/**
+ * Replace the app-owned phone-location state used by future outbound
+ * attempts. Existing durable attempt records remain immutable.
+ */
+    updatePhoneLocationObservationJson(observationJson: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
 /**
  * Validate and durably upsert a contact using the shared request DTO.
  */
@@ -2984,9 +3064,9 @@ private constructor(pointer: UniffiHandle) {
  * A prior generation must first be reported through
  * [`Self::ble_disconnected`]; this prevents silently orphaning its GATT
  * ownership. `max_write_bytes` must be the platform-reported
- * write-with-response value bound, not the negotiated ATT MTU. The bridge
- * validates that the platform supports the GATT 1.0 20-byte value, then
- * caps every emitted fragment to that fixed profile bound.
+ * conservative single-write value bound, not the negotiated ATT MTU. The
+ * bridge validates that the platform supports the mandatory 20-byte ATT
+ * value, then caps every emitted fragment to the generated profile maximum.
  */
     bleLinkConnected(peripheralId: string, maxWriteBytes: number): bigint /*throws*/ {
     return FfiConverterUInt64.lift(uniffiCaller.rustCallWithError(
@@ -3141,6 +3221,41 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
+ * Return saved contacts and otherwise-unknown durable message peers.
+ */
+    async conversationPeersJson(asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_conversation_peers_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
  * Inspect the configured app-private activated credential without
  * returning any secret bytes.
  *
@@ -3235,6 +3350,120 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
+ * Queue ordinary primary, LXMF, and NomadNet service announces.
+ *
+ * Repeated requests are successful and return `already_pending` when the
+ * board has already retained an equivalent announce schedule.
+ */
+    async manualServiceAnnounceJson(asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_manual_service_announce_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return one validated, bounded page of durable message activity as
+ * canonical JSON.
+ */
+    async messageActivityJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_message_activity_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Validate and apply one compare-and-swap desired-network mutation.
+ *
+ * The input can contain a WPA2-Personal passphrase. Both the incoming JSON
+ * buffer and the shared runtime DTO zeroize their secret-bearing storage
+ * when dropped. Validation failures use the runtime's fixed safe
+ * vocabulary and never include caller-supplied fields.
+ */
+    async mutateNetworkConfigJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_mutate_network_config_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
  * Return the bounded semantic projection of authenticated nearby
  * `lxmf.delivery` announces as canonical JSON.
  *
@@ -3249,6 +3478,78 @@ private constructor(pointer: UniffiHandle) {
             /*rustCaller:*/ uniffiCaller,
             /*rustFutureFunc:*/ () => {
                 return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_nearby_peers_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return the board-owned desired Wi-Fi and Reticulum TCP configuration as
+ * canonical JSON with all credentials redacted.
+ */
+    async networkConfigJson(asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_network_config_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return current secret-free Wi-Fi station and Reticulum TCP interface
+ * state as canonical JSON.
+ */
+    async networkStatusJson(asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_network_status_json(
                     uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
                 );
             },
@@ -3345,6 +3646,118 @@ private constructor(pointer: UniffiHandle) {
     }
 
 /**
+ * Return the phone-location state that will stamp the next local outbound
+ * attempt. This reads only the app-owned runtime and never contacts the
+ * appliance.
+ */
+    async phoneLocationObservationJson(asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_phone_location_observation_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return one coherent bounded local radio, interface, and retained-route
+ * diagnostics snapshot as canonical JSON.
+ *
+ * Retained routes are route-table state rather than a list of connected
+ * or necessarily reachable peers.
+ */
+    async radioRoutesStatusJson(asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_radio_routes_status_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Return one validated, bounded page of durable packet-correlated RF
+ * trace as canonical JSON.
+ */
+    async radioTraceJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_radio_trace_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
  * Request a fresh device connection.
  *
  * Configured Wi-Fi and BLE owners schedule a fresh connection attempt.
@@ -3366,6 +3779,112 @@ private constructor(pointer: UniffiHandle) {
             /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_void,
             /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_void,
             /*liftFunc:*/ (_v) => {},
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Validate and poll one boot-scoped Reticulum path-and-proof probe.
+ */
+    async reticulumProbePollJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reticulum_probe_poll_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Validate and begin or replay one bounded Reticulum path-and-proof probe.
+ */
+    async reticulumProbeStartJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_reticulum_probe_start_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
+    }
+
+/**
+ * Rearm one retryable terminal message while preserving its timeline and
+ * semantic LXMF identity.
+ */
+    async retryMessageJson(requestJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_retry_message_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(requestJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
             /*asyncOpts:*/ asyncOpts_,
             /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
@@ -3517,6 +4036,42 @@ private constructor(pointer: UniffiHandle) {
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
     ));
+    }
+
+/**
+ * Replace the app-owned phone-location state used by future outbound
+ * attempts. Existing durable attempt records remain immutable.
+ */
+    async updatePhoneLocationObservationJson(observationJson: string, asyncOpts_?: { signal: AbortSignal }): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+        return await uniffiRustCallAsync(
+            /*rustCaller:*/ uniffiCaller,
+            /*rustFutureFunc:*/ () => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_update_phone_location_observation_json(
+                    uniffiTypeNativeApplianceObjectFactory.clonePointer(this),FfiConverterString.lower(observationJson, nativeModule().rustbuffer_alloc)
+                );
+            },
+            /*pollFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_poll_rust_buffer,
+            /*cancelFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_cancel_rust_buffer,
+            /*completeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_complete_rust_buffer,
+            /*freeFunc:*/ nativeModule().ubrn_ffi_reticulum_appliance_native_rust_future_free_rust_buffer,
+            // Async returns always go through the JS-side converter: the
+            // FFI symbol returns the future handle (u64), and the user-level
+            // RustBuffer comes back via the shared `rust_future_complete_*`
+            // export. The bytes the runtime hands back must be deserialized
+            // here using the per-callable return-type converter.
+            /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+            /*asyncOpts:*/ asyncOpts_,
+            /*errorHandler:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError)
+        );
+    } catch (__error: any) {
+        if (uniffiIsDebug && __error instanceof Error) {
+            __error.stack = __stack;
+        }
+        throw __error;
+    }
     }
 
 /**
@@ -4078,6 +4633,18 @@ export interface NativeProfileStoreLike {
  */
     credentialStatus() /*throws*/: NativeCredentialStatus;
 /**
+ * Delete one validated inactive profile and return the authoritative catalog.
+ *
+ * This deliberately cannot remove the active profile: its SQLite actor and
+ * credential may still be owned by a [`crate::NativeAppliance`]. The caller
+ * must first activate another profile and close every owner of this target.
+ *
+ * The complete directory is preflighted before the first removal. Only the
+ * canonical credential, database, and SQLite WAL/SHM sidecars are accepted;
+ * symlinks, subdirectories, and unknown artifacts fail closed.
+ */
+    deleteInactiveProfile(deviceId: string) /*throws*/: NativeProfileStoreSnapshot;
+/**
  * Reconcile a post-activation BLE onboarding artifact with the profile store.
  *
  * A canonical Active artifact is installed and selected idempotently,
@@ -4190,6 +4757,36 @@ private constructor(pointer: UniffiHandle) {
             /*caller:*/ (callStatus) => {
                 return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_credential_status(
                 uniffiTypeNativeProfileStoreObjectFactory.clonePointer(this),
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Delete one validated inactive profile and return the authoritative catalog.
+ *
+ * This deliberately cannot remove the active profile: its SQLite actor and
+ * credential may still be owned by a [`crate::NativeAppliance`]. The caller
+ * must first activate another profile and close every owner of this target.
+ *
+ * The complete directory is preflighted before the first removal. Only the
+ * canonical credential, database, and SQLite WAL/SHM sidecars are accepted;
+ * symlinks, subdirectories, and unknown artifacts fail closed.
+ */
+    deleteInactiveProfile(deviceId: string): NativeProfileStoreSnapshot /*throws*/ {
+    return ((__rb: Uint8Array) => {
+        try {
+            return FfiConverterTypeNativeProfileStoreSnapshot.lift(__rb);
+        } finally {
+            nativeModule().rustbuffer_free(__rb);
+        }
+    })(uniffiCaller.rustCallWithError(
+            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
+            /*caller:*/ (callStatus) => {
+                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_delete_inactive_profile(
+                uniffiTypeNativeProfileStoreObjectFactory.clonePointer(this),
+        FfiConverterString.lower(deviceId, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
@@ -4384,7 +4981,7 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication() !== 1417) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected() !== 26602) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected() !== 57407) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_next_platform_command() !== 6004) {
@@ -4402,6 +4999,9 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json() !== 54150) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_contacts_json");
     }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_conversation_peers_json() !== 30223) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_conversation_peers_json");
+    }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_credential_status() !== 22492) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_credential_status");
     }
@@ -4411,8 +5011,23 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential() !== 61608) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential");
     }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_manual_service_announce_json() !== 65318) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_manual_service_announce_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_message_activity_json() !== 44751) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_message_activity_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_mutate_network_config_json() !== 63323) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_mutate_network_config_json");
+    }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nearby_peers_json() !== 1193) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nearby_peers_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_network_config_json() !== 5132) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_network_config_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_network_status_json() !== 42882) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_network_status_json");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nomad_fetch_poll_json() !== 47068) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nomad_fetch_poll_json");
@@ -4420,8 +5035,26 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nomad_fetch_start_json() !== 62926) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_nomad_fetch_start_json");
     }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_phone_location_observation_json() !== 27655) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_phone_location_observation_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_radio_routes_status_json() !== 1044) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_radio_routes_status_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_radio_trace_json() !== 41595) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_radio_trace_json");
+    }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect() !== 15037) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reticulum_probe_poll_json() !== 8262) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reticulum_probe_poll_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reticulum_probe_start_json() !== 23522) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reticulum_probe_start_json");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_retry_message_json() !== 36005) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_retry_message_json");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_send_message_json() !== 18594) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_send_message_json");
@@ -4437,6 +5070,9 @@ function uniffiEnsureInitialized() {
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport() !== 8308) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_update_phone_location_observation_json() !== 32490) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_update_phone_location_observation_json");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json() !== 4061) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json");
@@ -4482,6 +5118,9 @@ function uniffiEnsureInitialized() {
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status() !== 48667) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status");
+    }
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_delete_inactive_profile() !== 31763) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_delete_inactive_profile");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication() !== 44581) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication");

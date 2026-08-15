@@ -7,13 +7,13 @@ use reticulum_node_core::{
     PacketInterfaceId, PermitResolution, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
     TxAuthorizationPolicy, TxCompletionCode, TxCompletionDisposition, TxLeaseDeadline,
     TxPacketBuffer, TxPermitRequirements, TxPermitReservation, TxPermitResourceId,
-    TxPolicyDecision,
+    TxPolicyDecision, TxPolicyDenial,
 };
 use reticulum_storage_model::{
     AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
     AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AcceptOutcome, AcceptanceCandidate,
     ApplyOutcome, AuthorizationSnapshot, DestinationHash as StoredDestinationHash,
-    ExperimentalRnsDataIntent, IdempotencyKey, PrincipalId, SubmissionReplay,
+    ExperimentalRnsDataIntent, IdempotencyKey, LxmfMessageIntent, PrincipalId, SubmissionReplay,
 };
 use std::boxed::Box;
 
@@ -69,6 +69,14 @@ fn identity(tag: u8) -> NodeIdentity {
 }
 
 fn prepared_job(tag: u8, owner_deadline_ms: u64) -> (TestNode, RoutedTxJob<'static>) {
+    prepared_job_with_interfaces(tag, owner_deadline_ms, InterfaceSet::from_bits(1 << 1))
+}
+
+fn prepared_job_with_interfaces(
+    tag: u8,
+    owner_deadline_ms: u64,
+    enabled_interfaces: InterfaceSet,
+) -> (TestNode, RoutedTxJob<'static>) {
     let mut sender = TestNode::new(
         identity(tag),
         "reticulum",
@@ -106,7 +114,7 @@ fn prepared_job(tag: u8, owner_deadline_ms: u64) -> (TestNode, RoutedTxJob<'stat
                 rns_now: MonotonicSeconds::new(100),
                 owner_now: MonotonicMillis::new(100_000),
                 deadline: TxLeaseDeadline::new(MonotonicMillis::new(owner_deadline_ms)),
-                enabled_interfaces: InterfaceSet::from_bits(1 << 1),
+                enabled_interfaces,
             },
             &mut rng,
         )
@@ -125,6 +133,14 @@ impl TxAuthorizationPolicy for AllowPolicy {
             )
             .expect("test policy must mirror valid requirements"),
         )
+    }
+}
+
+struct DenyPolicy(TxPolicyDenial);
+
+impl TxAuthorizationPolicy for DenyPolicy {
+    fn authorize(&mut self, _candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
+        TxPolicyDecision::Deny(self.0)
     }
 }
 
@@ -180,12 +196,48 @@ fn acceptance_candidate(tag: u8) -> AcceptanceCandidate {
     )
 }
 
+fn lxmf_acceptance_candidate(tag: u8) -> AcceptanceCandidate {
+    let mut wire = [tag; 32];
+    wire[..16].copy_from_slice(&[tag.wrapping_add(2); 16]);
+    let mut credential_id = [0xA5; 16];
+    credential_id[0] = tag;
+    AcceptanceCandidate::new(
+        PrincipalId::new([tag; 16]),
+        IdempotencyKey::new([tag.wrapping_add(1); 16]),
+        LxmfMessageIntent::new(&wire).unwrap(),
+        AuthorizationSnapshot::new(
+            credential_id,
+            7,
+            9,
+            1,
+            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+                | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+        )
+        .unwrap(),
+    )
+}
+
 fn accepted_index<const N: usize>(id: u64) -> (SubmissionIndex<N>, SubmissionId) {
     let mut live = SubmissionReplay::<N>::new(SubmissionId::new(id))
         .complete()
         .unwrap();
     let accepted = accept_into(&mut live, id as u8);
     (live, accepted)
+}
+
+fn accepted_lxmf_index<const N: usize>(id: u64) -> (SubmissionIndex<N>, SubmissionId) {
+    let mut live = SubmissionReplay::<N>::new(SubmissionId::new(id))
+        .complete()
+        .unwrap();
+    let AcceptOutcome::Accepted(planned) = live.plan_accept(lxmf_acceptance_candidate(id as u8))
+    else {
+        panic!("LXMF acceptance must plan")
+    };
+    let JournalEntry::Accepted(accepted) = planned.entry() else {
+        panic!("LXMF acceptance plan changed record kind")
+    };
+    assert_eq!(live.apply_planned(planned), Ok(ApplyOutcome::Applied));
+    (live, accepted.id())
 }
 
 fn accept_into<const N: usize>(live: &mut SubmissionIndex<N>, tag: u8) -> SubmissionId {
@@ -234,6 +286,23 @@ fn bind_job<const N: usize, const P: usize>(
             .unwrap(),
         ProjectionProgress::AttemptBound
     );
+}
+
+#[test]
+fn prepared_packet_lookup_requires_the_exact_bound_attempt() {
+    let (mut live, id) = accepted_index::<2>(12);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (_node, bound) = prepared_job(13, 200_000);
+    let (_other_node, other) = prepared_job(14, 200_000);
+
+    assert_eq!(projector.submission_for_prepared(bound.prepared()), None);
+    bind_job(&mut projector, &live, id, &bound);
+    assert_eq!(
+        projector.submission_for_prepared(bound.prepared()),
+        Some(id)
+    );
+    assert_eq!(projector.submission_for_prepared(other.prepared()), None);
 }
 
 fn frame(job: &RoutedTxJob<'_>) -> PreparedFrameObservation {
@@ -534,6 +603,528 @@ fn a_fresh_projector_never_resumes_an_already_preparing_submission() {
 }
 
 #[test]
+fn fresh_projector_explicitly_resumes_only_a_durable_lxmf_delivery_loop() {
+    let (mut live, id) = accepted_lxmf_index::<2>(16);
+    let mut original = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut original, &mut live, id);
+
+    let mut restored = SubmissionProjector::<2>::new();
+    assert_eq!(
+        restored.resume_lxmf_delivery_loop(&live, id),
+        Ok(ProjectionProgress::DeliveryLoopResumed)
+    );
+    assert!(restored.preparation_allowed(&live, id));
+    assert_eq!(
+        restored.resume_lxmf_delivery_loop(&live, id),
+        Ok(ProjectionProgress::AlreadyObserved)
+    );
+    assert_eq!(restored.pending_persistence().count(), 0);
+
+    let (mut raw_live, raw_id) = accepted_index::<2>(17);
+    let mut raw_original = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut raw_original, &mut raw_live, raw_id);
+    let mut raw_restored = SubmissionProjector::<2>::new();
+    assert_eq!(
+        raw_restored.resume_lxmf_delivery_loop(&raw_live, raw_id),
+        Err(ProjectorError::Faulted(
+            ProjectorFault::UnexpectedDurableState(raw_id)
+        ))
+    );
+    assert!(!raw_restored.preparation_allowed(&raw_live, raw_id));
+}
+
+#[test]
+fn lxmf_frame_is_validated_under_preparing_without_an_awaiting_record() {
+    let (mut live, id) = accepted_lxmf_index::<2>(18);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (_node, job) = prepared_job(19, 200_000);
+    bind_job(&mut projector, &live, id, &job);
+    let observation = frame(&job);
+
+    assert_eq!(
+        projector.observe_frame(&live, observation),
+        Ok(ProjectionProgress::AttemptDurablyCovered)
+    );
+    assert_eq!(projector.pending_persistence().count(), 0);
+    assert_eq!(live.get(id).unwrap().revision(), 1);
+    assert_eq!(live.get(id).unwrap().state(), LifecycleState::Preparing);
+    assert_eq!(
+        projector.observe_frame(&live, observation),
+        Ok(ProjectionProgress::AttemptDurablyCovered)
+    );
+}
+
+#[test]
+fn lxmf_delivery_persists_the_winning_attempt_before_acknowledgement() {
+    let (mut live, id) = accepted_lxmf_index::<2>(20);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (mut node, job) = prepared_job(21, 200_000);
+    let prepared = job.prepared();
+    bind_job(&mut projector, &live, id, &job);
+    assert_eq!(
+        projector.observe_frame(&live, frame(&job)),
+        Ok(ProjectionProgress::AttemptDurablyCovered)
+    );
+
+    let mut rng = CounterRng::default();
+    node.ingest(
+        &proof_for(22, prepared.attempt()),
+        MonotonicSeconds::new(102),
+        PacketInterfaceId::new(1),
+        &mut rng,
+    )
+    .unwrap();
+    let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
+    let progress = projector.observe_terminal(&live, terminal).unwrap();
+    assert_eq!(projector.pending_acknowledgements().count(), 0);
+    persist(&mut projector, &mut live, progress);
+
+    let expected = PreparedPacketDetails::new(
+        prepared.packet_len(),
+        EncodedPacketSha256::new(*prepared.encoded_packet_sha256().as_bytes()),
+        RnsAttemptToken::new(*prepared.attempt().as_bytes()),
+    )
+    .unwrap();
+    assert_eq!(
+        live.get(id).unwrap().state(),
+        LifecycleState::Final(FinalDisposition::Delivered(expected))
+    );
+    assert_eq!(
+        projector.pending_acknowledgements().next().unwrap().kind(),
+        AcknowledgementKind::Terminal(terminal)
+    );
+}
+
+#[test]
+fn lxmf_timeout_recycles_the_attempt_only_after_exact_acknowledgement() {
+    let (mut live, id) = accepted_lxmf_index::<2>(22);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (mut node, job) = prepared_job(23, 200_000);
+    bind_job(&mut projector, &live, id, &job);
+
+    let mut authorized = authorize_job(&mut node, job);
+    let _ = authorized.frame(MonotonicMillis::new(100_020)).unwrap();
+    assert!(matches!(
+        node.complete_tx(
+            authorized.complete(TxCompletionCode::new(92)),
+            MonotonicMillis::new(100_021),
+        )
+        .unwrap_or_else(|_| panic!("possibly-transmitted owner did not return")),
+        TxCompletionDisposition::Available(_)
+    ));
+    let mut rng = CounterRng::default();
+    assert_eq!(
+        node.tick(MonotonicSeconds::new(132), &mut rng)
+            .timed_out_attempts,
+        1
+    );
+    let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+
+    assert_eq!(
+        projector.observe_terminal(&live, terminal),
+        Ok(ProjectionProgress::RetryableAttemptTerminal)
+    );
+    assert_eq!(live.get(id).unwrap().state(), LifecycleState::Preparing);
+    assert_eq!(projector.pending_persistence().count(), 0);
+    assert!(!projector.preparation_allowed(&live, id));
+    let action = projector.pending_acknowledgements().next().unwrap();
+    projector
+        .report_acknowledgement(action, AcknowledgementReply::Retryable)
+        .unwrap();
+    assert!(!projector.preparation_allowed(&live, id));
+    projector
+        .report_acknowledgement(action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert!(projector.preparation_allowed(&live, id));
+    assert_eq!(projector.submission_for_terminal(terminal), None);
+
+    let (_retry_node, retry) = prepared_job(25, 200_000);
+    bind_job(&mut projector, &live, id, &retry);
+    assert_eq!(
+        projector.submission_for_prepared(retry.prepared()),
+        Some(id)
+    );
+}
+
+#[test]
+fn lxmf_queue_rollback_recycles_the_attempt_without_finalizing_the_message() {
+    let (mut live, id) = accepted_lxmf_index::<2>(26);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (mut node, job) = prepared_job(27, 200_000);
+    bind_job(&mut projector, &live, id, &job);
+
+    let _ = node
+        .rollback_queued(job, MonotonicMillis::new(100_100))
+        .unwrap_or_else(|failure| panic!("rollback failed: {:?}", failure.reason()));
+    let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(
+        terminal.outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback)
+    );
+    assert_eq!(
+        projector.observe_terminal(&live, terminal),
+        Ok(ProjectionProgress::RetryableAttemptTerminal)
+    );
+    assert_eq!(live.get(id).unwrap().state(), LifecycleState::Preparing);
+    assert_eq!(projector.pending_persistence().count(), 0);
+    assert!(!projector.preparation_allowed(&live, id));
+
+    let action = projector.pending_acknowledgements().next().unwrap();
+    assert_eq!(node.acknowledge_terminal(terminal.handle()), Ok(terminal));
+    projector
+        .report_acknowledgement(action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert!(projector.preparation_allowed(&live, id));
+}
+
+#[test]
+fn lxmf_policy_denial_remains_a_durable_final_rejection() {
+    let (mut live, id) = accepted_lxmf_index::<2>(28);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (mut node, job) = prepared_job(29, 200_000);
+    bind_job(&mut projector, &live, id, &job);
+
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let reply = node
+        .authorize_tx(
+            request,
+            MonotonicMillis::new(100_010),
+            &mut DenyPolicy(TxPolicyDenial::PolicyDenied),
+        )
+        .unwrap_or_else(|_| panic!("policy denial failed authorization validation"));
+    let unpermitted = match pending.resolve(reply, MonotonicMillis::new(100_011)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("policy denial authorized transmission"),
+        Ok(PermitResolution::Expired(_)) => panic!("policy denial unexpectedly expired"),
+        Err(_) => panic!("matching policy denial did not resolve"),
+    };
+    assert!(matches!(
+        node.complete_tx(
+            unpermitted.complete(TxCompletionCode::new(93)),
+            MonotonicMillis::new(100_012),
+        )
+        .unwrap_or_else(|_| panic!("definitely-unsent owner did not return")),
+        TxCompletionDisposition::Available(_)
+    ));
+    let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(
+        terminal.outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
+            TxPolicyDenial::PolicyDenied
+        ))
+    );
+
+    let progress = projector.observe_terminal(&live, terminal).unwrap();
+    assert!(matches!(progress, ProjectionProgress::Persist(_)));
+    assert_eq!(projector.pending_acknowledgements().count(), 0);
+    persist(&mut projector, &mut live, progress);
+    assert_eq!(
+        live.get(id).unwrap().state(),
+        LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::Rejected))
+    );
+    assert!(!projector.preparation_allowed(&live, id));
+    assert_eq!(
+        projector.pending_acknowledgements().next().unwrap().kind(),
+        AcknowledgementKind::Terminal(terminal)
+    );
+}
+
+#[test]
+fn lxmf_retryable_terminal_classification_excludes_delivery_and_policy_denial() {
+    for outcome in [
+        AttemptOutcome::DeliveryTimeout,
+        AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PermitDeadlineExpired),
+        AttemptOutcome::Unsent(AttemptUnsentReason::RecoveryRequired),
+        AttemptOutcome::Unsent(AttemptUnsentReason::Unpermitted(TxCompletionCode::new(94))),
+    ] {
+        assert!(is_retryable_lxmf_attempt_terminal(outcome), "{outcome:?}");
+    }
+    for outcome in [
+        AttemptOutcome::Delivered,
+        AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
+            TxPolicyDenial::PolicyDenied,
+        )),
+    ] {
+        assert!(!is_retryable_lxmf_attempt_terminal(outcome), "{outcome:?}");
+    }
+    for outcome in [
+        AttemptOutcome::Unsent(AttemptUnsentReason::PermitDeadlineExpired),
+        AttemptOutcome::Unsent(AttemptUnsentReason::RecoveryRequired),
+    ] {
+        assert!(
+            retryable_terminal_requires_recovered_owner(outcome),
+            "{outcome:?}"
+        );
+    }
+    for outcome in [
+        AttemptOutcome::DeliveryTimeout,
+        AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback),
+        AttemptOutcome::Unsent(AttemptUnsentReason::Unpermitted(TxCompletionCode::new(95))),
+    ] {
+        assert!(
+            !retryable_terminal_requires_recovered_owner(outcome),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn lxmf_terminal_first_waits_for_the_exact_recovered_owner_acknowledgement() {
+    let (mut live, id) = accepted_lxmf_index::<2>(30);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (mut node, job) = prepared_job(31, 200_000);
+    bind_job(&mut projector, &live, id, &job);
+    let observation = recovered_observation(&mut node, job);
+    let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(
+        terminal.outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PermitDeadlineExpired)
+    );
+
+    assert_eq!(
+        projector.observe_terminal(&live, terminal),
+        Ok(ProjectionProgress::RetryableAttemptTerminal)
+    );
+    let terminal_action = projector.pending_acknowledgements().next().unwrap();
+    assert_eq!(
+        terminal_action.kind(),
+        AcknowledgementKind::Terminal(terminal)
+    );
+    assert_eq!(node.acknowledge_terminal(terminal.handle()), Ok(terminal));
+    projector
+        .report_acknowledgement(terminal_action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert_eq!(projector.pending_acknowledgements().count(), 0);
+    assert_eq!(projector.submission_for_terminal(terminal), Some(id));
+    assert!(!projector.preparation_allowed(&live, id));
+
+    assert_eq!(
+        projector.observe_recovered(&live, observation),
+        Ok(ProjectionProgress::RecoveryDurablyCovered)
+    );
+    assert_eq!(projector.pending_persistence().count(), 0);
+    assert!(!projector.preparation_allowed(&live, id));
+    assert_eq!(live.get(id).unwrap().state(), LifecycleState::Preparing);
+    assert_eq!(live.get(id).unwrap().transport_audit(), None);
+    assert!(!projector.preparation_allowed(&live, id));
+    let recovery_action = projector.pending_acknowledgements().next().unwrap();
+    assert_eq!(
+        recovery_action.kind(),
+        AcknowledgementKind::Recovered(observation)
+    );
+    projector
+        .report_acknowledgement(recovery_action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert_eq!(projector.pending_acknowledgements().count(), 0);
+    assert_eq!(projector.submission_for_terminal(terminal), None);
+    assert!(projector.preparation_allowed(&live, id));
+}
+
+#[test]
+fn lxmf_recovery_first_waits_for_the_exact_terminal_acknowledgement() {
+    let (mut live, id) = accepted_lxmf_index::<2>(32);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (mut node, job) = prepared_job(33, 200_000);
+    bind_job(&mut projector, &live, id, &job);
+    let observation = recovered_observation(&mut node, job);
+    let terminal = node.terminal_attempts().next().unwrap();
+
+    assert_eq!(
+        projector.observe_recovered(&live, observation),
+        Ok(ProjectionProgress::RecoveryDurablyCovered)
+    );
+    assert_eq!(projector.pending_persistence().count(), 0);
+    let recovery_action = projector.pending_acknowledgements().next().unwrap();
+    assert_eq!(
+        recovery_action.kind(),
+        AcknowledgementKind::Recovered(observation)
+    );
+    projector
+        .report_acknowledgement(recovery_action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert_eq!(projector.pending_acknowledgements().count(), 0);
+    assert_eq!(projector.submission_for_terminal(terminal), Some(id));
+    assert!(!projector.preparation_allowed(&live, id));
+
+    assert_eq!(
+        projector.observe_terminal(&live, terminal),
+        Ok(ProjectionProgress::RetryableAttemptTerminal)
+    );
+    assert_eq!(projector.pending_persistence().count(), 0);
+    assert_eq!(live.get(id).unwrap().state(), LifecycleState::Preparing);
+    assert!(!projector.preparation_allowed(&live, id));
+    let terminal_action = projector.pending_acknowledgements().next().unwrap();
+    assert_eq!(
+        terminal_action.kind(),
+        AcknowledgementKind::Terminal(terminal)
+    );
+    assert_eq!(node.acknowledge_terminal(terminal.handle()), Ok(terminal));
+    projector
+        .report_acknowledgement(terminal_action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert_eq!(projector.pending_acknowledgements().count(), 0);
+    assert_eq!(projector.submission_for_terminal(terminal), None);
+    assert!(projector.preparation_allowed(&live, id));
+}
+
+#[test]
+fn repeated_lxmf_recovery_uses_no_attempt_audits_and_a_fresh_token_can_deliver() {
+    let (mut live, id) = accepted_lxmf_index::<2>(34);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let mut recovered_tokens = [None; 2];
+
+    for (index, tag) in [35, 37].into_iter().enumerate() {
+        let (mut node, job) = prepared_job(tag, 200_000);
+        recovered_tokens[index] = Some(job.attempt());
+        bind_job(&mut projector, &live, id, &job);
+        let observation = recovered_observation(&mut node, job);
+        let terminal = node.terminal_attempts().next().unwrap();
+
+        assert_eq!(
+            projector.observe_recovered(&live, observation),
+            Ok(ProjectionProgress::RecoveryDurablyCovered)
+        );
+        assert_eq!(projector.pending_persistence().count(), 0);
+        let recovery_action = projector.pending_acknowledgements().next().unwrap();
+        assert_eq!(
+            recovery_action.kind(),
+            AcknowledgementKind::Recovered(observation)
+        );
+        projector
+            .report_acknowledgement(recovery_action, AcknowledgementReply::Completed)
+            .unwrap();
+        assert!(!projector.preparation_allowed(&live, id));
+
+        assert_eq!(
+            projector.observe_terminal(&live, terminal),
+            Ok(ProjectionProgress::RetryableAttemptTerminal)
+        );
+        let terminal_action = projector.pending_acknowledgements().next().unwrap();
+        assert_eq!(
+            terminal_action.kind(),
+            AcknowledgementKind::Terminal(terminal)
+        );
+        assert_eq!(node.acknowledge_terminal(terminal.handle()), Ok(terminal));
+        projector
+            .report_acknowledgement(terminal_action, AcknowledgementReply::Completed)
+            .unwrap();
+        assert!(projector.preparation_allowed(&live, id));
+        assert_eq!(live.get(id).unwrap().revision(), 1);
+        assert_eq!(live.get(id).unwrap().transport_audit(), None);
+        assert_eq!(live.get(id).unwrap().rns_attempt_token(), None);
+    }
+    assert_ne!(recovered_tokens[0], recovered_tokens[1]);
+
+    let (mut winning_node, winning_job) = prepared_job(39, 200_000);
+    let winning = winning_job.prepared();
+    assert!(!recovered_tokens.contains(&Some(winning.attempt())));
+    bind_job(&mut projector, &live, id, &winning_job);
+    assert_eq!(
+        projector.observe_frame(&live, frame(&winning_job)),
+        Ok(ProjectionProgress::AttemptDurablyCovered)
+    );
+    winning_node
+        .ingest(
+            &proof_for(40, winning.attempt()),
+            MonotonicSeconds::new(102),
+            PacketInterfaceId::new(1),
+            &mut CounterRng::default(),
+        )
+        .unwrap();
+    let delivered = winning_node.terminal_attempts().next().unwrap();
+    assert_eq!(delivered.outcome(), AttemptOutcome::Delivered);
+    let progress = projector.observe_terminal(&live, delivered).unwrap();
+    persist(&mut projector, &mut live, progress);
+    assert!(matches!(
+        live.get(id).unwrap().state(),
+        LifecycleState::Final(FinalDisposition::Delivered(details))
+            if details.rns_attempt_token() == RnsAttemptToken::new(*winning.attempt().as_bytes())
+    ));
+}
+
+#[test]
+fn possibly_transmitted_lxmf_recovery_keeps_attempt_until_its_later_timeout() {
+    let (mut live, id) = accepted_lxmf_index::<2>(40);
+    let mut projector = SubmissionProjector::<2>::new();
+    persisted_barrier(&mut projector, &mut live, id);
+    let (mut node, job) = prepared_job(41, 200_000);
+    bind_job(&mut projector, &live, id, &job);
+
+    let mut authorized = authorize_job(&mut node, job);
+    {
+        let _frame = authorized.frame(MonotonicMillis::new(100_020)).unwrap();
+    }
+    assert_eq!(
+        node.maintain_tx(MonotonicMillis::new(200_000))
+            .newly_recovery_required,
+        1
+    );
+    let observation = match node
+        .complete_tx(
+            authorized.complete(TxCompletionCode::new(96)),
+            MonotonicMillis::new(200_001),
+        )
+        .unwrap_or_else(|_| panic!("expired authorized owner did not return"))
+    {
+        TxCompletionDisposition::Recovered { observation, .. } => observation,
+        _ => panic!("expired authorized owner bypassed recovery"),
+    };
+    assert!(observation.record().may_have_transmitted());
+    assert_eq!(node.terminal_attempts().count(), 0);
+    assert_eq!(
+        projector.observe_recovered(&live, observation),
+        Ok(ProjectionProgress::RecoveryDurablyCovered)
+    );
+    assert!(!projector.preparation_allowed(&live, id));
+
+    assert_eq!(
+        node.tick(MonotonicSeconds::new(232), &mut CounterRng::default())
+            .timed_out_attempts,
+        1
+    );
+    let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+    assert_eq!(
+        projector.observe_terminal(&live, terminal),
+        Ok(ProjectionProgress::RetryableAttemptTerminal)
+    );
+    let actions = projector
+        .pending_acknowledgements()
+        .collect::<std::vec::Vec<_>>();
+    assert_eq!(actions.len(), 2);
+    let recovery_action = *actions
+        .iter()
+        .find(|action| matches!(action.kind(), AcknowledgementKind::Recovered(_)))
+        .unwrap();
+    let terminal_action = *actions
+        .iter()
+        .find(|action| matches!(action.kind(), AcknowledgementKind::Terminal(_)))
+        .unwrap();
+    assert_eq!(node.acknowledge_terminal(terminal.handle()), Ok(terminal));
+    projector
+        .report_acknowledgement(terminal_action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert!(!projector.preparation_allowed(&live, id));
+    assert_eq!(projector.pending_acknowledgements().count(), 1);
+    projector
+        .report_acknowledgement(recovery_action, AcknowledgementReply::Completed)
+        .unwrap();
+    assert!(projector.preparation_allowed(&live, id));
+    assert_eq!(live.get(id).unwrap().transport_audit(), None);
+}
+
+#[test]
 fn lost_acceptance_reply_replays_the_same_principal_scoped_identifier() {
     let candidate = acceptance_candidate(7);
     let live = SubmissionReplay::<2>::new(SubmissionId::new(70))
@@ -581,6 +1172,12 @@ fn lost_persistence_reply_applies_equivalent_plan_and_only_then_unlocks_ack() {
     assert_eq!(
         live.apply_planned(request.planned),
         Ok(ApplyOutcome::Applied)
+    );
+    assert_eq!(
+        live.get(id).unwrap().state(),
+        LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::Internal(
+            InternalFailure::Unspecified
+        )))
     );
     assert_eq!(projector.pending_acknowledgements().count(), 0);
     assert_eq!(
@@ -680,7 +1277,7 @@ fn delivery_before_frame_persistence_uses_preparation_digest_and_withholds_ack()
 }
 
 #[test]
-fn timeout_after_authorization_before_frame_is_conservative_and_late_frame_is_idempotent() {
+fn timeout_after_possibly_transmitted_return_keeps_late_frame_idempotent() {
     let (mut live, id) = accepted_index::<2>(34);
     let mut projector = SubmissionProjector::<2>::new();
     persisted_barrier(&mut projector, &mut live, id);
@@ -691,6 +1288,23 @@ fn timeout_after_authorization_before_frame_is_conservative_and_late_frame_is_id
     let mut rng = CounterRng::default();
     assert_eq!(
         node.tick(MonotonicSeconds::new(132), &mut rng)
+            .timed_out_attempts,
+        0
+    );
+
+    let exposed = authorized.frame(MonotonicMillis::new(132_020)).unwrap();
+    assert_eq!(exposed.bytes().len(), expected_frame.packet_len());
+    assert_eq!(exposed.attempt(), expected_frame.attempt());
+    let disposition = node
+        .complete_tx(
+            authorized.complete(TxCompletionCode::new(91)),
+            MonotonicMillis::new(132_021),
+        )
+        .unwrap_or_else(|_| panic!("possibly-transmitted owner did not return"));
+    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+
+    assert_eq!(
+        node.tick(MonotonicSeconds::new(164), &mut rng)
             .timed_out_attempts,
         1
     );
@@ -705,21 +1319,12 @@ fn timeout_after_authorization_before_frame_is_conservative_and_late_frame_is_id
     );
     assert!(live.get(id).unwrap().may_have_transmitted());
 
-    let exposed = authorized.frame(MonotonicMillis::new(100_020)).unwrap();
-    assert_eq!(exposed.bytes().len(), expected_frame.packet_len());
-    assert_eq!(exposed.attempt(), expected_frame.attempt());
     assert_eq!(
         projector.observe_frame(&live, expected_frame),
         Ok(ProjectionProgress::AlreadyObserved)
     );
     assert_eq!(projector.fault(), None);
     let action = projector.pending_acknowledgements().next().unwrap();
-    let completion = authorized.complete(TxCompletionCode::new(91));
-    let disposition = match node.complete_tx(completion, MonotonicMillis::new(100_021)) {
-        Ok(disposition) => disposition,
-        Err(_) => panic!("timed-out authorized owner did not return"),
-    };
-    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
     assert_eq!(node.acknowledge_terminal(terminal.handle()), Ok(terminal));
     projector
         .report_acknowledgement(action, AcknowledgementReply::Completed)
@@ -1108,12 +1713,15 @@ fn packet_still_bound_keeps_exact_terminal_ack_for_retry() {
     persist(&mut projector, &mut live, progress);
 
     let mut rng = CounterRng::default();
-    assert_eq!(
-        node.tick(MonotonicSeconds::new(132), &mut rng)
-            .timed_out_attempts,
-        1
-    );
+    node.ingest(
+        &proof_for(82, job.attempt()),
+        MonotonicSeconds::new(132),
+        PacketInterfaceId::new(1),
+        &mut rng,
+    )
+    .unwrap();
     let terminal = node.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
     let progress = projector.observe_terminal(&live, terminal).unwrap();
     persist(&mut projector, &mut live, progress);
     let action = projector.pending_acknowledgements().next().unwrap();

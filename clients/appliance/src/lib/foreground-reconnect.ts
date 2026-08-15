@@ -4,6 +4,26 @@ export type ForegroundReconnectProgress =
   | { readonly state: "attempting" }
   | { readonly reason: string; readonly state: "waiting_retry" };
 
+export interface ForegroundConnectionClient {
+  ensureConnected?(): Promise<unknown>;
+  reconnect(): Promise<unknown>;
+}
+
+/**
+ * Prefer a transport's non-destructive connection wake for automatic
+ * foreground recovery. Legacy clients without that capability retain their
+ * existing reconnect behavior.
+ */
+export async function ensureForegroundConnection(
+  client: ForegroundConnectionClient,
+): Promise<void> {
+  if (client.ensureConnected !== undefined) {
+    await client.ensureConnected();
+    return;
+  }
+  await client.reconnect();
+}
+
 export function foregroundReconnectMessage(progress: ForegroundReconnectProgress): string {
   if (progress.state === "attempting") {
     return "Pairing is saved. Connecting to the node.";
@@ -21,8 +41,8 @@ const scheduleRetry: RetryScheduler = (callback, delayMs) => {
 
 /**
  * Prevents overlapping foreground reconnects while re-arming a settled
- * attempt. The owner decides whether reconnecting is currently appropriate by
- * calling begin() or suspend().
+ * attempt. The owner can temporarily suspend retries or persistently inhibit
+ * them until a later explicit action.
  */
 export class ForegroundReconnect {
   readonly #delayMs: number;
@@ -31,6 +51,7 @@ export class ForegroundReconnect {
 
   #cancelScheduled: (() => void) | null = null;
   #enabled = false;
+  #inhibited = false;
   #inFlight = false;
   #lastRequest: number | null = null;
 
@@ -44,6 +65,7 @@ export class ForegroundReconnect {
   }
 
   begin(request: number): boolean {
+    if (this.#inhibited) return false;
     this.#enabled = true;
     if (this.#inFlight || this.#lastRequest === request) return false;
     this.#clearScheduled();
@@ -67,6 +89,22 @@ export class ForegroundReconnect {
     this.#enabled = false;
     this.#lastRequest = null;
     this.#clearScheduled();
+  }
+
+  /**
+   * Keep automatic attempts stopped across later begin() calls until a user
+   * action explicitly clears the inhibition.
+   *
+   * A failed BLE bond-repair scan uses this stronger state so an ordinary
+   * normal-name reconnect cannot immediately reclaim the bondless board.
+   */
+  inhibit(): void {
+    this.#inhibited = true;
+    this.suspend();
+  }
+
+  allow(): void {
+    this.#inhibited = false;
   }
 
   #clearScheduled(): void {

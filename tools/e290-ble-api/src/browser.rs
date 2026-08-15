@@ -27,7 +27,8 @@ use axum::{
     routing::get,
 };
 use reticulum_device_api_ble::{
-    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, INITIAL_ATT_VALUE_BYTES, RX_UUID, SERVICE_UUID, TX_UUID,
+    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, MAXIMUM_ATT_VALUE_BYTES,
+    MINIMUM_ATT_VALUE_BYTES as SAFE_ATT_VALUE_BYTES, RX_UUID, SERVICE_UUID, TX_UUID,
 };
 use serde::Deserialize;
 #[cfg(test)]
@@ -382,7 +383,7 @@ impl Write for BrowserBleTransport {
                     io::Error::new(io::ErrorKind::BrokenPipe, "browser bridge is not running")
                 }
             })?;
-        let fragments = input.len().div_ceil(INITIAL_ATT_VALUE_BYTES);
+        let fragments = input.len().div_ceil(SAFE_ATT_VALUE_BYTES);
         let host_deadline = self
             .operation_timeout
             .saturating_mul(u32::try_from(fragments).unwrap_or(u32::MAX))
@@ -474,7 +475,7 @@ async fn profile(Path(token): Path<String>, State(state): State<AppState>) -> Re
         "serviceUuid": SERVICE_UUID,
         "rxUuid": RX_UUID,
         "txUuid": TX_UUID,
-        "maximumFragmentBytes": INITIAL_ATT_VALUE_BYTES,
+        "maximumFragmentBytes": SAFE_ATT_VALUE_BYTES,
         "operationTimeoutMs": u64::try_from(state.operation_timeout.as_millis()).unwrap_or(u64::MAX),
         "writeType": "with_response",
         "txDelivery": "indication",
@@ -658,7 +659,7 @@ async fn write_fragments(
     next_write_id: &AtomicU32,
     state: &AppState,
 ) -> Result<usize, String> {
-    for fragment in bytes.chunks(INITIAL_ATT_VALUE_BYTES) {
+    for fragment in bytes.chunks(SAFE_ATT_VALUE_BYTES) {
         let id = next_write_id.fetch_add(1, Ordering::Relaxed);
         let id = if id == 0 {
             next_write_id.store(2, Ordering::Relaxed);
@@ -896,18 +897,18 @@ fn validate_ready(
     if !tx_indicate {
         return Err("browser did not validate TX indication support".to_owned());
     }
-    if maximum_write_bytes != INITIAL_ATT_VALUE_BYTES {
+    if maximum_write_bytes != SAFE_ATT_VALUE_BYTES {
         return Err(format!(
-            "browser write bound is {maximum_write_bytes}, expected {INITIAL_ATT_VALUE_BYTES}"
+            "browser write bound is {maximum_write_bytes}, expected {SAFE_ATT_VALUE_BYTES}"
         ));
     }
     Ok(())
 }
 
 fn encode_write_frame(id: u32, value: &[u8]) -> Result<Vec<u8>, String> {
-    if value.is_empty() || value.len() > INITIAL_ATT_VALUE_BYTES {
+    if value.is_empty() || value.len() > SAFE_ATT_VALUE_BYTES {
         return Err(format!(
-            "browser GATT write length {} is outside 1..={INITIAL_ATT_VALUE_BYTES}",
+            "browser GATT write length {} is outside 1..={SAFE_ATT_VALUE_BYTES}",
             value.len()
         ));
     }
@@ -927,9 +928,9 @@ fn decode_indication_frame(frame: &[u8]) -> Result<&[u8], String> {
         return Err("browser sent an invalid indication bridge frame".to_owned());
     }
     let value = &frame[FRAME_PREFIX_BYTES..];
-    if value.is_empty() || value.len() > INITIAL_ATT_VALUE_BYTES {
+    if value.is_empty() || value.len() > MAXIMUM_ATT_VALUE_BYTES {
         return Err(format!(
-            "browser indication length {} is outside 1..={INITIAL_ATT_VALUE_BYTES}",
+            "browser indication length {} is outside 1..={MAXIMUM_ATT_VALUE_BYTES}",
             value.len()
         ));
     }
@@ -1053,12 +1054,12 @@ mod tests {
                 Some("reticulum-e290-e13e88"),
                 true,
                 true,
-                INITIAL_ATT_VALUE_BYTES,
+                SAFE_ATT_VALUE_BYTES,
             )
             .is_ok()
         );
-        assert!(validate_ready("opaque", None, false, true, INITIAL_ATT_VALUE_BYTES,).is_err());
-        assert!(validate_ready("opaque", None, true, true, INITIAL_ATT_VALUE_BYTES + 1,).is_err());
+        assert!(validate_ready("opaque", None, false, true, SAFE_ATT_VALUE_BYTES,).is_err());
+        assert!(validate_ready("opaque", None, true, true, SAFE_ATT_VALUE_BYTES + 1,).is_err());
     }
 
     #[test]
@@ -1069,13 +1070,13 @@ mod tests {
             [BRIDGE_PROTOCOL_VERSION, FRAME_WRITE, 1, 2, 3, 4, 0xaa, 0xbb]
         );
         assert!(encode_write_frame(1, &[]).is_err());
-        assert!(encode_write_frame(1, &[0; INITIAL_ATT_VALUE_BYTES + 1]).is_err());
+        assert!(encode_write_frame(1, &[0; SAFE_ATT_VALUE_BYTES + 1]).is_err());
 
         let indication = [BRIDGE_PROTOCOL_VERSION, FRAME_INDICATION, 7, 8, 9];
         assert_eq!(decode_indication_frame(&indication).unwrap(), &[7, 8, 9]);
         assert!(decode_indication_frame(&write).is_err());
         let mut oversize = vec![BRIDGE_PROTOCOL_VERSION, FRAME_INDICATION];
-        oversize.extend_from_slice(&[0; INITIAL_ATT_VALUE_BYTES + 1]);
+        oversize.extend_from_slice(&[0; MAXIMUM_ATT_VALUE_BYTES + 1]);
         assert!(decode_indication_frame(&oversize).is_err());
     }
 
@@ -1129,11 +1130,11 @@ mod tests {
             bridge_protocol: BRIDGE_PROTOCOL_VERSION,
             direction: "rust_to_browser",
             id: 7,
-            bytes: 20,
+            bytes: SAFE_ATT_VALUE_BYTES,
         };
         let value = serde_json::to_value(evidence).unwrap();
         assert_eq!(value["bridge_protocol"], BRIDGE_PROTOCOL_VERSION);
-        assert_eq!(value["bytes"], INITIAL_ATT_VALUE_BYTES);
+        assert_eq!(value["bytes"], SAFE_ATT_VALUE_BYTES);
         assert!(value.get("payload").is_none());
     }
 }

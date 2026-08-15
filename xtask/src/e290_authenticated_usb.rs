@@ -1624,6 +1624,7 @@ fn command_request(command: &Command) -> DeviceRequest<'_> {
             timestamp_unix_ms: *timestamp_unix_ms,
             title,
             content,
+            location: None,
             idempotency_key: *idempotency_key,
         },
         Command::SubmissionStatus { id } => DeviceRequest::SubmissionStatus { id: *id },

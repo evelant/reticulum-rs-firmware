@@ -358,7 +358,9 @@ observation is idempotent against either final state and cannot reopen it.
 The projector can expose two independent exact acknowledgements:
 
 - terminal tombstone acknowledgement after the final disposition is durable;
-- recovered-buffer acknowledgement after its transport audit is durable.
+- generic recovered-buffer acknowledgement after its transport audit is
+  durable. A coherent recovered carrier owned by a durable LXMF `Preparing`
+  loop uses that logical obligation directly and appends no per-attempt audit.
 
 `PacketStillBound` is retryable ordering, not permission to discard the action.
 Terminal and recovery acknowledgements may arrive in either order and neither

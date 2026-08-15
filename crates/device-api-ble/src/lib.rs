@@ -13,7 +13,7 @@
 /// which did not contain the retained-link readiness characteristic.
 pub const GATT_PROFILE_MAJOR: u16 = 2;
 /// Backward-compatible revision of the GATT service contract.
-pub const GATT_PROFILE_MINOR: u16 = 1;
+pub const GATT_PROFILE_MINOR: u16 = 3;
 
 /// Project-owned primary service UUID in canonical text form.
 pub const SERVICE_UUID: &str = "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02";
@@ -55,35 +55,64 @@ pub const SERVICE_UUID_LE: [u8; 16] = SERVICE_UUID_U128.to_le_bytes();
 
 /// Prefix used for the MAC-derived local advertising name.
 pub const LOCAL_NAME_PREFIX: &[u8] = b"reticulum-e290-";
+/// Prefix used while an E290 is accepting a physical BLE recovery pairing.
+///
+/// Keeping recovery advertisements in a distinct name namespace prevents an
+/// application with a stale saved profile from taking the appliance's single
+/// BLE connection slot before a recovery client can claim it.
+pub const RECOVERY_LOCAL_NAME_PREFIX: &[u8] = b"reticulum-pair-";
 /// Number of trailing EUI-48 bytes encoded in the local name.
 pub const LOCAL_NAME_SUFFIX_BYTES: usize = 3;
 /// Exact number of bytes in the complete local name.
 pub const LOCAL_NAME_BYTES: usize = LOCAL_NAME_PREFIX.len() + LOCAL_NAME_SUFFIX_BYTES * 2;
+/// Exact number of bytes in the complete recovery local name.
+pub const RECOVERY_LOCAL_NAME_BYTES: usize =
+    RECOVERY_LOCAL_NAME_PREFIX.len() + LOCAL_NAME_SUFFIX_BYTES * 2;
 /// Namespace prefix used for stable E290 device-API identifiers.
 pub const E290_DEVICE_API_ID_PREFIX: &[u8; 10] = b"e290-api-1";
 
 /// ATT payload supported even when the central retains the minimum MTU of 23.
+pub const MINIMUM_ATT_VALUE_BYTES: usize = 20;
+/// Largest characteristic value carried by this GATT profile.
 ///
-/// A later profile revision may use a larger negotiated payload. Starting at
-/// twenty bytes keeps the first proof interoperable and bounded.
-pub const INITIAL_ATT_VALUE_BYTES: usize = 20;
+/// Trouble's current 255-byte packet pool can carry a 251-byte ATT MTU. The
+/// profile uses at most its 248-byte attribute payload and falls back to
+/// [`MINIMUM_ATT_VALUE_BYTES`] until a larger MTU has been negotiated.
+pub const MAXIMUM_ATT_VALUE_BYTES: usize = 248;
 /// Maximum number of centrals owned by the initial appliance profile.
 pub const MAX_CONNECTIONS: usize = 1;
 
 /// Build the stable advertising name from the final three EUI-48 bytes.
 pub const fn local_name(eui48: [u8; 6]) -> [u8; LOCAL_NAME_BYTES] {
+    derived_local_name::<LOCAL_NAME_BYTES>(LOCAL_NAME_PREFIX, eui48)
+}
+
+/// Build the physical-recovery advertising name from the final three EUI-48
+/// bytes.
+///
+/// The suffix matches [`local_name`], allowing a client with an activated E290
+/// credential to target the same physical appliance without accepting normal
+/// saved-profile advertisements.
+pub const fn recovery_local_name(eui48: [u8; 6]) -> [u8; RECOVERY_LOCAL_NAME_BYTES] {
+    derived_local_name::<RECOVERY_LOCAL_NAME_BYTES>(RECOVERY_LOCAL_NAME_PREFIX, eui48)
+}
+
+const fn derived_local_name<const NAME_BYTES: usize>(
+    prefix_bytes: &[u8],
+    eui48: [u8; 6],
+) -> [u8; NAME_BYTES] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
-    let mut name = [0_u8; LOCAL_NAME_BYTES];
+    let mut name = [0_u8; NAME_BYTES];
     let mut prefix = 0;
-    while prefix < LOCAL_NAME_PREFIX.len() {
-        name[prefix] = LOCAL_NAME_PREFIX[prefix];
+    while prefix < prefix_bytes.len() {
+        name[prefix] = prefix_bytes[prefix];
         prefix += 1;
     }
     let mut suffix = 0;
     while suffix < LOCAL_NAME_SUFFIX_BYTES {
         let byte = eui48[eui48.len() - LOCAL_NAME_SUFFIX_BYTES + suffix];
-        let output = LOCAL_NAME_PREFIX.len() + suffix * 2;
+        let output = prefix_bytes.len() + suffix * 2;
         name[output] = HEX[(byte >> 4) as usize];
         name[output + 1] = HEX[(byte & 0x0f) as usize];
         suffix += 1;
@@ -137,8 +166,24 @@ pub const fn local_name_for_device_api_id(device_id: [u8; 16]) -> Option<[u8; LO
     }
 }
 
+/// Derive the physical-recovery advertising name from an E290 device-API
+/// identifier.
+///
+/// Returns `None` when the identifier belongs to another device namespace.
+pub const fn recovery_local_name_for_device_api_id(
+    device_id: [u8; 16],
+) -> Option<[u8; RECOVERY_LOCAL_NAME_BYTES]> {
+    match eui48_from_device_api_id(device_id) {
+        Some(eui48) => Some(recovery_local_name(eui48)),
+        None => None,
+    }
+}
+
 const _: () = assert!(LOCAL_NAME_BYTES <= 29);
-const _: () = assert!(INITIAL_ATT_VALUE_BYTES == 23 - 3);
+const _: () = assert!(RECOVERY_LOCAL_NAME_BYTES <= 29);
+const _: () = assert!(MINIMUM_ATT_VALUE_BYTES == 23 - 3);
+const _: () = assert!(MAXIMUM_ATT_VALUE_BYTES == 251 - 3);
+const _: () = assert!(MINIMUM_ATT_VALUE_BYTES <= MAXIMUM_ATT_VALUE_BYTES);
 const _: () = assert!(MAX_CONNECTIONS == 1);
 const _: () = assert!(E290_DEVICE_API_ID_PREFIX.len() + 6 == 16);
 
@@ -168,6 +213,13 @@ mod tests {
     }
 
     #[test]
+    fn negotiated_value_profile_keeps_the_att_fallback_and_248_byte_ceiling() {
+        assert_eq!((GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR), (2, 3));
+        assert_eq!(MINIMUM_ATT_VALUE_BYTES, 20);
+        assert_eq!(MAXIMUM_ATT_VALUE_BYTES, 248);
+    }
+
+    #[test]
     fn local_name_is_complete_and_board_specific() {
         assert_eq!(
             &local_name([0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88]),
@@ -180,6 +232,21 @@ mod tests {
     }
 
     #[test]
+    fn recovery_local_name_is_distinct_but_keeps_the_board_suffix() {
+        let eui48 = [0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88];
+        let ordinary = local_name(eui48);
+        let recovery = recovery_local_name(eui48);
+
+        assert_eq!(&recovery, b"reticulum-pair-e13e88");
+        assert_ne!(ordinary.as_slice(), recovery.as_slice());
+        assert_eq!(
+            &ordinary[LOCAL_NAME_PREFIX.len()..],
+            &recovery[RECOVERY_LOCAL_NAME_PREFIX.len()..]
+        );
+        assert!(recovery.len() <= 29);
+    }
+
+    #[test]
     fn e290_device_api_id_round_trips_to_its_name() {
         let eui48 = [0xac, 0xa7, 0x04, 0xe1, 0x3e, 0x88];
         let device_id = device_api_id(eui48);
@@ -189,6 +256,10 @@ mod tests {
             local_name_for_device_api_id(device_id),
             Some(*b"reticulum-e290-e13e88")
         );
+        assert_eq!(
+            recovery_local_name_for_device_api_id(device_id),
+            Some(*b"reticulum-pair-e13e88")
+        );
     }
 
     #[test]
@@ -196,5 +267,6 @@ mod tests {
         let device_id = *b"other-api-\xac\xa7\x04\xe1\x3e\x88";
         assert_eq!(eui48_from_device_api_id(device_id), None);
         assert_eq!(local_name_for_device_api_id(device_id), None);
+        assert_eq!(recovery_local_name_for_device_api_id(device_id), None);
     }
 }

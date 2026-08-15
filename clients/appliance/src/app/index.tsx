@@ -3,12 +3,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
+  Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   useWindowDimensions,
@@ -16,12 +19,27 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { ActivityEventList, ActivityPanel } from "../components/ActivityPanel.tsx";
+import { ConnectivityPanel } from "../components/ConnectivityPanel.tsx";
+import { KeyboardDoneAccessory } from "../components/KeyboardDoneAccessory";
+import {
+  RadioTraceEventList,
+  type RadioTraceExportFormat,
+  RadioTracePanel,
+} from "../components/RadioTracePanel.tsx";
+import { TransmissionMapPanel } from "../components/TransmissionMapPanel.tsx";
 import type {
   ApplianceSnapshot,
   BytesView,
   ContactView,
+  ConversationPeerView,
+  MessageActivityPageView,
+  MessageLocationView,
   OnboardingView,
+  RadioTraceEventView,
+  RadioTracePageView,
   RecoveryRequest,
+  RetrySendRequest,
   SendRequest,
   TimelineView,
 } from "../generated/api.ts";
@@ -41,9 +59,26 @@ import {
   connectionStateLabel,
   connectionTransportLabel,
 } from "../lib/appliance-status.ts";
+import { bleBondRepairProgressMessage } from "../lib/ble-bond-repair.ts";
 import type { BleCandidate, BleScanOptions } from "../lib/ble-central-types.ts";
-import { type DraftIdentity, ensureDraftIdentity } from "../lib/draft.ts";
+import { contactSaveIntent } from "../lib/contact-editor.ts";
 import {
+  conversationPeerLabel,
+  messageRequestPeers,
+  outboundOnlyUnsavedPeers,
+  suggestedContactName,
+} from "../lib/conversation-peers.ts";
+import { ensureDraftIdentity } from "../lib/draft.ts";
+import { deliverExportArtifact } from "../lib/export-artifact";
+import {
+  type FieldTelemetryClient,
+  FieldTelemetryController,
+  type FieldTelemetryControllerState,
+} from "../lib/field-telemetry.ts";
+import { createFieldTelemetryPreferenceStore } from "../lib/field-telemetry-preference";
+import { ForegroundNearbyPoll } from "../lib/foreground-nearby-poll.ts";
+import {
+  ensureForegroundConnection,
   ForegroundReconnect,
   type ForegroundReconnectProgress,
   foregroundReconnectMessage,
@@ -51,15 +86,67 @@ import {
 import { keyboardLayoutPolicy } from "../lib/keyboard-layout.ts";
 import { LatestRequest } from "../lib/latest-request.ts";
 import { byteLimitError, utf8ByteLength } from "../lib/limits.ts";
+import { directLxmfPayloadBudget, directLxmfPayloadError } from "../lib/lxmf-message-size.ts";
+import {
+  retryMessageCacheKey,
+  retryMessageRequest,
+  timelineActivityRevision,
+  timelineEntryKey,
+  timelineMessageCapabilities,
+  timelineStatusLabel,
+} from "../lib/message-actions.ts";
+import { buildMessageActivityAliases, messageActivityPeerLabel } from "../lib/message-activity.ts";
+import {
+  captureForegroundMessageLocation,
+  messageLocationPresentation,
+} from "../lib/message-location.ts";
+import { type DraftSubmission, prepareDraftSubmission } from "../lib/message-location-draft.ts";
+import {
+  createMessageLocationPreferenceStore,
+  type MessageLocationPreferenceState,
+} from "../lib/message-location-preference";
+import {
+  consumeInitialMessageNotificationTarget,
+  createMessageNotificationLedgerStore,
+  initializeMessageNotifications,
+  type MessageNotificationPermission,
+  presentInboundMessageNotification,
+  requestMessageNotificationPermission,
+  subscribeMessageNotificationTargets,
+} from "../lib/message-notification-platform.ts";
+import {
+  enqueueMessageNotificationTarget,
+  MESSAGE_NOTIFICATION_PAGE_SIZE,
+  MessageNotificationReconciler,
+  type MessageNotificationTarget,
+  SupersededMessageNotificationReconciliation,
+  shouldPresentInboundMessageNotification,
+} from "../lib/message-notifications.ts";
+import {
+  type LocalMessageAcceptance,
+  localMessageAcceptance,
+  recordLocalMessageAcceptance,
+  unreconciledLocalMessageAcceptances,
+} from "../lib/message-submit-ui.ts";
 import { readNativeCoreStatus } from "../lib/native-core";
 import type { NativeCoreStatus } from "../lib/native-core-types.ts";
 import {
   associatedNomadDestinationForLxmf,
+  NEARBY_FOREGROUND_POLL_INTERVAL_MS,
   type NearbyPeerView,
+  nearbyInterfaceLabel,
+  nearbyInterfaceSummaryHint,
+  nearbyNetworkSummary,
   nearbyPeerFingerprint,
   nearbyPeerRouteHint,
   nearbyPeerSuggestedName,
+  nearbySnapshotElapsedMs,
 } from "../lib/nearby-peers.ts";
+import {
+  NetworkConfigController,
+  type NetworkConfigControllerState,
+  type NetworkConfigurationClient,
+} from "../lib/network-config.ts";
 import {
   DEFAULT_NOMAD_PAGE_PATH,
   NOMAD_PRESENTATION_TIMEOUT_MS,
@@ -77,18 +164,67 @@ import {
   onboardingPresentation,
   selectedBleCandidate,
 } from "../lib/onboarding.ts";
+import {
+  type RadioRoutesClient,
+  RadioRoutesController,
+  type RadioRoutesControllerState,
+} from "../lib/radio-routes.ts";
+import {
+  collectCompleteRadioTrace,
+  createRadioTraceExportDocument,
+  radioTraceCsvArtifact,
+  radioTraceJsonArtifact,
+} from "../lib/radio-trace-export.ts";
 import { randomHex } from "../lib/random.ts";
+import {
+  RETICULUM_PROBE_PRESENTATION_TIMEOUT_MS,
+  ReticulumProbeController,
+  type ReticulumProbeState,
+} from "../lib/reticulum-probe.ts";
+import { SettledPoll } from "../lib/settled-poll.ts";
+import {
+  buildTransmissionMapScene,
+  type LocatedTimeline,
+  type TransmissionMapFeatureDetails,
+} from "../lib/transmission-map.ts";
 
 const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
 const ONBOARDING_BLE_SCAN_TIMEOUT_MS = 15_000;
 const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
+const MESSAGE_ACTIVITY_PAGE_SIZE = 50;
+const RADIO_TRACE_PAGE_SIZE = 50;
 const KEYBOARD_LAYOUT = keyboardLayoutPolicy(Platform.OS);
-type Workspace = "lxmf" | "nomad";
+const MESSAGE_COMPOSER_INPUT_ACCESSORY_ID = "lxmf-message-composer-keyboard";
+interface QueueMessageResult {
+  readonly acceptance: LocalMessageAcceptance | null;
+  readonly error: string | null;
+  readonly queued: boolean;
+}
+type Workspace = "activity" | "connectivity" | "lxmf" | "map" | "nomad";
 type ProfileOperation =
   | { readonly state: "idle" }
   | { readonly message: string; readonly state: "switching" }
   | { readonly message: string; readonly state: "success" }
   | { readonly message: string; readonly state: "error" };
+interface MapFeatureEvidence {
+  readonly events: readonly RadioTraceEventView[];
+  readonly historyIncomplete: boolean;
+  readonly profileKey: string;
+  readonly timelineSequence: number;
+}
+type ProfileConfirmation =
+  | {
+      readonly action: "switch";
+      readonly profile: ApplianceProfilePresentation;
+    }
+  | {
+      readonly action: "forget";
+      readonly profile: ApplianceProfilePresentation;
+    }
+  | {
+      readonly action: "repair";
+      readonly profile: ApplianceProfilePresentation;
+    };
 
 function bytesText(field: BytesView): string {
   return field.encoding === "utf8" ? field.value : `hex:${field.value}`;
@@ -132,6 +268,9 @@ interface ApplianceProfileManagerProps {
   readonly onAdd: () => void;
   readonly onClearOperation: () => void;
   readonly onClose: () => void;
+  readonly onForget: ((profileKey: string) => Promise<boolean>) | null;
+  readonly onReconnect: () => Promise<boolean>;
+  readonly onRepairBond: (() => Promise<boolean>) | null;
   readonly operation: ProfileOperation;
   readonly visible: boolean;
 }
@@ -145,27 +284,36 @@ function ApplianceProfileManager({
   onAdd,
   onClearOperation,
   onClose,
+  onForget,
+  onReconnect,
+  onRepairBond,
   operation,
   visible,
 }: ApplianceProfileManagerProps) {
-  const [confirmation, setConfirmation] = useState<ApplianceProfilePresentation | null>(null);
+  const [confirmation, setConfirmation] = useState<ProfileConfirmation | null>(null);
   const presentation = applianceProfilesPresentation(catalog);
-  const switching = operation.state === "switching";
+  const operating = operation.state === "switching";
 
   useEffect(() => {
     if (!visible) setConfirmation(null);
   }, [visible]);
 
-  const activate = async () => {
+  const confirmOperation = async () => {
     if (confirmation === null) return;
-    if (await onActivate(confirmation.profileKey)) setConfirmation(null);
+    const completed =
+      confirmation.action === "switch"
+        ? await onActivate(confirmation.profile.profileKey)
+        : confirmation.action === "forget"
+          ? await onForget?.(confirmation.profile.profileKey)
+          : await onRepairBond?.();
+    if (completed) setConfirmation(null);
   };
 
   return (
     <Modal
       animationType="slide"
       onRequestClose={() => {
-        if (!switching) onClose();
+        if (!operating) onClose();
       }}
       presentationStyle="pageSheet"
       transparent={false}
@@ -177,7 +325,7 @@ function ApplianceProfileManager({
             <Text style={styles.eyebrow}>APPLIANCES</Text>
             <Text style={styles.profileManagerTitle}>Choose a Reticulum node</Text>
           </View>
-          <ActionButton disabled={switching} label="Done" onPress={onClose} secondary />
+          <ActionButton disabled={operating} label="Done" onPress={onClose} secondary />
         </View>
         <ScrollView
           contentContainerStyle={styles.profileManagerContent}
@@ -195,7 +343,7 @@ function ApplianceProfileManager({
                 operation.state === "success" && styles.profileOperationSuccess,
               ]}
             >
-              {switching ? <ActivityIndicator color="#91e6a7" /> : null}
+              {operating ? <ActivityIndicator color="#91e6a7" /> : null}
               <Text
                 style={[
                   styles.profileOperationText,
@@ -210,28 +358,14 @@ function ApplianceProfileManager({
             {presentation.profiles.map((profile) => {
               const incompatible =
                 exactBleTargetRequired && !profile.active && profile.advertisedName === null;
-              const disabled = busy || switching || profile.active || incompatible;
-              const accessibilityLabel = profile.active
-                ? `Active appliance ${profile.boardLabel}`
-                : incompatible
-                  ? `${profile.boardLabel} cannot be selected because its exact Bluetooth name is unavailable`
-                  : `Switch to ${profile.boardLabel}`;
               return (
-                <Pressable
-                  accessibilityLabel={accessibilityLabel}
-                  accessibilityRole="button"
-                  accessibilityState={{ disabled, selected: profile.active }}
-                  disabled={disabled}
+                <View
+                  accessibilityLabel={`${profile.active ? "Active" : "Saved"} appliance ${profile.boardLabel}`}
                   key={profile.profileKey}
-                  onPress={() => {
-                    onClearOperation();
-                    setConfirmation(profile);
-                  }}
-                  style={({ pressed }) => [
+                  style={[
                     styles.profileRow,
                     profile.active && styles.profileRowActive,
                     incompatible && styles.profileRowUnavailable,
-                    pressed && !disabled && styles.buttonPressed,
                   ]}
                 >
                   <View style={styles.profileRowHeading}>
@@ -241,7 +375,7 @@ function ApplianceProfileManager({
                     <Text
                       style={[styles.profileBadge, profile.active && styles.profileBadgeActive]}
                     >
-                      {profile.active ? "ACTIVE" : incompatible ? "NO BLE NAME" : "SWITCH"}
+                      {profile.active ? "ACTIVE" : incompatible ? "NO BLE NAME" : "SAVED"}
                     </Text>
                   </View>
                   <Text selectable style={styles.monospace}>
@@ -253,28 +387,104 @@ function ApplianceProfileManager({
                       Re-import or repair this profile before selecting it over Bluetooth.
                     </Text>
                   ) : null}
-                </Pressable>
+                  {profile.active ? (
+                    <>
+                      <View style={styles.profileRowActions}>
+                        <ActionButton
+                          disabled={busy || operating}
+                          label="Reconnect"
+                          onPress={() => {
+                            onClearOperation();
+                            void onReconnect();
+                          }}
+                          secondary
+                        />
+                        {onRepairBond === null ? null : (
+                          <ActionButton
+                            disabled={busy || operating}
+                            label="Repair Bluetooth"
+                            onPress={() => {
+                              onClearOperation();
+                              setConfirmation({ action: "repair", profile });
+                            }}
+                            secondary
+                          />
+                        )}
+                      </View>
+                      <Text style={styles.profileGeneration}>
+                        Switch to another appliance before forgetting this active profile.
+                      </Text>
+                    </>
+                  ) : (
+                    <View style={styles.profileRowActions}>
+                      <ActionButton
+                        disabled={busy || operating || incompatible}
+                        label="Switch"
+                        onPress={() => {
+                          onClearOperation();
+                          setConfirmation({ action: "switch", profile });
+                        }}
+                      />
+                      {onForget === null ? null : (
+                        <ActionButton
+                          disabled={busy || operating}
+                          label="Forget"
+                          onPress={() => {
+                            onClearOperation();
+                            setConfirmation({ action: "forget", profile });
+                          }}
+                          secondary
+                        />
+                      )}
+                    </View>
+                  )}
+                </View>
               );
             })}
           </View>
           {confirmation === null ? null : (
             <View accessibilityLiveRegion="polite" style={styles.profileConfirmation}>
               <Text style={styles.profileConfirmationTitle}>
-                Switch to {confirmation.boardLabel}?
+                {confirmation.action === "switch"
+                  ? `Switch to ${confirmation.profile.boardLabel}?`
+                  : confirmation.action === "forget"
+                    ? `Forget ${confirmation.profile.boardLabel} from this phone?`
+                    : `Repair Bluetooth for ${confirmation.profile.boardLabel}?`}
               </Text>
               <Text style={styles.secondaryText}>
-                The current connection will close. Profile-local messages and contacts stay
-                isolated, and any unsent composer text will be discarded.
+                {confirmation.action === "switch"
+                  ? "The current connection will close. Profile-local messages and contacts stay isolated, and any unsent composer text will be discarded."
+                  : confirmation.action === "forget"
+                    ? "This permanently deletes this phone's local credential, messages, contacts, and outbox for this appliance. It does not revoke the board's credential or remove its Bluetooth bond."
+                    : `This keeps the local credential, messages, contacts, and outbox. The alpha board retains one phone connection and one phone bond, so first force-quit this app or disable Bluetooth on the previous phone. On this phone, forget ${confirmation.profile.bleLabel} in system Bluetooth settings. Then hold GPIO21 before pressing RST, keep holding it for at least three seconds, and release it only after the board shows BLE Recovery. Choose Repair Bluetooth while that recovery screen is visible. When the app later asks for physical presence, hold GPIO21 again for about two seconds and enter the displayed code. Repair moves Bluetooth access to this phone and displaces the previous phone.`}
               </Text>
               <View style={styles.actionRow}>
                 <ActionButton
-                  disabled={busy || switching}
-                  label={switching ? "Switching…" : "Switch appliance"}
-                  onPress={() => void activate()}
+                  disabled={busy || operating}
+                  label={
+                    operating
+                      ? confirmation.action === "switch"
+                        ? "Switching…"
+                        : confirmation.action === "forget"
+                          ? "Forgetting…"
+                          : "Repairing…"
+                      : confirmation.action === "switch"
+                        ? "Switch appliance"
+                        : confirmation.action === "forget"
+                          ? "Delete local data"
+                          : "Start Bluetooth repair"
+                  }
+                  onPress={() => void confirmOperation()}
                 />
                 <ActionButton
-                  disabled={switching}
-                  label="Keep current"
+                  disabled={operating}
+                  label={
+                    confirmation.action === "switch"
+                      ? "Keep current"
+                      : confirmation.action === "forget"
+                        ? "Keep appliance"
+                        : "Cancel"
+                  }
                   onPress={() => setConfirmation(null)}
                   secondary
                 />
@@ -288,7 +498,7 @@ function ApplianceProfileManager({
             </Text>
             <View style={styles.actionRow}>
               <ActionButton
-                disabled={busy || switching || !canAdd}
+                disabled={busy || operating || !canAdd}
                 label="Add appliance"
                 onPress={() => {
                   onClearOperation();
@@ -318,6 +528,10 @@ interface ApplianceStatusCardProps {
   readonly onActivateProfile: (profileKey: string) => Promise<boolean>;
   readonly onAddAppliance: () => void;
   readonly onClearProfileOperation: () => void;
+  readonly onForgetProfile: ((profileKey: string) => Promise<boolean>) | null;
+  readonly onReconnect: () => Promise<boolean>;
+  readonly onRepairBleBond: (() => Promise<boolean>) | null;
+  readonly onSync: () => void;
   readonly profileOperation: ProfileOperation;
   readonly profiles: NativeProfileStoreSnapshot | null;
   readonly snapshot: ApplianceSnapshot | null;
@@ -332,6 +546,10 @@ function ApplianceStatusCard({
   onActivateProfile,
   onAddAppliance,
   onClearProfileOperation,
+  onForgetProfile,
+  onReconnect,
+  onRepairBleBond,
+  onSync,
   profileOperation,
   profiles,
   snapshot,
@@ -339,29 +557,61 @@ function ApplianceStatusCard({
   const [showDetails, setShowDetails] = useState(false);
   const [showProfiles, setShowProfiles] = useState(false);
   const presentation = applianceStatusPresentation(snapshot);
+  const activeProfile =
+    profiles === null ? null : applianceProfilesPresentation(profiles).activeProfile;
+  const connectionReady = snapshot?.connection.state === "ready";
   const nativeApiLabel =
     nativeCore?.label ?? (Platform.OS === "web" ? "Web client" : "Checking native bridge");
 
   return (
     <View style={[styles.applianceStatusCard, compact && styles.applianceStatusCardCompact]}>
-      <View style={styles.applianceStatusHeading}>
-        <View style={styles.applianceStatusIdentity}>
-          <Text style={styles.eyebrow}>APPLIANCE STATUS</Text>
-          <Text selectable style={styles.applianceStatusBoard}>
-            {presentation.boardLabel}
+      <View
+        style={[styles.applianceStatusHeading, compact && styles.applianceStatusHeadingCompact]}
+      >
+        <View
+          style={[styles.applianceStatusIdentity, compact && styles.applianceStatusIdentityCompact]}
+        >
+          {compact ? null : <Text style={styles.eyebrow}>APPLIANCE STATUS</Text>}
+          <Text
+            numberOfLines={compact ? 1 : undefined}
+            selectable
+            style={[styles.applianceStatusBoard, compact && styles.applianceStatusBoardCompact]}
+          >
+            {activeProfile?.boardLabel ?? presentation.boardLabel}
           </Text>
           <Text
             accessibilityLiveRegion="polite"
             style={[
               styles.applianceStatusConnection,
+              compact && styles.applianceStatusConnectionCompact,
               presentation.tone === "ready" && styles.applianceStatusConnectionReady,
               presentation.tone === "faulted" && styles.applianceStatusConnectionFaulted,
             ]}
           >
-            {presentation.connectionLabel}
+            {compact ? connectionStateLabel(snapshot?.connection) : presentation.connectionLabel}
           </Text>
         </View>
-        <View style={styles.applianceStatusActions}>
+        <View
+          style={[styles.applianceStatusActions, compact && styles.applianceStatusActionsCompact]}
+        >
+          {compact && !connectionReady ? (
+            <Pressable
+              accessibilityLabel="Reconnect to active appliance"
+              accessibilityRole="button"
+              accessibilityState={{ disabled: busy }}
+              disabled={busy}
+              hitSlop={7}
+              onPress={() => void onReconnect()}
+              style={({ pressed }) => [
+                styles.statusDetailsButton,
+                styles.statusDetailsButtonCompact,
+                busy && styles.buttonDisabled,
+                pressed && !busy && styles.buttonPressed,
+              ]}
+            >
+              <Text style={styles.statusDetailsButtonText}>Reconnect</Text>
+            </Pressable>
+          ) : null}
           {profiles === null ? null : (
             <Pressable
               accessibilityLabel="Manage saved appliances"
@@ -375,11 +625,12 @@ function ApplianceStatusCard({
               }}
               style={({ pressed }) => [
                 styles.statusDetailsButton,
+                compact && styles.statusDetailsButtonCompact,
                 busy && styles.buttonDisabled,
                 pressed && !busy && styles.buttonPressed,
               ]}
             >
-              <Text style={styles.statusDetailsButtonText}>Appliances</Text>
+              <Text style={styles.statusDetailsButtonText}>{compact ? "Nodes" : "Appliances"}</Text>
             </Pressable>
           )}
           <Pressable
@@ -388,33 +639,52 @@ function ApplianceStatusCard({
             accessibilityState={{ expanded: showDetails }}
             hitSlop={7}
             onPress={() => setShowDetails((visible) => !visible)}
-            style={({ pressed }) => [styles.statusDetailsButton, pressed && styles.buttonPressed]}
+            style={({ pressed }) => [
+              styles.statusDetailsButton,
+              compact && styles.statusDetailsButtonCompact,
+              pressed && styles.buttonPressed,
+            ]}
           >
             <Text style={styles.statusDetailsButtonText}>
-              {showDetails ? "Hide details" : "Details"}
+              {showDetails ? (compact ? "Less" : "Hide details") : "Details"}
             </Text>
           </Pressable>
         </View>
       </View>
-      <View style={styles.applianceActivity}>
-        <Text style={styles.applianceActivityItem}>{presentation.pendingOutboxLabel}</Text>
-        <Text style={styles.applianceActivitySeparator}>·</Text>
-        <Text style={styles.applianceActivityItem}>{presentation.importedThisRunLabel}</Text>
-        <Text style={styles.applianceActivitySeparator}>·</Text>
-        <Text style={styles.applianceActivityItem}>{presentation.contactCountLabel}</Text>
-      </View>
-      <View style={styles.applianceDestination}>
-        <Text style={styles.applianceDestinationLabel}>LOCAL LXMF</Text>
-        <Text selectable style={styles.applianceDestinationValue}>
-          {presentation.lxmfDestination ?? "Not available"}
-        </Text>
-      </View>
+      {!compact || showDetails ? (
+        <>
+          <View style={styles.applianceActivity}>
+            <Text style={styles.applianceActivityItem}>{presentation.pendingOutboxLabel}</Text>
+            <Text style={styles.applianceActivitySeparator}>·</Text>
+            <Text style={styles.applianceActivityItem}>{presentation.importedThisRunLabel}</Text>
+            <Text style={styles.applianceActivitySeparator}>·</Text>
+            <Text style={styles.applianceActivityItem}>{presentation.contactCountLabel}</Text>
+          </View>
+          <View style={styles.applianceDestination}>
+            <Text style={styles.applianceDestinationLabel}>LOCAL LXMF</Text>
+            <Text selectable style={styles.applianceDestinationValue}>
+              {presentation.lxmfDestination ?? "Not available"}
+            </Text>
+          </View>
+        </>
+      ) : null}
       {showDetails ? (
         <View style={styles.applianceStatusDetails}>
           <MetaRow label="Endpoint" value={presentation.endpoint ?? "Not connected"} />
           <MetaRow label="Primary" value={presentation.primaryDestination ?? "Not available"} />
           <MetaRow label="Device ID" value={presentation.deviceId ?? "Not available"} />
           <MetaRow label="API" value={nativeApiLabel} />
+          {compact ? (
+            <View style={styles.statusUtilityActions}>
+              <ActionButton disabled={busy} label="Sync" onPress={onSync} secondary />
+              <ActionButton
+                disabled={busy}
+                label="Reconnect"
+                onPress={() => void onReconnect()}
+                secondary
+              />
+            </View>
+          ) : null}
         </View>
       ) : null}
       {profiles === null ? null : (
@@ -430,6 +700,9 @@ function ApplianceStatusCard({
             setShowProfiles(false);
             onClearProfileOperation();
           }}
+          onForget={onForgetProfile}
+          onReconnect={onReconnect}
+          onRepairBond={onRepairBleBond}
           operation={profileOperation}
           visible={showProfiles}
         />
@@ -1045,6 +1318,7 @@ function OnboardingPanel({
 }
 
 interface NearbyPanelProps {
+  readonly active: boolean;
   readonly busy: boolean;
   readonly compact: boolean;
   readonly connected: boolean;
@@ -1057,9 +1331,11 @@ interface NearbyPanelProps {
   readonly onSelect: (destination: string) => void;
   readonly onUpsert: (destination: string, name: string) => Promise<boolean>;
   readonly peers: readonly NearbyPeerView[];
+  readonly snapshotFetchedAtMs: number | null;
 }
 
 function NearbyPanel({
+  active,
   busy,
   compact,
   connected,
@@ -1072,8 +1348,18 @@ function NearbyPanel({
   onSelect,
   onUpsert,
   peers,
+  snapshotFetchedAtMs,
 }: NearbyPanelProps) {
   const [addingDestination, setAddingDestination] = useState<string | null>(null);
+  const [ageClockMs, setAgeClockMs] = useState(() => Date.now());
+  useEffect(() => {
+    setAgeClockMs(Date.now());
+    if (!active) return;
+    const timer = setInterval(() => setAgeClockMs(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [active]);
+  const elapsedSinceFetchMs = nearbySnapshotElapsedMs(snapshotFetchedAtMs, ageClockMs);
+  const networkSummary = nearbyNetworkSummary(peers, contacts, elapsedSinceFetchMs);
 
   const choosePeer = async (peer: NearbyPeerView, alreadyAdded: boolean) => {
     if (alreadyAdded) {
@@ -1139,7 +1425,7 @@ function NearbyPanel({
             </Pressable>
           </View>
         </View>
-        <Text style={styles.nearbyStatus}>{nearbyPeerRouteHint(peer)}</Text>
+        <Text style={styles.nearbyStatus}>{nearbyPeerRouteHint(peer, elapsedSinceFetchMs)}</Text>
         <Text selectable style={styles.monospace}>
           ID {nearbyPeerFingerprint(peer)}
         </Text>
@@ -1152,7 +1438,11 @@ function NearbyPanel({
       <View style={styles.nearbyHeading}>
         <View style={styles.nearbyTitle}>
           <Text style={styles.contactName}>Nearby</Text>
-          <Text style={styles.nearbyCaption}>Authenticated LXMF announces</Text>
+          <Text style={styles.nearbyCaption}>
+            {loaded
+              ? `${networkSummary.peerCount} authenticated · ${networkSummary.unaddedPeerCount} not in contacts`
+              : "Authenticated LXMF announces"}
+          </Text>
         </View>
         <Pressable
           accessibilityLabel="Refresh nearby peers"
@@ -1187,20 +1477,39 @@ function NearbyPanel({
         </View>
       ) : loaded && peers.length === 0 ? (
         <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
-          No LXMF peers heard yet. Leave both nodes powered, then refresh.
+          No authenticated LXMF announces received yet. Leave both nodes powered, then refresh.
         </Text>
-      ) : compact ? (
-        <View style={styles.nearbyList}>{peerRows}</View>
       ) : (
-        <ScrollView
-          contentContainerStyle={styles.nearbyList}
-          keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
-          keyboardShouldPersistTaps="handled"
-          nestedScrollEnabled
-          style={styles.nearbyScroller}
-        >
-          {peerRows}
-        </ScrollView>
+        <>
+          <View style={styles.nearbyInterfaces}>
+            <Text style={styles.applianceDestinationLabel}>
+              OBSERVED INTERFACES ({networkSummary.interfaceCount})
+            </Text>
+            {networkSummary.interfaces.map((observedInterface) => (
+              <View key={observedInterface.interfaceId} style={styles.nearbyInterfaceRow}>
+                <Text style={styles.nearbyInterfaceName}>
+                  {nearbyInterfaceLabel(observedInterface)}
+                </Text>
+                <Text style={styles.nearbyStatus}>
+                  {nearbyInterfaceSummaryHint(observedInterface)}
+                </Text>
+              </View>
+            ))}
+          </View>
+          {compact ? (
+            <View style={styles.nearbyList}>{peerRows}</View>
+          ) : (
+            <ScrollView
+              contentContainerStyle={styles.nearbyList}
+              keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              style={styles.nearbyScroller}
+            >
+              {peerRows}
+            </ScrollView>
+          )}
+        </>
       )}
     </View>
   );
@@ -1210,35 +1519,52 @@ interface SidebarProps {
   readonly busy: boolean;
   readonly compact: boolean;
   readonly contacts: ContactView[];
+  readonly conversations: ConversationPeerView[];
+  readonly foreground: boolean;
   readonly onBrowseNomad: (destination: string) => void;
+  readonly onClose: () => void;
   readonly onRefreshNearby: (() => Promise<NearbyPeerView[]>) | null;
   readonly onSelect: (destination: string) => void;
-  readonly onUpsert: (destination: string, name: string) => Promise<boolean>;
+  readonly onUpsert: (
+    destination: string,
+    name: string,
+    selectAfterSave?: boolean,
+  ) => Promise<boolean>;
   readonly selected: string | null;
   readonly snapshot: ApplianceSnapshot | null;
+  readonly visible: boolean;
 }
 
 function Sidebar({
   busy,
   compact,
   contacts,
+  conversations,
+  foreground,
   onBrowseNomad,
+  onClose,
   onRefreshNearby,
   onSelect,
   onUpsert,
   selected,
   snapshot,
+  visible,
 }: SidebarProps) {
   const [showForm, setShowForm] = useState(false);
   const [showNearby, setShowNearby] = useState(false);
   const [name, setName] = useState("");
   const [destination, setDestination] = useState("");
+  const [editingDestination, setEditingDestination] = useState<string | null>(null);
+  const [requestDestination, setRequestDestination] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [nearbyPeers, setNearbyPeers] = useState<NearbyPeerView[]>([]);
   const [nearbyLoadError, setNearbyLoadError] = useState<string | null>(null);
   const [nearbyLoaded, setNearbyLoaded] = useState(false);
   const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [nearbySnapshotFetchedAtMs, setNearbySnapshotFetchedAtMs] = useState<number | null>(null);
   const nearbyRequests = useRef(new LatestRequest());
+  const nearbyRefreshInFlight = useRef(false);
+  const drawerScroller = useRef<ScrollView | null>(null);
   const readyConnection = snapshot?.connection.state === "ready" ? snapshot.connection : undefined;
   const nearbyConnectionKey =
     readyConnection === undefined
@@ -1250,12 +1576,74 @@ function Sidebar({
           readyConnection.device_label,
         ].join("\u0000");
   const nearbyConnectionKeyRef = useRef(nearbyConnectionKey);
-  nearbyConnectionKeyRef.current = nearbyConnectionKey;
+
+  const resetContactForm = () => {
+    setShowForm(false);
+    setName("");
+    setDestination("");
+    setEditingDestination(null);
+    setRequestDestination(null);
+    setFormError(null);
+  };
+
+  const revealContactForm = () => {
+    requestAnimationFrame(() => drawerScroller.current?.scrollTo({ animated: true, y: 0 }));
+  };
+
+  const beginAddingContact = () => {
+    setShowNearby(false);
+    setName("");
+    setDestination("");
+    setEditingDestination(null);
+    setRequestDestination(null);
+    setFormError(null);
+    setShowForm(true);
+    revealContactForm();
+  };
+
+  const beginEditingContact = (contact: ContactView) => {
+    setShowNearby(false);
+    setName(contact.name);
+    setDestination(contact.destination);
+    setEditingDestination(contact.destination);
+    setRequestDestination(null);
+    setFormError(null);
+    setShowForm(true);
+    revealContactForm();
+  };
+
+  const beginSavingUnsavedPeer = (peer: ConversationPeerView) => {
+    setShowNearby(false);
+    setName(suggestedContactName(peer.destination));
+    setDestination(peer.destination);
+    setEditingDestination(null);
+    setRequestDestination(peer.destination);
+    setFormError(null);
+    setShowForm(true);
+    revealContactForm();
+  };
+
+  const selectContact = (selectedDestination: string) => {
+    resetContactForm();
+    onSelect(selectedDestination);
+    if (compact) onClose();
+  };
+
+  const upsertContact = async (
+    selectedDestination: string,
+    selectedName: string,
+    selectAfterSave = true,
+  ) => {
+    const saved = await onUpsert(selectedDestination, selectedName, selectAfterSave);
+    if (saved && compact) onClose();
+    return saved;
+  };
 
   const refreshNearby = useCallback(async () => {
     const source = nearbyConnectionKey;
-    if (onRefreshNearby === null || source === null) return;
+    if (onRefreshNearby === null || source === null || nearbyRefreshInFlight.current) return;
 
+    nearbyRefreshInFlight.current = true;
     const request = nearbyRequests.current.begin();
     setNearbyLoading(true);
     setNearbyLoadError(null);
@@ -1265,6 +1653,7 @@ function Sidebar({
         return;
       }
       setNearbyPeers(discovered);
+      setNearbySnapshotFetchedAtMs(Date.now());
       setNearbyLoaded(true);
     } catch (nextError) {
       if (!nearbyRequests.current.accepts(request) || nearbyConnectionKeyRef.current !== source) {
@@ -1273,6 +1662,7 @@ function Sidebar({
       setNearbyLoadError(errorText(nextError));
       setNearbyLoaded(true);
     } finally {
+      nearbyRefreshInFlight.current = false;
       if (nearbyRequests.current.accepts(request) && nearbyConnectionKeyRef.current === source) {
         setNearbyLoading(false);
       }
@@ -1280,18 +1670,53 @@ function Sidebar({
   }, [nearbyConnectionKey, onRefreshNearby]);
 
   useEffect(() => {
+    nearbyConnectionKeyRef.current = nearbyConnectionKey;
     nearbyRequests.current.invalidate();
     setNearbyPeers([]);
     setNearbyLoadError(null);
     setNearbyLoaded(false);
     setNearbyLoading(false);
-    if (nearbyConnectionKey !== null && onRefreshNearby !== null) void refreshNearby();
+    setNearbySnapshotFetchedAtMs(null);
 
     return () => nearbyRequests.current.invalidate();
-  }, [nearbyConnectionKey, onRefreshNearby, refreshNearby]);
+  }, [nearbyConnectionKey]);
+
+  useEffect(() => {
+    if (visible) return;
+    setShowForm(false);
+    setName("");
+    setDestination("");
+    setEditingDestination(null);
+    setRequestDestination(null);
+    setFormError(null);
+  }, [visible]);
+
+  useEffect(() => {
+    if (
+      busy ||
+      !foreground ||
+      !showNearby ||
+      !visible ||
+      nearbyConnectionKey === null ||
+      onRefreshNearby === null
+    ) {
+      return;
+    }
+
+    const poll = new ForegroundNearbyPoll(refreshNearby, NEARBY_FOREGROUND_POLL_INTERVAL_MS);
+    poll.start();
+    return () => poll.stop();
+  }, [busy, foreground, nearbyConnectionKey, onRefreshNearby, refreshNearby, showNearby, visible]);
 
   const save = async () => {
-    const normalizedDestination = destination.trim().toLowerCase();
+    const intent =
+      requestDestination === null
+        ? contactSaveIntent(name, destination, editingDestination)
+        : {
+            destination: requestDestination,
+            name,
+            selectAfterSave: false,
+          };
     const nameError = byteLimitError(name, MAX_CONTACT_NAME_BYTES, "Name");
     if (nameError !== null) {
       setFormError(nameError);
@@ -1301,15 +1726,13 @@ function Sidebar({
       setFormError("Name is required");
       return;
     }
-    if (!/^[0-9a-f]{32}$/.test(normalizedDestination)) {
+    if (!/^[0-9a-f]{32}$/.test(intent.destination)) {
       setFormError("LXMF destination must be exactly 32 hexadecimal characters");
       return;
     }
     setFormError(null);
-    if (!(await onUpsert(normalizedDestination, name))) return;
-    setName("");
-    setDestination("");
-    setShowForm(false);
+    if (!(await upsertContact(intent.destination, intent.name, intent.selectAfterSave))) return;
+    resetContactForm();
   };
 
   const contactRows = contacts.map((contact) => {
@@ -1323,7 +1746,7 @@ function Sidebar({
         <Pressable
           accessibilityLabel={`Open ${displayName}`}
           accessibilityRole="button"
-          onPress={() => onSelect(contact.destination)}
+          onPress={() => selectContact(contact.destination)}
           style={({ pressed }) => [styles.contactSelection, pressed && styles.contactPressed]}
         >
           <Text numberOfLines={1} style={styles.contactName}>
@@ -1333,26 +1756,127 @@ function Sidebar({
             {contact.destination}
           </Text>
         </Pressable>
-        {nomadDestination === null ? null : (
+        <View style={styles.contactActions}>
           <Pressable
-            accessibilityHint="Uses the distinct Nomad destination authenticated in this peer's nearby announce"
-            accessibilityLabel={`Browse ${displayName} on NomadNet`}
+            accessibilityHint="Changes this phone's local name for the contact"
+            accessibilityLabel={`Rename ${displayName}`}
             accessibilityRole="button"
             disabled={busy}
-            onPress={() => onBrowseNomad(nomadDestination)}
+            onPress={() => beginEditingContact(contact)}
             style={({ pressed }) => [
               styles.nearbyPeerButton,
-              styles.contactBrowseButton,
               busy && styles.buttonDisabled,
               pressed && !busy && styles.contactPressed,
             ]}
           >
-            <Text style={styles.nearbyPeerAction}>Browse</Text>
+            <Text style={styles.nearbyPeerAction}>Edit</Text>
           </Pressable>
-        )}
+          {nomadDestination === null ? null : (
+            <Pressable
+              accessibilityHint="Uses the distinct Nomad destination authenticated in this peer's nearby announce"
+              accessibilityLabel={`Browse ${displayName} on NomadNet`}
+              accessibilityRole="button"
+              disabled={busy}
+              onPress={() => onBrowseNomad(nomadDestination)}
+              style={({ pressed }) => [
+                styles.nearbyPeerButton,
+                busy && styles.buttonDisabled,
+                pressed && !busy && styles.contactPressed,
+              ]}
+            >
+              <Text style={styles.nearbyPeerAction}>Browse</Text>
+            </Pressable>
+          )}
+        </View>
       </View>
     );
   });
+
+  const unsavedPeerRow = (peer: ConversationPeerView, inboundRequest: boolean) => {
+    const displayName = conversationPeerLabel(peer);
+    const lastMessage = peer.last_message;
+    const preview =
+      lastMessage === null
+        ? `${peer.message_count} stored message${peer.message_count === 1 ? "" : "s"}`
+        : `${lastMessage.direction === "inbound" ? "Received" : "Sent"} · ${
+            bytesText(lastMessage.content) || "Empty message"
+          }`;
+    return (
+      <View
+        key={peer.destination}
+        style={[styles.contact, selected === peer.destination && styles.contactActive]}
+      >
+        <Pressable
+          accessibilityLabel={
+            inboundRequest
+              ? `Open message request from ${displayName}, ${peer.inbound_message_count} message${peer.inbound_message_count === 1 ? "" : "s"}`
+              : `Open unsaved conversation with ${displayName}, ${peer.message_count} message${peer.message_count === 1 ? "" : "s"}`
+          }
+          accessibilityRole="button"
+          onPress={() => selectContact(peer.destination)}
+          style={({ pressed }) => [styles.contactSelection, pressed && styles.contactPressed]}
+        >
+          <Text numberOfLines={1} style={styles.contactName}>
+            {displayName}
+          </Text>
+          <Text numberOfLines={1} style={styles.messageRequestPreview}>
+            {preview}
+          </Text>
+          <Text selectable style={styles.monospace}>
+            {peer.destination}
+          </Text>
+        </Pressable>
+        <View style={styles.contactActions}>
+          <Pressable
+            accessibilityHint="Adds a local name without changing the authenticated destination"
+            accessibilityLabel={`Save ${displayName} as a contact`}
+            accessibilityRole="button"
+            disabled={busy}
+            onPress={() => beginSavingUnsavedPeer(peer)}
+            style={({ pressed }) => [
+              styles.nearbyPeerButton,
+              busy && styles.buttonDisabled,
+              pressed && !busy && styles.contactPressed,
+            ]}
+          >
+            <Text style={styles.nearbyPeerAction}>Save</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  };
+  const requestRows = messageRequestPeers(conversations).map((peer) => unsavedPeerRow(peer, true));
+  const outboundUnsavedRows = outboundOnlyUnsavedPeers(conversations).map((peer) =>
+    unsavedPeerRow(peer, false),
+  );
+
+  const conversationRows = (
+    <>
+      {requestRows.length === 0 ? null : (
+        <View style={styles.messageRequestsSection}>
+          <Text style={styles.applianceDestinationLabel}>
+            MESSAGE REQUESTS ({requestRows.length})
+          </Text>
+          <Text style={styles.nearbyStatus}>
+            Authenticated inbound senders that are not saved as contacts.
+          </Text>
+          <View style={styles.contacts}>{requestRows}</View>
+        </View>
+      )}
+      {outboundUnsavedRows.length === 0 ? null : (
+        <View style={styles.messageRequestsSection}>
+          <Text style={styles.applianceDestinationLabel}>
+            UNSAVED CONVERSATIONS ({outboundUnsavedRows.length})
+          </Text>
+          <Text style={styles.nearbyStatus}>
+            Outbound history for destinations that are not saved as contacts.
+          </Text>
+          <View style={styles.contacts}>{outboundUnsavedRows}</View>
+        </View>
+      )}
+      <View style={styles.contacts}>{contactRows}</View>
+    </>
+  );
 
   const sidebarContents = (
     <>
@@ -1363,7 +1887,7 @@ function Sidebar({
             accessibilityLabel={showNearby ? "Hide nearby peers" : "Find nearby peers"}
             accessibilityRole="button"
             onPress={() => {
-              setShowForm(false);
+              resetContactForm();
               setShowNearby((visible) => !visible);
             }}
             style={[styles.smallButton, showNearby && styles.smallButtonActive]}
@@ -1373,10 +1897,7 @@ function Sidebar({
           <Pressable
             accessibilityLabel="Add contact manually"
             accessibilityRole="button"
-            onPress={() => {
-              setShowNearby(false);
-              setShowForm(true);
-            }}
+            onPress={beginAddingContact}
             style={styles.addButton}
           >
             <Text style={styles.addButtonText}>+</Text>
@@ -1385,6 +1906,7 @@ function Sidebar({
       </View>
       {showNearby ? (
         <NearbyPanel
+          active={foreground && visible}
           busy={busy}
           compact={compact}
           connected={readyConnection !== undefined}
@@ -1394,13 +1916,21 @@ function Sidebar({
           loading={nearbyLoading}
           onBrowseNomad={onBrowseNomad}
           onRefresh={onRefreshNearby === null ? null : refreshNearby}
-          onSelect={onSelect}
-          onUpsert={onUpsert}
+          onSelect={selectContact}
+          onUpsert={upsertContact}
           peers={nearbyPeers}
+          snapshotFetchedAtMs={nearbySnapshotFetchedAtMs}
         />
       ) : null}
       {showForm ? (
         <View style={styles.contactForm}>
+          <Text style={styles.contactName}>
+            {editingDestination !== null
+              ? "Rename contact"
+              : requestDestination !== null
+                ? "Save conversation peer"
+                : "Add contact"}
+          </Text>
           <Text style={styles.label}>Name</Text>
           <TextInput
             accessibilityLabel="Contact name"
@@ -1412,31 +1942,53 @@ function Sidebar({
           />
           <Text style={styles.label}>LXMF destination</Text>
           <TextInput
-            accessibilityLabel="LXMF destination"
+            accessibilityLabel={
+              editingDestination === null && requestDestination === null
+                ? "LXMF destination"
+                : "LXMF destination, fixed for this contact"
+            }
+            accessibilityState={{
+              disabled: busy || editingDestination !== null || requestDestination !== null,
+            }}
             autoCapitalize="none"
             autoCorrect={false}
-            editable={!busy}
+            editable={!busy && editingDestination === null && requestDestination === null}
             maxLength={32}
             onChangeText={setDestination}
-            style={[styles.input, styles.monospaceInput]}
+            selectTextOnFocus={editingDestination !== null || requestDestination !== null}
+            style={[
+              styles.input,
+              styles.monospaceInput,
+              (editingDestination !== null || requestDestination !== null) && styles.inputReadOnly,
+            ]}
             value={destination}
           />
           {formError === null ? null : <Text style={styles.inlineError}>{formError}</Text>}
           <View style={styles.actionRow}>
-            <ActionButton disabled={busy} label="Save" onPress={() => void save()} />
-            <ActionButton label="Cancel" onPress={() => setShowForm(false)} secondary />
+            <ActionButton
+              disabled={busy}
+              label={
+                editingDestination !== null
+                  ? "Save name"
+                  : requestDestination !== null
+                    ? "Add contact"
+                    : "Save"
+              }
+              onPress={() => void save()}
+            />
+            <ActionButton label="Cancel" onPress={resetContactForm} secondary />
           </View>
         </View>
       ) : null}
       {compact ? (
-        <View style={styles.contacts}>{contactRows}</View>
+        conversationRows
       ) : (
         <ScrollView
           contentContainerStyle={styles.contacts}
           keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
           keyboardShouldPersistTaps="handled"
         >
-          {contactRows}
+          {conversationRows}
         </ScrollView>
       )}
     </>
@@ -1444,15 +1996,39 @@ function Sidebar({
 
   if (compact) {
     return (
-      <ScrollView
-        contentContainerStyle={styles.sidebarCompactContent}
-        keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
-        keyboardShouldPersistTaps="handled"
-        nestedScrollEnabled
-        style={styles.sidebarCompactScroller}
-      >
-        {sidebarContents}
-      </ScrollView>
+      <Modal animationType="slide" onRequestClose={onClose} transparent visible={visible}>
+        <KeyboardAvoidingView
+          behavior={KEYBOARD_LAYOUT.avoidingBehavior}
+          enabled={KEYBOARD_LAYOUT.avoidingEnabled}
+          style={styles.sidebarDrawerBackdrop}
+        >
+          <Pressable
+            accessibilityLabel="Close contacts"
+            accessibilityRole="button"
+            onPress={onClose}
+            style={styles.sidebarDrawerDismiss}
+          />
+          <SafeAreaView style={styles.sidebarDrawer}>
+            <View style={styles.sidebarDrawerHeading}>
+              <View>
+                <Text style={styles.eyebrow}>MESSAGES</Text>
+                <Text style={styles.profileManagerTitle}>Contacts</Text>
+              </View>
+              <ActionButton label="Done" onPress={onClose} secondary />
+            </View>
+            <ScrollView
+              automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+              contentContainerStyle={styles.sidebarCompactContent}
+              keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+              keyboardShouldPersistTaps="handled"
+              ref={drawerScroller}
+              style={styles.sidebarCompactScroller}
+            >
+              {sidebarContents}
+            </ScrollView>
+          </SafeAreaView>
+        </KeyboardAvoidingView>
+      </Modal>
     );
   }
 
@@ -1470,32 +2046,190 @@ function MetaRow({ label, value }: { readonly label: string; readonly value: str
   );
 }
 
+function AttachedMessageLocation({ location }: { readonly location: MessageLocationView }) {
+  const presentation = messageLocationPresentation(location);
+  return (
+    <View accessibilityLabel={presentation.summary} style={styles.messageLocationChip}>
+      <Text style={styles.messageLocationChipLabel}>ATTACHED MESSAGE LOCATION</Text>
+      <Text numberOfLines={2} selectable style={styles.messageLocationChipText}>
+        {presentation.coordinates} · {presentation.accuracy}
+      </Text>
+    </View>
+  );
+}
+
 interface ConversationProps {
   readonly busy: boolean;
+  readonly canMeasurePath: boolean;
   readonly compact: boolean;
-  readonly contact: ContactView | undefined;
+  readonly messageLocationDefaultEnabled: boolean;
+  readonly messageLocationPreferenceLoaded: boolean;
+  readonly onAbandonRetainedProbe: () => void;
+  readonly onMeasurePath: (destination: string) => Promise<void>;
   readonly onDraftChanged: () => void;
-  readonly onSend: (title: string, content: string) => Promise<boolean>;
+  readonly onLoadMessageActivity: (
+    timelineSequence: number,
+    beforeEventId: number | null,
+  ) => Promise<MessageActivityPageView>;
+  readonly onLoadRadioTrace: (
+    timelineSequence: number,
+    beforeEventId: number | null,
+  ) => Promise<RadioTracePageView>;
+  readonly onExportRadioTrace: (
+    timelineSequence: number,
+    format: RadioTraceExportFormat,
+  ) => Promise<void>;
+  readonly onRetryMessage: (entry: TimelineView) => Promise<boolean>;
+  readonly onSend: (
+    title: string,
+    content: string,
+    attachLocation: boolean,
+  ) => Promise<QueueMessageResult>;
+  readonly peer: ConversationPeerView | undefined;
+  readonly probeState: ReticulumProbeState;
   readonly timeline: TimelineView[];
 }
 
 function Conversation({
   busy,
+  canMeasurePath,
   compact,
-  contact,
+  messageLocationDefaultEnabled,
+  messageLocationPreferenceLoaded,
+  onAbandonRetainedProbe,
+  onMeasurePath,
   onDraftChanged,
+  onLoadMessageActivity,
+  onLoadRadioTrace,
+  onExportRadioTrace,
+  onRetryMessage,
   onSend,
+  peer,
+  probeState,
   timeline,
 }: ConversationProps) {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [attachLocation, setAttachLocation] = useState(
+    messageLocationPreferenceLoaded && messageLocationDefaultEnabled,
+  );
+  const [queueing, setQueueing] = useState(false);
+  const [localAcceptances, setLocalAcceptances] = useState<readonly LocalMessageAcceptance[]>([]);
+  const [localAcceptanceScrollGeneration, setLocalAcceptanceScrollGeneration] = useState(0);
+  const [messageLocationActionError, setMessageLocationActionError] = useState<string | null>(null);
+  const [selectedActionKey, setSelectedActionKey] = useState<string | null>(null);
+  const [messageActivityPage, setMessageActivityPage] = useState<MessageActivityPageView | null>(
+    null,
+  );
+  const [messageActivityLoading, setMessageActivityLoading] = useState(false);
+  const [messageActivityError, setMessageActivityError] = useState<string | null>(null);
+  const [messageRadioTracePage, setMessageRadioTracePage] = useState<RadioTracePageView | null>(
+    null,
+  );
+  const [messageRadioTraceLoading, setMessageRadioTraceLoading] = useState(false);
+  const [messageRadioTraceError, setMessageRadioTraceError] = useState<string | null>(null);
+  const [messageRadioTraceExporting, setMessageRadioTraceExporting] =
+    useState<RadioTraceExportFormat | null>(null);
   const draftVersion = useRef(0);
+  const timelineScroller = useRef<ScrollView | null>(null);
+  const messageLocationPreferenceApplied = useRef(messageLocationPreferenceLoaded);
+  const messageActivityGeneration = useRef(0);
+  const messageRadioTraceGeneration = useRef(0);
+  const selectedAction =
+    selectedActionKey === null
+      ? null
+      : (timeline.find((entry) => timelineEntryKey(entry) === selectedActionKey) ?? null);
+  const selectedActionSequence = selectedAction?.sequence ?? null;
+  const selectedActionActivityRevision =
+    selectedAction === null ? null : timelineActivityRevision(selectedAction);
+  const activePeerDestination = peer?.destination ?? null;
+  const visibleLocalAcceptances = unreconciledLocalMessageAcceptances(
+    localAcceptances,
+    timeline,
+    activePeerDestination,
+  );
 
-  if (contact === undefined) {
+  useEffect(() => {
+    if (selectedActionKey !== null && selectedAction === null) setSelectedActionKey(null);
+  }, [selectedAction, selectedActionKey]);
+
+  useEffect(() => {
+    if (!messageLocationPreferenceLoaded || messageLocationPreferenceApplied.current) return;
+    messageLocationPreferenceApplied.current = true;
+    setAttachLocation(messageLocationDefaultEnabled);
+  }, [messageLocationDefaultEnabled, messageLocationPreferenceLoaded]);
+
+  useEffect(() => {
+    setLocalAcceptances((current) =>
+      unreconciledLocalMessageAcceptances(current, timeline, activePeerDestination),
+    );
+  }, [activePeerDestination, timeline]);
+
+  useEffect(() => {
+    if (localAcceptanceScrollGeneration === 0) return;
+    const frame = requestAnimationFrame(() => {
+      timelineScroller.current?.scrollToEnd({ animated: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [localAcceptanceScrollGeneration]);
+
+  useEffect(() => {
+    const generation = messageActivityGeneration.current + 1;
+    messageActivityGeneration.current = generation;
+    setMessageActivityPage(null);
+    setMessageActivityError(null);
+    if (selectedActionSequence === null || selectedActionActivityRevision === null) {
+      setMessageActivityLoading(false);
+      return;
+    }
+    setMessageActivityLoading(true);
+    void onLoadMessageActivity(selectedActionSequence, null)
+      .then((page) => {
+        if (messageActivityGeneration.current !== generation) return;
+        setMessageActivityPage(page);
+      })
+      .catch((nextError) => {
+        if (messageActivityGeneration.current !== generation) return;
+        setMessageActivityError(errorText(nextError));
+      })
+      .finally(() => {
+        if (messageActivityGeneration.current === generation) setMessageActivityLoading(false);
+      });
+  }, [onLoadMessageActivity, selectedActionActivityRevision, selectedActionSequence]);
+
+  useEffect(() => {
+    const generation = messageRadioTraceGeneration.current + 1;
+    messageRadioTraceGeneration.current = generation;
+    setMessageRadioTracePage(null);
+    setMessageRadioTraceError(null);
+    if (selectedActionSequence === null || selectedActionActivityRevision === null) {
+      setMessageRadioTraceLoading(false);
+      return;
+    }
+    setMessageRadioTraceLoading(true);
+    void onLoadRadioTrace(selectedActionSequence, null)
+      .then((page) => {
+        if (messageRadioTraceGeneration.current !== generation) return;
+        setMessageRadioTracePage(page);
+      })
+      .catch((nextError) => {
+        if (messageRadioTraceGeneration.current !== generation) return;
+        setMessageRadioTraceError(errorText(nextError));
+      })
+      .finally(() => {
+        if (messageRadioTraceGeneration.current === generation) {
+          setMessageRadioTraceLoading(false);
+        }
+      });
+  }, [onLoadRadioTrace, selectedActionActivityRevision, selectedActionSequence]);
+
+  if (peer === undefined) {
     return (
       <View style={[styles.emptyState, compact && styles.conversationCompact]}>
-        <Text style={styles.emptyTitle}>Select or add a contact to begin.</Text>
+        <Text style={styles.emptyTitle}>
+          Select a contact, message request, or unsaved conversation to begin.
+        </Text>
         <Text style={styles.secondaryText}>
           The node continues receiving and routing while this app is closed.
         </Text>
@@ -1503,36 +2237,272 @@ function Conversation({
     );
   }
 
+  const probeDestination =
+    probeState.status === "idle"
+      ? null
+      : probeState.status === "input_error"
+        ? probeState.destination
+        : probeState.status === "starting" || probeState.status === "error"
+          ? probeState.request.destination
+          : probeState.destination;
+  const visibleProbeState = probeDestination === peer.destination ? probeState : null;
+  const probeRunning =
+    visibleProbeState?.status === "starting" || visibleProbeState?.status === "pending";
+  const probeRetainedForResume =
+    visibleProbeState?.status === "timed_out" ||
+    (visibleProbeState?.status === "error" && visibleProbeState.stage === "poll");
+  const probeOwnsDeviceSlot =
+    probeState.status === "starting" ||
+    probeState.status === "pending" ||
+    probeState.status === "timed_out" ||
+    (probeState.status === "error" && probeState.stage === "poll");
+  const probeOwnedByAnotherPeer =
+    probeOwnsDeviceSlot && probeDestination !== null && probeDestination !== peer.destination;
+  const probeButtonDisabled = busy || !canMeasurePath || probeRunning || probeOwnedByAnotherPeer;
+
   const titleBytes = utf8ByteLength(title);
   const contentBytes = utf8ByteLength(content);
+  const directPayloadBudget = directLxmfPayloadBudget(titleBytes, contentBytes, attachLocation);
+  const actionCapabilities =
+    selectedAction === null ? null : timelineMessageCapabilities(selectedAction);
+  const selectedMessageLocation =
+    selectedAction?.location === null || selectedAction?.location === undefined
+      ? null
+      : messageLocationPresentation(selectedAction.location);
+  const openSelectedMessageLocation = async () => {
+    if (selectedMessageLocation === null) return;
+    setMessageLocationActionError(null);
+    try {
+      await Linking.openURL(selectedMessageLocation.mapUrl);
+    } catch (nextError) {
+      setMessageLocationActionError(`Could not open map: ${errorText(nextError)}`);
+    }
+  };
   const send = async () => {
     const error =
       byteLimitError(title, MAX_LXMF_BASIC_TITLE_BYTES, "Title") ??
       byteLimitError(content, MAX_LXMF_BASIC_CONTENT_BYTES, "Message") ??
+      directLxmfPayloadError(titleBytes, contentBytes, attachLocation) ??
       (content.length === 0 ? "Message is required" : null);
     setValidationError(error);
     if (error !== null) return;
     const submittedVersion = draftVersion.current;
-    if (!(await onSend(title, content))) return;
-    if (draftVersion.current === submittedVersion) {
-      setTitle("");
-      setContent("");
+    setQueueing(true);
+    try {
+      const result = await onSend(title, content, attachLocation);
+      if (!result.queued) {
+        setValidationError(result.error ?? "The message could not be queued");
+        return;
+      }
+      const acceptance = result.acceptance;
+      if (acceptance !== null) {
+        setLocalAcceptances((current) => recordLocalMessageAcceptance(current, acceptance));
+        setLocalAcceptanceScrollGeneration((generation) => generation + 1);
+      }
+      if (draftVersion.current === submittedVersion) {
+        setTitle("");
+        setContent("");
+        setAttachLocation(messageLocationDefaultEnabled);
+      }
+    } finally {
+      setQueueing(false);
+    }
+  };
+  const populateDraft = (entry: TimelineView) => {
+    const capabilities = timelineMessageCapabilities(entry);
+    if (!capabilities.canUseAsDraft) return;
+    draftVersion.current += 1;
+    setTitle(entry.title.value);
+    setContent(entry.content.value);
+    setAttachLocation(messageLocationDefaultEnabled);
+    setValidationError(null);
+    onDraftChanged();
+    setSelectedActionKey(null);
+  };
+  const retryMessage = async (entry: TimelineView) => {
+    const capabilities = timelineMessageCapabilities(entry);
+    if (!capabilities.canRetry) return;
+    if (await onRetryMessage(entry)) setSelectedActionKey(null);
+  };
+  const loadOlderMessageActivity = async () => {
+    if (
+      selectedAction === null ||
+      messageActivityLoading ||
+      messageActivityPage?.next_before_event_id === null ||
+      messageActivityPage?.next_before_event_id === undefined
+    ) {
+      return;
+    }
+    const generation = messageActivityGeneration.current;
+    setMessageActivityLoading(true);
+    setMessageActivityError(null);
+    try {
+      const older = await onLoadMessageActivity(
+        selectedAction.sequence,
+        messageActivityPage.next_before_event_id,
+      );
+      if (messageActivityGeneration.current !== generation) return;
+      setMessageActivityPage({
+        events: [...messageActivityPage.events, ...older.events],
+        next_before_event_id: older.next_before_event_id,
+        history_incomplete: messageActivityPage.history_incomplete || older.history_incomplete,
+      });
+    } catch (nextError) {
+      if (messageActivityGeneration.current === generation) {
+        setMessageActivityError(errorText(nextError));
+      }
+    } finally {
+      if (messageActivityGeneration.current === generation) setMessageActivityLoading(false);
+    }
+  };
+  const loadOlderMessageRadioTrace = async () => {
+    if (
+      selectedAction === null ||
+      messageRadioTraceLoading ||
+      messageRadioTracePage?.next_before_event_id === null ||
+      messageRadioTracePage?.next_before_event_id === undefined
+    ) {
+      return;
+    }
+    const generation = messageRadioTraceGeneration.current;
+    setMessageRadioTraceLoading(true);
+    setMessageRadioTraceError(null);
+    try {
+      const older = await onLoadRadioTrace(
+        selectedAction.sequence,
+        messageRadioTracePage.next_before_event_id,
+      );
+      if (messageRadioTraceGeneration.current !== generation) return;
+      setMessageRadioTracePage({
+        events: [...messageRadioTracePage.events, ...older.events],
+        next_before_event_id: older.next_before_event_id,
+        history_incomplete: messageRadioTracePage.history_incomplete || older.history_incomplete,
+      });
+    } catch (nextError) {
+      if (messageRadioTraceGeneration.current === generation) {
+        setMessageRadioTraceError(errorText(nextError));
+      }
+    } finally {
+      if (messageRadioTraceGeneration.current === generation) {
+        setMessageRadioTraceLoading(false);
+      }
+    }
+  };
+  const exportMessageRadioTrace = async (format: RadioTraceExportFormat) => {
+    if (selectedAction === null || messageRadioTraceExporting !== null) return;
+    setMessageRadioTraceExporting(format);
+    setMessageRadioTraceError(null);
+    try {
+      await onExportRadioTrace(selectedAction.sequence, format);
+    } catch (nextError) {
+      setMessageRadioTraceError(`Export failed: ${errorText(nextError)}`);
+    } finally {
+      setMessageRadioTraceExporting(null);
     }
   };
 
   return (
     <View style={[styles.conversation, compact && styles.conversationCompact]}>
-      <View style={styles.conversationHeading}>
-        <Text style={styles.heading}>{contact.name || "Unnamed contact"}</Text>
+      <View style={[styles.conversationHeading, compact && styles.conversationHeadingCompact]}>
+        <View style={styles.conversationIdentity}>
+          <Text style={styles.heading}>{conversationPeerLabel(peer)}</Text>
+          {peer.name === null ? (
+            <Text style={styles.messageRequestBadge}>
+              {peer.inbound_message_count > 0
+                ? "MESSAGE REQUEST · NOT SAVED"
+                : "UNSAVED CONVERSATION"}
+            </Text>
+          ) : null}
+        </View>
         <Text selectable style={styles.monospace}>
-          {contact.destination}
+          {peer.destination}
         </Text>
+        <Pressable
+          accessibilityHint="Sends one bounded Reticulum path-and-proof measurement"
+          accessibilityLabel={`Measure Reticulum path to ${conversationPeerLabel(peer)}`}
+          accessibilityRole="button"
+          disabled={probeButtonDisabled}
+          onPress={() => void onMeasurePath(peer.destination)}
+          style={({ pressed }) => [
+            styles.measurePathButton,
+            probeButtonDisabled && styles.buttonDisabled,
+            pressed && !probeButtonDisabled && styles.buttonPressed,
+          ]}
+        >
+          <Text style={styles.measurePathButtonText}>
+            {probeRunning
+              ? "Measuring…"
+              : probeOwnedByAnotherPeer
+                ? "Measurement active"
+                : probeRetainedForResume
+                  ? "Resume measurement"
+                  : "Measure path"}
+          </Text>
+        </Pressable>
       </View>
+      {visibleProbeState === null || visibleProbeState.status === "idle" ? null : (
+        <View
+          accessibilityLiveRegion={
+            visibleProbeState.status === "failed" ||
+            visibleProbeState.status === "error" ||
+            visibleProbeState.status === "input_error" ||
+            visibleProbeState.status === "timed_out"
+              ? "assertive"
+              : "polite"
+          }
+          style={styles.probeResult}
+        >
+          <Text style={styles.probeResultTitle}>
+            {visibleProbeState.status === "starting"
+              ? "Starting path measurement…"
+              : visibleProbeState.status === "pending"
+                ? visibleProbeState.phase === null
+                  ? "Probe accepted; waiting for node status…"
+                  : visibleProbeState.phase === "path_lookup"
+                    ? "Looking up a Reticulum path…"
+                    : visibleProbeState.phase === "awaiting_dispatch"
+                      ? "Waiting for probe dispatch…"
+                      : "Probe sent; awaiting proof…"
+                : visibleProbeState.status === "succeeded"
+                  ? `${visibleProbeState.result.round_trip_ms} ms round trip · ${visibleProbeState.result.hops} route ${visibleProbeState.result.hops === 1 ? "hop" : "hops"}`
+                  : visibleProbeState.status === "failed"
+                    ? `Measurement failed: ${visibleProbeState.failure.replaceAll("_", " ")}`
+                    : visibleProbeState.status === "timed_out"
+                      ? `No terminal result after ${RETICULUM_PROBE_PRESENTATION_TIMEOUT_MS / 60_000} minutes`
+                      : visibleProbeState.error}
+          </Text>
+          {visibleProbeState.status === "succeeded" ? (
+            <>
+              <Text selectable style={styles.probeResultValue}>
+                Return interface {visibleProbeState.result.ingress_observation.interface_id}
+                {visibleProbeState.result.ingress_observation.signal === null
+                  ? " · no radio signal values"
+                  : ` · ${visibleProbeState.result.ingress_observation.signal.rssi_dbm} dBm RSSI · ${visibleProbeState.result.ingress_observation.signal.snr_db} dB SNR`}
+              </Text>
+              <Text style={styles.probeResultHelp}>
+                Signal is receiver-local at this appliance on the proof&apos;s final return hop. A
+                relay may be the transmitter; this is not the remote receiver&apos;s request RSSI.
+              </Text>
+            </>
+          ) : null}
+          {probeRetainedForResume ? (
+            <Pressable
+              accessibilityHint="Forgets this local probe ID after a device reboot or unrecoverable poll failure"
+              accessibilityLabel="Clear retained path measurement"
+              accessibilityRole="button"
+              onPress={onAbandonRetainedProbe}
+              style={({ pressed }) => [styles.probeResultAction, pressed && styles.buttonPressed]}
+            >
+              <Text style={styles.probeResultActionText}>Clear retained measurement</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      )}
       <ScrollView
-        contentContainerStyle={styles.timeline}
+        contentContainerStyle={[styles.timeline, compact && styles.timelineCompact]}
         keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
         keyboardShouldPersistTaps="handled"
-        nestedScrollEnabled={compact}
+        ref={timelineScroller}
         style={styles.timelineScroller}
       >
         {timeline.map((entry) => (
@@ -1543,21 +2513,79 @@ function Conversation({
               entry.direction === "outbound" ? styles.messageOutbound : styles.messageInbound,
             ]}
           >
-            <Text style={styles.messageTitle}>{bytesText(entry.title) || "Untitled"}</Text>
+            <View style={styles.messageHeading}>
+              <Text numberOfLines={compact ? 2 : undefined} style={styles.messageTitle}>
+                {bytesText(entry.title) || "Untitled"}
+              </Text>
+              <Pressable
+                accessibilityLabel={`Actions for ${bytesText(entry.title) || "untitled message"}`}
+                accessibilityRole="button"
+                hitSlop={8}
+                onPress={() => {
+                  Keyboard.dismiss();
+                  setMessageLocationActionError(null);
+                  setSelectedActionKey(timelineEntryKey(entry));
+                }}
+                style={({ pressed }) => [
+                  styles.messageActionsButton,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.messageActionsButtonText}>•••</Text>
+              </Pressable>
+            </View>
             <Text selectable style={styles.messageContent}>
               {bytesText(entry.content)}
             </Text>
+            {entry.location ? <AttachedMessageLocation location={entry.location} /> : null}
             <Text style={styles.messageFooter}>
               {new Date(entry.timestamp_ms).toLocaleString()}
-              {entry.status === null ? "" : ` · ${entry.status.replaceAll("_", " ")}`}
+              {entry.status === null ? "" : ` · ${timelineStatusLabel(entry)}`}
+              {entry.direction !== "inbound" ||
+              entry.ingress_observation === null ||
+              entry.ingress_observation.signal === null
+                ? ""
+                : ` · RX ${entry.ingress_observation.signal.rssi_dbm} dBm · SNR ${entry.ingress_observation.signal.snr_db} dB`}
+            </Text>
+          </View>
+        ))}
+        {visibleLocalAcceptances.map((acceptance) => (
+          <View
+            key={`local:${acceptance.outboxId}`}
+            style={[styles.message, styles.messageOutbound]}
+          >
+            <View style={styles.messageHeading}>
+              <Text numberOfLines={compact ? 2 : undefined} style={styles.messageTitle}>
+                {acceptance.title || "Untitled"}
+              </Text>
+              <Text style={styles.localAcceptanceBadge}>QUEUED</Text>
+            </View>
+            <Text selectable style={styles.messageContent}>
+              {acceptance.content}
+            </Text>
+            {acceptance.location ? (
+              <AttachedMessageLocation location={acceptance.location} />
+            ) : null}
+            <Text style={styles.messageFooter}>
+              {new Date(acceptance.timestampMs).toLocaleString()} · Queued on appliance
             </Text>
           </View>
         ))}
       </ScrollView>
-      <View style={styles.compose}>
+      <ScrollView
+        contentContainerStyle={[styles.compose, compact && styles.composeCompact]}
+        keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+        showsVerticalScrollIndicator={compact}
+        style={[styles.composeScroller, compact && styles.composeScrollerCompact]}
+      >
         <TextInput
           accessibilityLabel="Message title"
           editable={!busy}
+          inputAccessoryViewID={
+            KEYBOARD_LAYOUT.inputAccessoryEnabled ? MESSAGE_COMPOSER_INPUT_ACCESSORY_ID : undefined
+          }
           onChangeText={(value) => {
             draftVersion.current += 1;
             setTitle(value);
@@ -1571,6 +2599,9 @@ function Conversation({
         <TextInput
           accessibilityLabel="Message"
           editable={!busy}
+          inputAccessoryViewID={
+            KEYBOARD_LAYOUT.inputAccessoryEnabled ? MESSAGE_COMPOSER_INPUT_ACCESSORY_ID : undefined
+          }
           multiline
           onChangeText={(value) => {
             draftVersion.current += 1;
@@ -1579,26 +2610,431 @@ function Conversation({
           }}
           placeholder="Message"
           placeholderTextColor="#748078"
-          style={[styles.input, styles.messageInput]}
+          style={[styles.input, styles.messageInput, compact && styles.messageInputCompact]}
           value={content}
         />
         {validationError === null ? null : (
           <Text style={styles.inlineError}>{validationError}</Text>
         )}
-        <View style={styles.composeFooter}>
-          <Text style={styles.counter}>
-            Title {titleBytes} / {MAX_LXMF_BASIC_TITLE_BYTES} · Message {contentBytes} /{" "}
-            {MAX_LXMF_BASIC_CONTENT_BYTES}
-          </Text>
-          <ActionButton disabled={busy} label="Queue message" onPress={() => void send()} />
+        <View
+          style={[styles.composerLocationToggle, compact && styles.composerLocationToggleCompact]}
+        >
+          <View
+            style={[styles.composerLocationCopy, compact && styles.composerLocationCopyCompact]}
+          >
+            <Text style={styles.composerLocationTitle}>
+              {compact ? "Location" : "Attach phone location"}
+            </Text>
+            <Text numberOfLines={compact ? 1 : undefined} style={styles.composerLocationHelp}>
+              {messageLocationPreferenceLoaded
+                ? attachLocation
+                  ? compact
+                    ? "On · fresh phone fix at send"
+                    : "A fresh high-accuracy fix will be requested when you queue this message. Queueing fails if the fix is unavailable."
+                  : compact
+                    ? "Off"
+                    : "No sender location will be included in this message."
+                : "Loading this phone's saved default…"}
+            </Text>
+            {compact ? null : (
+              <Text style={styles.composerLocationCaveat}>
+                Recipient-visible message metadata · not board or RF position
+              </Text>
+            )}
+          </View>
+          <Switch
+            accessibilityLabel="Attach phone location to this message"
+            disabled={busy || queueing || !messageLocationPreferenceLoaded}
+            onValueChange={(enabled) => {
+              draftVersion.current += 1;
+              setAttachLocation(enabled);
+              setValidationError(null);
+              onDraftChanged();
+            }}
+            trackColor={{ false: colors.line, true: "#496d8f" }}
+            value={attachLocation}
+          />
         </View>
-      </View>
+        <View style={styles.composeFooter}>
+          <View style={styles.composerBudget}>
+            <Text style={[styles.counter, !directPayloadBudget.fits && styles.counterOverLimit]}>
+              {compact
+                ? `T ${titleBytes}/${MAX_LXMF_BASIC_TITLE_BYTES} · M ${contentBytes}/${MAX_LXMF_BASIC_CONTENT_BYTES} · Payload ${directPayloadBudget.payloadBytes}/${directPayloadBudget.maximumPayloadBytes}`
+                : `Title ${titleBytes} / ${MAX_LXMF_BASIC_TITLE_BYTES} · Message ${contentBytes} / ${MAX_LXMF_BASIC_CONTENT_BYTES} · Direct payload ${directPayloadBudget.payloadBytes} / ${directPayloadBudget.maximumPayloadBytes}`}
+            </Text>
+            {compact ? null : (
+              <Text
+                style={[
+                  styles.composerBudgetHelp,
+                  !directPayloadBudget.fits && styles.counterOverLimit,
+                ]}
+              >
+                {attachLocation
+                  ? `Includes a conservative ${directPayloadBudget.fieldsEncodedBytes}-byte location-fields reservation and exact bin8/bin16 title and message headers.`
+                  : `Includes the exact ${directPayloadBudget.fieldsEncodedBytes}-byte empty fields map and bin8/bin16 title and message headers.`}
+              </Text>
+            )}
+          </View>
+          {queueing ? <ActivityIndicator color={colors.green} size="small" /> : null}
+          <ActionButton
+            disabled={busy || queueing || !messageLocationPreferenceLoaded}
+            label={
+              queueing ? (attachLocation ? "Getting location…" : "Queueing…") : "Queue message"
+            }
+            onPress={() => void send()}
+          />
+        </View>
+      </ScrollView>
+      {KEYBOARD_LAYOUT.inputAccessoryEnabled ? (
+        <KeyboardDoneAccessory nativeID={MESSAGE_COMPOSER_INPUT_ACCESSORY_ID} />
+      ) : null}
+      <Modal
+        animationType="fade"
+        onRequestClose={() => setSelectedActionKey(null)}
+        transparent
+        visible={selectedAction !== null}
+      >
+        <View style={styles.messageActionsBackdrop}>
+          <Pressable
+            accessibilityLabel="Close message actions"
+            accessibilityRole="button"
+            onPress={() => setSelectedActionKey(null)}
+            style={styles.messageActionsDismiss}
+          />
+          {selectedAction === null || actionCapabilities === null ? null : (
+            <SafeAreaView style={styles.messageActionsSheet}>
+              <View style={styles.messageActionsHeading}>
+                <View style={styles.messageActionsHeadingCopy}>
+                  <Text style={styles.eyebrow}>MESSAGE</Text>
+                  <Text style={styles.profileManagerTitle}>Details and actions</Text>
+                </View>
+                <ActionButton label="Done" onPress={() => setSelectedActionKey(null)} secondary />
+              </View>
+              <ScrollView
+                contentContainerStyle={styles.messageActionsContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                <MetaRow
+                  label="Direction"
+                  value={selectedAction.direction === "inbound" ? "Received" : "Sent"}
+                />
+                <MetaRow label="Status" value={timelineStatusLabel(selectedAction)} />
+                <MetaRow
+                  label="Time"
+                  value={new Date(selectedAction.timestamp_ms).toLocaleString()}
+                />
+                <MetaRow label="Title" value={bytesText(selectedAction.title) || "Untitled"} />
+                <MetaRow label="Message" value={bytesText(selectedAction.content) || "Empty"} />
+                <MetaRow label="Message ID" value={selectedAction.message_id ?? "Not assigned"} />
+                <MetaRow
+                  label="Outbox ID"
+                  value={
+                    selectedAction.outbox_id === null
+                      ? "Not applicable"
+                      : String(selectedAction.outbox_id)
+                  }
+                />
+                <MetaRow
+                  label="Submission"
+                  value={
+                    selectedAction.submission_id === null
+                      ? "Not assigned"
+                      : String(selectedAction.submission_id)
+                  }
+                />
+                <MetaRow
+                  label="App submission #"
+                  value={
+                    selectedAction.current_attempt_number === null
+                      ? "Not applicable"
+                      : String(selectedAction.current_attempt_number)
+                  }
+                />
+                <MetaRow
+                  label="Legacy app rearms"
+                  value={
+                    selectedAction.automatic_retry_count === null
+                      ? "Not applicable"
+                      : String(selectedAction.automatic_retry_count)
+                  }
+                />
+                <MetaRow label="Sequence" value={String(selectedAction.sequence)} />
+                {selectedAction.packet_evidence === null ? null : (
+                  <>
+                    <MetaRow
+                      label="Packet bytes"
+                      value={String(selectedAction.packet_evidence.encoded_packet_len)}
+                    />
+                    <MetaRow
+                      label="Packet SHA"
+                      value={selectedAction.packet_evidence.encoded_packet_sha256}
+                    />
+                  </>
+                )}
+                {selectedMessageLocation === null ? (
+                  <MetaRow label="Attached location" value="None" />
+                ) : (
+                  <View style={styles.messageAttachedLocationDetails}>
+                    <Text style={styles.applianceDestinationLabel}>ATTACHED MESSAGE LOCATION</Text>
+                    <MetaRow label="Coordinates" value={selectedMessageLocation.coordinates} />
+                    <MetaRow label="Horizontal accuracy" value={selectedMessageLocation.accuracy} />
+                    <MetaRow label="Altitude" value={selectedMessageLocation.altitude} />
+                    <MetaRow label="Speed" value={selectedMessageLocation.speed} />
+                    <MetaRow label="Bearing" value={selectedMessageLocation.bearing} />
+                    <MetaRow label="Location updated" value={selectedMessageLocation.updated} />
+                    <Text style={styles.secondaryText}>
+                      {selectedAction.direction === "outbound"
+                        ? "This app attached a fresh foreground phone fix when the message was queued. "
+                        : "The remote sender supplied this authenticated Sideband location snapshot. "}
+                      It does not prove board position, route position, or the exact location or
+                      time of RF transmission.
+                    </Text>
+                    {messageLocationActionError === null ? null : (
+                      <Text accessibilityLiveRegion="polite" style={styles.inlineError}>
+                        {messageLocationActionError}
+                      </Text>
+                    )}
+                    <ActionButton
+                      label="Open Map"
+                      onPress={() => void openSelectedMessageLocation()}
+                      secondary
+                    />
+                  </View>
+                )}
+                <View style={styles.messageRadioDetails}>
+                  <Text style={styles.applianceDestinationLabel}>RECEIVER-LOCAL FINAL HOP</Text>
+                  {selectedAction.direction === "outbound" ? (
+                    <Text style={styles.secondaryText}>
+                      Receiver-local ingress evidence is not available on this sender. Nearby
+                      announce signal readings are not substituted.
+                    </Text>
+                  ) : selectedAction.ingress_observation === null ? (
+                    <Text style={styles.secondaryText}>
+                      No first-arrival evidence was retained for this received message. Nearby
+                      announce signal readings are not substituted.
+                    </Text>
+                  ) : (
+                    <>
+                      <MetaRow
+                        label="Interface ID at receipt"
+                        value={String(selectedAction.ingress_observation.interface_id)}
+                      />
+                      {selectedAction.ingress_observation.signal === null ? (
+                        <Text style={styles.secondaryText}>
+                          This ingress interface did not report physical signal values.
+                        </Text>
+                      ) : (
+                        <>
+                          <MetaRow
+                            label="RSSI"
+                            value={`${selectedAction.ingress_observation.signal.rssi_dbm} dBm`}
+                          />
+                          <MetaRow
+                            label="SNR"
+                            value={`${selectedAction.ingress_observation.signal.snr_db} dB`}
+                          />
+                        </>
+                      )}
+                      <Text style={styles.secondaryText}>
+                        Recorded by this appliance on first arrival. These values describe only the
+                        final hop into this appliance; the final-hop transmitter may be a relay. The
+                        numeric interface ID is historical and is not reinterpreted using current
+                        interface settings.
+                      </Text>
+                    </>
+                  )}
+                </View>
+                <View style={styles.messageActivityDetails}>
+                  <Text style={styles.applianceDestinationLabel}>ATTEMPT HISTORY</Text>
+                  <Text style={styles.secondaryText}>
+                    Durable app-observed transitions are retained across retries. Intermediate
+                    states may be absent when the appliance advanced between status reads.
+                  </Text>
+                  {messageActivityError === null ? null : (
+                    <Text accessibilityLiveRegion="polite" style={styles.inlineError}>
+                      Could not read message history: {messageActivityError}
+                    </Text>
+                  )}
+                  {messageActivityLoading && messageActivityPage === null ? (
+                    <ActivityIndicator color={colors.green} size="small" />
+                  ) : (
+                    <ActivityEventList
+                      conversationPeers={[peer]}
+                      emptyMessage="No retained activity is available for this message."
+                      events={messageActivityPage?.events ?? []}
+                    />
+                  )}
+                  {messageActivityPage?.history_incomplete ? (
+                    <Text style={styles.secondaryText}>
+                      Earlier activity predates this journal or was removed by bounded retention.
+                    </Text>
+                  ) : null}
+                  {messageActivityPage?.next_before_event_id === null ||
+                  messageActivityPage?.next_before_event_id === undefined ? null : (
+                    <ActionButton
+                      disabled={messageActivityLoading}
+                      label={messageActivityLoading ? "Loading…" : "Load older history"}
+                      onPress={() => void loadOlderMessageActivity()}
+                      secondary
+                    />
+                  )}
+                </View>
+                <View style={styles.messageActivityDetails}>
+                  <Text style={styles.applianceDestinationLabel}>PACKET-CORRELATED RF TRACE</Text>
+                  <Text style={styles.secondaryText}>
+                    Board-local route, TxDone, receive and proof evidence correlated to this message
+                    row. Board times are monotonic; import time and queued phone location are not
+                    exact RF timestamps or positions.
+                  </Text>
+                  {messageRadioTraceError === null ? null : (
+                    <Text accessibilityLiveRegion="polite" style={styles.inlineError}>
+                      Could not read RF trace: {messageRadioTraceError}
+                    </Text>
+                  )}
+                  {messageRadioTraceLoading && messageRadioTracePage === null ? (
+                    <ActivityIndicator color={colors.green} size="small" />
+                  ) : (
+                    <RadioTraceEventList
+                      emptyMessage="No RF evidence is correlated to this message yet."
+                      events={messageRadioTracePage?.events ?? []}
+                    />
+                  )}
+                  {messageRadioTracePage?.history_incomplete ? (
+                    <Text style={styles.secondaryText}>
+                      Earlier observations were overwritten by a board&apos;s bounded trace ring.
+                    </Text>
+                  ) : null}
+                  <Text style={styles.secondaryText}>
+                    Exports can contain precise phone coordinates, peer identities, packet hashes
+                    and radio timing. Message bodies and credentials are excluded.
+                  </Text>
+                  <View style={styles.messageTraceActions}>
+                    {(["json", "csv"] as const).map((format) => (
+                      <ActionButton
+                        disabled={messageRadioTraceExporting !== null}
+                        key={format}
+                        label={
+                          messageRadioTraceExporting === format
+                            ? `Exporting ${format.toUpperCase()}…`
+                            : `Export ${format.toUpperCase()}`
+                        }
+                        onPress={() => void exportMessageRadioTrace(format)}
+                        secondary
+                      />
+                    ))}
+                    {messageRadioTracePage?.next_before_event_id === null ||
+                    messageRadioTracePage?.next_before_event_id === undefined ? null : (
+                      <ActionButton
+                        disabled={messageRadioTraceLoading}
+                        label={messageRadioTraceLoading ? "Loading…" : "Load older RF events"}
+                        onPress={() => void loadOlderMessageRadioTrace()}
+                        secondary
+                      />
+                    )}
+                  </View>
+                </View>
+                <View style={styles.messageActionUtilities}>
+                  {actionCapabilities.canRetry ? (
+                    <View style={styles.messageSendAgainNotice}>
+                      <Text style={styles.secondaryText}>
+                        Current appliances keep accepted LXMF messages pending and retry on the
+                        board without the app. This action is for a legacy or permanently terminal
+                        row: it keeps the outbox row and signed LXMF identity, but creates a
+                        replacement durable device submission with a fresh request key.
+                      </Text>
+                      <ActionButton
+                        disabled={busy}
+                        label="Retry now"
+                        onPress={() => void retryMessage(selectedAction)}
+                      />
+                    </View>
+                  ) : null}
+                  {actionCapabilities.canUseAsDraft ? (
+                    <ActionButton
+                      disabled={busy}
+                      label="Use as draft"
+                      onPress={() => populateDraft(selectedAction)}
+                      secondary
+                    />
+                  ) : (
+                    <Text style={styles.secondaryText}>
+                      Binary message fields cannot be copied into the UTF-8 composer.
+                    </Text>
+                  )}
+                </View>
+              </ScrollView>
+            </SafeAreaView>
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }
 
 export default function ApplianceScreen() {
   const api = useMemo(() => new ApplianceApi(), []);
+  const manualServiceAnnounce = useMemo(() => {
+    const announce = api.manualServiceAnnounce;
+    return announce === undefined ? undefined : () => announce.call(api);
+  }, [api]);
+  const networkClient = useMemo<NetworkConfigurationClient | null>(() => {
+    const mutateNetworkConfig = api.mutateNetworkConfig;
+    const networkConfig = api.networkConfig;
+    const networkStatus = api.networkStatus;
+    if (
+      mutateNetworkConfig === undefined ||
+      networkConfig === undefined ||
+      networkStatus === undefined
+    ) {
+      return null;
+    }
+    return {
+      mutateNetworkConfig: (request) => mutateNetworkConfig.call(api, request),
+      networkConfig: () => networkConfig.call(api),
+      networkStatus: () => networkStatus.call(api),
+    };
+  }, [api]);
+  const networkController = useMemo(
+    () =>
+      networkClient === null
+        ? null
+        : new NetworkConfigController(networkClient, {
+            createIdempotencyKey: () => randomHex(16),
+          }),
+    [networkClient],
+  );
+  const radioRoutesClient = useMemo<RadioRoutesClient | null>(() => {
+    const radioRoutesStatus = api.radioRoutesStatus;
+    return radioRoutesStatus === undefined
+      ? null
+      : { radioRoutesStatus: () => radioRoutesStatus.call(api) };
+  }, [api]);
+  const radioRoutesController = useMemo(
+    () => (radioRoutesClient === null ? null : new RadioRoutesController(radioRoutesClient)),
+    [radioRoutesClient],
+  );
+  const fieldTelemetryClient = useMemo<FieldTelemetryClient | null>(() => {
+    const observation = api.phoneLocationObservation;
+    const update = api.updatePhoneLocationObservation;
+    if (observation === undefined || update === undefined) return null;
+    return {
+      phoneLocationObservation: () => observation.call(api),
+      updatePhoneLocationObservation: (next) => update.call(api, next),
+    };
+  }, [api]);
+  const fieldTelemetryPreferenceStore = useMemo(() => createFieldTelemetryPreferenceStore(), []);
+  const messageLocationPreferenceStore = useMemo(() => createMessageLocationPreferenceStore(), []);
+  const fieldTelemetryController = useMemo(
+    () =>
+      fieldTelemetryClient === null
+        ? null
+        : new FieldTelemetryController(
+            fieldTelemetryClient,
+            undefined,
+            fieldTelemetryPreferenceStore,
+          ),
+    [fieldTelemetryClient, fieldTelemetryPreferenceStore],
+  );
   const nomadBrowser = useMemo(
     () =>
       new NomadBrowserController(api, {
@@ -1606,8 +3042,15 @@ export default function ApplianceScreen() {
       }),
     [api],
   );
-  const { width } = useWindowDimensions();
-  const compact = width < 760;
+  const reticulumProbe = useMemo(
+    () =>
+      new ReticulumProbeController(api, {
+        createIdempotencyKey: () => randomHex(16),
+      }),
+    [api],
+  );
+  const { height, width } = useWindowDimensions();
+  const compact = width < 760 || height < 640;
   const [bootstrapped, setBootstrapped] = useState(false);
   const [nativeCore, setNativeCore] = useState<NativeCoreStatus | null>(null);
   const [snapshot, setSnapshot] = useState<ApplianceSnapshot | null>(null);
@@ -1615,9 +3058,24 @@ export default function ApplianceScreen() {
   const [profiles, setProfiles] = useState<NativeProfileStoreSnapshot | null>(null);
   const [addingAppliance, setAddingAppliance] = useState(false);
   const [contacts, setContacts] = useState<ContactView[]>([]);
+  const [conversations, setConversations] = useState<ConversationPeerView[]>([]);
+  const [activityPage, setActivityPage] = useState<MessageActivityPageView | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [radioTracePage, setRadioTracePage] = useState<RadioTracePageView | null>(null);
+  const [radioTraceLoading, setRadioTraceLoading] = useState(false);
+  const [radioTraceError, setRadioTraceError] = useState<string | null>(null);
+  const [radioTraceExportError, setRadioTraceExportError] = useState<string | null>(null);
+  const [radioTraceExporting, setRadioTraceExporting] = useState<RadioTraceExportFormat | null>(
+    null,
+  );
+  const [mapFeatureEvidence, setMapFeatureEvidence] = useState<MapFeatureEvidence | null>(null);
+  const [mapFeatureEvidenceLoading, setMapFeatureEvidenceLoading] = useState(false);
+  const [mapFeatureEvidenceError, setMapFeatureEvidenceError] = useState<string | null>(null);
   const [foreground, setForeground] = useState(
     AppState.currentState === null || AppState.currentState === "active",
   );
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [reconnectRetry, setReconnectRetry] = useState(0);
   const [reconnectProgress, setReconnectProgress] = useState<ForegroundReconnectProgress | null>(
     null,
@@ -1625,17 +3083,69 @@ export default function ApplianceScreen() {
   const [selected, setSelected] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineView[]>([]);
   const [workspace, setWorkspace] = useState<Workspace>("lxmf");
+  const [mobileSidebarVisible, setMobileSidebarVisible] = useState(false);
   const [nomadDestinationHint, setNomadDestinationHint] = useState<string | null>(null);
   const [nomadState, setNomadState] = useState<NomadBrowserState>(nomadBrowser.state);
+  const [reticulumProbeState, setReticulumProbeState] = useState<ReticulumProbeState>(
+    reticulumProbe.state,
+  );
+  const [networkState, setNetworkState] = useState<NetworkConfigControllerState | null>(
+    networkController?.state ?? null,
+  );
+  const [radioRoutesState, setRadioRoutesState] = useState<RadioRoutesControllerState | null>(
+    radioRoutesController?.state ?? null,
+  );
+  const [fieldTelemetryState, setFieldTelemetryState] =
+    useState<FieldTelemetryControllerState | null>(fieldTelemetryController?.state ?? null);
+  const [messageLocationPreference, setMessageLocationPreference] =
+    useState<MessageLocationPreferenceState>({
+      attachByDefault: false,
+      error: null,
+      loading: true,
+      saving: false,
+    });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [profileOperation, setProfileOperation] = useState<ProfileOperation>({ state: "idle" });
+  const [messageNotificationPermission, setMessageNotificationPermission] =
+    useState<MessageNotificationPermission>({ state: "checking" });
+  const [messageNotificationPermissionCheckedEpoch, setMessageNotificationPermissionCheckedEpoch] =
+    useState<number | null>(null);
+  const [messageNotificationError, setMessageNotificationError] = useState<string | null>(null);
+  const [messageNotificationTargets, setMessageNotificationTargets] = useState<
+    readonly MessageNotificationTarget[]
+  >([]);
   const addingApplianceRef = useRef(false);
-  const draft = useRef<DraftIdentity | null>(null);
+  const draft = useRef<DraftSubmission | null>(null);
+  const retryMessageRequests = useRef(new Map<string, RetrySendRequest>());
+  const activityPageRef = useRef<MessageActivityPageView | null>(null);
+  const activityRequests = useRef(new LatestRequest());
+  const activityReadInFlight = useRef<number | null>(null);
+  const radioTracePageRef = useRef<RadioTracePageView | null>(null);
+  const radioTraceRequests = useRef(new LatestRequest());
+  const radioTraceReadInFlight = useRef<number | null>(null);
+  const mapFeatureEvidenceRequests = useRef(new LatestRequest());
+  const mapProfileKeyRef = useRef<string | null>(null);
   const mutationInFlight = useRef(false);
+  const sendTimelineRefreshesInFlight = useRef(0);
   const refreshRequests = useRef(new LatestRequest());
   const selectedRef = useRef<string | null>(null);
   const timelineRequests = useRef(new LatestRequest());
+  const notificationNavigationInFlight = useRef(false);
+  const messageNotificationProfileEpoch = useRef(0);
+  const messageNotificationPermissionEpoch = useRef(0);
+  const messageNotificationProfileKeyRef = useRef<string | null>(null);
+  const notificationActivateProfile = useRef<(profileKey: string) => Promise<boolean>>(
+    async () => false,
+  );
+  const notificationChooseContact = useRef<(destination: string) => void>(() => undefined);
+  const foregroundRef = useRef(foreground);
+  const mobileSidebarVisibleRef = useRef(mobileSidebarVisible);
+  const workspaceRef = useRef(workspace);
+  const messageNotificationReconciler = useMemo(
+    () => new MessageNotificationReconciler(createMessageNotificationLedgerStore()),
+    [],
+  );
   const automaticReconnect = useMemo(
     () =>
       new ForegroundReconnect(
@@ -1644,6 +3154,9 @@ export default function ApplianceScreen() {
       ),
     [],
   );
+  foregroundRef.current = foreground;
+  mobileSidebarVisibleRef.current = mobileSidebarVisible;
+  workspaceRef.current = workspace;
 
   const ready = onboardingPresentation(onboarding).ready;
   // Missing credentials can make the dormant connector report an expected
@@ -1653,8 +3166,72 @@ export default function ApplianceScreen() {
     (ready && (reconnectProgress === null || snapshot?.connection.state === "faulted")
       ? snapshot?.last_error
       : null);
-  const selectedContact = contacts.find((contact) => contact.destination === selected);
+  const selectedConversation = conversations.find((peer) => peer.destination === selected);
+  const networkDeviceKey = profiles?.activeProfileKey ?? snapshot?.device?.device_id ?? null;
+  mapProfileKeyRef.current = networkDeviceKey;
+  const mapLocatedTimelines = useMemo<LocatedTimeline[]>(() => {
+    const located: LocatedTimeline[] = [];
+    for (const conversation of conversations) {
+      if (conversation.last_message !== null) {
+        located.push({
+          peer: conversation.destination,
+          peerName: conversation.name,
+          timeline: conversation.last_message,
+        });
+      }
+    }
+    return located;
+  }, [conversations]);
+  const scopedMapFeatureEvidence =
+    mapFeatureEvidence?.profileKey === networkDeviceKey ? mapFeatureEvidence : null;
+  const mapRadioTraceEvents = useMemo(
+    () => [
+      ...new Map(
+        [...(radioTracePage?.events ?? []), ...(scopedMapFeatureEvidence?.events ?? [])].map(
+          (event) => [event.event_id, event] as const,
+        ),
+      ).values(),
+    ],
+    [radioTracePage, scopedMapFeatureEvidence],
+  );
+  const transmissionMapScene = useMemo(
+    () =>
+      buildTransmissionMapScene({
+        activityHistoryIncomplete: activityPage?.history_incomplete ?? false,
+        contacts,
+        conversationPeers: conversations,
+        locatedTimelines: mapLocatedTimelines,
+        messageActivityEvents: activityPage?.events ?? [],
+        profileKey: networkDeviceKey,
+        radioTraceEvents: mapRadioTraceEvents,
+        radioTraceHistoryIncomplete:
+          (radioTracePage?.history_incomplete ?? false) ||
+          (scopedMapFeatureEvidence?.historyIncomplete ?? false),
+      }),
+    [
+      activityPage,
+      contacts,
+      conversations,
+      mapLocatedTimelines,
+      mapRadioTraceEvents,
+      networkDeviceKey,
+      radioTracePage?.history_incomplete,
+      scopedMapFeatureEvidence?.historyIncomplete,
+    ],
+  );
+  const messageNotificationProfileKey = networkDeviceKey;
+  messageNotificationProfileKeyRef.current = messageNotificationProfileKey;
+  const messageNotificationBoardLabel =
+    (profiles === null
+      ? null
+      : applianceProfilesPresentation(profiles).activeProfile?.boardLabel) ??
+    applianceStatusPresentation(snapshot).boardLabel;
+  const connectivityAvailable =
+    networkController !== null &&
+    networkDeviceKey !== null &&
+    snapshot?.connection.state === "ready";
   const canManageProfiles = api.profiles !== undefined && api.activateProfile !== undefined;
+  const hasSavedProfiles = (profiles?.profiles.length ?? 0) > 0;
   const canAddAppliance =
     api.beginAddAppliance !== undefined && (api.supportsAdditionalBleOnboarding?.() ?? true);
   const exactBleTargetRequired = api.supportsBleCandidateDiscovery?.() ?? false;
@@ -1662,6 +3239,216 @@ export default function ApplianceScreen() {
     const read = api.nearbyPeers;
     return read === undefined ? null : () => read.call(api);
   }, [api]);
+  const resetActivity = useCallback(() => {
+    activityRequests.current.invalidate();
+    activityReadInFlight.current = null;
+    activityPageRef.current = null;
+    setActivityPage(null);
+    setActivityError(null);
+    setActivityLoading(false);
+  }, []);
+  const loadActivity = useCallback(
+    async (older = false) => {
+      if (activityReadInFlight.current !== null) return;
+      const retained = activityPageRef.current;
+      const beforeEventId = older ? retained?.next_before_event_id : null;
+      if (older && (beforeEventId === null || beforeEventId === undefined)) return;
+
+      const request = activityRequests.current.begin();
+      activityReadInFlight.current = request;
+      setActivityLoading(true);
+      setActivityError(null);
+      try {
+        const next = await api.messageActivity({
+          before_event_id: beforeEventId ?? null,
+          limit: MESSAGE_ACTIVITY_PAGE_SIZE,
+          timeline_sequence: null,
+        });
+        if (!activityRequests.current.accepts(request)) return;
+        const merged =
+          older && retained !== null
+            ? {
+                events: [...retained.events, ...next.events],
+                next_before_event_id: next.next_before_event_id,
+                history_incomplete: retained.history_incomplete || next.history_incomplete,
+              }
+            : next;
+        activityPageRef.current = merged;
+        setActivityPage(merged);
+      } catch (nextError) {
+        if (activityRequests.current.accepts(request)) setActivityError(errorText(nextError));
+      } finally {
+        if (activityReadInFlight.current === request) activityReadInFlight.current = null;
+        if (activityRequests.current.accepts(request)) setActivityLoading(false);
+      }
+    },
+    [api],
+  );
+  const loadMessageActivity = useCallback(
+    (timelineSequence: number, beforeEventId: number | null) =>
+      api.messageActivity({
+        before_event_id: beforeEventId,
+        limit: MESSAGE_ACTIVITY_PAGE_SIZE,
+        timeline_sequence: timelineSequence,
+      }),
+    [api],
+  );
+  const resetRadioTrace = useCallback(() => {
+    radioTraceRequests.current.invalidate();
+    radioTraceReadInFlight.current = null;
+    radioTracePageRef.current = null;
+    setRadioTracePage(null);
+    setRadioTraceError(null);
+    setRadioTraceLoading(false);
+    setRadioTraceExportError(null);
+    setRadioTraceExporting(null);
+  }, []);
+  const loadRadioTrace = useCallback(
+    async (older = false) => {
+      const read = api.radioTrace;
+      if (read === undefined || radioTraceReadInFlight.current !== null) return;
+      const retained = radioTracePageRef.current;
+      const beforeEventId = older ? retained?.next_before_event_id : null;
+      if (older && (beforeEventId === null || beforeEventId === undefined)) return;
+
+      const request = radioTraceRequests.current.begin();
+      radioTraceReadInFlight.current = request;
+      setRadioTraceLoading(true);
+      setRadioTraceError(null);
+      try {
+        const next = await read.call(api, {
+          before_event_id: beforeEventId ?? null,
+          limit: RADIO_TRACE_PAGE_SIZE,
+          timeline_sequence: null,
+        });
+        if (!radioTraceRequests.current.accepts(request)) return;
+        const merged =
+          older && retained !== null
+            ? {
+                events: [...retained.events, ...next.events],
+                next_before_event_id: next.next_before_event_id,
+                history_incomplete: retained.history_incomplete || next.history_incomplete,
+              }
+            : next;
+        radioTracePageRef.current = merged;
+        setRadioTracePage(merged);
+      } catch (nextError) {
+        if (radioTraceRequests.current.accepts(request)) {
+          setRadioTraceError(errorText(nextError));
+        }
+      } finally {
+        if (radioTraceReadInFlight.current === request) radioTraceReadInFlight.current = null;
+        if (radioTraceRequests.current.accepts(request)) setRadioTraceLoading(false);
+      }
+    },
+    [api],
+  );
+  const loadMessageRadioTrace = useCallback(
+    (timelineSequence: number, beforeEventId: number | null) => {
+      const read = api.radioTrace;
+      if (read === undefined) throw new Error("Durable RF trace is unavailable in this client");
+      return read.call(api, {
+        before_event_id: beforeEventId,
+        limit: RADIO_TRACE_PAGE_SIZE,
+        timeline_sequence: timelineSequence,
+      });
+    },
+    [api],
+  );
+  const selectMapFeature = useCallback(
+    (details: TransmissionMapFeatureDetails | null) => {
+      const request = mapFeatureEvidenceRequests.current.begin();
+      setMapFeatureEvidence(null);
+      setMapFeatureEvidenceError(null);
+      if (
+        details?.kind !== "attempt" ||
+        details.timelineSequence === null ||
+        api.radioTrace === undefined ||
+        networkDeviceKey === null
+      ) {
+        setMapFeatureEvidenceLoading(false);
+        return;
+      }
+
+      const profileKey = networkDeviceKey;
+      const timelineSequence = details.timelineSequence;
+      const read = api.radioTrace;
+      setMapFeatureEvidenceLoading(true);
+      void collectCompleteRadioTrace((pageRequest) => read.call(api, pageRequest), timelineSequence)
+        .then((collection) => {
+          if (
+            !mapFeatureEvidenceRequests.current.accepts(request) ||
+            mapProfileKeyRef.current !== profileKey
+          ) {
+            return;
+          }
+          setMapFeatureEvidence({
+            events: collection.events,
+            historyIncomplete: collection.historyIncomplete,
+            profileKey,
+            timelineSequence,
+          });
+        })
+        .catch((nextError) => {
+          if (
+            mapFeatureEvidenceRequests.current.accepts(request) &&
+            mapProfileKeyRef.current === profileKey
+          ) {
+            setMapFeatureEvidenceError(errorText(nextError));
+          }
+        })
+        .finally(() => {
+          if (
+            mapFeatureEvidenceRequests.current.accepts(request) &&
+            mapProfileKeyRef.current === profileKey
+          ) {
+            setMapFeatureEvidenceLoading(false);
+          }
+        });
+    },
+    [api, networkDeviceKey],
+  );
+  const exportRadioTrace = useCallback(
+    async (timelineSequence: number | null, format: RadioTraceExportFormat) => {
+      const read = api.radioTrace;
+      if (read === undefined) throw new Error("Durable RF trace is unavailable in this client");
+      const collection = await collectCompleteRadioTrace(
+        (request) => read.call(api, request),
+        timelineSequence,
+      );
+      const document = createRadioTraceExportDocument({
+        collection,
+        exportedAtUnixMs: Date.now(),
+        source: {
+          board_label: messageNotificationBoardLabel,
+          device_id: snapshot?.device?.device_id ?? null,
+          lxmf_delivery_destination: snapshot?.device?.lxmf_delivery_destination ?? null,
+          primary_destination: snapshot?.device?.primary_destination ?? null,
+          profile_key: profiles?.activeProfileKey ?? null,
+        },
+        timelineSequence,
+      });
+      await deliverExportArtifact(
+        format === "json" ? radioTraceJsonArtifact(document) : radioTraceCsvArtifact(document),
+      );
+    },
+    [api, messageNotificationBoardLabel, profiles?.activeProfileKey, snapshot?.device],
+  );
+  const exportCompleteRadioTrace = useCallback(
+    async (format: RadioTraceExportFormat) => {
+      if (radioTraceExporting !== null) return;
+      setRadioTraceExporting(format);
+      setRadioTraceExportError(null);
+      try {
+        await exportRadioTrace(null, format);
+      } catch (nextError) {
+        setRadioTraceExportError(errorText(nextError));
+      } finally {
+        setRadioTraceExporting(null);
+      }
+    },
+    [exportRadioTrace, radioTraceExporting],
+  );
   const bleCandidateScanner = useMemo(() => {
     if (!bootstrapped) return null;
     const scan = api.scanBleCandidates;
@@ -1681,6 +3468,43 @@ export default function ApplianceScreen() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = subscribeMessageNotificationTargets((target) => {
+      if (active) {
+        setMessageNotificationTargets((queue) => enqueueMessageNotificationTarget(queue, target));
+      }
+    });
+    const initialTarget = consumeInitialMessageNotificationTarget();
+    if (initialTarget !== null) {
+      setMessageNotificationTargets((queue) =>
+        enqueueMessageNotificationTarget(queue, initialTarget),
+      );
+    }
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!foreground) return;
+    const permissionEpoch = messageNotificationPermissionEpoch.current + 1;
+    messageNotificationPermissionEpoch.current = permissionEpoch;
+    setMessageNotificationPermission({ state: "checking" });
+    setMessageNotificationPermissionCheckedEpoch(null);
+    let active = true;
+    void initializeMessageNotifications().then((permission) => {
+      if (active && messageNotificationPermissionEpoch.current === permissionEpoch) {
+        setMessageNotificationPermission(permission);
+        setMessageNotificationPermissionCheckedEpoch(permissionEpoch);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [foreground]);
+
   useEffect(() => () => api.dispose(), [api]);
 
   useEffect(() => {
@@ -1692,10 +3516,192 @@ export default function ApplianceScreen() {
   }, [nomadBrowser]);
 
   useEffect(() => {
+    const unsubscribe = reticulumProbe.subscribe(setReticulumProbeState);
+    return () => {
+      unsubscribe();
+      reticulumProbe.dispose();
+    };
+  }, [reticulumProbe]);
+
+  useEffect(() => {
+    if (networkController === null) {
+      setNetworkState(null);
+      return;
+    }
+    const unsubscribe = networkController.subscribe(setNetworkState);
+    return () => {
+      unsubscribe();
+      networkController.dispose();
+    };
+  }, [networkController]);
+
+  useEffect(() => {
+    if (radioRoutesController === null) {
+      setRadioRoutesState(null);
+      return;
+    }
+    const unsubscribe = radioRoutesController.subscribe(setRadioRoutesState);
+    return () => {
+      unsubscribe();
+      radioRoutesController.dispose();
+    };
+  }, [radioRoutesController]);
+
+  useEffect(() => {
+    if (fieldTelemetryController === null) {
+      setFieldTelemetryState(null);
+      return;
+    }
+    const unsubscribe = fieldTelemetryController.subscribe(setFieldTelemetryState);
+    return () => {
+      unsubscribe();
+      fieldTelemetryController.dispose();
+    };
+  }, [fieldTelemetryController]);
+
+  useEffect(() => {
+    let active = true;
+    void messageLocationPreferenceStore
+      .load()
+      .then((attachByDefault) => {
+        if (!active) return;
+        setMessageLocationPreference({
+          attachByDefault,
+          error: null,
+          loading: false,
+          saving: false,
+        });
+      })
+      .catch((nextError) => {
+        if (!active) return;
+        setMessageLocationPreference({
+          attachByDefault: false,
+          error: `Saved default could not be loaded: ${errorText(nextError)}`,
+          loading: false,
+          saving: false,
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [messageLocationPreferenceStore]);
+
+  const setMessageLocationDefault = useCallback(
+    async (attachByDefault: boolean) => {
+      setMessageLocationPreference((current) => ({
+        ...current,
+        error: null,
+        saving: true,
+      }));
+      try {
+        await messageLocationPreferenceStore.save(attachByDefault);
+        setMessageLocationPreference({
+          attachByDefault,
+          error: null,
+          loading: false,
+          saving: false,
+        });
+      } catch (nextError) {
+        setMessageLocationPreference((current) => ({
+          ...current,
+          error: `Default was not saved: ${errorText(nextError)}`,
+          loading: false,
+          saving: false,
+        }));
+      }
+    },
+    [messageLocationPreferenceStore],
+  );
+
+  useEffect(() => {
+    if (
+      networkController !== null &&
+      workspace === "connectivity" &&
+      connectivityAvailable &&
+      foreground &&
+      networkDeviceKey !== null
+    ) {
+      void networkController.activate(networkDeviceKey);
+      return;
+    }
+    networkController?.suspend();
+  }, [connectivityAvailable, foreground, networkController, networkDeviceKey, workspace]);
+
+  useEffect(() => {
+    if (
+      radioRoutesController !== null &&
+      workspace === "connectivity" &&
+      connectivityAvailable &&
+      foreground &&
+      networkDeviceKey !== null
+    ) {
+      void radioRoutesController.activate(networkDeviceKey);
+      return;
+    }
+    radioRoutesController?.suspend();
+  }, [connectivityAvailable, foreground, networkDeviceKey, radioRoutesController, workspace]);
+
+  useEffect(() => {
+    if (
+      fieldTelemetryController !== null &&
+      bootstrapped &&
+      foreground &&
+      networkDeviceKey !== null
+    ) {
+      void fieldTelemetryController.activate(networkDeviceKey);
+      return;
+    }
+    fieldTelemetryController?.suspend();
+  }, [bootstrapped, fieldTelemetryController, foreground, networkDeviceKey]);
+
+  useEffect(() => {
+    if (workspace === "connectivity" && !connectivityAvailable) setWorkspace("lxmf");
+  }, [connectivityAvailable, workspace]);
+
+  useEffect(() => {
+    // A boot-scoped probe identifier must never survive an appliance switch.
+    void networkDeviceKey;
+    reticulumProbe.reset();
+  }, [networkDeviceKey, reticulumProbe]);
+
+  useEffect(() => {
+    // Selection evidence is profile-local and must not survive an appliance switch.
+    void networkDeviceKey;
+    mapFeatureEvidenceRequests.current.invalidate();
+    setMapFeatureEvidence(null);
+    setMapFeatureEvidenceError(null);
+    setMapFeatureEvidenceLoading(false);
+  }, [networkDeviceKey]);
+
+  useEffect(() => {
+    if (
+      bootstrapped &&
+      ready &&
+      networkDeviceKey !== null &&
+      (workspace === "activity" || workspace === "map")
+    ) {
+      void loadActivity(false);
+      void loadRadioTrace(false);
+    }
+  }, [bootstrapped, loadActivity, loadRadioTrace, networkDeviceKey, ready, workspace]);
+
+  useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      setForeground(state === "active");
+      const active = state === "active";
+      foregroundRef.current = active;
+      setForeground(active);
     });
     return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!KEYBOARD_LAYOUT.avoidingEnabled) return;
+    const show = Keyboard.addListener("keyboardDidShow", () => setKeyboardVisible(true));
+    const hide = Keyboard.addListener("keyboardDidHide", () => setKeyboardVisible(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
   }, []);
 
   useEffect(() => () => automaticReconnect.suspend(), [automaticReconnect]);
@@ -1722,59 +3728,75 @@ export default function ApplianceScreen() {
         timelineRequests.current.invalidate();
         selectedRef.current = null;
         draft.current = null;
+        retryMessageRequests.current.clear();
         setSelected(null);
         setTimeline([]);
         setContacts([]);
+        setConversations([]);
+        resetActivity();
+        resetRadioTrace();
         nomadBrowser.reset();
       }
 
-      const nextSnapshot = await api.snapshot();
-      if (!refreshRequests.current.accepts(refreshRequest)) return;
-      setSnapshot(nextSnapshot);
       if (!nextReady) {
+        const nextSnapshot = await api.snapshot();
+        if (!refreshRequests.current.accepts(refreshRequest)) return;
+        setSnapshot(nextSnapshot);
         timelineRequests.current.invalidate();
         return;
       }
-      const nextContacts = await api.contacts();
-      if (!refreshRequests.current.accepts(refreshRequest)) return;
-      setContacts(nextContacts);
+
+      // Queue all ready-state local reads in one foreground burst. The native
+      // actor drains already-queued commands before beginning another blocking
+      // BLE exchange; staging timeline as a later wave could add a complete
+      // device-request timeout to an otherwise local UI refresh.
       const selectedDestination = selectedRef.current;
+      const timelineRequest =
+        selectedDestination === null ? null : timelineRequests.current.begin();
+      type TimelineRead =
+        | { readonly ok: true; readonly value: TimelineView[] }
+        | { readonly error: unknown; readonly ok: false };
+      const timelineRead: Promise<TimelineRead | null> =
+        selectedDestination === null
+          ? Promise.resolve(null)
+          : api.timeline(selectedDestination).then(
+              (value) => ({ ok: true, value }),
+              (nextError: unknown) => ({ error: nextError, ok: false }),
+            );
+      const [nextSnapshot, nextContacts, nextConversations, nextTimelineRead] = await Promise.all([
+        api.snapshot(),
+        api.contacts(),
+        api.conversationPeers(),
+        timelineRead,
+      ]);
+      if (!refreshRequests.current.accepts(refreshRequest)) return;
+      setSnapshot(nextSnapshot);
+      setContacts(nextContacts);
+      setConversations(nextConversations);
+
       if (selectedDestination !== null) {
-        if (nextContacts.some((contact) => contact.destination === selectedDestination)) {
-          const timelineRequest = timelineRequests.current.begin();
-          let nextTimeline: TimelineView[];
-          try {
-            nextTimeline = await api.timeline(selectedDestination);
-          } catch (nextError) {
-            if (
-              refreshRequests.current.accepts(refreshRequest) &&
-              timelineRequests.current.accepts(timelineRequest) &&
-              selectedRef.current === selectedDestination
-            ) {
-              throw nextError;
-            }
-            return;
+        const timelineStillCurrent =
+          timelineRequest !== null &&
+          timelineRequests.current.accepts(timelineRequest) &&
+          selectedRef.current === selectedDestination;
+        if (!nextConversations.some((peer) => peer.destination === selectedDestination)) {
+          if (timelineStillCurrent) {
+            timelineRequests.current.invalidate();
+            selectedRef.current = null;
+            setSelected(null);
+            setTimeline([]);
           }
-          if (
-            !refreshRequests.current.accepts(refreshRequest) ||
-            !timelineRequests.current.accepts(timelineRequest) ||
-            selectedRef.current !== selectedDestination
-          ) {
-            return;
-          }
-          setTimeline(nextTimeline);
-        } else {
-          timelineRequests.current.invalidate();
-          selectedRef.current = null;
-          setSelected(null);
-          setTimeline([]);
+        } else if (timelineStillCurrent && nextTimelineRead?.ok) {
+          setTimeline(nextTimelineRead.value);
+        } else if (timelineStillCurrent && nextTimelineRead !== null && !nextTimelineRead.ok) {
+          throw nextTimelineRead.error;
         }
       }
       setError(null);
     } catch (nextError) {
       if (refreshRequests.current.accepts(refreshRequest)) throw nextError;
     }
-  }, [api, nomadBrowser]);
+  }, [api, nomadBrowser, resetActivity, resetRadioTrace]);
 
   useEffect(() => {
     let active = true;
@@ -1799,18 +3821,95 @@ export default function ApplianceScreen() {
       () => void refresh().catch((nextError) => setError(errorText(nextError))),
       () => setError("Event stream reconnecting"),
     );
-    const interval =
+    const poll =
       !ready || unsubscribe === null
-        ? setInterval(
-            () => void refresh().catch((nextError) => setError(errorText(nextError))),
+        ? new SettledPoll(
+            () => refresh().catch((nextError) => setError(errorText(nextError))),
             ready ? 2_000 : 500,
+            () => mutationInFlight.current || sendTimelineRefreshesInFlight.current > 0,
           )
         : null;
+    poll?.start();
     return () => {
       unsubscribe?.();
-      if (interval !== null) clearInterval(interval);
+      poll?.stop();
     };
   }, [api, bootstrapped, profileOperation.state, ready, refresh]);
+
+  useEffect(() => {
+    if (
+      addingAppliance ||
+      !bootstrapped ||
+      !foreground ||
+      !ready ||
+      profileOperation.state === "switching" ||
+      messageNotificationPermission.state !== "enabled" ||
+      messageNotificationPermissionCheckedEpoch !== messageNotificationPermissionEpoch.current ||
+      messageNotificationProfileKey === null
+    ) {
+      return;
+    }
+    const profileEpoch = messageNotificationProfileEpoch.current;
+    const permissionEpoch = messageNotificationPermissionEpoch.current;
+    const profileKey = messageNotificationProfileKey.trim().toLowerCase();
+    const profileIsCurrent = () =>
+      messageNotificationProfileEpoch.current === profileEpoch &&
+      messageNotificationPermissionEpoch.current === permissionEpoch &&
+      foregroundRef.current &&
+      messageNotificationProfileKeyRef.current?.trim().toLowerCase() === profileKey;
+    const aliases = buildMessageActivityAliases(contacts, conversations);
+    void messageNotificationReconciler
+      .reconcile({
+        isCurrent: profileIsCurrent,
+        loadPage: (beforeEventId) =>
+          api.messageActivity({
+            before_event_id: beforeEventId,
+            limit: MESSAGE_NOTIFICATION_PAGE_SIZE,
+            timeline_sequence: null,
+          }),
+        notify: async (notification) => {
+          if (
+            !shouldPresentInboundMessageNotification(notification.peer, {
+              foreground: foregroundRef.current,
+              navigationOverlayVisible: mobileSidebarVisibleRef.current,
+              selectedDestination: selectedRef.current,
+              workspace: workspaceRef.current,
+            })
+          ) {
+            return;
+          }
+          await presentInboundMessageNotification({
+            boardLabel: messageNotificationBoardLabel,
+            notification,
+            peerLabel: messageActivityPeerLabel(
+              { direction: "inbound", peer: notification.peer },
+              aliases,
+            ),
+            profileKey,
+          });
+        },
+        profileKey,
+      })
+      .then(() => setMessageNotificationError(null))
+      .catch((nextError) => {
+        if (nextError instanceof SupersededMessageNotificationReconciliation) return;
+        setMessageNotificationError(`Message notification failed: ${errorText(nextError)}`);
+      });
+  }, [
+    addingAppliance,
+    api,
+    bootstrapped,
+    contacts,
+    conversations,
+    foreground,
+    messageNotificationBoardLabel,
+    messageNotificationPermissionCheckedEpoch,
+    messageNotificationPermission.state,
+    messageNotificationProfileKey,
+    messageNotificationReconciler,
+    profileOperation.state,
+    ready,
+  ]);
 
   useEffect(() => {
     if (
@@ -1829,8 +3928,7 @@ export default function ApplianceScreen() {
 
     let active = true;
     setReconnectProgress({ state: "attempting" });
-    void api
-      .reconnect()
+    void ensureForegroundConnection(api)
       .then(refresh)
       .then(() => {
         if (active) setReconnectProgress(null);
@@ -1884,9 +3982,196 @@ export default function ApplianceScreen() {
     }
   };
 
+  const profileLabel = (profileKey: string | undefined): string => {
+    if (profileKey === undefined || profiles === null) return "active appliance";
+    const normalizedProfileKey = profileKey.trim().toLowerCase();
+    return (
+      applianceProfilesPresentation(profiles).profiles.find(
+        (profile) => profile.profileKey.toLowerCase() === normalizedProfileKey,
+      )?.boardLabel ?? "active appliance"
+    );
+  };
+
+  const runActiveProfileOperation = async (
+    startedMessage: string,
+    successMessage: string,
+    operation: () => Promise<unknown>,
+  ): Promise<boolean> => {
+    if (mutationInFlight.current) return false;
+    mutationInFlight.current = true;
+    automaticReconnect.suspend();
+    setReconnectProgress(null);
+    setBusy(true);
+    setError(null);
+    setProfileOperation({ message: startedMessage, state: "switching" });
+
+    let operationFailure: unknown;
+    try {
+      await operation();
+    } catch (nextError) {
+      operationFailure = nextError;
+    }
+
+    let authorityFailure: unknown;
+    try {
+      const authoritativeProfiles = await api.profiles?.();
+      if (authoritativeProfiles !== undefined) setProfiles(authoritativeProfiles);
+    } catch (nextError) {
+      authorityFailure = nextError;
+    }
+
+    let refreshFailure: unknown;
+    try {
+      await refresh();
+    } catch (nextError) {
+      refreshFailure = nextError;
+    }
+
+    const failure = operationFailure ?? authorityFailure ?? refreshFailure;
+    if (failure === undefined) {
+      setProfileOperation({ message: successMessage, state: "success" });
+    } else {
+      const prefix =
+        operationFailure === undefined
+          ? `${successMessage} The action completed, but the authoritative display refresh failed:`
+          : "The appliance operation failed:";
+      setProfileOperation({ message: `${prefix} ${errorText(failure)}`, state: "error" });
+    }
+
+    mutationInFlight.current = false;
+    setBusy(false);
+    return failure === undefined;
+  };
+
+  const reconnectActiveProfile = (): Promise<boolean> => {
+    const label = profileLabel(profiles?.activeProfileKey);
+    automaticReconnect.allow();
+    return runActiveProfileOperation(`Reconnecting to ${label}…`, `Reconnected to ${label}.`, () =>
+      api.reconnect(),
+    );
+  };
+
+  const repairActiveBleBond = async (): Promise<boolean> => {
+    const repair = api.repairBleBond;
+    if (repair === undefined) {
+      setProfileOperation({
+        message: "Bluetooth bond repair is unavailable for this client.",
+        state: "error",
+      });
+      return false;
+    }
+    const label = profileLabel(profiles?.activeProfileKey);
+    automaticReconnect.inhibit();
+    let repairSucceeded = false;
+    const completed = await runActiveProfileOperation(
+      `Finding ${label}… The board must already show BLE Recovery from a reset-time GPIO21 hold. Keep GPIO21 released during discovery; hold it again for about two seconds only when the app asks for physical presence.`,
+      `Bluetooth bond repaired for ${label}; the saved appliance data was retained.`,
+      async () => {
+        await repair.call(api, (stage) => {
+          setProfileOperation({
+            message: bleBondRepairProgressMessage(stage, label),
+            state: "switching",
+          });
+        });
+        repairSucceeded = true;
+      },
+    );
+    if (repairSucceeded) automaticReconnect.allow();
+    return completed;
+  };
+
+  const forgetInactiveProfile = async (profileKey: string): Promise<boolean> => {
+    const forget = api.forgetProfile;
+    const normalizedProfileKey = profileKey.trim().toLowerCase();
+    const label = profileLabel(profileKey);
+    if (forget === undefined) {
+      setProfileOperation({
+        message: "Forgetting saved appliance profiles is unavailable for this client.",
+        state: "error",
+      });
+      return false;
+    }
+    if (profiles?.activeProfileKey?.trim().toLowerCase() === normalizedProfileKey) {
+      setProfileOperation({
+        message: `Switch to another appliance before forgetting ${label}.`,
+        state: "error",
+      });
+      return false;
+    }
+    if (mutationInFlight.current) return false;
+
+    mutationInFlight.current = true;
+    automaticReconnect.suspend();
+    setReconnectProgress(null);
+    setBusy(true);
+    setError(null);
+    setProfileOperation({ message: `Deleting local data for ${label}…`, state: "switching" });
+
+    let forgetFailure: unknown;
+    try {
+      await forget.call(api, profileKey);
+    } catch (nextError) {
+      forgetFailure = nextError;
+    }
+
+    let authoritativeProfiles: NativeProfileStoreSnapshot | null = null;
+    let authorityFailure: unknown;
+    try {
+      authoritativeProfiles = (await api.profiles?.()) ?? null;
+      if (authoritativeProfiles !== null) setProfiles(authoritativeProfiles);
+    } catch (nextError) {
+      authorityFailure = nextError;
+    }
+
+    let refreshFailure: unknown;
+    try {
+      await refresh();
+    } catch (nextError) {
+      refreshFailure = nextError;
+    }
+
+    const profileRemoved =
+      authoritativeProfiles !== null &&
+      !authoritativeProfiles.profiles.some(
+        (profile) => profile.profileKey.trim().toLowerCase() === normalizedProfileKey,
+      );
+    let notificationLedgerFailure: unknown;
+    if (profileRemoved) {
+      try {
+        await messageNotificationReconciler.forgetProfile(profileKey);
+      } catch (nextError) {
+        notificationLedgerFailure = nextError;
+      }
+    }
+    const failure =
+      profileRemoved && forgetFailure !== undefined
+        ? (authorityFailure ?? refreshFailure ?? notificationLedgerFailure)
+        : (forgetFailure ??
+          authorityFailure ??
+          refreshFailure ??
+          notificationLedgerFailure ??
+          new Error("the authoritative profile store still lists this appliance"));
+    if (failure === undefined) {
+      setProfileOperation({
+        message: `Deleted ${label}'s local credential, messages, contacts, and outbox. The board credential and Bluetooth bond were not revoked.`,
+        state: "success",
+      });
+    } else {
+      setProfileOperation({
+        message: `Could not forget ${label}: ${errorText(failure)}`,
+        state: "error",
+      });
+    }
+
+    mutationInFlight.current = false;
+    setBusy(false);
+    return failure === undefined;
+  };
+
   const activateProfileWithAuthority = async (profileKey: string): Promise<boolean> => {
     const activate = api.activateProfile;
     if (activate === undefined) return false;
+    messageNotificationProfileEpoch.current += 1;
     const normalizedProfileKey = profileKey.trim().toLowerCase();
     const targetLabel =
       (profiles === null
@@ -1895,15 +4180,21 @@ export default function ApplianceScreen() {
             (profile) => profile.profileKey.toLowerCase() === normalizedProfileKey,
           )?.boardLabel) ?? profileKey;
 
+    automaticReconnect.allow();
     automaticReconnect.suspend();
+    setWorkspace("lxmf");
     setReconnectProgress(null);
     refreshRequests.current.invalidate();
     timelineRequests.current.invalidate();
     selectedRef.current = null;
     draft.current = null;
+    retryMessageRequests.current.clear();
     setSelected(null);
     setTimeline([]);
     setContacts([]);
+    setConversations([]);
+    resetActivity();
+    resetRadioTrace();
     nomadBrowser.reset();
     setError(null);
     setProfileOperation({ message: `Switching to ${targetLabel}…`, state: "switching" });
@@ -1993,7 +4284,10 @@ export default function ApplianceScreen() {
   const beginAddAppliance = () => {
     const begin = api.beginAddAppliance;
     if (begin === undefined || addingApplianceRef.current) return;
+    messageNotificationProfileEpoch.current += 1;
+    automaticReconnect.allow();
     automaticReconnect.suspend();
+    setWorkspace("lxmf");
     setReconnectProgress(null);
     refreshRequests.current.invalidate();
     timelineRequests.current.invalidate();
@@ -2025,6 +4319,7 @@ export default function ApplianceScreen() {
         : applianceProfilesPresentation(profiles).profiles.find(
             (profile) => profile.profileKey === profileKey,
           )?.boardLabel) ?? profileKey;
+    automaticReconnect.allow();
     mutationInFlight.current = true;
     setBusy(true);
     setError(null);
@@ -2084,9 +4379,14 @@ export default function ApplianceScreen() {
           await refresh();
         };
 
-  const upsertContact = (destination: string, name: string): Promise<boolean> =>
+  const upsertContact = (
+    destination: string,
+    name: string,
+    selectAfterSave = true,
+  ): Promise<boolean> =>
     run(async () => {
       await api.upsertContact(destination, { name });
+      if (!selectAfterSave) return;
       if (selectedRef.current !== destination) draft.current = null;
       selectedRef.current = destination;
       timelineRequests.current.invalidate();
@@ -2094,21 +4394,97 @@ export default function ApplianceScreen() {
       setTimeline([]);
     });
 
-  const send = async (title: string, content: string): Promise<boolean> => {
-    if (selected === null) return false;
-    return run(async () => {
-      const identity = ensureDraftIdentity(draft.current, () => randomHex(16), Date.now);
-      draft.current = identity;
+  const send = async (
+    title: string,
+    content: string,
+    attachLocation: boolean,
+  ): Promise<QueueMessageResult> => {
+    if (selected === null) {
+      return { acceptance: null, error: "Select a recipient first", queued: false };
+    }
+    if (mutationInFlight.current) {
+      return {
+        acceptance: null,
+        error: "Another appliance action is already in progress",
+        queued: false,
+      };
+    }
+
+    const destination = selected;
+    mutationInFlight.current = true;
+    try {
+      const submission = await prepareDraftSubmission(
+        draft.current,
+        attachLocation,
+        () => ensureDraftIdentity(null, () => randomHex(16), Date.now),
+        captureForegroundMessageLocation,
+      );
+      draft.current = submission;
       const request: SendRequest = {
-        destination: selected,
-        timestamp_ms: identity.timestampMs,
-        idempotency_key: identity.idempotencyKey,
+        destination,
+        timestamp_ms: submission.identity.timestampMs,
+        idempotency_key: submission.identity.idempotencyKey,
         title,
         content,
+        location: submission.location,
       };
-      await api.send(request);
-      if (draft.current === identity) draft.current = null;
-    });
+      const response = await api.send(request);
+      if (draft.current === submission) draft.current = null;
+
+      // The successful response is the durable SQLite acceptance boundary.
+      // Reconcile the exact sequence/status in the background without keeping
+      // the composer or global navigation busy.
+      if (selectedRef.current === destination) {
+        const timelineRequest = timelineRequests.current.begin();
+        sendTimelineRefreshesInFlight.current += 1;
+        void api
+          .timeline(destination)
+          .then((nextTimeline) => {
+            if (
+              timelineRequests.current.accepts(timelineRequest) &&
+              selectedRef.current === destination
+            ) {
+              setTimeline(nextTimeline);
+            }
+          })
+          .catch(() => {
+            // The local acceptance remains visible. The settled full refresh
+            // poll will retry this projection without changing send success.
+          })
+          .finally(() => {
+            sendTimelineRefreshesInFlight.current = Math.max(
+              0,
+              sendTimelineRefreshesInFlight.current - 1,
+            );
+          });
+      }
+
+      return {
+        acceptance: localMessageAcceptance(request, response),
+        error: null,
+        queued: true,
+      };
+    } catch (nextError) {
+      // draft.current intentionally retains an ambiguous request's exact
+      // identity and captured location for the next explicit retry.
+      return { acceptance: null, error: errorText(nextError), queued: false };
+    } finally {
+      mutationInFlight.current = false;
+    }
+  };
+  const retryMessage = async (entry: TimelineView): Promise<boolean> => {
+    if (selected === null) return false;
+    const cacheKey = retryMessageCacheKey(selected, entry);
+    let request = retryMessageRequests.current.get(cacheKey);
+    if (request === undefined) {
+      const nextRequest = retryMessageRequest(entry, randomHex(16));
+      if (nextRequest === null) return false;
+      request = nextRequest;
+      retryMessageRequests.current.set(cacheKey, request);
+    }
+    const accepted = await run(() => api.retryMessage(request));
+    if (accepted) retryMessageRequests.current.delete(cacheKey);
+    return accepted;
   };
 
   const chooseContact = (destination: string) => {
@@ -2138,7 +4514,66 @@ export default function ApplianceScreen() {
       });
   };
 
+  const enableMessageNotifications = async (): Promise<void> => {
+    setMessageNotificationError(null);
+    if (
+      messageNotificationPermission.state === "disabled" &&
+      !messageNotificationPermission.canAskAgain
+    ) {
+      try {
+        await Linking.openSettings();
+      } catch (nextError) {
+        setMessageNotificationError(
+          `Could not open notification settings: ${errorText(nextError)}`,
+        );
+      }
+      return;
+    }
+    setMessageNotificationPermission({ state: "checking" });
+    const permission = await requestMessageNotificationPermission();
+    setMessageNotificationPermission(permission);
+    setMessageNotificationPermissionCheckedEpoch(messageNotificationPermissionEpoch.current);
+  };
+
+  notificationActivateProfile.current = activateApplianceProfile;
+  notificationChooseContact.current = chooseContact;
+  const messageNotificationTarget = messageNotificationTargets[0] ?? null;
+
+  useEffect(() => {
+    if (
+      messageNotificationTarget === null ||
+      !bootstrapped ||
+      !ready ||
+      busy ||
+      notificationNavigationInFlight.current
+    ) {
+      return;
+    }
+    const target = messageNotificationTarget;
+    notificationNavigationInFlight.current = true;
+    void (async () => {
+      try {
+        const activeProfileKey = profiles?.activeProfileKey?.trim().toLowerCase() ?? "";
+        if (activeProfileKey !== target.profileKey) {
+          const activated = await notificationActivateProfile.current(target.profileKey);
+          if (!activated) {
+            throw new Error("the appliance attached to this notification could not be activated");
+          }
+        }
+        setMobileSidebarVisible(false);
+        setWorkspace("lxmf");
+        notificationChooseContact.current(target.destination);
+      } catch (nextError) {
+        setError(`Could not open the message notification: ${errorText(nextError)}`);
+      } finally {
+        notificationNavigationInFlight.current = false;
+        setMessageNotificationTargets((queue) => (queue[0] === target ? queue.slice(1) : queue));
+      }
+    })();
+  }, [bootstrapped, busy, messageNotificationTarget, profiles?.activeProfileKey, ready]);
+
   const browseNomad = useCallback((destination: string) => {
+    setMobileSidebarVisible(false);
     setNomadDestinationHint(destination);
     setWorkspace("nomad");
   }, []);
@@ -2152,25 +4587,116 @@ export default function ApplianceScreen() {
         busy={busy}
         compact={compact}
         contacts={contacts}
+        conversations={conversations}
+        foreground={foreground}
         onBrowseNomad={browseNomad}
+        onClose={() => setMobileSidebarVisible(false)}
         onRefreshNearby={nearbyReader}
         onSelect={chooseContact}
         onUpsert={upsertContact}
         selected={selected}
         snapshot={snapshot}
+        visible={!compact || mobileSidebarVisible}
       />
       <Conversation
         busy={busy}
+        canMeasurePath={snapshot?.connection.state === "ready"}
         compact={compact}
-        contact={selectedContact}
-        key={selectedContact?.destination ?? "empty"}
+        key={selectedConversation?.destination ?? "empty"}
+        messageLocationDefaultEnabled={messageLocationPreference.attachByDefault}
+        messageLocationPreferenceLoaded={!messageLocationPreference.loading}
+        onAbandonRetainedProbe={() => reticulumProbe.abandonRetainedProbe()}
         onDraftChanged={() => {
           draft.current = null;
         }}
         onSend={send}
+        onRetryMessage={retryMessage}
+        onLoadMessageActivity={loadMessageActivity}
+        onLoadRadioTrace={loadMessageRadioTrace}
+        onExportRadioTrace={(timelineSequence, format) =>
+          exportRadioTrace(timelineSequence, format)
+        }
+        onMeasurePath={(destination) => reticulumProbe.measure(destination)}
+        peer={selectedConversation}
+        probeState={reticulumProbeState}
         timeline={timeline}
       />
     </View>
+  );
+  const activityShell = (
+    <ScrollView
+      contentContainerStyle={styles.activityContent}
+      keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+      keyboardShouldPersistTaps="handled"
+      style={styles.activityScroller}
+    >
+      <ActivityPanel
+        contacts={contacts}
+        conversationPeers={conversations}
+        disabled={!ready}
+        error={activityError}
+        fieldTelemetry={fieldTelemetryState}
+        loading={activityLoading}
+        messageLocationPreference={messageLocationPreference}
+        onLoadOlder={() => void loadActivity(true)}
+        onRefresh={() => void loadActivity(false)}
+        onToggleFieldTelemetry={
+          fieldTelemetryController === null
+            ? undefined
+            : (enabled) => {
+                void fieldTelemetryController.setEnabled(enabled);
+              }
+        }
+        onToggleMessageLocationDefault={(enabled) => {
+          void setMessageLocationDefault(enabled);
+        }}
+        page={activityPage}
+      />
+      {api.radioTrace === undefined ? (
+        <Text style={styles.secondaryText}>
+          Durable packet-correlated RF tracing is unavailable in this client build.
+        </Text>
+      ) : (
+        <RadioTracePanel
+          disabled={!ready}
+          error={radioTraceError}
+          exportError={radioTraceExportError}
+          exporting={radioTraceExporting}
+          loading={radioTraceLoading}
+          onExport={(format) => void exportCompleteRadioTrace(format)}
+          onLoadOlder={() => void loadRadioTrace(true)}
+          onRefresh={() => void loadRadioTrace(false)}
+          page={radioTracePage}
+        />
+      )}
+    </ScrollView>
+  );
+  const mapDataError = [activityError, radioTraceError]
+    .filter((message): message is string => message !== null)
+    .join(" · ");
+  const mapShell = (
+    <TransmissionMapPanel
+      compact={compact}
+      disabled={!ready}
+      evidenceError={mapFeatureEvidenceError}
+      evidenceLoading={mapFeatureEvidenceLoading}
+      error={mapDataError.length === 0 ? null : mapDataError}
+      hasOlder={
+        (activityPage?.next_before_event_id !== null &&
+          activityPage?.next_before_event_id !== undefined) ||
+        (radioTracePage?.next_before_event_id !== null &&
+          radioTracePage?.next_before_event_id !== undefined)
+      }
+      loading={activityLoading || radioTraceLoading}
+      onLoadOlder={() => {
+        void Promise.all([loadActivity(true), loadRadioTrace(true)]);
+      }}
+      onRefresh={() => {
+        void Promise.all([loadActivity(false), loadRadioTrace(false)]);
+      }}
+      onSelectFeature={selectMapFeature}
+      scene={transmissionMapScene}
+    />
   );
   const nomadShell = (
     <NomadPanel
@@ -2181,65 +4707,203 @@ export default function ApplianceScreen() {
       state={nomadState}
     />
   );
+  const connectivityShell =
+    networkController === null ||
+    networkState === null ||
+    networkDeviceKey === null ? null : networkState.deviceKey === networkDeviceKey ? (
+      <ConnectivityPanel
+        announceNow={manualServiceAnnounce}
+        controller={networkController}
+        key={networkDeviceKey}
+        onRefreshRadioRoutes={
+          radioRoutesController === null
+            ? undefined
+            : () => {
+                void radioRoutesController.refresh();
+              }
+        }
+        radioRoutesState={radioRoutesState}
+        state={networkState}
+      />
+    ) : (
+      <View style={styles.connectivityLoading}>
+        <ActivityIndicator color={colors.green} />
+        <Text style={styles.secondaryText}>Loading this appliance&apos;s network settings…</Text>
+      </View>
+    );
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <View style={styles.topbar}>
-        <View style={styles.brandCluster}>
-          <View>
-            <Text style={styles.eyebrow}>RETICULUM APPLIANCE</Text>
-            <Text style={styles.title}>{workspace === "lxmf" ? "LXMF" : "NomadNet"}</Text>
-          </View>
-          <View accessibilityRole="tablist" style={styles.workspaceSwitcher}>
-            <Pressable
-              accessibilityRole="tab"
-              accessibilityState={{ selected: workspace === "lxmf" }}
-              onPress={() => setWorkspace("lxmf")}
-              style={[styles.workspaceTab, workspace === "lxmf" && styles.workspaceTabActive]}
-            >
-              <Text style={styles.workspaceTabText}>Messages</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="tab"
-              accessibilityState={{ selected: workspace === "nomad" }}
-              onPress={() => setWorkspace("nomad")}
-              style={[styles.workspaceTab, workspace === "nomad" && styles.workspaceTabActive]}
-            >
-              <Text style={styles.workspaceTabText}>Browse</Text>
-            </Pressable>
-          </View>
-        </View>
-        <View style={styles.statusCluster}>
-          <View
-            style={[
-              styles.pill,
-              snapshot?.connection.state === "ready" && styles.pillReady,
-              snapshot?.connection.state === "faulted" && styles.pillFaulted,
-            ]}
-          >
-            <Text style={styles.pillText}>
-              {ready ? connectionStateLabel(snapshot?.connection) : "setup required"}
-            </Text>
-          </View>
-          {compact ? null : (
-            <>
-              <ActionButton
-                disabled={!ready || busy}
-                label="Sync"
-                onPress={() => void run(() => api.sync())}
-                secondary
-              />
-              <ActionButton
-                disabled={!ready || busy}
-                label="Reconnect"
-                onPress={() => void run(() => api.reconnect())}
-                secondary
-              />
-            </>
+      <View style={[styles.topbar, compact && styles.topbarCompact]}>
+        <View style={[styles.brandCluster, compact && styles.brandClusterCompact]}>
+          {compact ? (
+            workspace === "lxmf" ? (
+              <Pressable
+                accessibilityLabel="Open contacts"
+                accessibilityRole="button"
+                accessibilityState={{ expanded: mobileSidebarVisible }}
+                onPress={() => setMobileSidebarVisible(true)}
+                style={({ pressed }) => [
+                  styles.mobileContactsButton,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.mobileContactsButtonText}>Contacts</Text>
+              </Pressable>
+            ) : (
+              <Text style={styles.mobileBrand}>Reticulum</Text>
+            )
+          ) : (
+            <View>
+              <Text style={styles.eyebrow}>RETICULUM APPLIANCE</Text>
+              <Text style={styles.title}>
+                {workspace === "lxmf"
+                  ? "LXMF"
+                  : workspace === "nomad"
+                    ? "NomadNet"
+                    : workspace === "activity"
+                      ? "Activity"
+                      : workspace === "map"
+                        ? "Map"
+                        : "Connectivity"}
+              </Text>
+            </View>
           )}
+          <View
+            accessibilityRole="tablist"
+            style={[styles.workspaceSwitcher, compact && styles.workspaceSwitcherCompact]}
+          >
+            <ScrollView
+              contentContainerStyle={styles.workspaceSwitcherContent}
+              horizontal
+              keyboardShouldPersistTaps="handled"
+              showsHorizontalScrollIndicator={false}
+            >
+              <Pressable
+                accessibilityRole="tab"
+                accessibilityState={{ selected: workspace === "lxmf" }}
+                onPress={() => {
+                  setWorkspace("lxmf");
+                }}
+                style={[
+                  styles.workspaceTab,
+                  compact && styles.workspaceTabCompact,
+                  workspace === "lxmf" && styles.workspaceTabActive,
+                ]}
+              >
+                <Text style={[styles.workspaceTabText, compact && styles.workspaceTabTextCompact]}>
+                  {compact ? "Chat" : "Messages"}
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="tab"
+                accessibilityState={{ selected: workspace === "nomad" }}
+                onPress={() => {
+                  setMobileSidebarVisible(false);
+                  setWorkspace("nomad");
+                }}
+                style={[
+                  styles.workspaceTab,
+                  compact && styles.workspaceTabCompact,
+                  workspace === "nomad" && styles.workspaceTabActive,
+                ]}
+              >
+                <Text style={[styles.workspaceTabText, compact && styles.workspaceTabTextCompact]}>
+                  Browse
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="tab"
+                accessibilityState={{ selected: workspace === "activity" }}
+                onPress={() => {
+                  setMobileSidebarVisible(false);
+                  setWorkspace("activity");
+                }}
+                style={[
+                  styles.workspaceTab,
+                  compact && styles.workspaceTabCompact,
+                  workspace === "activity" && styles.workspaceTabActive,
+                ]}
+              >
+                <Text style={[styles.workspaceTabText, compact && styles.workspaceTabTextCompact]}>
+                  Activity
+                </Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="tab"
+                accessibilityState={{ selected: workspace === "map" }}
+                onPress={() => {
+                  setMobileSidebarVisible(false);
+                  setWorkspace("map");
+                }}
+                style={[
+                  styles.workspaceTab,
+                  compact && styles.workspaceTabCompact,
+                  workspace === "map" && styles.workspaceTabActive,
+                ]}
+              >
+                <Text style={[styles.workspaceTabText, compact && styles.workspaceTabTextCompact]}>
+                  Map
+                </Text>
+              </Pressable>
+              {connectivityAvailable ? (
+                <Pressable
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: workspace === "connectivity" }}
+                  onPress={() => {
+                    setMobileSidebarVisible(false);
+                    setWorkspace("connectivity");
+                  }}
+                  style={[
+                    styles.workspaceTab,
+                    compact && styles.workspaceTabCompact,
+                    workspace === "connectivity" && styles.workspaceTabActive,
+                  ]}
+                >
+                  <Text
+                    style={[styles.workspaceTabText, compact && styles.workspaceTabTextCompact]}
+                  >
+                    {compact ? "Net" : "Network"}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </ScrollView>
+          </View>
         </View>
+        {compact ? null : (
+          <View style={styles.statusCluster}>
+            <View
+              style={[
+                styles.pill,
+                snapshot?.connection.state === "ready" && styles.pillReady,
+                snapshot?.connection.state === "faulted" && styles.pillFaulted,
+              ]}
+            >
+              <Text style={styles.pillText}>
+                {ready ? connectionStateLabel(snapshot?.connection) : "setup required"}
+              </Text>
+            </View>
+            {compact ? null : (
+              <>
+                <ActionButton
+                  disabled={!ready || busy}
+                  label="Sync"
+                  onPress={() => void run(() => api.sync())}
+                  secondary
+                />
+                <ActionButton
+                  disabled={!ready || busy}
+                  label="Reconnect"
+                  onPress={() => void reconnectActiveProfile()}
+                  secondary
+                />
+              </>
+            )}
+          </View>
+        )}
       </View>
-      {ready ? (
+      {(ready || (canManageProfiles && hasSavedProfiles)) &&
+      !(compact && workspace === "lxmf" && keyboardVisible) ? (
         <ApplianceStatusCard
           busy={busy}
           canAddAppliance={canAddAppliance}
@@ -2249,6 +4913,10 @@ export default function ApplianceScreen() {
           onActivateProfile={activateApplianceProfile}
           onAddAppliance={beginAddAppliance}
           onClearProfileOperation={() => setProfileOperation({ state: "idle" })}
+          onForgetProfile={api.forgetProfile === undefined ? null : forgetInactiveProfile}
+          onReconnect={reconnectActiveProfile}
+          onRepairBleBond={api.repairBleBond === undefined ? null : repairActiveBleBond}
+          onSync={() => void run(() => api.sync())}
           profileOperation={profileOperation}
           profiles={canManageProfiles ? profiles : null}
           snapshot={snapshot}
@@ -2257,6 +4925,36 @@ export default function ApplianceScreen() {
       {displayedError === null || displayedError === undefined ? null : (
         <View accessibilityLiveRegion="assertive" style={styles.errorBanner}>
           <Text style={styles.errorText}>{displayedError}</Text>
+        </View>
+      )}
+      {ready &&
+      (messageNotificationPermission.state === "disabled" ||
+        messageNotificationPermission.state === "error") ? (
+        <View accessibilityLiveRegion="polite" style={styles.notificationPermissionBanner}>
+          <Text style={styles.notificationPermissionText}>
+            {messageNotificationPermission.state === "error"
+              ? `Phone notification setup failed: ${messageNotificationPermission.message}`
+              : messageNotificationPermission.reason === "android_channel"
+                ? "The Android LXMF notification channel is disabled in system settings."
+                : messageNotificationPermission.canAskAgain
+                  ? "Enable phone alerts for newly collected LXMF messages."
+                  : "Phone alerts are disabled in system settings."}
+          </Text>
+          <ActionButton
+            label={
+              messageNotificationPermission.state === "disabled" &&
+              !messageNotificationPermission.canAskAgain
+                ? "Open settings"
+                : "Enable"
+            }
+            onPress={() => void enableMessageNotifications()}
+            secondary
+          />
+        </View>
+      ) : null}
+      {messageNotificationError === null ? null : (
+        <View accessibilityLiveRegion="assertive" style={styles.errorBanner}>
+          <Text style={styles.errorText}>{messageNotificationError}</Text>
         </View>
       )}
       {profileOperation.state === "idle" ? null : (
@@ -2297,38 +4995,15 @@ export default function ApplianceScreen() {
           enabled={KEYBOARD_LAYOUT.avoidingEnabled}
           style={styles.keyboardAvoiding}
         >
-          {workspace === "nomad" ? (
-            nomadShell
-          ) : compact ? (
-            <ScrollView
-              automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
-              contentContainerStyle={styles.compactContent}
-              keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
-              keyboardShouldPersistTaps="handled"
-              nestedScrollEnabled
-              style={styles.compactScroller}
-            >
-              {applianceShell}
-            </ScrollView>
-          ) : (
-            applianceShell
-          )}
-          {compact ? (
-            <View style={styles.mobileActions}>
-              <ActionButton
-                disabled={busy}
-                label="Sync"
-                onPress={() => void run(() => api.sync())}
-                secondary
-              />
-              <ActionButton
-                disabled={busy}
-                label="Reconnect"
-                onPress={() => void run(() => api.reconnect())}
-                secondary
-              />
-            </View>
-          ) : null}
+          {workspace === "nomad"
+            ? nomadShell
+            : workspace === "activity"
+              ? activityShell
+              : workspace === "map"
+                ? mapShell
+                : workspace === "connectivity"
+                  ? connectivityShell
+                  : applianceShell}
         </KeyboardAvoidingView>
       ) : null}
     </SafeAreaView>
@@ -2350,6 +5025,22 @@ const colors = {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, minHeight: "100%", backgroundColor: colors.background },
   keyboardAvoiding: { flex: 1, minHeight: 0 },
+  connectivityLoading: {
+    flex: 1,
+    minHeight: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  activityScroller: { flex: 1, minHeight: 0 },
+  activityContent: {
+    width: "100%",
+    maxWidth: 900,
+    alignSelf: "center",
+    gap: 14,
+    padding: 18,
+    paddingBottom: 44,
+  },
   topbar: {
     minHeight: 84,
     paddingHorizontal: 28,
@@ -2363,7 +5054,32 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     backgroundColor: "#101411f2",
   },
+  topbarCompact: {
+    minHeight: 48,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    flexWrap: "nowrap",
+    gap: 8,
+  },
   brandCluster: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 18 },
+  brandClusterCompact: {
+    flex: 1,
+    minWidth: 0,
+    justifyContent: "space-between",
+    flexWrap: "nowrap",
+    gap: 8,
+  },
+  mobileBrand: { color: colors.text, fontSize: 14, fontWeight: "800" },
+  mobileContactsButton: {
+    minHeight: 34,
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.panel,
+  },
+  mobileContactsButtonText: { color: colors.text, fontSize: 12, fontWeight: "700" },
   eyebrow: {
     marginBottom: 3,
     color: colors.green,
@@ -2374,21 +5090,24 @@ const styles = StyleSheet.create({
   title: { color: colors.text, fontSize: 24, fontWeight: "800" },
   heading: { color: colors.text, fontSize: 17, fontWeight: "700" },
   workspaceSwitcher: {
-    flexDirection: "row",
-    padding: 3,
     borderColor: colors.line,
     borderWidth: 1,
     borderRadius: 9,
     backgroundColor: colors.panel,
+    overflow: "hidden",
   },
+  workspaceSwitcherCompact: { flexShrink: 1, minWidth: 0 },
+  workspaceSwitcherContent: { flexDirection: "row", padding: 3 },
   workspaceTab: {
     minHeight: 30,
     justifyContent: "center",
     paddingHorizontal: 11,
     borderRadius: 6,
   },
+  workspaceTabCompact: { paddingHorizontal: 5 },
   workspaceTabActive: { backgroundColor: colors.greenDark },
   workspaceTabText: { color: "#dfe8df", fontSize: 11, fontWeight: "700" },
+  workspaceTabTextCompact: { fontSize: 9 },
   statusCluster: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 },
   pill: {
     paddingHorizontal: 11,
@@ -2411,10 +5130,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.panel,
   },
   applianceStatusCardCompact: {
-    marginHorizontal: 14,
-    marginTop: 10,
-    padding: 12,
-    gap: 8,
+    marginHorizontal: 12,
+    marginTop: 8,
+    padding: 8,
+    gap: 7,
   },
   applianceStatusHeading: {
     flexDirection: "row",
@@ -2423,7 +5142,9 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 12,
   },
+  applianceStatusHeadingCompact: { alignItems: "center", flexWrap: "nowrap", gap: 8 },
   applianceStatusIdentity: { flex: 1, minWidth: 0 },
+  applianceStatusIdentityCompact: { justifyContent: "center" },
   applianceStatusBoard: {
     color: colors.text,
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
@@ -2431,7 +5152,9 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.4,
   },
+  applianceStatusBoardCompact: { fontSize: 13 },
   applianceStatusConnection: { marginTop: 4, color: colors.muted, fontSize: 12 },
+  applianceStatusConnectionCompact: { marginTop: 1, fontSize: 11 },
   applianceStatusConnectionReady: { color: colors.green },
   applianceStatusConnectionFaulted: { color: colors.red },
   applianceStatusActions: {
@@ -2442,6 +5165,7 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
     gap: 7,
   },
+  applianceStatusActionsCompact: { flexWrap: "nowrap", flexShrink: 0, gap: 5 },
   statusDetailsButton: {
     minHeight: 44,
     justifyContent: "center",
@@ -2451,6 +5175,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 999,
   },
+  statusDetailsButtonCompact: { minHeight: 34, paddingHorizontal: 8, paddingVertical: 3 },
   statusDetailsButtonText: { color: "#dfe8df", fontSize: 11, fontWeight: "700" },
   applianceActivity: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 7 },
   applianceActivityItem: { color: colors.text, fontSize: 12, fontWeight: "600" },
@@ -2480,10 +5205,12 @@ const styles = StyleSheet.create({
     borderTopColor: colors.line,
     borderTopWidth: 1,
   },
+  statusUtilityActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   profileManagerSafeArea: { flex: 1, backgroundColor: colors.background },
   profileManagerHeading: {
     minHeight: 76,
-    paddingHorizontal: 22,
+    paddingLeft: 22,
+    paddingRight: 132,
     paddingVertical: 14,
     flexDirection: "row",
     alignItems: "center",
@@ -2557,6 +5284,13 @@ const styles = StyleSheet.create({
   },
   profileBadgeActive: { color: colors.green, borderColor: "#4c8d5b" },
   profileGeneration: { color: colors.muted, fontSize: 11 },
+  profileRowActions: {
+    marginTop: 7,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+  },
   profileConfirmation: {
     padding: 16,
     gap: 10,
@@ -2587,6 +5321,21 @@ const styles = StyleSheet.create({
   buttonSecondary: { borderColor: colors.line, backgroundColor: "transparent" },
   buttonText: { color: "#0d1b11", fontWeight: "700", textAlign: "center" },
   buttonSecondaryText: { color: "#dfe8df" },
+  notificationPermissionBanner: {
+    marginHorizontal: 28,
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderColor: "#4c8d5b",
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.greenDark,
+  },
+  notificationPermissionText: { flex: 1, color: colors.text, fontSize: 12 },
   errorBanner: {
     marginHorizontal: 28,
     marginTop: 14,
@@ -2673,8 +5422,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
   },
   actionRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 },
-  compactScroller: { flex: 1 },
-  compactContent: { flexGrow: 1 },
   shell: { flex: 1, flexDirection: "row", minHeight: 0 },
   shellCompact: { flexDirection: "column" },
   sidebar: {
@@ -2685,15 +5432,39 @@ const styles = StyleSheet.create({
     borderRightWidth: 1,
     backgroundColor: colors.panel,
   },
-  sidebarCompactScroller: {
-    width: "100%",
-    maxHeight: 320,
-    borderRightWidth: 0,
-    borderBottomColor: colors.line,
-    borderBottomWidth: 1,
+  sidebarDrawerBackdrop: {
+    flex: 1,
+    flexDirection: "row",
+    backgroundColor: "#00000099",
+  },
+  sidebarDrawerDismiss: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  sidebarDrawer: {
+    width: "88%",
+    maxWidth: 420,
+    height: "100%",
+    borderRightColor: colors.line,
+    borderRightWidth: 1,
     backgroundColor: colors.panel,
   },
-  sidebarCompactContent: { padding: 22 },
+  sidebarDrawerHeading: {
+    minHeight: 64,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+  },
+  sidebarCompactScroller: { flex: 1, minHeight: 0 },
+  sidebarCompactContent: { padding: 18, paddingBottom: 36 },
   sectionHeading: {
     flexDirection: "row",
     alignItems: "center",
@@ -2741,6 +5512,16 @@ const styles = StyleSheet.create({
   nearbyCaption: { color: colors.muted, fontSize: 10 },
   nearbyStatus: { color: colors.muted, fontSize: 11, lineHeight: 16 },
   nearbyError: { gap: 3 },
+  nearbyInterfaces: {
+    gap: 6,
+    padding: 8,
+    borderColor: colors.line,
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: colors.panel,
+  },
+  nearbyInterfaceRow: { gap: 1 },
+  nearbyInterfaceName: { color: "#dfe8df", fontSize: 11, fontWeight: "700" },
   nearbyScroller: { maxHeight: 230 },
   nearbyList: { gap: 7 },
   nearbyPeer: {
@@ -2790,6 +5571,7 @@ const styles = StyleSheet.create({
     color: "#f3f7f2",
     backgroundColor: "#0d110e",
   },
+  inputReadOnly: { color: colors.muted },
   monospaceInput: {
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
   },
@@ -2803,10 +5585,23 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   contactSelection: { flex: 1, minWidth: 0, gap: 3, padding: 11 },
-  contactBrowseButton: { marginRight: 8 },
+  contactActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginRight: 8,
+  },
   contactActive: { borderColor: colors.line, backgroundColor: colors.panel2 },
   contactPressed: { opacity: 0.8 },
   contactName: { color: "#dfe8df", fontWeight: "700" },
+  messageRequestsSection: {
+    gap: 7,
+    marginBottom: 12,
+    paddingBottom: 12,
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+  },
+  messageRequestPreview: { color: colors.muted, fontSize: 11 },
   monospace: {
     color: colors.muted,
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
@@ -2826,7 +5621,7 @@ const styles = StyleSheet.create({
   emptyState: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
   emptyTitle: { marginBottom: 8, color: colors.text, fontSize: 17, fontWeight: "600" },
   conversation: { flex: 1, minWidth: 0 },
-  conversationCompact: { minHeight: 420 },
+  conversationCompact: { minHeight: 0 },
   conversationHeading: {
     minHeight: 72,
     justifyContent: "center",
@@ -2835,8 +5630,45 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.line,
     borderBottomWidth: 1,
   },
+  conversationHeadingCompact: { minHeight: 48, paddingLeft: 14, paddingRight: 124 },
+  conversationIdentity: { gap: 3 },
+  messageRequestBadge: { color: colors.green, fontSize: 9, fontWeight: "800", letterSpacing: 0.7 },
+  measurePathButton: {
+    position: "absolute",
+    top: 12,
+    right: 14,
+    minHeight: 30,
+    justifyContent: "center",
+    paddingHorizontal: 9,
+    borderColor: "#4c8d5b",
+    borderWidth: 1,
+    borderRadius: 8,
+  },
+  measurePathButtonText: { color: colors.green, fontSize: 10, fontWeight: "800" },
+  probeResult: {
+    gap: 3,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+    backgroundColor: colors.greenDark,
+  },
+  probeResultTitle: { color: colors.text, fontSize: 11, fontWeight: "700" },
+  probeResultValue: { color: colors.green, fontSize: 11, fontWeight: "700" },
+  probeResultHelp: { color: colors.muted, fontSize: 9, lineHeight: 13 },
+  probeResultAction: {
+    alignSelf: "flex-start",
+    marginTop: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    borderColor: "#4c8d5b",
+    borderWidth: 1,
+    borderRadius: 6,
+  },
+  probeResultActionText: { color: colors.green, fontSize: 9, fontWeight: "800" },
   timelineScroller: { flex: 1 },
   timeline: { flexGrow: 1, gap: 12, padding: 22, justifyContent: "flex-end" },
+  timelineCompact: { gap: 9, padding: 12 },
   message: {
     maxWidth: "78%",
     padding: 13,
@@ -2850,8 +5682,50 @@ const styles = StyleSheet.create({
     borderColor: "#356344",
     backgroundColor: colors.greenDark,
   },
-  messageTitle: { marginBottom: 5, color: colors.text, fontWeight: "700" },
+  messageHeading: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  messageTitle: { flex: 1, marginBottom: 5, color: colors.text, fontWeight: "700" },
+  localAcceptanceBadge: {
+    color: colors.green,
+    fontSize: 8,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  messageActionsButton: {
+    minWidth: 28,
+    minHeight: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 999,
+  },
+  messageActionsButtonText: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
   messageContent: { color: colors.text, lineHeight: 21 },
+  messageLocationChip: {
+    marginTop: 9,
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+    gap: 2,
+    borderColor: "#506b88",
+    borderWidth: 1,
+    borderRadius: 8,
+    backgroundColor: "#15212b",
+  },
+  messageLocationChipLabel: {
+    color: "#9ac9f4",
+    fontSize: 8,
+    fontWeight: "800",
+    letterSpacing: 0.9,
+  },
+  messageLocationChipText: { color: "#c9def0", fontSize: 9, lineHeight: 13 },
   messageFooter: { marginTop: 8, color: colors.muted, fontSize: 10 },
   nomadScroller: { flex: 1 },
   nomadContent: { flexGrow: 1, padding: 22 },
@@ -2926,28 +5800,106 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 20,
   },
-  compose: {
-    gap: 10,
-    padding: 16,
+  composeScroller: {
+    flexGrow: 0,
+    flexShrink: 1,
+    minHeight: 0,
     borderTopColor: colors.line,
     borderTopWidth: 1,
     backgroundColor: colors.panel,
   },
+  composeScrollerCompact: { maxHeight: "60%" },
+  compose: { gap: 10, padding: 16 },
+  composeCompact: { gap: 6, padding: 9 },
   messageInput: { minHeight: 78, textAlignVertical: "top" },
+  messageInputCompact: { minHeight: 48, maxHeight: 96 },
+  composerLocationToggle: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+    padding: 9,
+    borderColor: "#506b88",
+    borderWidth: 1,
+    borderRadius: 9,
+    backgroundColor: "#151e27",
+  },
+  composerLocationToggleCompact: { alignItems: "center", padding: 7 },
+  composerLocationCopy: { flex: 1, minWidth: 0, gap: 2 },
+  composerLocationCopyCompact: { flexDirection: "row", alignItems: "center", gap: 7 },
+  composerLocationTitle: { color: "#b5d9fa", fontSize: 10, fontWeight: "800" },
+  composerLocationHelp: { color: colors.muted, fontSize: 9, lineHeight: 13 },
+  composerLocationCaveat: { color: "#829bb1", fontSize: 8, lineHeight: 12 },
   composeFooter: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
   },
-  counter: { flex: 1, color: colors.muted, fontSize: 10 },
-  mobileActions: {
-    flexDirection: "row",
+  composerBudget: { flex: 1, minWidth: 0, gap: 2 },
+  counter: { color: colors.muted, fontSize: 10 },
+  composerBudgetHelp: { color: "#748078", fontSize: 8, lineHeight: 12 },
+  counterOverLimit: { color: colors.red },
+  messageActionsBackdrop: {
+    flex: 1,
     justifyContent: "flex-end",
-    gap: 8,
-    padding: 10,
+    alignItems: "center",
+    backgroundColor: "#00000099",
+  },
+  messageActionsDismiss: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  messageActionsSheet: {
+    width: "100%",
+    maxWidth: 680,
+    maxHeight: "88%",
     borderTopColor: colors.line,
     borderTopWidth: 1,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
     backgroundColor: colors.panel,
   },
+  messageActionsHeading: {
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    borderBottomColor: colors.line,
+    borderBottomWidth: 1,
+  },
+  messageActionsHeadingCopy: { flex: 1, minWidth: 0 },
+  messageActionsContent: { padding: 18, paddingBottom: 30, gap: 12 },
+  messageRadioDetails: {
+    gap: 5,
+    paddingTop: 12,
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+  },
+  messageAttachedLocationDetails: {
+    gap: 7,
+    padding: 11,
+    borderColor: "#506b88",
+    borderWidth: 1,
+    borderRadius: 9,
+    backgroundColor: "#151e27",
+  },
+  messageActivityDetails: {
+    gap: 8,
+    paddingTop: 12,
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+  },
+  messageTraceActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  messageActionUtilities: {
+    gap: 10,
+    paddingTop: 12,
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+  },
+  messageSendAgainNotice: { gap: 10 },
 });

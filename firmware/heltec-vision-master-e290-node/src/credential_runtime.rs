@@ -12,7 +12,8 @@ use core::mem;
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::IdentitySummary;
 use reticulum_device_api_adapter::{
-    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, NomadFetchPort, PeerDiscoveryPort,
+    InboundMailboxPort, LxmfComposePort, LxmfInboxPort, ManualServiceAnnouncePort,
+    NetworkConfigPort, NodeDiagnosticsPort, NomadFetchPort, PeerDiscoveryPort, ReticulumProbePort,
     SubmissionPort,
 };
 use reticulum_device_api_credential_store::{
@@ -44,7 +45,8 @@ use reticulum_device_api_session::AuthenticatedGrant;
 use zeroize::Zeroizing;
 
 use crate::authenticated_api_node::{
-    AuthenticatedApiDispatchFailure, dispatch_authenticated_request_with_inbox_lxmf_and_nomad,
+    AuthenticatedApiDispatchFailure,
+    dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config,
 };
 use crate::credential_boot::{
     CredentialBootOutcome, CredentialBootState, MAXIMUM_CREDENTIAL_BOOT_OUTCOME_BYTES,
@@ -226,6 +228,9 @@ impl CredentialRuntime {
     ) -> Self {
         let (boot_state, mounted) = outcome.into_parts_for_binding(expected);
         let initialization = match boot_state {
+            CredentialBootState::Ready | CredentialBootState::AuthenticationOnly { .. } => {
+                InitializationOwnership::Completed
+            }
             CredentialBootState::UninitializedErased => {
                 InitializationOwnership::Eligible(InitializableMedia::ExactlyErased)
             }
@@ -351,7 +356,10 @@ impl CredentialRuntime {
             + InboundMailboxPort
             + LxmfInboxPort
             + LxmfComposePort
-            + PeerDiscoveryPort,
+            + PeerDiscoveryPort
+            + NetworkConfigPort
+            + ManualServiceAnnouncePort
+            + NodeDiagnosticsPort,
         N: NomadFetchPort,
     {
         let authority = self
@@ -359,8 +367,49 @@ impl CredentialRuntime {
             .as_ref()
             .and_then(MountedCredentialStore::publishable_authority)
             .filter(|_| self.boot_state.authority_publishable());
-        dispatch_authenticated_request_with_inbox_lxmf_and_nomad(
+        dispatch_authenticated_request_with_inbox_lxmf_nomad_and_network_config(
             request, authority, identity, port, nomad_port,
+        )
+    }
+
+    /// Revalidate and dispatch through the complete appliance surface plus one
+    /// independent volatile Reticulum proof-probe owner.
+    #[allow(
+        clippy::result_large_err,
+        reason = "terminal failure must retain the exact allocation-free request owner"
+    )]
+    pub fn dispatch_authenticated_request_with_probe<P, N, Q>(
+        &self,
+        request: LocalApiRequest<AuthenticatedGrant>,
+        identity: IdentitySummary,
+        port: &mut P,
+        nomad_port: &mut N,
+        probe_port: &mut Q,
+    ) -> Result<LocalApiReply, AuthenticatedApiDispatchFailure>
+    where
+        P: SubmissionPort
+            + InboundMailboxPort
+            + LxmfInboxPort
+            + LxmfComposePort
+            + PeerDiscoveryPort
+            + NetworkConfigPort
+            + ManualServiceAnnouncePort
+            + NodeDiagnosticsPort,
+        N: NomadFetchPort,
+        Q: ReticulumProbePort,
+    {
+        let authority = self
+            .mounted
+            .as_ref()
+            .and_then(MountedCredentialStore::publishable_authority)
+            .filter(|_| self.boot_state.authority_publishable());
+        crate::authenticated_api_node::dispatch_authenticated_request_with_inbox_lxmf_nomad_network_config_and_probe(
+            request,
+            authority,
+            identity,
+            port,
+            nomad_port,
+            probe_port,
         )
     }
 
@@ -1419,7 +1468,8 @@ where
         let credential_id = CredentialId::new(credential_bytes);
         let permissions = Permissions::from_bits(
             Permissions::READ_SUBMISSION_STATUS.bits()
-                | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits(),
+                | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits()
+                | Permissions::MANAGE_NETWORK_CONFIG.bits(),
         )
         .expect("the fixed developer policy contains only stable permission bits");
         let enrollment = NewPendingCredential::new(
@@ -2605,6 +2655,10 @@ mod tests {
         assert!(!runtime.mutation_eligible());
         assert!(runtime.pairing_policy_available());
         assert_eq!(
+            runtime.initialization_status(),
+            CredentialInitializationStatus::Completed
+        );
+        assert_eq!(
             runtime.pairing_connected(time(0), connection()),
             Some(Ok(None))
         );
@@ -2630,6 +2684,50 @@ mod tests {
             ),
             Err(error) if error == OrdinarySessionSelectionRefusal::REFUSED
         ));
+    }
+
+    #[test]
+    fn rebooted_active_authority_reports_initialized_and_admits_another_credential() {
+        let (mut runtime, mut access) = ready_pairing_runtime();
+        let mut rng = TestRng::patterned(0x71);
+        let offer = commit_begin(&mut runtime, &mut access, &mut rng);
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::CleanupCompleted
+        ));
+        let _ = admit_valid_activation(&mut runtime, &mut rng, &offer);
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::MutationPrepared(PairingMutation::ActivatePending)
+        ));
+        assert!(matches!(
+            runtime.drive_live_pairing(&mut access),
+            CredentialPairingDriveOutcome::Activated(_)
+        ));
+
+        let store_binding = runtime.binding();
+        let device_id = runtime.device_id();
+        let mut access = bound(access.into_backend(), store_binding);
+        let boot = boot_credentials(&mut access);
+        assert_eq!(boot.state(), CredentialBootState::Ready);
+        access.backend_mut().reset_io();
+        let mut rebooted = CredentialRuntime::from_boot(boot, store_binding, device_id);
+
+        assert_eq!(rebooted.active_credential_count(), Some(1));
+        assert_eq!(
+            rebooted.initialization_status(),
+            CredentialInitializationStatus::Completed
+        );
+        open_pairing_window(&mut rebooted);
+        assert_eq!(
+            rebooted.request_pairing_begin(
+                reticulum_device_api_pairing::BearerBinding::BleGatt,
+                time(REQUEST_MILLIS + 1),
+                connection(),
+                &mut rng,
+            ),
+            BeginAdmission::Accepted
+        );
     }
 
     #[test]
@@ -2708,7 +2806,7 @@ mod tests {
         ));
         assert!(matches!(
             runtime.drive_initialization(&mut access, true),
-            InitializationDriveOutcome::NotInFlight(CredentialInitializationStatus::Unavailable)
+            InitializationDriveOutcome::NotInFlight(CredentialInitializationStatus::Completed)
         ));
         assert!(matches!(
             runtime.drive_live_pairing(&mut access),

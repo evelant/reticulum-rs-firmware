@@ -15,7 +15,7 @@ use reticulum_device_api::{
     MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 };
 use reticulum_device_api_ble::{
-    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, INITIAL_ATT_VALUE_BYTES, RX_UUID,
+    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, MAXIMUM_ATT_VALUE_BYTES, RX_UUID,
     SECURITY_CONFIRMATION_READY_VALUE, SECURITY_CONFIRMATION_UUID, SERVICE_UUID, TX_UUID,
 };
 
@@ -41,7 +41,7 @@ pub use profile::{
 /// Incompatible generation of the callable native bridge.
 pub const BRIDGE_API_MAJOR: u16 = 1;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 10;
+pub const BRIDGE_API_MINOR: u16 = 23;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -91,8 +91,8 @@ pub struct NativeBleGattProfile {
     /// Public value proving that the retained authenticated link is ready for
     /// application protocol bytes.
     pub security_confirmation_ready_value: Vec<u8>,
-    /// Universally safe initial ATT value size.
-    pub initial_att_value_bytes: u32,
+    /// Largest characteristic value permitted by the firmware profile.
+    pub maximum_att_value_bytes: u32,
 }
 
 /// Return the immutable API contract compiled into this native library.
@@ -133,7 +133,7 @@ pub fn native_ble_gatt_profile() -> NativeBleGattProfile {
         tx_uuid: TX_UUID.to_owned(),
         security_confirmation_uuid: SECURITY_CONFIRMATION_UUID.to_owned(),
         security_confirmation_ready_value: SECURITY_CONFIRMATION_READY_VALUE.to_vec(),
-        initial_att_value_bytes: u32::try_from(INITIAL_ATT_VALUE_BYTES)
+        maximum_att_value_bytes: u32::try_from(MAXIMUM_ATT_VALUE_BYTES)
             .expect("ATT value bound must fit u32"),
     }
 }
@@ -150,9 +150,9 @@ mod tests {
             native_bridge_contract(),
             NativeBridgeContract {
                 bridge_api_major: 1,
-                bridge_api_minor: 10,
+                bridge_api_minor: 23,
                 device_api_major: 1,
-                device_api_minor: 6,
+                device_api_minor: 18,
                 max_message_bytes: 512,
                 max_lxmf_read_chunk_bytes: 416,
                 max_lxmf_basic_title_bytes: 295,
@@ -170,13 +170,13 @@ mod tests {
             native_ble_gatt_profile(),
             NativeBleGattProfile {
                 major: 2,
-                minor: 1,
+                minor: 3,
                 service_uuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
                 rx_uuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
                 tx_uuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
                 security_confirmation_uuid: "f3c8a0b3-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
                 security_confirmation_ready_value: b"RDY1".to_vec(),
-                initial_att_value_bytes: 20,
+                maximum_att_value_bytes: 248,
             }
         );
     }

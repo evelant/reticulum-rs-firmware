@@ -228,7 +228,7 @@ remain open.
 
 Pairing remains outside the session core. ADR 0009's bounded manager owns a
 roughly two-second GPIO21 confirmation, exclusive
-60-second USB Serial/JTAG window, three-attempt ceiling, one pending enrollment,
+five-minute USB Serial/JTAG window, three-attempt ceiling, one pending enrollment,
 durable-before-offer `Pending`, HMAC possession proof, and durable-before-
 completion `Active` transition. Empty media never pairs or initializes
 automatically. Production pairing adds an independently confirmed

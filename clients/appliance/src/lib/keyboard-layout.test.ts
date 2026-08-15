@@ -8,6 +8,7 @@ describe("keyboard layout policy", () => {
       avoidingBehavior: "padding",
       avoidingEnabled: true,
       dismissMode: "interactive",
+      inputAccessoryEnabled: true,
     });
   });
 
@@ -16,11 +17,14 @@ describe("keyboard layout policy", () => {
       avoidingBehavior: "height",
       avoidingEnabled: true,
       dismissMode: "on-drag",
+      inputAccessoryEnabled: false,
     });
   });
 
   test("does not alter the web or desktop layout", () => {
     expect(keyboardLayoutPolicy("web").avoidingEnabled).toBeFalse();
+    expect(keyboardLayoutPolicy("web").inputAccessoryEnabled).toBeFalse();
     expect(keyboardLayoutPolicy("macos").avoidingEnabled).toBeFalse();
+    expect(keyboardLayoutPolicy("macos").inputAccessoryEnabled).toBeFalse();
   });
 });

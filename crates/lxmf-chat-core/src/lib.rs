@@ -18,15 +18,30 @@ mod store;
 
 pub use memory::{MEMORY_IMAGE_SCHEMA_VERSION, MemoryChatStore, MemoryImage};
 pub use model::{
-    AcceptanceIds, Contact, DEVICE_ID_LENGTH, DestinationHash, DeviceBinding, EncodedPacketSha256,
-    IdempotencyKey, InboundMessage, InboundRecord, InvalidEncodedPacketLength, InvalidSubmissionId,
-    InvalidTimestamp, MAX_UNIX_TIMESTAMP_MILLIS, MessageId, OutboxId, OutboxMaterial, OutboxRecord,
-    OutboxStatus, PacketEvidence, ReconcileWork, SubmissionFailure, SubmissionId, SubmissionState,
-    TimelineDirection, TimelineEntry, TimelineSequence, UnixTimestampMillis,
+    AUTOMATIC_OUTBOX_RETRY_LIMIT, AcceptanceIds, AttemptLocationStamp, Contact, ConversationPeer,
+    DEVICE_ID_LENGTH, DestinationHash, DeviceBinding, EncodedPacketSha256, IdempotencyKey,
+    InboundMessage, InboundRecord, InvalidEncodedPacketLength, InvalidMessageActivityPageLimit,
+    InvalidRfTraceImportBatch, InvalidRfTracePageLimit, InvalidSubmissionId, InvalidTimestamp,
+    MAX_LATITUDE_E6, MAX_LONGITUDE_E6, MAX_MESSAGE_ACTIVITY_EVENTS, MAX_MESSAGE_ACTIVITY_PAGE_SIZE,
+    MAX_RF_TRACE_PAGE_SIZE, MAX_UNIX_TIMESTAMP_MILLIS, MIN_LATITUDE_E6, MIN_LONGITUDE_E6,
+    MessageActivityEvent, MessageActivityId, MessageActivityKind, MessageActivityPage,
+    MessageActivityPageRequest, MessageActivityRetryTrigger, MessageActivityScope,
+    MessageAttemptNumber, MessageId, MessageIngressObservation, MessageInterfaceId,
+    MessageLocation, MessageSignalObservation, OutboxId, OutboxMaterial, OutboxRecord,
+    OutboxStatus, PacketEvidence, PhoneLocationAuthorization, PhoneLocationSample,
+    PhoneLocationSource, PhoneLocationUnavailableReason, ReconcileWork, RfTraceAttemptObservation,
+    RfTraceAttemptOutcome, RfTraceBootId, RfTraceEvent, RfTraceEventId, RfTraceEventSequence,
+    RfTraceIdentityHash, RfTraceImportBatch, RfTraceInterfaceId, RfTraceMessageCorrelation,
+    RfTraceObservation, RfTraceObservationKind, RfTracePage, RfTracePageRequest,
+    RfTraceProofIngress, RfTraceRadioProfile, RfTraceRouteObservation, RfTraceRouteResolution,
+    RfTraceRxObservation, RfTraceScope, RfTraceTxObservation, RfTraceTxOutcome, RnsAttemptToken,
+    SubmissionFailure, SubmissionId, SubmissionState, TimelineDirection, TimelineEntry,
+    TimelineSequence, UnixTimestampMillis,
 };
 #[cfg(feature = "sqlite")]
 pub use sqlite::{SQLITE_SCHEMA_VERSION, SqliteChatStore, SqliteStoreError};
 pub use store::{
-    AcceptanceOutcome, ChatStore, ChatStoreError, ContactUpsertOutcome, DeviceBindingOutcome,
-    ImageError, InboundCommitOutcome, OutboxCommitOutcome, StatusProjectionOutcome,
+    AcceptanceOutcome, AutomaticOutboxRetryOutcome, ChatStore, ChatStoreError,
+    ContactUpsertOutcome, DeviceBindingOutcome, ImageError, InboundCommitOutcome,
+    OutboxCommitOutcome, OutboxRetryOutcome, RfTraceImportOutcome, StatusProjectionOutcome,
 };

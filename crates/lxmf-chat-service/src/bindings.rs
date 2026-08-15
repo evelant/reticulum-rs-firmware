@@ -1,17 +1,43 @@
 //! App-facing TypeScript binding generation and JSON integer policy.
 
 use reticulum_device_api::{
-    API_VERSION_MAJOR, API_VERSION_MINOR, MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES,
-    MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES,
-    MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
+    API_VERSION_MAJOR, API_VERSION_MINOR, DEFAULT_RETICULUM_TCP_PORT, MAX_LXMF_BASIC_CONTENT_BYTES,
+    MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES,
+    MAX_NOMAD_PAGE_PATH_BYTES, MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
+    MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES, MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_PASSPHRASE_BYTES,
+    MAX_WIFI_SSID_BYTES, MIN_WIFI_PASSPHRASE_BYTES,
 };
 use reticulum_lxmf_chat_runtime::{
-    ApplianceSnapshot, BytesEncoding, BytesView, ConnectionState, ConnectionTransport,
-    ContactRequest, ContactView, DeviceView, MAX_CONTACT_NAME_BYTES, MutationOutcome,
-    MutationResponse, NearbyPeerView, NomadFetchFailure, NomadFetchPhase, NomadFetchPollRequest,
-    NomadFetchPollResponse, NomadFetchStartOutcome, NomadFetchStartRequest,
-    NomadFetchStartResponse, SendOutcome, SendRequest, SendResponse, TimelineDirection,
-    TimelineStatus, TimelineView,
+    ApplianceSnapshot, BASIC_LXMF_SELECTION_OVERHEAD_BYTES, BytesEncoding, BytesView,
+    ConnectionState, ConnectionTransport, ContactRequest, ContactView, ConversationPeerView,
+    DeviceView, DiagnosticInterfaceKindView, DiagnosticInterfaceStateView, DiagnosticInterfaceView,
+    DiagnosticLoraDataTxEvidenceView, DiagnosticLoraLastRxView, DiagnosticLoraLastTxView,
+    DiagnosticLoraTxFamilyView, DiagnosticLoraTxOutcomeView, EMPTY_LXMF_FIELDS_ENCODED_BYTES,
+    LINK_PACKET_MAX_CONTENT, LoraDiagnosticsView, LoraRadioProfileView, MAX_CONTACT_NAME_BYTES,
+    MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES, ManualServiceAnnounceDisposition,
+    MessageActivityEventView, MessageActivityKindView, MessageActivityPageRequest,
+    MessageActivityPageView, MessageActivityRetryTriggerView, MessageIngressObservationView,
+    MessageLocationView, MessageSignalObservationView, MutationOutcome, MutationResponse,
+    NearbyPeerView, NetworkConfigMutation, NetworkConfigMutationOutcome,
+    NetworkConfigMutationRequest, NetworkConfigView, NetworkRuntimeStatusView, NomadFetchFailure,
+    NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse, NomadFetchStartOutcome,
+    NomadFetchStartRequest, NomadFetchStartResponse, PacketEvidenceView,
+    PhoneLocationAuthorizationView, PhoneLocationObservationView, PhoneLocationSourceView,
+    PhoneLocationUnavailableReasonView, RadioRoutesStatusView, RadioTraceAttemptOutcomeView,
+    RadioTraceEventKindView, RadioTraceEventView, RadioTraceMessageCorrelationView,
+    RadioTracePageRequest, RadioTracePageView, RadioTraceProfileView,
+    RadioTraceRouteResolutionView, RadioTraceTxOutcomeView, RetainedRouteView,
+    ReticulumDnsDiagnosticsView, ReticulumDnsPrimaryOutcomeView, ReticulumDnsRawAttemptView,
+    ReticulumDnsRawOutcomeView, ReticulumDnsRawSetupStateView, ReticulumDnsRawSourceView,
+    ReticulumDnsResolutionSourceView, ReticulumDnsResolutionView, ReticulumProbeFailure,
+    ReticulumProbeIngressView, ReticulumProbePhase, ReticulumProbePollRequest,
+    ReticulumProbePollResponse, ReticulumProbeSignalView, ReticulumProbeStartOutcome,
+    ReticulumProbeStartRequest, ReticulumProbeStartResponse, ReticulumProbeSuccessView,
+    ReticulumTcpFailureView, ReticulumTcpPeerHostnameInput, ReticulumTcpPeerIpv4Input,
+    ReticulumTcpPeerStateView, ReticulumTcpPeerView, RetrySendOutcome, RetrySendRequest,
+    RetrySendResponse, RmapPhoneLocation, RnsDiagnosticsView, RouteDiagnosticResolutionView,
+    SendOutcome, SendRequest, SendResponse, TimelineDirection, TimelineStatus, TimelineView,
+    WifiCredentialUpdate, WifiNetworkProfileView, WifiStationStateView,
 };
 use ts_rs::TS;
 
@@ -48,9 +74,19 @@ pub fn render_api_bindings() -> String {
          export const MAX_CONTACT_NAME_BYTES = {MAX_CONTACT_NAME_BYTES} as const;\n\
          export const MAX_LXMF_BASIC_TITLE_BYTES = {MAX_LXMF_BASIC_TITLE_BYTES} as const;\n\
          export const MAX_LXMF_BASIC_CONTENT_BYTES = {MAX_LXMF_BASIC_CONTENT_BYTES} as const;\n\
+         export const MAX_LXMF_DIRECT_CONTENT_BYTES = {LINK_PACKET_MAX_CONTENT} as const;\n\
+         export const BASIC_LXMF_SELECTION_OVERHEAD_BYTES = {BASIC_LXMF_SELECTION_OVERHEAD_BYTES} as const;\n\
+         export const EMPTY_LXMF_FIELDS_ENCODED_BYTES = {EMPTY_LXMF_FIELDS_ENCODED_BYTES} as const;\n\
+         export const MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES = {MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES} as const;\n\
          export const MAX_NOMAD_PAGE_PATH_BYTES = {MAX_NOMAD_PAGE_PATH_BYTES} as const;\n\
          export const MAX_NOMAD_PAGE_BYTES = {MAX_NOMAD_PAGE_BYTES} as const;\n\
-         export const MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS = {MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS} as const;\n\n"
+         export const MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS = {MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS} as const;\n\
+         export const MAX_WIFI_NETWORK_PROFILES = {MAX_WIFI_NETWORK_PROFILES} as const;\n\
+         export const MAX_WIFI_SSID_BYTES = {MAX_WIFI_SSID_BYTES} as const;\n\
+         export const MIN_WIFI_PASSPHRASE_BYTES = {MIN_WIFI_PASSPHRASE_BYTES} as const;\n\
+         export const MAX_WIFI_PASSPHRASE_BYTES = {MAX_WIFI_PASSPHRASE_BYTES} as const;\n\
+         export const MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES = {MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES} as const;\n\
+         export const DEFAULT_RETICULUM_TCP_PORT = {DEFAULT_RETICULUM_TCP_PORT} as const;\n\n"
     ));
 
     append_declaration::<JsonSafeInteger>(&mut output, &config);
@@ -68,12 +104,72 @@ pub fn render_api_bindings() -> String {
     append_declaration::<OnboardingMethod>(&mut output, &config);
     append_declaration::<OnboardingView>(&mut output, &config);
     append_declaration::<ContactView>(&mut output, &config);
+    append_declaration::<ConversationPeerView>(&mut output, &config);
     append_declaration::<NearbyPeerView>(&mut output, &config);
+    append_declaration::<DiagnosticInterfaceKindView>(&mut output, &config);
+    append_declaration::<DiagnosticInterfaceStateView>(&mut output, &config);
+    append_declaration::<DiagnosticInterfaceView>(&mut output, &config);
+    append_declaration::<DiagnosticLoraTxOutcomeView>(&mut output, &config);
+    append_declaration::<DiagnosticLoraTxFamilyView>(&mut output, &config);
+    append_declaration::<DiagnosticLoraDataTxEvidenceView>(&mut output, &config);
+    append_declaration::<DiagnosticLoraLastRxView>(&mut output, &config);
+    append_declaration::<DiagnosticLoraLastTxView>(&mut output, &config);
+    append_declaration::<LoraDiagnosticsView>(&mut output, &config);
+    append_declaration::<RnsDiagnosticsView>(&mut output, &config);
+    append_declaration::<RouteDiagnosticResolutionView>(&mut output, &config);
+    append_declaration::<RetainedRouteView>(&mut output, &config);
+    append_declaration::<RadioRoutesStatusView>(&mut output, &config);
     append_declaration::<BytesEncoding>(&mut output, &config);
     append_declaration::<BytesView>(&mut output, &config);
+    append_declaration::<WifiNetworkProfileView>(&mut output, &config);
+    append_declaration::<ReticulumTcpPeerView>(&mut output, &config);
+    append_declaration::<RmapPhoneLocation>(&mut output, &config);
+    append_declaration::<LoraRadioProfileView>(&mut output, &config);
+    append_declaration::<NetworkConfigView>(&mut output, &config);
+    append_declaration::<WifiStationStateView>(&mut output, &config);
+    append_declaration::<ReticulumTcpPeerStateView>(&mut output, &config);
+    append_declaration::<ReticulumTcpFailureView>(&mut output, &config);
+    append_declaration::<ReticulumDnsPrimaryOutcomeView>(&mut output, &config);
+    append_declaration::<ReticulumDnsRawSetupStateView>(&mut output, &config);
+    append_declaration::<ReticulumDnsRawSourceView>(&mut output, &config);
+    append_declaration::<ReticulumDnsRawOutcomeView>(&mut output, &config);
+    append_declaration::<ReticulumDnsRawAttemptView>(&mut output, &config);
+    append_declaration::<ReticulumDnsResolutionSourceView>(&mut output, &config);
+    append_declaration::<ReticulumDnsResolutionView>(&mut output, &config);
+    append_declaration::<ReticulumDnsDiagnosticsView>(&mut output, &config);
+    append_declaration::<NetworkRuntimeStatusView>(&mut output, &config);
+    append_declaration::<WifiCredentialUpdate>(&mut output, &config);
+    append_declaration::<ReticulumTcpPeerIpv4Input>(&mut output, &config);
+    append_declaration::<ReticulumTcpPeerHostnameInput>(&mut output, &config);
+    append_declaration::<NetworkConfigMutation>(&mut output, &config);
+    append_declaration::<NetworkConfigMutationRequest>(&mut output, &config);
+    append_declaration::<NetworkConfigMutationOutcome>(&mut output, &config);
+    append_declaration::<ManualServiceAnnounceDisposition>(&mut output, &config);
     append_declaration::<TimelineDirection>(&mut output, &config);
     append_declaration::<TimelineStatus>(&mut output, &config);
+    append_declaration::<PacketEvidenceView>(&mut output, &config);
+    append_declaration::<MessageSignalObservationView>(&mut output, &config);
+    append_declaration::<MessageIngressObservationView>(&mut output, &config);
+    append_declaration::<MessageLocationView>(&mut output, &config);
     append_declaration::<TimelineView>(&mut output, &config);
+    append_declaration::<MessageActivityRetryTriggerView>(&mut output, &config);
+    append_declaration::<MessageActivityKindView>(&mut output, &config);
+    append_declaration::<PhoneLocationAuthorizationView>(&mut output, &config);
+    append_declaration::<PhoneLocationSourceView>(&mut output, &config);
+    append_declaration::<PhoneLocationUnavailableReasonView>(&mut output, &config);
+    append_declaration::<PhoneLocationObservationView>(&mut output, &config);
+    append_declaration::<MessageActivityEventView>(&mut output, &config);
+    append_declaration::<MessageActivityPageRequest>(&mut output, &config);
+    append_declaration::<MessageActivityPageView>(&mut output, &config);
+    append_declaration::<RadioTraceProfileView>(&mut output, &config);
+    append_declaration::<RadioTraceRouteResolutionView>(&mut output, &config);
+    append_declaration::<RadioTraceTxOutcomeView>(&mut output, &config);
+    append_declaration::<RadioTraceAttemptOutcomeView>(&mut output, &config);
+    append_declaration::<RadioTraceEventKindView>(&mut output, &config);
+    append_declaration::<RadioTraceMessageCorrelationView>(&mut output, &config);
+    append_declaration::<RadioTraceEventView>(&mut output, &config);
+    append_declaration::<RadioTracePageRequest>(&mut output, &config);
+    append_declaration::<RadioTracePageView>(&mut output, &config);
     append_declaration::<SessionRequest>(&mut output, &config);
     append_declaration::<RecoveryAction>(&mut output, &config);
     append_declaration::<RecoveryRequest>(&mut output, &config);
@@ -83,6 +179,9 @@ pub fn render_api_bindings() -> String {
     append_declaration::<SendRequest>(&mut output, &config);
     append_declaration::<SendOutcome>(&mut output, &config);
     append_declaration::<SendResponse>(&mut output, &config);
+    append_declaration::<RetrySendRequest>(&mut output, &config);
+    append_declaration::<RetrySendOutcome>(&mut output, &config);
+    append_declaration::<RetrySendResponse>(&mut output, &config);
     append_declaration::<NomadFetchStartRequest>(&mut output, &config);
     append_declaration::<NomadFetchPollRequest>(&mut output, &config);
     append_declaration::<NomadFetchStartOutcome>(&mut output, &config);
@@ -90,6 +189,16 @@ pub fn render_api_bindings() -> String {
     append_declaration::<NomadFetchPhase>(&mut output, &config);
     append_declaration::<NomadFetchFailure>(&mut output, &config);
     append_declaration::<NomadFetchPollResponse>(&mut output, &config);
+    append_declaration::<ReticulumProbeStartRequest>(&mut output, &config);
+    append_declaration::<ReticulumProbePollRequest>(&mut output, &config);
+    append_declaration::<ReticulumProbeStartOutcome>(&mut output, &config);
+    append_declaration::<ReticulumProbeStartResponse>(&mut output, &config);
+    append_declaration::<ReticulumProbePhase>(&mut output, &config);
+    append_declaration::<ReticulumProbeFailure>(&mut output, &config);
+    append_declaration::<ReticulumProbeSignalView>(&mut output, &config);
+    append_declaration::<ReticulumProbeIngressView>(&mut output, &config);
+    append_declaration::<ReticulumProbeSuccessView>(&mut output, &config);
+    append_declaration::<ReticulumProbePollResponse>(&mut output, &config);
     append_declaration::<ErrorBody>(&mut output, &config);
     normalize_generated_module(output)
 }
@@ -162,6 +271,75 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn network_bindings_are_generated_from_the_secret_safe_runtime_contract() {
+        let bindings = render_api_bindings();
+        assert!(bindings.contains("export type NetworkConfigView ="));
+        assert!(bindings.contains("export type NetworkConfigMutationRequest ="));
+        assert!(bindings.contains("export type NetworkConfigMutationOutcome ="));
+        assert!(bindings.contains("\"kind\": \"replace\""));
+        assert!(bindings.contains("passphrase: string"));
+        assert!(bindings.contains("hostname: string"));
+        assert!(bindings.contains("\"kind\": \"set_gateway_policy\""));
+        assert!(bindings.contains("\"kind\": \"set_rmap_config\""));
+        assert!(bindings.contains("export type ManualServiceAnnounceDisposition ="));
+        assert!(bindings.contains("export type ReticulumTcpFailureView ="));
+        assert!(bindings.contains("\"backoff\""));
+        assert!(bindings.contains("\"dns_timeout\""));
+        assert!(bindings.contains("export type ReticulumDnsDiagnosticsView ="));
+        assert!(bindings.contains("\"kind\": \"response_code\""));
+        assert!(bindings.contains("dns_diagnostics: ReticulumDnsDiagnosticsView | null"));
+        assert!(bindings.contains("\"outcome\": \"revision_conflict\""));
+        assert!(bindings.contains("export const DEFAULT_RETICULUM_TCP_PORT = 4242 as const;"));
+    }
+
+    #[test]
+    fn radio_and_route_bindings_preserve_local_diagnostics_semantics() {
+        let bindings = render_api_bindings();
+        assert!(bindings.contains("export type RadioRoutesStatusView ="));
+        assert!(bindings.contains("export type RetainedRouteView ="));
+        assert!(bindings.contains("last_local_use_age_ms: JsonSafeInteger | null"));
+        assert!(bindings.contains("route_table_revision: JsonSafeInteger"));
+        assert!(bindings.contains("\"broadcast_ready\""));
+        assert!(bindings.contains("applied_tx_power_dbm: number"));
+        assert!(bindings.contains("rssi_dbm: number"));
+    }
+
+    #[test]
+    fn activity_bindings_preserve_paging_and_lifecycle_semantics() {
+        let bindings = render_api_bindings();
+        assert!(bindings.contains("export type MessageSignalObservationView ="));
+        assert!(bindings.contains("export type MessageIngressObservationView ="));
+        assert!(bindings.contains("interface_id: number"));
+        assert!(bindings.contains("signal: MessageSignalObservationView | null"));
+        assert!(bindings.contains("ingress_observation: MessageIngressObservationView | null"));
+        assert!(bindings.contains("export type MessageActivityPageRequest ="));
+        assert!(bindings.contains("before_event_id: JsonSafeInteger | null"));
+        assert!(bindings.contains("timeline_sequence: JsonSafeInteger | null"));
+        assert!(bindings.contains("export type MessageActivityPageView ="));
+        assert!(bindings.contains("export type PhoneLocationObservationView ="));
+        assert!(bindings.contains("\"state\": \"available\""));
+        assert!(bindings.contains("captured_at_unix_ms: JsonSafeInteger"));
+        assert!(bindings.contains("export type MessageActivityEventView ="));
+        assert!(bindings.contains("attempt_location: PhoneLocationObservationView | null"));
+        assert!(bindings.contains("ingress_observation: MessageIngressObservationView | null"));
+        assert!(bindings.contains("export type MessageActivityKindView ="));
+        assert!(bindings.contains("\"kind\": \"outbound_status\""));
+        assert!(bindings.contains("packet_evidence: PacketEvidenceView | null"));
+        assert!(bindings.contains("trigger: MessageActivityRetryTriggerView"));
+    }
+
+    #[test]
+    fn probe_bindings_preserve_receiver_local_return_hop_semantics() {
+        let bindings = render_api_bindings();
+        assert!(bindings.contains("export type ReticulumProbeStartRequest ="));
+        assert!(bindings.contains("export type ReticulumProbePollResponse ="));
+        assert!(bindings.contains("\"state\": \"succeeded\""));
+        assert!(bindings.contains("round_trip_ms: number"));
+        assert!(bindings.contains("ingress_observation: ReticulumProbeIngressView"));
+        assert!(bindings.contains("signal: ReticulumProbeSignalView | null"));
     }
 
     #[test]

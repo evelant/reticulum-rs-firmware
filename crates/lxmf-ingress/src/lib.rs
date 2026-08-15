@@ -327,6 +327,7 @@ where
         ApplicationEvent::DataReceived {
             destination,
             payload,
+            ..
         } => (destination, payload.as_slice(), CarrierKind::Opportunistic),
         ApplicationEvent::LinkData {
             binding, context, ..

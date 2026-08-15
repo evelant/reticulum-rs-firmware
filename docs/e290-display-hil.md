@@ -85,6 +85,7 @@ Board A from a changing `/dev/cu.*` enumeration order.
 
    ```sh
    source "$HOME/export-esp.sh"
+   RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles' \
    cargo +esp build --locked --release \
      -p reticulum-heltec-vision-master-e290-display-hil \
      --target xtensa-esp32s3-none-elf
@@ -103,8 +104,8 @@ Board A from a changing `/dev/cu.*` enumeration order.
 
    Although this image never mounts product storage, it is flashed onto a
    product board and therefore uses the canonical 16 MiB product partition map.
-   Do not rely on the workspace runner's 8 MiB default or an implicit espflash
-   table.
+   The shared Xtensa target configuration deliberately defines no flash runner.
+   Do not substitute an implicit `espflash` size or partition table.
 
 4. Attach the serial monitor to the re-enumerated port and reset once for a
    complete trace:

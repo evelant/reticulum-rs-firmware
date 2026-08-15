@@ -1,35 +1,6 @@
 //! Permanent transport-neutral node and interface orchestration.
 
-use core::mem;
-
-use embassy_sync::blocking_mutex::raw::RawMutex;
-use rand_core::{CryptoRng, RngCore};
-#[cfg(test)]
-use reticulum_interface_router::InterfaceLifecycleState;
-use reticulum_interface_router::{
-    CompletionRouteError, IngressBufferId, IngressBufferReturnError, IngressBufferReturnFailure,
-    IngressRouteError, InterfaceActorHandoff, InterfaceDescriptor, InterfaceFabric, InterfaceLease,
-    InterfaceLeaseError, InterfaceLifecycleTransition, InterfaceProperties, InterfaceQueueId,
-    InterfaceRegistrationError, InterfaceRegistry, OutboundCompletion, OutboundRouter,
-    SealedIngressPacket,
-};
-use reticulum_node_core::{
-    AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, ApplicationEventOfferError,
-    ApplicationEventOfferReport, ApplicationEventOwner, ApplicationLinkBinding, AttemptHandle,
-    CapacitySnapshot, DestinationHash, IngressReport, InitiateLinkError, LinkHandle, LinkState,
-    MaintenanceReport, MonotonicInstant, MonotonicMillis, MonotonicSeconds, NodeActions, NodeCore,
-    OrdinaryActionCapacitySnapshot, OrdinaryPreparedPacket, OutboundDispatchInterval,
-    OutboundProtocolToken, PacketInterfaceId, PathRequestError, PrepareBasicLxmfError,
-    PrepareRequestError, PrepareResponseError, PreparedBasicDirectLxmf, PreparedBasicLxmf,
-    PreparedPacket, PreparedRequestActions, ReceiptCorrelationError, RequestDispatchConfirmation,
-    RequestDispatchError, RequestDispatchReconciliation, RequestHandle, TerminalAttempt,
-    TerminalAttempts, TxAuthorizationPolicy, TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope,
-    TxRecoveryObservation, TxRoutePlan,
-};
-use reticulum_tx_handoff::{
-    DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
-    OrdinaryPairedPermitHandoff,
-};
+use core::mem::{self, MaybeUninit};
 
 use crate::{
     DataCompletionAcceptError, DataPermitServer, DataPermitServerPhase, DataPermitServerStep,
@@ -40,6 +11,276 @@ use crate::{
     OrdinaryRouterFault, OrdinaryRouterFaultResidueKind, OrdinaryRouterOfferError,
     OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions, OrdinaryRouterStep,
 };
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use rand_core::{CryptoRng, RngCore};
+#[cfg(test)]
+use reticulum_interface_router::InterfaceLifecycleState;
+use reticulum_interface_router::{
+    CompletionRouteError, IngressBufferId, IngressBufferReturnError, IngressBufferReturnFailure,
+    IngressRouteError, InterfaceActorHandoff, InterfaceDescriptor, InterfaceFabric, InterfaceLease,
+    InterfaceLeaseError, InterfaceLifecycleTransition, InterfaceProperties, InterfaceQueueId,
+    InterfaceRegistrationError, InterfaceRegistry, InterfaceTopology, OutboundCompletion,
+    OutboundRouter, SealedIngressPacket,
+};
+use reticulum_node_core::{
+    AcknowledgeError, AnnounceAdmissionError, AnnounceEmissionTime, ApplicationEventOfferError,
+    ApplicationEventOfferReport, ApplicationEventOwner, ApplicationLinkBinding, AttemptHandle,
+    CapacitySnapshot, DestinationHash, EmbeddedNodeMetrics, IngressAnnounceEgress,
+    IngressBroadcastPolicy, IngressBroadcastScope, IngressReport, InitiateLinkError, LinkHandle,
+    LinkState, LxmfMessageLocation, MaintenanceReport, MonotonicInstant, MonotonicMillis,
+    MonotonicSeconds, NodeActions, NodeConfig, NodeConstructionError, NodeCore, NodeIdentity,
+    NodeInstanceId, OrdinaryActionCapacitySnapshot, OrdinaryPreparedPacket,
+    OutboundDispatchInterval, OutboundProtocolToken, PacketIngressObservation, PacketInterfaceId,
+    PacketSignalObservation, PathRequestError, PrepareBasicLxmfError, PrepareRequestError,
+    PrepareResponseError, PreparedBasicDirectLxmf, PreparedBasicLxmf, PreparedPacket,
+    PreparedRequestActions, ProofProbeIdentityAliasError, ReceiptCorrelationError,
+    RequestDispatchConfirmation, RequestDispatchError, RequestDispatchReconciliation,
+    RequestHandle, RetainedRouteSnapshot, TerminalAttempt, TerminalAttempts, TxAuthorizationPolicy,
+    TxLeaseDeadline, TxMaintenanceReport, TxOwnerScope, TxRecoveryObservation, TxRoutePlan,
+    TxTarget,
+};
+use reticulum_tx_handoff::{
+    DataPairedPermitHandoff, DispatcherPermitHandoff, OrdinaryDispatcherPermitHandoff,
+    OrdinaryPairedPermitHandoff,
+};
+
+/// Resolution of one RNS-retained interface binding against current registry state.
+///
+/// An exact route retains only an interface identifier. Its descriptor is the
+/// registry's current descriptor, not proof that the route was learned under
+/// that descriptor generation or configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteInterfaceResolution {
+    /// RNS retained no exact interface and will use current broadcast fallback.
+    BroadcastFallback {
+        /// Whether at least one currently eligible interface satisfies the fallback.
+        usable: bool,
+    },
+    /// RNS retained one exact interface identifier.
+    Exact {
+        /// Exact interface identifier retained with the route.
+        interface: PacketInterfaceId,
+        /// Current descriptor for that identifier, if still registered.
+        current: Option<InterfaceDescriptor>,
+        /// Whether the exact target resolves against current interface eligibility.
+        usable: bool,
+    },
+}
+
+impl RouteInterfaceResolution {
+    /// Whether the retained target can currently accept a new routed owner.
+    pub const fn is_usable(self) -> bool {
+        match self {
+            Self::BroadcastFallback { usable } | Self::Exact { usable, .. } => usable,
+        }
+    }
+
+    /// Exact retained interface, or `None` when RNS will use broadcast fallback.
+    pub const fn retained_interface(self) -> Option<PacketInterfaceId> {
+        match self {
+            Self::BroadcastFallback { .. } => None,
+            Self::Exact { interface, .. } => Some(interface),
+        }
+    }
+
+    /// Current authoritative descriptor for an exact retained interface.
+    ///
+    /// Broadcast fallback can involve multiple interfaces and therefore has no
+    /// single descriptor. `None` for an exact route means the retained
+    /// identifier is not currently registered.
+    pub const fn current_descriptor(self) -> Option<InterfaceDescriptor> {
+        match self {
+            Self::BroadcastFallback { .. } => None,
+            Self::Exact { current, .. } => current,
+        }
+    }
+
+    /// Current online state of an exact retained interface.
+    ///
+    /// `None` means either broadcast fallback or a missing current descriptor.
+    pub const fn current_online(self) -> Option<bool> {
+        match self {
+            Self::BroadcastFallback { .. } => None,
+            Self::Exact {
+                current: Some(descriptor),
+                ..
+            } => Some(descriptor.is_online()),
+            Self::Exact { current: None, .. } => None,
+        }
+    }
+
+    /// Whether RNS retained transport-neutral broadcast fallback.
+    pub const fn is_broadcast_fallback(self) -> bool {
+        matches!(self, Self::BroadcastFallback { .. })
+    }
+}
+
+/// Expiry interpretation of one retained route at a snapshot's monotonic time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteExpiryState {
+    /// The route remains within Rete's inclusive expiry boundary.
+    Retained {
+        /// Whole seconds until the boundary, possibly zero at the last valid sample.
+        remaining_seconds: u64,
+    },
+    /// The route exceeded its boundary but periodic maintenance has not removed it.
+    ExpiredPendingMaintenance {
+        /// Whole seconds beyond the inclusive expiry boundary.
+        overdue_seconds: u64,
+    },
+    /// Snapshot time preceded the route's retained learning timestamp.
+    ClockRegression,
+}
+
+/// One retained route enriched with current interface-registry resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteDiagnosticsEntry {
+    route: RetainedRouteSnapshot,
+    resolution: RouteInterfaceResolution,
+}
+
+impl RouteDiagnosticsEntry {
+    /// Copy-only native route-table projection.
+    pub const fn route(self) -> RetainedRouteSnapshot {
+        self.route
+    }
+
+    /// Resolution against the current authoritative interface registry.
+    pub const fn resolution(self) -> RouteInterfaceResolution {
+        self.resolution
+    }
+
+    /// Age of the retained route candidate at `captured_at`.
+    ///
+    /// `None` reports a monotonic-clock regression instead of flattening it to zero.
+    pub const fn learned_age_seconds(self, captured_at: MonotonicSeconds) -> Option<u64> {
+        captured_at.get().checked_sub(self.route.learned_at().get())
+    }
+
+    /// Age of Rete's LRU timestamp at `captured_at`.
+    ///
+    /// This is not peer activity or a last-heard measurement.
+    pub const fn lru_age_seconds(self, captured_at: MonotonicSeconds) -> Option<u64> {
+        captured_at
+            .get()
+            .checked_sub(self.route.last_accessed_at().get())
+    }
+
+    /// Interpret the retained route's expiry boundary at `captured_at`.
+    pub const fn expiry_state(self, captured_at: MonotonicSeconds) -> RouteExpiryState {
+        let Some(age) = self.learned_age_seconds(captured_at) else {
+            return RouteExpiryState::ClockRegression;
+        };
+        let expiry = self.route.expires_after_seconds();
+        if age <= expiry {
+            RouteExpiryState::Retained {
+                remaining_seconds: expiry - age,
+            }
+        } else {
+            RouteExpiryState::ExpiredPendingMaintenance {
+                overdue_seconds: age - expiry,
+            }
+        }
+    }
+}
+
+/// Caller-owned, allocation-free full route-table diagnostics snapshot.
+///
+/// Entries are sorted lexicographically by complete destination hash. This is
+/// a complete replacement view with no mutation revision: the pinned RNS path
+/// table exposes no revision counter. Consumers must not paginate over live
+/// native iteration. A future paged API must retain one complete snapshot and
+/// assign its own boot incarnation and generation.
+pub struct RouteDiagnosticsSnapshot<const PATHS: usize> {
+    captured_at: MonotonicSeconds,
+    len: usize,
+    entries: [Option<RouteDiagnosticsEntry>; PATHS],
+}
+
+impl<const PATHS: usize> RouteDiagnosticsSnapshot<PATHS> {
+    /// Construct empty caller-owned storage for later snapshot refreshes.
+    pub const fn empty() -> Self {
+        Self {
+            captured_at: MonotonicSeconds::new(0),
+            len: 0,
+            entries: [None; PATHS],
+        }
+    }
+
+    /// Monotonic whole-second sample shared by every entry in this snapshot.
+    ///
+    /// This timestamp is not a mutation revision.
+    pub const fn captured_at(&self) -> MonotonicSeconds {
+        self.captured_at
+    }
+
+    /// Number of complete retained routes copied into this snapshot.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the copied route table was empty.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Fixed route capacity inherited from the node's `PATHS` profile.
+    pub const fn capacity(&self) -> usize {
+        PATHS
+    }
+
+    /// Iterate complete entries in deterministic destination-hash order.
+    pub fn entries(&self) -> impl Iterator<Item = &RouteDiagnosticsEntry> {
+        self.entries[..self.len].iter().map(|entry| {
+            entry
+                .as_ref()
+                .expect("the initialized route diagnostics prefix is contiguous")
+        })
+    }
+
+    fn reset(&mut self, captured_at: MonotonicSeconds) {
+        self.captured_at = captured_at;
+        self.len = 0;
+        self.entries.fill(None);
+    }
+
+    fn push(&mut self, entry: RouteDiagnosticsEntry) -> bool {
+        let Some(slot) = self.entries.get_mut(self.len) else {
+            return false;
+        };
+        *slot = Some(entry);
+        self.len += 1;
+        true
+    }
+
+    fn sort_by_destination(&mut self) {
+        for index in 1..self.len {
+            let mut cursor = index;
+            while cursor > 0 {
+                let out_of_order = {
+                    let left = self.entries[cursor - 1]
+                        .as_ref()
+                        .expect("initialized route entry");
+                    let right = self.entries[cursor]
+                        .as_ref()
+                        .expect("initialized route entry");
+                    left.route.destination().as_bytes() > right.route.destination().as_bytes()
+                };
+                if !out_of_order {
+                    break;
+                }
+                self.entries.swap(cursor - 1, cursor);
+                cursor -= 1;
+            }
+        }
+    }
+}
+
+impl<const PATHS: usize> Default for RouteDiagnosticsSnapshot<PATHS> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 /// Why permanent node/interface aggregate construction failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,14 +392,15 @@ mod tests {
 
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
     use reticulum_interface_router::{
-        AdvertisedBitrate, InterfaceConfigId, InterfaceCost, InterfaceTxJob, LogicalMtu,
+        AdvertisedBitrate, IngressSignalObservation as RouterIngressSignalObservation,
+        InterfaceConfigId, InterfaceCost, InterfaceTxJob, LogicalMtu,
     };
     use reticulum_node_core::{
         ApplicationEvent, ApplicationEventDiscardReason, ApplicationEventSlot, ApplicationLinkRole,
         DestinationHash, MAX_DIRECT_LXMF_WIRE, MAX_OPPORTUNISTIC_LXMF_CARRIER, NodeConfig,
         NodeIdentity, NodeInstanceId, OrdinaryBufferPool, OrdinaryPacketBuffer, PermitResolution,
         TxAuthorizationCandidate, TxCompletionCode, TxPacketBuffer, TxPermitRequirements,
-        TxPermitReservation, TxPermitResourceId, TxPolicyDecision,
+        TxPermitReservation, TxPermitResourceId, TxPolicyDecision, TxTarget as NodeTxTarget,
     };
     use reticulum_rns_rete::{
         IngressDisposition, InterfaceId as RnsInterfaceId, PacketType, TxTarget as RnsTxTarget,
@@ -169,7 +411,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        DataPreparedHop, DataRouterCompletionProgress, DataRouterConfig, OrdinaryRouterConfig,
+        DataPreparedHop, DataRouterCompletionProgress, DataRouterConfig,
+        OrdinaryRouterCompletionProgress, OrdinaryRouterConfig,
     };
 
     const DATA_BUFFERS: usize = 1;
@@ -490,6 +733,147 @@ mod tests {
             supervisor.recall_identity(&DestinationHash::new([0xee; 16])),
             None
         );
+    }
+
+    #[test]
+    fn route_diagnostics_are_complete_sorted_and_resolve_current_interfaces() {
+        let (mut owner, fallback_destination) = sender(110);
+        let mut exact_peer = NodeCore::<8, 4, 8, 8, 0>::new(
+            identity(112),
+            "reticulum",
+            &["route-diagnostics-exact-peer"],
+            NodeInstanceId::new([0xf2; 16]),
+            NodeConfig::endpoint(),
+        )
+        .expect("exact route peer must construct");
+        let exact_destination = exact_peer.destination_hash();
+        let mut rng = CounterRng::default();
+        exact_peer
+            .queue_announce(None, AnnounceEmissionTime::new(1).unwrap(), &mut rng)
+            .expect("exact route announce must queue");
+        let announce = exact_peer.flush_announces(MonotonicSeconds::new(1), &mut rng);
+        owner
+            .ingest(
+                announce.packets[0].bytes(),
+                MonotonicSeconds::new(10),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .expect("owner must learn exact route");
+
+        let (mut supervisor, actor_ports, _) = build_from_node::<2, 1>(owner, fallback_destination);
+        let mut snapshot = RouteDiagnosticsSnapshot::<8>::empty();
+        supervisor.snapshot_route_diagnostics(MonotonicSeconds::new(50), &mut snapshot);
+        assert_eq!(snapshot.captured_at(), MonotonicSeconds::new(50));
+        assert_eq!(snapshot.capacity(), 8);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(supervisor.retained_route_count(), 2);
+        assert_eq!(supervisor.node_metrics().capacity.paths.used, 2);
+        assert_eq!(supervisor.node_metrics().transport.paths_learned, 1);
+
+        let missing: Vec<_> = snapshot.entries().copied().collect();
+        assert!(
+            missing
+                .windows(2)
+                .all(|pair| pair[0].route().destination().as_bytes()
+                    <= pair[1].route().destination().as_bytes())
+        );
+        let fallback = missing
+            .iter()
+            .copied()
+            .find(|entry| entry.route().destination() == fallback_destination)
+            .expect("direct route must be copied");
+        assert_eq!(
+            fallback.resolution(),
+            RouteInterfaceResolution::BroadcastFallback { usable: false }
+        );
+        let exact = missing
+            .iter()
+            .copied()
+            .find(|entry| entry.route().destination() == exact_destination)
+            .expect("exact route must be copied");
+        assert_eq!(exact.route().received_on(), Some(PacketInterfaceId::new(2)));
+        assert_eq!(exact.route().learned_at(), MonotonicSeconds::new(10));
+        assert_eq!(exact.route().last_accessed_at(), MonotonicSeconds::new(10));
+        assert_eq!(exact.learned_age_seconds(snapshot.captured_at()), Some(40));
+        assert_eq!(exact.lru_age_seconds(snapshot.captured_at()), Some(40));
+        assert_eq!(
+            exact.resolution(),
+            RouteInterfaceResolution::Exact {
+                interface: PacketInterfaceId::new(2),
+                current: None,
+                usable: false,
+            }
+        );
+        let expiry = exact.route().expires_after_seconds();
+        assert_eq!(
+            exact.expiry_state(MonotonicSeconds::new(10 + expiry)),
+            RouteExpiryState::Retained {
+                remaining_seconds: 0
+            }
+        );
+        assert_eq!(
+            exact.expiry_state(MonotonicSeconds::new(11 + expiry)),
+            RouteExpiryState::ExpiredPendingMaintenance { overdue_seconds: 1 }
+        );
+        assert_eq!(
+            exact.expiry_state(MonotonicSeconds::new(9)),
+            RouteExpiryState::ClockRegression
+        );
+
+        let descriptors = register(&mut supervisor, &actor_ports, [true, true]);
+        supervisor.snapshot_route_diagnostics(MonotonicSeconds::new(51), &mut snapshot);
+        let registered: Vec<_> = snapshot.entries().copied().collect();
+        let fallback = registered
+            .iter()
+            .copied()
+            .find(|entry| entry.route().destination() == fallback_destination)
+            .expect("direct route must remain copied");
+        assert_eq!(
+            fallback.resolution(),
+            RouteInterfaceResolution::BroadcastFallback { usable: true }
+        );
+        let exact = registered
+            .iter()
+            .copied()
+            .find(|entry| entry.route().destination() == exact_destination)
+            .expect("exact route must remain copied");
+        assert_eq!(
+            exact.resolution(),
+            RouteInterfaceResolution::Exact {
+                interface: PacketInterfaceId::new(2),
+                current: Some(descriptors[0]),
+                usable: true,
+            }
+        );
+        assert_eq!(exact.resolution().current_online(), Some(true));
+
+        let offline = supervisor
+            .router
+            .set_online(descriptors[0].lease(), false)
+            .expect("exact route interface can go offline");
+        supervisor.snapshot_route_diagnostics(MonotonicSeconds::new(52), &mut snapshot);
+        let refreshed: Vec<_> = snapshot.entries().copied().collect();
+        let fallback = refreshed
+            .iter()
+            .copied()
+            .find(|entry| entry.route().destination() == fallback_destination)
+            .expect("direct route must remain copied");
+        assert!(fallback.resolution().is_usable());
+        let exact = refreshed
+            .iter()
+            .copied()
+            .find(|entry| entry.route().destination() == exact_destination)
+            .expect("exact route must remain copied");
+        assert_eq!(
+            exact.resolution(),
+            RouteInterfaceResolution::Exact {
+                interface: PacketInterfaceId::new(2),
+                current: Some(offline),
+                usable: false,
+            }
+        );
+        assert_eq!(exact.resolution().current_online(), Some(false));
     }
 
     #[test]
@@ -910,6 +1294,111 @@ mod tests {
         actions.packets[0].bytes().to_vec()
     }
 
+    fn first_forwarded_announce_job(
+        through_point_to_point: bool,
+        boundary_roles: bool,
+    ) -> Option<(NodeTxTarget, PacketInterfaceId)> {
+        let relay = TestNode::new(
+            identity(90),
+            "reticulum",
+            &["aggregate-border-relay"],
+            NodeInstanceId::new([0xea; 16]),
+            NodeConfig::transport(),
+        )
+        .expect("transport node must construct");
+        let destination = relay.destination_hash();
+        let (mut supervisor, [lora_actor, tcp_actor], _) =
+            build_from_node::<2, 2>(relay, destination);
+        let mut lora_properties = properties(1).with_topology(InterfaceTopology::SharedMedium);
+        let mut tcp_properties = properties(2).with_topology(InterfaceTopology::PointToPoint);
+        if boundary_roles {
+            lora_properties = lora_properties
+                .with_announce_mode(reticulum_interface_router::AnnouncePropagationMode::Internal);
+            tcp_properties = tcp_properties
+                .with_announce_mode(reticulum_interface_router::AnnouncePropagationMode::Boundary);
+        }
+        let lora_descriptor = supervisor
+            .router
+            .register(
+                lora_actor.queue_id(),
+                PacketInterfaceId::new(1),
+                lora_properties,
+                true,
+            )
+            .expect("shared-medium LoRa fixture registers");
+        let tcp_descriptor = supervisor
+            .router
+            .register(
+                tcp_actor.queue_id(),
+                PacketInterfaceId::new(2),
+                tcp_properties,
+                true,
+            )
+            .expect("point-to-point TCP fixture registers");
+        let (lora_interface, _lora_data, _lora_ordinary) = lora_actor.into_parts();
+        let (tcp_interface, _tcp_data, _tcp_ordinary) = tcp_actor.into_parts();
+        let (mut lora_tx, mut lora_ingress, _lora_lifecycle) = lora_interface.into_parts();
+        let (mut tcp_tx, mut tcp_ingress, _tcp_lifecycle) = tcp_interface.into_parts();
+        let (source_ingress, source_descriptor) = if through_point_to_point {
+            (&mut tcp_ingress, tcp_descriptor)
+        } else {
+            (&mut lora_ingress, lora_descriptor)
+        };
+        let authority = source_ingress
+            .bind_ingress(source_descriptor)
+            .expect("current descriptor binds to its ingress actor");
+        let mut rng = CounterRng::default();
+        let packet = native_announce_packet(91, &mut rng);
+        let mut buffer = source_ingress
+            .try_receive_buffer()
+            .expect("source actor owns a reusable ingress buffer");
+        buffer.capacity_mut()[..packet.len()].copy_from_slice(&packet);
+        let sealed = buffer.seal(packet.len()).expect("announce packet seals");
+        source_ingress
+            .try_send(authority, sealed)
+            .expect("completed ingress queue has capacity");
+
+        let processed =
+            match supervisor.step_ingress(MonotonicSeconds::new(40), admission(), &mut rng) {
+                NodeInterfaceIngressStep::Processed(processed) => processed,
+                _ => panic!("announce ingress did not process"),
+            };
+        assert_eq!(processed.actions_backpressured(), None);
+        assert_eq!(processed.terminal_action_fault(), None);
+        assert_eq!(processed.recycle_fault(), None);
+
+        let mut routed = None;
+        for _ in 0..64 {
+            if let Some(job) = lora_tx.try_receive_job() {
+                routed = Some(job);
+                break;
+            }
+            assert!(
+                tcp_tx.try_receive_job().is_none(),
+                "interface ordering must route this fixture through LoRa first"
+            );
+            if matches!(
+                supervisor.step(MonotonicMillis::new(40_000)).transition(),
+                NodeInterfaceSupervisorTransition::Ordinary(
+                    OrdinaryRouterStep::NonPacketActionsReady
+                )
+            ) {
+                let _ = drain_and_discard_application_events(&mut supervisor);
+            }
+        }
+        assert!(
+            tcp_tx.try_receive_job().is_none(),
+            "the serialized first hop must not skip the lower-numbered LoRa interface"
+        );
+        let routed = routed?;
+        let InterfaceTxJob::Ordinary(job) = routed else {
+            panic!("forwarded announce changed owner family")
+        };
+        let (_ticket, job) = job.into_parts();
+        let prepared = job.prepared();
+        Some((prepared.target(), prepared.interface()))
+    }
+
     fn admission() -> OrdinaryRouterAdmission {
         OrdinaryRouterAdmission::new(TxLeaseDeadline::new(MonotonicMillis::new(100_000)))
     }
@@ -1026,6 +1515,165 @@ mod tests {
     }
 
     #[test]
+    fn offline_tcp_pinned_path_cannot_capture_fresh_lora_path_discovery() {
+        let sender_tag = 40;
+        let receiver_tag = sender_tag + 1;
+        let mut receiver = NodeCore::<8, 4, 8, 8, 0>::new(
+            identity(receiver_tag),
+            "reticulum",
+            &["offline-tcp-path-receiver"],
+            NodeInstanceId::new([receiver_tag.wrapping_add(0x80); 16]),
+            NodeConfig::endpoint(),
+        )
+        .expect("path receiver must construct");
+        let destination = receiver.destination_hash();
+        let mut sender = node(sender_tag, "offline-tcp-path-sender");
+        let mut rng = CounterRng::default();
+        receiver
+            .queue_announce(None, AnnounceEmissionTime::new(1).unwrap(), &mut rng)
+            .expect("receiver announce must queue");
+        let announce = receiver.flush_announces(MonotonicSeconds::new(1), &mut rng);
+        sender
+            .ingest(
+                announce.packets[0].bytes(),
+                MonotonicSeconds::new(2),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .expect("sender must learn a path received on TCP");
+
+        let (mut supervisor, [lora_actor, tcp_actor], _) =
+            build_from_node::<2, 1>(sender, destination);
+        let lora_descriptor = supervisor
+            .router
+            .register(
+                lora_actor.queue_id(),
+                PacketInterfaceId::new(1),
+                properties(1).with_topology(InterfaceTopology::SharedMedium),
+                true,
+            )
+            .expect("LoRa interface must register online");
+        let tcp_descriptor = supervisor
+            .router
+            .register(
+                tcp_actor.queue_id(),
+                PacketInterfaceId::new(2),
+                properties(2).with_topology(InterfaceTopology::PointToPoint),
+                true,
+            )
+            .expect("TCP interface must register online");
+        let (lora_interface, _lora_data, _lora_ordinary) = lora_actor.into_parts();
+        let (tcp_interface, _tcp_data, _tcp_ordinary) = tcp_actor.into_parts();
+        let (mut lora_tx, _lora_ingress, _lora_lifecycle) = lora_interface.into_parts();
+        let (mut tcp_tx, _tcp_ingress, mut tcp_lifecycle) = tcp_interface.into_parts();
+
+        assert_eq!(
+            supervisor.node.retained_path_target(&destination),
+            Some(NodeTxTarget::Only(PacketInterfaceId::new(2)))
+        );
+        assert!(supervisor.has_usable_path(&destination));
+
+        let offline = tcp_lifecycle
+            .try_request_state(tcp_descriptor.lease(), InterfaceLifecycleState::Offline)
+            .expect("TCP Offline request must fit");
+        let mut offline_applied = false;
+        for _ in 0..16 {
+            if let NodeInterfaceSupervisorTransition::Lifecycle(transition) =
+                supervisor.step(MonotonicMillis::new(3)).transition()
+                && transition.acknowledgement().request() == offline
+            {
+                assert!(
+                    !transition
+                        .acknowledgement()
+                        .result()
+                        .expect("TCP Offline request must apply")
+                        .is_online()
+                );
+                offline_applied = true;
+                break;
+            }
+        }
+        assert!(offline_applied);
+        assert!(
+            !tcp_lifecycle
+                .try_finish_request()
+                .expect("TCP Offline acknowledgement must correlate")
+                .expect("TCP Offline acknowledgement must be retained")
+                .is_online()
+        );
+        assert!(supervisor.has_path(&destination));
+        assert!(
+            !supervisor.has_usable_path(&destination),
+            "the retained TCP path must not resolve through an offline interface"
+        );
+
+        let path_request = supervisor
+            .request_path(&destination, &mut rng)
+            .expect("offline pinned path must permit fresh discovery");
+        assert_eq!(path_request.packets.len(), 1);
+        assert_eq!(path_request.packets[0].target(), RnsTxTarget::All);
+        supervisor
+            .try_offer_actions(path_request, admission())
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "fresh path discovery must enter the ordinary router: {:?}",
+                    failure.reason()
+                )
+            });
+
+        let mut routed_lora = false;
+        for _ in 0..24 {
+            if let NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Routed {
+                interface,
+                ..
+            }) = supervisor.step(MonotonicMillis::new(4)).transition()
+            {
+                assert_eq!(interface, lora_descriptor.lease().interface());
+                routed_lora = true;
+                break;
+            }
+        }
+        assert!(routed_lora);
+        let InterfaceTxJob::Ordinary(lora_job) = lora_tx
+            .try_receive_job()
+            .expect("fresh path discovery must reach LoRa")
+        else {
+            panic!("fresh path discovery changed packet family")
+        };
+        let (ticket, lora_job) = lora_job.into_parts();
+        let completion = ticket
+            .complete(lora_job.cancel(TxCompletionCode::new(0x782)))
+            .expect("LoRa completion ticket must remain exact");
+        lora_tx
+            .try_send_completion(completion)
+            .expect("LoRa completion must fit");
+
+        let mut returned = false;
+        for _ in 0..24 {
+            match supervisor.step(MonotonicMillis::new(5)).transition() {
+                NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Completion(
+                    OrdinaryRouterCompletionProgress::Returned { .. },
+                )) => {
+                    returned = true;
+                    break;
+                }
+                NodeInterfaceSupervisorTransition::Ordinary(OrdinaryRouterStep::Routed {
+                    interface,
+                    ..
+                }) if interface == tcp_descriptor.lease().interface() => {
+                    panic!("offline TCP captured fresh path discovery")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            returned,
+            "LoRa was the fresh discovery's only eligible route"
+        );
+        assert!(tcp_tx.try_receive_job().is_none());
+    }
+
+    #[test]
     fn oversized_application_batch_stays_exact_while_ordinary_packet_progresses() {
         let (mut supervisor, [actor], _) = build::<1, 1>(2);
         register(
@@ -1042,6 +1690,7 @@ mod tests {
             vec![ApplicationEvent::DataReceived {
                 destination: [0x41; 16],
                 payload,
+                ingress: None,
             }],
             core::mem::take(&mut announce.packets),
             announce.unroutable_packets,
@@ -1167,6 +1816,7 @@ mod tests {
                     vec![ApplicationEvent::DataReceived {
                         destination: [0x61; 16],
                         payload: vec![0x71, 0x72],
+                        ingress: None,
                     }],
                     vec![],
                     0,
@@ -1458,6 +2108,87 @@ mod tests {
     }
 
     #[test]
+    fn queued_announce_preserves_optional_interface_signal_into_application_event() {
+        let (mut supervisor, [actor], _) = build::<1, 1>(17);
+        let [descriptor] = register(
+            &mut supervisor,
+            core::slice::from_ref(&actor).try_into().unwrap(),
+            [true],
+        );
+        let (interface, _data_permit, _ordinary_permit) = actor.into_parts();
+        let (_tx, mut ingress, _lifecycle) = interface.into_parts();
+        let authority = ingress
+            .bind_ingress(descriptor)
+            .expect("current descriptor binds to ingress actor");
+        let mut rng = CounterRng::default();
+        let signal = RouterIngressSignalObservation::new(-92, 6);
+
+        for (tag, expected_signal) in [(67, Some(signal)), (68, None)] {
+            let packet = native_announce_packet(tag, &mut rng);
+            let mut buffer = ingress
+                .try_receive_buffer()
+                .expect("the previous exact ingress buffer must be available");
+            buffer.capacity_mut()[..packet.len()].copy_from_slice(&packet);
+            let sealed = buffer
+                .seal_with_signal(packet.len(), expected_signal)
+                .expect("native announce fits the exact buffer");
+            ingress
+                .try_send(authority, sealed)
+                .expect("completed ingress queue has capacity");
+
+            let processed =
+                match supervisor.step_ingress(MonotonicSeconds::new(40), admission(), &mut rng) {
+                    NodeInterfaceIngressStep::Processed(processed) => processed,
+                    _ => panic!("queued announce must process"),
+                };
+            assert_eq!(processed.recycle_fault(), None);
+            assert_eq!(processed.actions_backpressured(), None);
+            drop(processed.into_report());
+
+            let mut non_packet_ready = false;
+            for _ in 0..16 {
+                if matches!(
+                    supervisor.step(MonotonicMillis::new(40_000)).transition(),
+                    NodeInterfaceSupervisorTransition::Ordinary(
+                        OrdinaryRouterStep::NonPacketActionsReady
+                    )
+                ) {
+                    non_packet_ready = true;
+                    break;
+                }
+            }
+            assert!(non_packet_ready, "announce event must reach the drain edge");
+
+            let mut slots = [ApplicationEventSlot::new()];
+            let mut owner = ApplicationEventOwner::new(&mut slots);
+            assert!(matches!(
+                supervisor.drain_application_events(&mut owner),
+                NodeInterfaceApplicationEventDrain::Drained(report)
+                    if report.accepted_events() == 1
+            ));
+            let lease = owner.lease_next().expect("announce event must be ready");
+            let ApplicationEvent::AnnounceReceived {
+                ingress: Some(observation),
+                ..
+            } = lease.event()
+            else {
+                panic!("announce event must retain ingress observation")
+            };
+            assert_eq!(
+                observation.interface().0,
+                descriptor.lease().interface().get()
+            );
+            assert_eq!(
+                observation
+                    .signal()
+                    .map(|signal| { (signal.rssi_dbm(), signal.snr_db()) }),
+                expected_signal.map(|signal| (signal.rssi_dbm(), signal.snr_db()))
+            );
+            lease.discard(ApplicationEventDiscardReason::ConsumerUnavailable);
+        }
+    }
+
+    #[test]
     fn queued_ingress_action_pressure_recycles_buffer_and_retries_exact_actions() {
         let (mut supervisor, [actor], _) = build::<1, 1>(18);
         let [descriptor] = register(
@@ -1563,6 +2294,45 @@ mod tests {
         }
         assert!(!supervisor.ingress_actions_pending());
         assert_eq!(supervisor.terminal_ingress_action_fault(), None);
+    }
+
+    #[test]
+    fn point_to_point_ingress_broadcast_excludes_its_source_interface() {
+        let (target, first_interface) =
+            first_forwarded_announce_job(true, false).expect("Full-mode announce forwards");
+
+        assert_eq!(target, NodeTxTarget::AllExcept(PacketInterfaceId::new(2)));
+        assert_eq!(first_interface, PacketInterfaceId::new(1));
+    }
+
+    #[test]
+    fn shared_medium_ingress_broadcast_preserves_same_interface_relay() {
+        let (target, first_interface) =
+            first_forwarded_announce_job(false, false).expect("Full-mode announce forwards");
+
+        assert_eq!(target, NodeTxTarget::All);
+        assert_eq!(
+            first_interface,
+            PacketInterfaceId::new(1),
+            "the shared-medium ingress slot remains a valid first relay hop"
+        );
+    }
+
+    #[test]
+    fn boundary_tcp_announce_does_not_enter_internal_lora() {
+        assert_eq!(
+            first_forwarded_announce_job(true, true),
+            None,
+            "the exact Boundary ingress announce has no eligible Internal LoRa egress"
+        );
+    }
+
+    #[test]
+    fn internal_lora_announce_can_relay_locally_and_cross_boundary() {
+        let (target, first_interface) =
+            first_forwarded_announce_job(false, true).expect("Internal announce forwards");
+        assert_eq!(target, NodeTxTarget::All);
+        assert_eq!(first_interface, PacketInterfaceId::new(1));
     }
 
     #[test]
@@ -2565,6 +3335,39 @@ mod tests {
     }
 
     #[test]
+    fn staged_in_place_construction_configures_the_final_node_before_finish() {
+        let storage = Box::leak(Box::new(MaybeUninit::<TestSupervisor<1, 1>>::uninit()));
+        let mut stage = TestSupervisor::<1, 1>::begin_node_in(
+            storage,
+            identity(41),
+            "reticulum",
+            &["staged-aggregate"],
+            NodeInstanceId::new([0xc1; 16]),
+            NodeConfig::endpoint(),
+        )
+        .expect("the in-place node must construct");
+        let destination = stage.node_mut().destination_hash();
+        let data = data_coordinator(stage.node_mut());
+        let ordinary = ordinary_coordinator(stage.node_mut());
+        let fabric = Box::leak(Box::new(InterfaceFabric::new()));
+
+        let (supervisor, actors) = stage
+            .finish(
+                fabric,
+                data,
+                ordinary,
+                data_pairs(),
+                ordinary_pairs(),
+                CountingAllow::default(),
+            )
+            .expect("the validated stage must finish");
+
+        assert_eq!(supervisor.destination_hash(), destination);
+        assert_eq!(actors.len(), 1);
+        assert_eq!(supervisor.fault(), None);
+    }
+
+    #[test]
     fn rejected_demultiplexed_completion_is_retained_as_exact_residue() {
         let (mut supervisor, [actor], _) = build::<1, 1>(9);
         register(
@@ -2744,6 +3547,205 @@ where
         [NodeInterfaceActorPorts<M, QUEUE_DEPTH>; SLOTS],
     ) {
         (self.supervisor, self.actors)
+    }
+}
+
+/// Partially initialized permanent aggregate whose node already resides at
+/// its final caller-owned address.
+///
+/// This boot-only stage lets a product configure the node, register external
+/// packet buffers, and derive the DATA and ordinary coordinators without ever
+/// moving the capacity-sized node through a stack frame. The stage must be
+/// consumed by [`Self::finish`]; dropping it intentionally leaves the
+/// caller-owned destination partially initialized and unavailable for reuse.
+#[must_use = "the in-place node must be configured and the supervisor construction finished"]
+pub struct NodeInterfaceSupervisorInit<
+    'a,
+    M,
+    P,
+    const PATHS: usize,
+    const ANNOUNCES: usize,
+    const DEDUPLICATION: usize,
+    const LINKS: usize,
+    const DATA_PACKET_BUFFERS: usize,
+    const ORDINARY_PACKET_BUFFERS: usize,
+    const SLOTS: usize,
+    const QUEUE_DEPTH: usize,
+> where
+    M: RawMutex + 'static,
+{
+    destination: &'a mut MaybeUninit<
+        NodeInterfaceSupervisor<
+            M,
+            P,
+            PATHS,
+            ANNOUNCES,
+            DEDUPLICATION,
+            LINKS,
+            DATA_PACKET_BUFFERS,
+            ORDINARY_PACKET_BUFFERS,
+            SLOTS,
+            QUEUE_DEPTH,
+        >,
+    >,
+}
+
+impl<
+    'a,
+    M,
+    P,
+    const PATHS: usize,
+    const ANNOUNCES: usize,
+    const DEDUPLICATION: usize,
+    const LINKS: usize,
+    const DATA_PACKET_BUFFERS: usize,
+    const ORDINARY_PACKET_BUFFERS: usize,
+    const SLOTS: usize,
+    const QUEUE_DEPTH: usize,
+>
+    NodeInterfaceSupervisorInit<
+        'a,
+        M,
+        P,
+        PATHS,
+        ANNOUNCES,
+        DEDUPLICATION,
+        LINKS,
+        DATA_PACKET_BUFFERS,
+        ORDINARY_PACKET_BUFFERS,
+        SLOTS,
+        QUEUE_DEPTH,
+    >
+where
+    M: RawMutex + 'static,
+    P: TxAuthorizationPolicy,
+{
+    /// Mutably borrow the completely initialized node field while the rest of
+    /// the supervisor remains inaccessible.
+    #[allow(
+        unsafe_code,
+        reason = "the stage is created only after the projected node field is fully initialized and uniquely owns the parent MaybeUninit"
+    )]
+    pub fn node_mut(
+        &mut self,
+    ) -> &mut NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, DATA_PACKET_BUFFERS> {
+        let supervisor = self.destination.as_mut_ptr();
+        // SAFETY: `begin_node_in` creates this stage only after `NodeCore::new_in`
+        // initialized this exact field. The stage's exclusive borrow prevents
+        // any other access to the parent allocation.
+        unsafe { &mut *core::ptr::addr_of_mut!((*supervisor).node) }
+    }
+
+    /// Finish every remaining aggregate field directly at its final address.
+    ///
+    /// Ownership validation precedes fabric splitting and all remaining
+    /// writes. An error consumes this boot-only stage and leaves only the node
+    /// field initialized; callers must abandon the backing allocation.
+    #[allow(
+        unsafe_code,
+        clippy::too_many_arguments,
+        clippy::type_complexity,
+        reason = "audited field-wise placement completes the large aggregate without a by-value supervisor temporary"
+    )]
+    #[inline(never)]
+    pub fn finish(
+        self,
+        fabric: &'static mut InterfaceFabric<M, SLOTS, QUEUE_DEPTH>,
+        data: DataRouterCoordinator<DATA_PACKET_BUFFERS>,
+        ordinary: OrdinaryRouterCoordinator<ORDINARY_PACKET_BUFFERS>,
+        data_permits: [DataPairedPermitHandoff<M>; SLOTS],
+        ordinary_permits: [OrdinaryPairedPermitHandoff<M>; SLOTS],
+        policy: P,
+    ) -> Result<
+        (
+            &'a mut NodeInterfaceSupervisor<
+                M,
+                P,
+                PATHS,
+                ANNOUNCES,
+                DEDUPLICATION,
+                LINKS,
+                DATA_PACKET_BUFFERS,
+                ORDINARY_PACKET_BUFFERS,
+                SLOTS,
+                QUEUE_DEPTH,
+            >,
+            [NodeInterfaceActorPorts<M, QUEUE_DEPTH>; SLOTS],
+        ),
+        NodeInterfaceSupervisorBuildError,
+    > {
+        let supervisor = self.destination.as_mut_ptr();
+        // SAFETY: the stage proves the node field is initialized and uniquely
+        // borrowed. No reference to any other parent field is created.
+        let node = unsafe { &*core::ptr::addr_of!((*supervisor).node) };
+        if let Some(reason) = NodeInterfaceSupervisor::<
+            M,
+            P,
+            PATHS,
+            ANNOUNCES,
+            DEDUPLICATION,
+            LINKS,
+            DATA_PACKET_BUFFERS,
+            ORDINARY_PACKET_BUFFERS,
+            SLOTS,
+            QUEUE_DEPTH,
+        >::build_error(node, &data, &ordinary)
+        {
+            return Err(reason);
+        }
+
+        let (router, interface_actors) = fabric.split();
+        let mut data_pairs = data_permits.into_iter();
+        let mut ordinary_pairs = ordinary_permits.into_iter();
+        let mut interface_actors = interface_actors.into_iter();
+
+        // SAFETY: `supervisor` addresses one uniquely borrowed parent whose
+        // node field is already initialized. Validation above is the only
+        // fallible step. Every other field and every permit array element is
+        // written exactly once before the complete reference is exposed.
+        let (supervisor, actors) = unsafe {
+            let data_servers =
+                core::ptr::addr_of_mut!((*supervisor).data_permits).cast::<DataPermitServer<M>>();
+            let ordinary_servers = core::ptr::addr_of_mut!((*supervisor).ordinary_permits)
+                .cast::<OrdinaryPermitServer<M>>();
+            let actors = core::array::from_fn(|index| {
+                let (data_node, data_permit) = data_pairs
+                    .next()
+                    .expect("the DATA permit iterator has exactly SLOTS elements")
+                    .into_parts();
+                let (ordinary_node, ordinary_permit) = ordinary_pairs
+                    .next()
+                    .expect("the ordinary permit iterator has exactly SLOTS elements")
+                    .into_parts();
+                data_servers
+                    .add(index)
+                    .write(DataPermitServer::new(data_node));
+                ordinary_servers
+                    .add(index)
+                    .write(OrdinaryPermitServer::new(ordinary_node));
+                NodeInterfaceActorPorts {
+                    interface: interface_actors
+                        .next()
+                        .expect("the interface actor iterator has exactly SLOTS elements"),
+                    data_permit,
+                    ordinary_permit,
+                }
+            });
+
+            core::ptr::addr_of_mut!((*supervisor).router).write(router);
+            core::ptr::addr_of_mut!((*supervisor).data).write(data);
+            core::ptr::addr_of_mut!((*supervisor).ordinary).write(ordinary);
+            core::ptr::addr_of_mut!((*supervisor).policy).write(policy);
+            core::ptr::addr_of_mut!((*supervisor).lane_cursor).write(0);
+            core::ptr::addr_of_mut!((*supervisor).completion_fault).write(None);
+            core::ptr::addr_of_mut!((*supervisor).owner_mismatch_fault).write(false);
+            core::ptr::addr_of_mut!((*supervisor).pending_ingress_actions).write(None);
+            core::ptr::addr_of_mut!((*supervisor).terminal_ingress_actions).write(None);
+            core::ptr::addr_of_mut!((*supervisor).pending_ingress_recycle).write(None);
+            core::ptr::addr_of_mut!((*supervisor).terminal_ingress_recycle).write(None);
+            (&mut *supervisor, actors)
+        };
+        Ok((supervisor, actors))
     }
 }
 
@@ -3258,6 +4260,85 @@ where
     M: RawMutex + 'static,
     P: TxAuthorizationPolicy,
 {
+    fn build_error(
+        node: &NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, DATA_PACKET_BUFFERS>,
+        data: &DataRouterCoordinator<DATA_PACKET_BUFFERS>,
+        ordinary: &OrdinaryRouterCoordinator<ORDINARY_PACKET_BUFFERS>,
+    ) -> Option<NodeInterfaceSupervisorBuildError> {
+        let node_scope = node.tx_owner_scope();
+        if SLOTS == 0 {
+            Some(NodeInterfaceSupervisorBuildError::ZeroInterfaceSlots)
+        } else if data.owner_scope() != node_scope {
+            Some(NodeInterfaceSupervisorBuildError::DataOwnerMismatch {
+                node: node_scope,
+                coordinator: data.owner_scope(),
+            })
+        } else if ordinary.owner_scope() != node_scope {
+            Some(NodeInterfaceSupervisorBuildError::OrdinaryOwnerMismatch {
+                node: node_scope,
+                coordinator: ordinary.owner_scope(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Begin constructing this aggregate by initializing its node directly in
+    /// the final caller-owned destination.
+    ///
+    /// The returned stage exposes only that initialized node until
+    /// [`NodeInterfaceSupervisorInit::finish`] completes every other field.
+    /// If node validation fails, the destination remains uninitialized and may
+    /// be reused for another attempt.
+    #[allow(
+        unsafe_code,
+        clippy::too_many_arguments,
+        reason = "audited projection delegates initialization of the final node field to node-core's in-place constructor"
+    )]
+    #[inline(never)]
+    pub fn begin_node_in<'a>(
+        destination: &'a mut MaybeUninit<Self>,
+        identity: NodeIdentity,
+        app_name: &str,
+        aspects: &[&str],
+        instance: NodeInstanceId,
+        config: NodeConfig,
+    ) -> Result<
+        NodeInterfaceSupervisorInit<
+            'a,
+            M,
+            P,
+            PATHS,
+            ANNOUNCES,
+            DEDUPLICATION,
+            LINKS,
+            DATA_PACKET_BUFFERS,
+            ORDINARY_PACKET_BUFFERS,
+            SLOTS,
+            QUEUE_DEPTH,
+        >,
+        NodeConstructionError,
+    > {
+        let supervisor = destination.as_mut_ptr();
+        // SAFETY: `destination` is uniquely borrowed and uninitialized. A
+        // projected `MaybeUninit<NodeCore>` has the exact node field's address
+        // and layout without creating a reference to an uninitialized node.
+        let node_destination = unsafe {
+            &mut *core::ptr::addr_of_mut!((*supervisor).node).cast::<MaybeUninit<
+                    NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, DATA_PACKET_BUFFERS>,
+                >>()
+        };
+        NodeCore::new_in(
+            node_destination,
+            identity,
+            app_name,
+            aspects,
+            instance,
+            config,
+        )?;
+        Ok(NodeInterfaceSupervisorInit { destination })
+    }
+
     /// Consume every permanent component after validating common node
     /// ownership. Every failure returns every non-copy input unchanged.
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
@@ -3295,23 +4376,7 @@ where
             QUEUE_DEPTH,
         >,
     > {
-        let node_scope = node.tx_owner_scope();
-        let reason = if SLOTS == 0 {
-            Some(NodeInterfaceSupervisorBuildError::ZeroInterfaceSlots)
-        } else if data.owner_scope() != node_scope {
-            Some(NodeInterfaceSupervisorBuildError::DataOwnerMismatch {
-                node: node_scope,
-                coordinator: data.owner_scope(),
-            })
-        } else if ordinary.owner_scope() != node_scope {
-            Some(NodeInterfaceSupervisorBuildError::OrdinaryOwnerMismatch {
-                node: node_scope,
-                coordinator: ordinary.owner_scope(),
-            })
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
+        if let Some(reason) = Self::build_error(&node, &data, &ordinary) {
             return Err(NodeInterfaceSupervisorBuildFailure {
                 reason,
                 node,
@@ -3400,6 +4465,26 @@ where
             .prepare_basic_lxmf_into(destination, timestamp_unix_ms, title, content, output)
     }
 
+    /// Compose one signed opportunistic LXMF carrier with a location snapshot.
+    pub fn prepare_basic_lxmf_with_location_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        location: LxmfMessageLocation,
+        output: &mut [u8],
+    ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
+        self.node.prepare_basic_lxmf_with_location_into(
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            location,
+            output,
+        )
+    }
+
     /// Compose one complete direct-LXMF wire message with the node-owned
     /// identity and exact registered `lxmf.delivery` source.
     ///
@@ -3423,6 +4508,26 @@ where
         )
     }
 
+    /// Compose one complete signed direct-LXMF wire message with a location snapshot.
+    pub fn prepare_basic_direct_lxmf_with_location_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        location: LxmfMessageLocation,
+        output: &mut [u8],
+    ) -> Result<PreparedBasicDirectLxmf, PrepareBasicLxmfError> {
+        self.node.prepare_basic_direct_lxmf_with_location_into(
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            location,
+            output,
+        )
+    }
+
     /// Copy a public key learned for one announced Reticulum destination.
     ///
     /// The permanent aggregate retains sole mutable node ownership. This
@@ -3430,6 +4535,25 @@ where
     /// source without exposing the inner node or borrowing native storage.
     pub fn recall_identity(&self, destination: &DestinationHash) -> Option<[u8; 64]> {
         self.node.recall_identity(destination)
+    }
+
+    /// Derive the canonical remote `rnstransport.probe` destination from any
+    /// announce-known destination owned by that retained identity.
+    pub fn proof_probe_destination_for(
+        &self,
+        announced_destination: &DestinationHash,
+    ) -> Option<DestinationHash> {
+        self.node.proof_probe_destination_for(announced_destination)
+    }
+
+    /// Alias an authenticated retained peer identity under its canonical
+    /// `rnstransport.probe` destination without creating a path.
+    pub fn prepare_proof_probe_destination_for(
+        &mut self,
+        announced_destination: &DestinationHash,
+    ) -> Result<DestinationHash, ProofProbeIdentityAliasError> {
+        self.node
+            .prepare_proof_probe_destination_for(announced_destination)
     }
 
     /// Recall an announce-learned identity only for its exact
@@ -3680,10 +4804,52 @@ where
         match self.router.try_receive_ingress() {
             Ok(Some(ingress)) => {
                 let interface = ingress.interface();
+                let signal = ingress.signal();
+                let properties = ingress.descriptor().properties();
+                let broadcast_scope = match properties.topology() {
+                    InterfaceTopology::SharedMedium => IngressBroadcastScope::SharedMedium,
+                    InterfaceTopology::PointToPoint => IngressBroadcastScope::PointToPoint,
+                };
+                let eligible = self.router.eligible_interfaces();
+                let allowed = self.router.announce_egress_interfaces(interface);
+                let default_egress =
+                    eligible
+                        .ok()
+                        .and_then(|eligible| match properties.topology() {
+                            InterfaceTopology::SharedMedium => Some(eligible),
+                            InterfaceTopology::PointToPoint => eligible.without(interface),
+                        });
+                let mut broadcast_policy = IngressBroadcastPolicy::new(broadcast_scope);
+                match (allowed, default_egress) {
+                    (Ok(allowed), Some(default_egress)) if allowed == default_egress => {}
+                    (Ok(allowed), _) => {
+                        broadcast_policy = broadcast_policy
+                            .with_announce_egress(IngressAnnounceEgress::from_bits(allowed.bits()));
+                    }
+                    (Err(_), _) => {
+                        // A stale/out-of-profile registry cannot safely widen
+                        // announce propagation. Suppress only this exact
+                        // ingress-derived announce; ordinary traffic keeps its
+                        // existing route contract and registry diagnostics.
+                        broadcast_policy =
+                            broadcast_policy.with_announce_egress(IngressAnnounceEgress::empty());
+                    }
+                }
                 let packet = ingress.into_packet();
-                let result =
-                    self.node
-                        .ingest_at(packet.as_ref(), rns_now, link_now, interface, rng);
+                let ingress_observation = PacketIngressObservation::remote(
+                    interface,
+                    signal.map(|signal| {
+                        PacketSignalObservation::new(signal.rssi_dbm(), signal.snr_db())
+                    }),
+                );
+                let result = self.node.ingest_at_with_broadcast_policy_observed(
+                    packet.as_ref(),
+                    rns_now,
+                    link_now,
+                    ingress_observation,
+                    broadcast_policy,
+                    rng,
+                );
                 self.finish_queued_ingress(result, packet, admission)
             }
             Ok(None) => NodeInterfaceIngressStep::Idle,
@@ -3960,6 +5126,16 @@ where
         self.node.has_path(destination)
     }
 
+    /// Remove one exact retained native path without changing identity or Link
+    /// ownership.
+    ///
+    /// The durable submission runtime uses this only for destination-DATA
+    /// receipt timeouts. Direct Link-DATA timeouts retain their separate Link
+    /// retirement transaction.
+    pub fn remove_retained_path(&mut self, destination: &DestinationHash) -> bool {
+        self.node.remove_retained_path(destination)
+    }
+
     /// Whether one retained native path resolves against the authoritative
     /// currently-online interface snapshot.
     ///
@@ -3977,9 +5153,62 @@ where
             .is_some()
     }
 
+    /// Replace caller-owned storage with a complete route diagnostics snapshot.
+    ///
+    /// Every native route is copied under one immutable node borrow, enriched
+    /// against one current interface-registry view, and then sorted by complete
+    /// destination hash. The operation allocates nothing and copies at most the
+    /// node's `PATHS` const-generic capacity.
+    ///
+    /// `captured_at` is an observation time, not a route-table revision.
+    pub fn snapshot_route_diagnostics(
+        &self,
+        captured_at: MonotonicSeconds,
+        snapshot: &mut RouteDiagnosticsSnapshot<PATHS>,
+    ) {
+        snapshot.reset(captured_at);
+        let eligible = self.router.eligible_interfaces().ok();
+        let registry = self.router.registry();
+        let visited = self.node.visit_retained_routes(|route| {
+            let target = match route.received_on() {
+                Some(interface) => TxTarget::Only(interface),
+                None => TxTarget::All,
+            };
+            let usable = eligible
+                .and_then(|interfaces| TxRoutePlan::resolve(target, interfaces).ok())
+                .is_some();
+            let resolution = match route.received_on() {
+                Some(interface) => RouteInterfaceResolution::Exact {
+                    interface,
+                    current: registry.descriptor(interface),
+                    usable,
+                },
+                None => RouteInterfaceResolution::BroadcastFallback { usable },
+            };
+            let inserted = snapshot.push(RouteDiagnosticsEntry { route, resolution });
+            debug_assert!(
+                inserted,
+                "native route count cannot exceed matching PATHS snapshot"
+            );
+        });
+        debug_assert_eq!(visited, snapshot.len);
+        debug_assert_eq!(visited, self.node.retained_route_count());
+        snapshot.sort_by_destination();
+    }
+
+    /// Number of routes currently retained by the native RNS path table.
+    pub fn retained_route_count(&self) -> usize {
+        self.node.retained_route_count()
+    }
+
     /// Hop count retained with one known destination path.
     pub fn retained_path_hops(&self, destination: &DestinationHash) -> Option<u8> {
         self.node.retained_path_hops(destination)
+    }
+
+    /// Next-hop transport identity retained for one known destination path.
+    pub fn retained_path_next_hop(&self, destination: &DestinationHash) -> Option<[u8; 16]> {
+        self.node.retained_path_next_hop(destination)
     }
 
     /// Conservative first-hop serialization allowance for the retained route.
@@ -4371,6 +5600,11 @@ where
     /// Read scalar node-owner occupancy.
     pub fn node_capacities(&self) -> CapacitySnapshot {
         self.node.capacities()
+    }
+
+    /// Copy the complete allocation-free RNS telemetry and capacity snapshot.
+    pub fn node_metrics(&self) -> EmbeddedNodeMetrics {
+        self.node.metrics()
     }
 
     /// Immutable authoritative interface registry.

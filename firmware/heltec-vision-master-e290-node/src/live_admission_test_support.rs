@@ -14,7 +14,7 @@ use embedded_storage::nor_flash::{
 };
 use rand_core::{CryptoRng, RngCore};
 use reticulum_board_heltec_vision_master_e290_radio::{
-    E290_NA915_DEV_CONFIGURATION_FINGERPRINT, E290_NA915_DEV_PROFILE,
+    E290_NA915_DEV_CONFIGURATION, E290_NA915_DEV_CONFIGURATION_FINGERPRINT, E290_NA915_DEV_PROFILE,
 };
 use reticulum_device_api::CapabilityAvailability;
 use reticulum_device_api_adapter::{SubmissionAcceptance, SubmissionPort, SubmissionPortError};
@@ -61,6 +61,8 @@ use std::{boxed::Box, vec, vec::Vec};
 pub const LORA_INTERFACE: PacketInterfaceId = PacketInterfaceId::new(1);
 const FIRST_SUBMISSION: SubmissionId = SubmissionId::new(1);
 
+// This scripted harness exercises the qualified LoRa actor in isolation. Keep
+// its registry shape independent of optional product-profile interfaces.
 pub type ProductSupervisor = NodeInterfaceSupervisor<
     NoopRawMutex,
     ExactLoRaAirtimePolicy,
@@ -70,7 +72,7 @@ pub type ProductSupervisor = NodeInterfaceSupervisor<
     { config::LINKS },
     { config::DATA_BUFFERS },
     { config::ORDINARY_BUFFERS },
-    { config::INTERFACE_SLOTS },
+    1,
     { config::INTERFACE_QUEUE_DEPTH },
 >;
 
@@ -641,7 +643,9 @@ impl LiveNodeSystem {
             .register_interface(
                 actor.queue_id(),
                 LORA_INTERFACE,
-                config::interface_properties(),
+                config::interface_properties(
+                    reticulum_board_heltec_vision_master_e290_radio::E290_NA915_DEV_PROFILE,
+                ),
             )
             .expect("LoRa interface registers");
         let (interface, data_permit, ordinary_permit) = actor.into_parts();
@@ -665,7 +669,7 @@ impl LiveNodeSystem {
             data_permit,
             ordinary_permit,
             frame_dispatcher,
-            config::dispatcher_config(),
+            config::dispatcher_config(E290_NA915_DEV_CONFIGURATION),
         );
         let application_event_slots = Box::leak(Box::new(
             [const { ApplicationEventSlot::new() }; config::APPLICATION_EVENT_SLOTS],
@@ -709,6 +713,18 @@ impl LiveNodeSystem {
                     let RadioOperationStep::Terminal(report) = result else {
                         panic!("DATA transmit did not terminate: {result:?}")
                     };
+                    if let Some(completed_at_us) = report.progress().and_then(|progress| {
+                        progress.frame_completed_at_us(usize::from(
+                            report.frame_count().saturating_sub(1),
+                        ))
+                    }) {
+                        // A real radio future cannot return before its final
+                        // TxDone observation. Keep the scripted monotonic clock
+                        // consistent with that physical completion boundary so
+                        // later owner reconciliation cannot observe TxDone in
+                        // its future.
+                        self.now_us = self.now_us.max(completed_at_us);
+                    }
                     assert_eq!(report.family(), DispatchFamily::Data);
                     assert_eq!(report.outcome(), DispatchOutcome::Transmitted);
                     assert_eq!(

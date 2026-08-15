@@ -1,8 +1,8 @@
 import { runExpo } from "./expo-cli.ts";
-import { prepareNativeBindings } from "./native-bindings.ts";
+import { type NativeBuildProfile, prepareNativeBindings } from "./native-bindings.ts";
 import { assertExpectedBun } from "./toolchain.ts";
 
-type NativePlatform = "android" | "ios";
+export type NativePlatform = "android" | "ios";
 
 async function commandSucceeds(
   command: readonly string[],
@@ -43,15 +43,23 @@ async function iosEnvironment(): Promise<NodeJS.ProcessEnv> {
   );
 }
 
-assertExpectedBun();
+export async function runNative(
+  platform: NativePlatform,
+  arguments_: readonly string[],
+  profile: NativeBuildProfile = "debug",
+): Promise<void> {
+  assertExpectedBun();
+  const environment = platform === "ios" ? await iosEnvironment() : process.env;
 
-const [requestedPlatform, ...arguments_] = process.argv.slice(2);
-if (requestedPlatform !== "android" && requestedPlatform !== "ios") {
-  throw new Error("usage: bun run scripts/run-native.ts <android|ios> [...Expo arguments]");
+  await prepareNativeBindings(platform, profile);
+  await runExpo(["prebuild", "--platform", platform, "--clean", "--no-install"], environment);
+  await runExpo([`run:${platform}`, ...arguments_], environment);
 }
-const platform: NativePlatform = requestedPlatform;
-const environment = platform === "ios" ? await iosEnvironment() : process.env;
 
-await prepareNativeBindings(platform);
-await runExpo(["prebuild", "--platform", platform, "--clean", "--no-install"], environment);
-await runExpo([`run:${platform}`, ...arguments_], environment);
+if (import.meta.main) {
+  const [requestedPlatform, ...arguments_] = process.argv.slice(2);
+  if (requestedPlatform !== "android" && requestedPlatform !== "ios") {
+    throw new Error("usage: bun run scripts/run-native.ts <android|ios> [...Expo arguments]");
+  }
+  await runNative(requestedPlatform, arguments_);
+}

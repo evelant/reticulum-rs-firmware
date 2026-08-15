@@ -16,10 +16,12 @@ pub const BUTTON_DEBOUNCE_MILLIS: u64 = 20;
 
 /// Longest raw-sample interval that can prove physical-button continuity.
 ///
-/// A gap this long could hide a fully debounced release. The edge therefore
-/// invalidates its prior level and requires a fresh stable High before a later
-/// Low can count toward physical presence.
-pub const BUTTON_MAX_SAMPLE_GAP_MILLIS: u64 = BUTTON_DEBOUNCE_MILLIS;
+/// This is deliberately separate from the electrical debounce interval. The
+/// GPIO sampler shares an async bearer owner with bounded BLE or USB work, so
+/// an ordinary scheduler pause can exceed 20 ms without meaning that physical
+/// observation was lost. A longer gap still fails closed and requires a fresh
+/// stable High before a later Low can count toward physical presence.
+pub const BUTTON_MAX_SAMPLE_GAP_MILLIS: u64 = 250;
 
 /// A USB connection is considered suspended after this many milliseconds
 /// without an observed start-of-frame indication.
@@ -183,6 +185,22 @@ impl ActiveLowButtonDebouncer {
         self.last_now = now_millis;
 
         if sample_gap >= BUTTON_MAX_SAMPLE_GAP_MILLIS {
+            if self.current == ActiveLowButton::High {
+                // There is no active physical-presence hold to invalidate
+                // while the last trusted level is released High. Discard any
+                // pre-gap candidate and start a fresh Low candidate at this
+                // observation instead of manufacturing a Low baseline that
+                // would force the operator to release and press again.
+                self.candidate = match raw_level {
+                    ActiveLowButton::High => None,
+                    ActiveLowButton::Low => Some((ActiveLowButton::Low, now_millis)),
+                };
+                return Ok(DebouncedButtonObservation {
+                    level: ActiveLowButton::High,
+                    transitioned: false,
+                    continuity_lost: false,
+                });
+            }
             // Low is the fail-closed internal baseline. If the pin is really
             // High, it must remain there for a fresh debounce interval before
             // that release is trusted again.
@@ -641,7 +659,11 @@ mod tests {
             "synthetic cancellation cannot itself re-arm a later Low"
         );
 
-        for now in [21, 31, 41] {
+        for now in [
+            BUTTON_MAX_SAMPLE_GAP_MILLIS + 1,
+            BUTTON_MAX_SAMPLE_GAP_MILLIS + 11,
+            BUTTON_MAX_SAMPLE_GAP_MILLIS + 21,
+        ] {
             publication.observe(button.observe(now, ActiveLowButton::High).unwrap());
         }
         assert_eq!(button.current(), ActiveLowButton::High);
@@ -651,6 +673,47 @@ mod tests {
             ActiveLowButton::Low,
             "a fresh stable released-high observation restores trust"
         );
+    }
+
+    #[test]
+    fn routine_async_scheduler_gaps_preserve_a_deliberate_press() {
+        let mut button = ActiveLowButtonDebouncer::new(0, ActiveLowButton::High);
+
+        let candidate = button.observe(50, ActiveLowButton::Low).unwrap();
+        assert!(!candidate.transitioned());
+        assert!(!candidate.continuity_lost());
+
+        let pressed = button.observe(100, ActiveLowButton::Low).unwrap();
+        assert!(pressed.transitioned());
+        assert!(!pressed.continuity_lost());
+        assert_eq!(pressed.level(), ActiveLowButton::Low);
+
+        let retained = button.observe(200, ActiveLowButton::Low).unwrap();
+        assert!(!retained.transitioned());
+        assert!(!retained.continuity_lost());
+        assert_eq!(retained.level(), ActiveLowButton::Low);
+    }
+
+    #[test]
+    fn long_gap_from_released_high_starts_a_fresh_press_candidate() {
+        let mut button = ActiveLowButtonDebouncer::new(0, ActiveLowButton::High);
+
+        let candidate = button
+            .observe(BUTTON_MAX_SAMPLE_GAP_MILLIS, ActiveLowButton::Low)
+            .unwrap();
+        assert!(!candidate.transitioned());
+        assert!(!candidate.continuity_lost());
+        assert_eq!(candidate.level(), ActiveLowButton::High);
+
+        let pressed = button
+            .observe(
+                BUTTON_MAX_SAMPLE_GAP_MILLIS + BUTTON_DEBOUNCE_MILLIS,
+                ActiveLowButton::Low,
+            )
+            .unwrap();
+        assert!(pressed.transitioned());
+        assert!(!pressed.continuity_lost());
+        assert_eq!(pressed.level(), ActiveLowButton::Low);
     }
 
     #[test]

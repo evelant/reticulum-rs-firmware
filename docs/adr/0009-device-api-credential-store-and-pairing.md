@@ -1,16 +1,12 @@
 # ADR 0009: Device-API credential store and initial pairing policy
 
-- **Status:** accepted design; portable lifecycle-safe authority/store path,
-  interrupted-initialization classifier, E290 boot/coordinator mount integration,
-  pairing-admission policy, pre-authentication initialization-control codec, and
-  E290 forward-only initialization runtime/sole-owner port implemented; the
-  E290 USB Serial/JTAG pre-authentication initialization bearer, GPIO21
-  physical-presence sampler, and depth-one task handoff are host-, target-, and
-  bounded-powered-control verified; ADR 0010 live-pairing wire/crypto core,
-  independent vectors, resident E290 durable lifecycle, bounded entropy, and
-  bearer-neutral secret handoff implemented and routed through the node/USB
-  owners; authenticated session service and successful button-confirmed
-  initialization/pairing remain pending
+- **Status:** accepted and implemented for the bounded USB developer and BLE
+  appliance paths; portable lifecycle-safe authority/store, interrupted-state
+  classification, E290 boot/coordinator mount, five-minute pairing admission,
+  initialization control, ADR 0010 live pairing, durable activation, and
+  bearer-neutral secret handoff are composed. ADR 0019 adds the separately
+  bonded, display-confirmed BLE onboarding path and records its powered
+  acceptance.
 - **Date:** 2026-07-18
 - **Decision owners:** project maintainers
 - **Extends:** [ADR 0004](0004-sole-flash-coordinator.md),
@@ -362,7 +358,7 @@ The exact admission contract is:
   ordinary-session admission and returns a single-use request for the bearer to
   acquire exclusive ownership. The window opens only after the bearer
   acknowledges that ownership;
-- the deadline is exactly 60,000 monotonic milliseconds after the hold
+- the deadline is exactly 300,000 monotonic milliseconds after the hold
   threshold, not after the later exclusivity acknowledgement. A request at
   `now >= deadline` loses to timeout, including a late acknowledgement;
 - accepted connection epochs are nonzero and strictly increasing for the whole
@@ -428,16 +424,14 @@ durable, publishable result to the policy closes an otherwise-open window as
 successfully activated. Thus both `Pending` before secret offer and `Active`
 before completion are durable facts.
 
-Every ordinary production E290 profile selects `esp-println`'s `no-op` backend
-and does not initialize its logger. In the default profile, application, panic,
-and framework log text therefore cannot share the USB Serial/JTAG FIFO; binary
-COBS control records are the sole firmware-owned bytes on that stream. The
-BLE/Wi-Fi profiles retain native USB electrically and at runtime as a
-diagnostics-only sink, but emit nothing there. Only a separately named
-diagnostic image enables USB Serial/JTAG output. Boot-ROM output can still
-precede the application; the streaming decoder deliberately ignores bytes
-until a leading zero delimiter. No raw log byte may appear between binary COBS
-records.
+The legacy no-wireless E290 profile does not initialize the logger. Its binary
+COBS control records are the sole application-owned bytes on USB Serial/JTAG,
+so raw application or framework log text cannot be multiplexed into that
+stream. BLE/Wi-Fi profiles do not compose the USB RDA1 bearer; they retain
+native USB electrically and initialize USB Serial/JTAG logging at `Info` for
+alpha diagnostics. Boot-ROM output can still precede the legacy framed
+application; its streaming decoder deliberately ignores bytes until a leading
+zero delimiter. No raw log byte may appear between binary COBS records.
 
 The USB response owner is released only after every byte enters the endpoint
 FIFO and firmware requests hardware `WR_DONE`. Waiting for a later completion
@@ -546,7 +540,7 @@ but cannot claim security from the developer USB trust shortcut.
   No request source invoked initialization, so this is not powered recovery,
   pairing, or authentication evidence.
 - Complete in the portable pairing-policy slice: 22 unit tests and four
-  compile-fail doctests freeze the exact 2,000/60,000 ms boundaries,
+  compile-fail doctests freeze the exact 2,000/300,000 ms boundaries,
   release-to-rearm behavior, strictly
   increasing connection epochs, ordinary-session invalidation, trusted
   exact erased/interrupted initialization facts and permit ownership, counted
@@ -660,9 +654,11 @@ but cannot claim security from the developer USB trust shortcut.
   only flash and mutable-authority owner, zeroize temporary secrets, preserve LoRa
   scheduling under USB pressure, and prove no API/session service starts from
   unformatted, unrecovered, or conflicting media. It must also prove USB
-  disconnect closes pairing. The current no-op logging selection mechanically
-  excludes application log bytes from the binary COBS stream; powered capture
-  must still verify that ownership.
+  disconnect closes pairing. The legacy no-wireless profile's uninitialized
+  logger mechanically excludes routine application log bytes from the binary
+  COBS stream; powered capture must still verify that ownership. Wireless
+  profiles own USB only as an `Info` logging sink and do not compose that COBS
+  bearer.
 - Powered E290 tests must interrupt initial provisioning, pending creation,
   activation, retirement, and cleanup at every reachable boundary and verify
   exact flash readback before this path is enabled outside developer/HIL use.

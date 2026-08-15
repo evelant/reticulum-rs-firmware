@@ -8,6 +8,7 @@
 //! can make deterministic and observable on embedded targets.
 
 use alloc::{collections::BTreeMap, vec::Vec};
+use core::{mem::MaybeUninit, ptr::addr_of_mut};
 
 use rand_core::{CryptoRng, RngCore};
 use rete_core::{
@@ -26,6 +27,10 @@ use rete_stack::{
     RequestFailReason as NativeRequestFailReason,
 };
 use rete_transport::{HeaplessStorage, LinkRole, LinkState, SendError, Transport};
+use reticulum_lxmf_wire::{
+    FIELD_TELEMETRY, MAX_ENCODED_SIDEBAND_LOCATION_TELEMETRY_BYTES, SidebandLocationTelemetry,
+    encode_sideband_location_telemetry,
+};
 use sha2::{Digest, Sha256};
 
 use crate::capacity::{
@@ -94,6 +99,12 @@ const LXMF_WIRE_PREFIX_LENGTH: usize = LXMF_DESTINATION_HASH_LENGTH * 2 + LXMF_S
 const LXMF_APPLICATION_NAME: &str = "lxmf";
 const LXMF_DELIVERY_ASPECT: &str = "delivery";
 const LXMF_DELIVERY_EXPANDED_NAME: &str = "lxmf.delivery";
+/// Canonical Reticulum probe application name.
+pub const RNSTRANSPORT_PROBE_APPLICATION_NAME: &str = "rnstransport";
+/// Canonical Reticulum probe destination aspect.
+pub const RNSTRANSPORT_PROBE_ASPECT: &str = "probe";
+/// Canonical expanded Reticulum probe destination name.
+pub const RNSTRANSPORT_PROBE_EXPANDED_NAME: &str = "rnstransport.probe";
 const SINGLE_PACKET_REQUEST_OVERHEAD: usize = 1 + 9 + 2 + TRUNCATED_HASH_LEN;
 const RESPONSE_ARRAY_HEADER_LEN: usize = 1;
 const RESPONSE_REQUEST_ID_HEADER_LEN: usize = 2;
@@ -118,6 +129,191 @@ const _: () = assert!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InterfaceId(pub u8);
 
+/// Compact set of interfaces allowed to receive one ingress-derived announce.
+///
+/// Product routing policy computes this set from authoritative interface
+/// metadata while exact ingress provenance is still available. The protocol
+/// owner only carries the resulting identifiers; it does not know concrete
+/// bearers or product interface roles. Identifiers above 63 are outside the
+/// current embedded routing profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IngressAnnounceEgress(u64);
+
+impl IngressAnnounceEgress {
+    /// Empty egress set, which suppresses the exact ingress-derived announce.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Construct a set from its complete compact bit representation.
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Complete compact bit representation.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// Whether no interface is allowed to receive the announce.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Optional physical-link signal values observed for one ingress packet.
+///
+/// These transport-neutral whole-dB values can be supplied by radio
+/// interfaces. Stream and other interfaces leave the observation absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressSignalObservation {
+    rssi_dbm: i16,
+    snr_db: i16,
+}
+
+impl IngressSignalObservation {
+    /// Construct one complete physical-link signal observation.
+    pub const fn new(rssi_dbm: i16, snr_db: i16) -> Self {
+        Self { rssi_dbm, snr_db }
+    }
+
+    /// Received signal strength in whole dBm.
+    pub const fn rssi_dbm(self) -> i16 {
+        self.rssi_dbm
+    }
+
+    /// Signal-to-noise ratio in whole dB.
+    pub const fn snr_db(self) -> i16 {
+        self.snr_db
+    }
+}
+
+/// Whether a packet was injected by a local client or received from a remote
+/// peer through an interface.
+///
+/// Rete currently retains a HEADER_1 compatibility path for locally injected
+/// DATA. Remote interfaces must be distinguished before native ingest so a
+/// shared-medium bystander cannot enter that local-origin forwarding path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressOrigin {
+    /// Packet supplied by a trusted local client for routing by this node.
+    LocalOrigin,
+    /// Packet received from another Reticulum peer through an interface.
+    RemoteInterface,
+}
+
+/// Transport-neutral provenance attached to one received application event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressObservation {
+    interface: InterfaceId,
+    signal: Option<IngressSignalObservation>,
+    origin: IngressOrigin,
+}
+
+impl IngressObservation {
+    /// Construct remote-interface provenance and its optional signal values.
+    ///
+    /// This compatibility constructor is equivalent to [`Self::remote`].
+    pub const fn new(interface: InterfaceId, signal: Option<IngressSignalObservation>) -> Self {
+        Self::remote(interface, signal)
+    }
+
+    /// Construct explicit remote-interface provenance.
+    pub const fn remote(interface: InterfaceId, signal: Option<IngressSignalObservation>) -> Self {
+        Self {
+            interface,
+            signal,
+            origin: IngressOrigin::RemoteInterface,
+        }
+    }
+
+    /// Construct provenance for one trusted local-origin injection.
+    pub const fn local_origin(interface: InterfaceId) -> Self {
+        Self {
+            interface,
+            signal: None,
+            origin: IngressOrigin::LocalOrigin,
+        }
+    }
+
+    /// Interface that supplied the packet.
+    pub const fn interface(self) -> InterfaceId {
+        self.interface
+    }
+
+    /// Physical-link signal values, when supplied by the interface.
+    pub const fn signal(self) -> Option<IngressSignalObservation> {
+        self.signal
+    }
+
+    /// Whether the packet came from a local injector or a remote peer.
+    pub const fn origin(self) -> IngressOrigin {
+        self.origin
+    }
+}
+
+/// Media-aware policy for broadcasts derived synchronously from one ingress.
+///
+/// Shared-medium interfaces may need to repeat a packet on the ingress
+/// interface to reach another peer. A point-to-point interface has only the
+/// peer that supplied the packet, so reflecting that exact derived broadcast
+/// cannot reach anyone new.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IngressBroadcastScope {
+    /// Preserve same-interface broadcast forwarding.
+    #[default]
+    SharedMedium,
+    /// Exclude the one ingress interface from the exact derived broadcast.
+    PointToPoint,
+}
+
+/// Product-supplied forwarding policy for broadcasts derived from one ingress.
+///
+/// Topology controls reflection of announces and path requests. An optional
+/// announce-egress set additionally constrains only the exact announce derived
+/// from this ingress. Unrelated local or timer-due announces emitted in the
+/// same native action envelope remain unrestricted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressBroadcastPolicy {
+    scope: IngressBroadcastScope,
+    announce_egress: Option<IngressAnnounceEgress>,
+}
+
+impl IngressBroadcastPolicy {
+    /// Preserve topology behavior without an additional announce boundary.
+    pub const fn new(scope: IngressBroadcastScope) -> Self {
+        Self {
+            scope,
+            announce_egress: None,
+        }
+    }
+
+    /// Restrict the exact ingress-derived announce to these interface IDs.
+    ///
+    /// An empty set suppresses that forwarding action while retaining normal
+    /// ingress processing, including route and identity learning.
+    pub const fn with_announce_egress(mut self, egress: IngressAnnounceEgress) -> Self {
+        self.announce_egress = Some(egress);
+        self
+    }
+
+    /// Media topology for ingress-derived broadcast reflection.
+    pub const fn scope(self) -> IngressBroadcastScope {
+        self.scope
+    }
+
+    /// Optional exact announce-egress restriction.
+    pub const fn announce_egress(self) -> Option<IngressAnnounceEgress> {
+        self.announce_egress
+    }
+}
+
+impl Default for IngressBroadcastPolicy {
+    fn default() -> Self {
+        Self::new(IngressBroadcastScope::SharedMedium)
+    }
+}
+
 /// Firmware routing target with native interface routing already resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxTarget {
@@ -127,6 +323,8 @@ pub enum TxTarget {
     Only(InterfaceId),
     /// Send on every eligible interface except the triggering interface.
     AllExcept(InterfaceId),
+    /// Send only on the selected compact interface set.
+    Selected(IngressAnnounceEgress),
 }
 
 /// Stable product-owned identifier for one packet delivery receipt.
@@ -167,10 +365,14 @@ pub enum ReceiptKind {
 pub struct ReceiptCandidate {
     kind: ReceiptKind,
     receipt: ReceiptId,
+    ingress: Option<IngressObservation>,
 }
 
 impl ReceiptCandidate {
-    fn from_native(candidate: rete_stack::ReceiptCandidate) -> Self {
+    fn from_native(
+        candidate: rete_stack::ReceiptCandidate,
+        ingress: Option<IngressObservation>,
+    ) -> Self {
         let kind = match candidate.kind {
             rete_stack::ReceiptKind::Data => ReceiptKind::Data,
             rete_stack::ReceiptKind::LinkData => ReceiptKind::LinkData,
@@ -179,6 +381,7 @@ impl ReceiptCandidate {
         Self {
             kind,
             receipt: ReceiptId(candidate.packet_hash),
+            ingress,
         }
     }
 
@@ -190,6 +393,15 @@ impl ReceiptCandidate {
     /// Complete packet hash identifying the receipt.
     pub const fn receipt(self) -> ReceiptId {
         self.receipt
+    }
+
+    /// Packet ingress that produced this candidate, when it came from ingress.
+    ///
+    /// Valid delivery proofs carry the exact interface and optional physical
+    /// signal observation supplied to the receipt-aware ingest call. Timer
+    /// expiration candidates have no ingress observation.
+    pub const fn ingress(self) -> Option<IngressObservation> {
+        self.ingress
     }
 }
 
@@ -254,6 +466,7 @@ pub struct PreparedData {
     packet_len: u16,
     target: TxTarget,
     receipt: ReceiptId,
+    destination: DestHash,
 }
 
 impl PreparedData {
@@ -1039,6 +1252,8 @@ pub enum ApplicationEvent {
         hops: u8,
         /// Owned announce application data.
         app_data: Option<Vec<u8>>,
+        /// Interface provenance and optional physical-link signal values.
+        ingress: Option<IngressObservation>,
     },
     /// Decrypted DATA addressed to one local destination.
     DataReceived {
@@ -1046,11 +1261,15 @@ pub enum ApplicationEvent {
         destination: [u8; rete_core::TRUNCATED_HASH_LEN],
         /// Exact moved plaintext owner.
         payload: Vec<u8>,
+        /// Interface provenance and optional physical-link signal values.
+        ingress: Option<IngressObservation>,
     },
     /// A valid proof covered one sent packet.
     ProofReceived {
         /// Complete covered packet hash.
         packet_hash: [u8; 32],
+        /// Interface provenance and optional physical-link signal values.
+        ingress: Option<IngressObservation>,
     },
     /// One sent-packet receipt expired.
     ReceiptFailed {
@@ -1077,6 +1296,8 @@ pub enum ApplicationEvent {
         data: Vec<u8>,
         /// Reticulum Link context byte.
         context: u8,
+        /// Interface provenance and optional physical-link signal values.
+        ingress: Option<IngressObservation>,
     },
     /// One or more reliable Channel messages arrived on a Link.
     ChannelMessages {
@@ -1259,24 +1480,32 @@ impl core::fmt::Debug for ApplicationEvent {
                 identity,
                 hops,
                 app_data,
+                ingress,
             } => formatter
                 .debug_struct("AnnounceReceived")
                 .field("destination", destination)
                 .field("identity", identity)
                 .field("hops", hops)
                 .field("app_data_len", &app_data.as_ref().map(Vec::len))
+                .field("ingress", ingress)
                 .finish(),
             Self::DataReceived {
                 destination,
                 payload,
+                ingress,
             } => formatter
                 .debug_struct("DataReceived")
                 .field("destination", destination)
                 .field("payload_len", &payload.len())
+                .field("ingress", ingress)
                 .finish(),
-            Self::ProofReceived { packet_hash } => formatter
+            Self::ProofReceived {
+                packet_hash,
+                ingress,
+            } => formatter
                 .debug_struct("ProofReceived")
                 .field("packet_hash", packet_hash)
+                .field("ingress", ingress)
                 .finish(),
             Self::ReceiptFailed { packet_hash } => formatter
                 .debug_struct("ReceiptFailed")
@@ -1295,11 +1524,13 @@ impl core::fmt::Debug for ApplicationEvent {
                 binding,
                 data,
                 context,
+                ingress,
             } => formatter
                 .debug_struct("LinkData")
                 .field("binding", binding)
                 .field("data_len", &data.len())
                 .field("context", context)
+                .field("ingress", ingress)
                 .finish(),
             Self::ChannelMessages { link, messages } => formatter
                 .debug_struct("ChannelMessages")
@@ -1472,14 +1703,17 @@ fn project_application_event(
             identity: *identity_hash.as_bytes(),
             hops,
             app_data,
+            ingress: None,
         },
         NativeNodeEvent::DataReceived { dest_hash, payload } => ApplicationEvent::DataReceived {
             destination: *dest_hash.as_bytes(),
             payload,
+            ingress: None,
         },
-        NativeNodeEvent::ProofReceived { packet_hash } => {
-            ApplicationEvent::ProofReceived { packet_hash }
-        }
+        NativeNodeEvent::ProofReceived { packet_hash } => ApplicationEvent::ProofReceived {
+            packet_hash,
+            ingress: None,
+        },
         NativeNodeEvent::ReceiptFailed { packet_hash } => {
             ApplicationEvent::ReceiptFailed { packet_hash }
         }
@@ -1498,6 +1732,7 @@ fn project_application_event(
             binding: require_application_link_binding(&link_id, link_binding)?,
             data,
             context,
+            ingress: None,
         },
         NativeNodeEvent::ChannelMessages { link_id, messages } => {
             ApplicationEvent::ChannelMessages {
@@ -1832,6 +2067,35 @@ impl NodeActions {
         }
     }
 
+    /// Attach the authoritative interface and optional physical-link signal
+    /// values to application events produced by this one synchronous ingress.
+    ///
+    /// The interface owner calls this before the action envelope can be
+    /// queued or separated from its ingress packet. Events that are not part of
+    /// this bounded ingress-observation surface remain unchanged.
+    pub fn attach_ingress_observation(&mut self, interface: u8, signal: Option<(i16, i16)>) {
+        let signal =
+            signal.map(|(rssi_dbm, snr_db)| IngressSignalObservation::new(rssi_dbm, snr_db));
+        self.attach_exact_ingress_observation(IngressObservation::remote(
+            InterfaceId(interface),
+            signal,
+        ));
+    }
+
+    fn attach_exact_ingress_observation(&mut self, observation: IngressObservation) {
+        for event in &mut self.events.events {
+            match event {
+                ApplicationEvent::AnnounceReceived { ingress, .. }
+                | ApplicationEvent::DataReceived { ingress, .. }
+                | ApplicationEvent::ProofReceived { ingress, .. }
+                | ApplicationEvent::LinkData { ingress, .. } => {
+                    *ingress = Some(observation);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Whether this envelope owns no event, retained proof, packet, or
     /// unroutable-action observation.
     pub fn is_empty(&self) -> bool {
@@ -1881,6 +2145,7 @@ impl NodeActions {
 pub struct InboundData {
     destination: [u8; rete_core::TRUNCATED_HASH_LEN],
     payload: Vec<u8>,
+    ingress: Option<IngressObservation>,
 }
 
 impl core::fmt::Debug for InboundData {
@@ -1889,6 +2154,7 @@ impl core::fmt::Debug for InboundData {
             .debug_struct("InboundData")
             .field("destination", &self.destination)
             .field("payload_len", &self.payload.len())
+            .field("ingress", &self.ingress)
             .finish_non_exhaustive()
     }
 }
@@ -1904,9 +2170,25 @@ impl InboundData {
         &self.payload
     }
 
+    /// Interface provenance and optional physical-link signal values.
+    pub const fn ingress(&self) -> Option<IngressObservation> {
+        self.ingress
+    }
+
     /// Consume this value into its destination and exact moved payload owner.
     pub fn into_parts(self) -> ([u8; rete_core::TRUNCATED_HASH_LEN], Vec<u8>) {
         (self.destination, self.payload)
+    }
+
+    /// Consume this value into destination, exact payload owner, and ingress observation.
+    pub fn into_observed_parts(
+        self,
+    ) -> (
+        [u8; rete_core::TRUNCATED_HASH_LEN],
+        Vec<u8>,
+        Option<IngressObservation>,
+    ) {
+        (self.destination, self.payload, self.ingress)
     }
 }
 
@@ -1934,9 +2216,11 @@ pub fn project_inbound_data(event: ApplicationEvent) -> InboundDataProjection {
         ApplicationEvent::DataReceived {
             destination,
             payload,
+            ingress,
         } => InboundDataProjection::Data(InboundData {
             destination,
             payload,
+            ingress,
         }),
         other => InboundDataProjection::Other(other),
     }
@@ -2092,6 +2376,9 @@ pub enum IngressDropReason {
     /// Arbitrary remote HEADER_1 LINKREQUEST ingress remains disabled until
     /// interface roles can distinguish it from local-origin injection.
     Header1RemoteLinkRequestDisabled,
+    /// Remote HEADER_1 DATA addressed beyond this node cannot use Rete's
+    /// local-origin compatibility forwarding seam.
+    Header1RemoteDataForwardingDisabled,
     /// A non-announce HEADER_2 packet names another transport identity.
     Header2NotAddressedToUs { transport_id: IdentityHash },
     /// Forwarding would require reverse state that cannot be retained.
@@ -2161,6 +2448,12 @@ impl core::fmt::Display for IngressDropReason {
                 write!(
                     f,
                     "remote HEADER_1 LINKREQUEST requires an explicit ingress role"
+                )
+            }
+            Self::Header1RemoteDataForwardingDisabled => {
+                write!(
+                    f,
+                    "remote HEADER_1 DATA cannot enter local-origin forwarding"
                 )
             }
             Self::Header2NotAddressedToUs { transport_id } => {
@@ -2353,6 +2646,7 @@ pub struct IngressCounters {
     pub protocol_token_exhausted: u64,
     pub protocol_token_assignment_failed: u64,
     pub header1_remote_link_request_disabled: u64,
+    pub header1_remote_data_forwarding_disabled: u64,
     pub native_duplicate: u64,
     pub native_invalid: u64,
     pub native_no_outcome: u64,
@@ -2444,12 +2738,30 @@ impl From<&rete_transport::TransportStats> for TransportCounters {
     }
 }
 
-/// Read-only route information without exposing Rete's mutable transport.
+/// Copy-only retained route information without exposing Rete's mutable transport.
+///
+/// This is one current path-table entry, not evidence that its interface is
+/// online or that the destination is presently reachable. `learned_at_seconds`
+/// is when this retained candidate was installed or replaced.
+/// `last_accessed_at_seconds` is Rete's LRU timestamp and is not peer activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteSnapshot {
+    /// Destination addressed by this retained route.
+    pub destination: DestHash,
+    /// Next-hop transport identity, or `None` for a direct route.
     pub via: Option<IdentityHash>,
+    /// Reticulum hop count. A direct route has one hop.
     pub hops: u8,
+    /// Interface on which the accepted announce was received.
+    ///
+    /// `None` retains Reticulum's broadcast fallback for local transmission.
     pub received_on: Option<InterfaceId>,
+    /// Monotonic whole seconds when this route candidate was retained.
+    pub learned_at_seconds: u64,
+    /// Monotonic whole seconds of Rete's last local LRU touch.
+    pub last_accessed_at_seconds: u64,
+    /// Duration after learning before periodic maintenance expires the route.
+    pub expires_after_seconds: u64,
 }
 
 /// Combined adapter and native telemetry snapshot.
@@ -2571,8 +2883,43 @@ impl From<rete_core::Error> for DestinationRegistrationError {
     }
 }
 
-/// Failure to compose one basic, unstamped, empty-fields LXMF message with the
-/// node-owned identity.
+/// Failure to alias one authenticated retained identity under its canonical
+/// `rnstransport.probe` destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofProbeIdentityAliasError {
+    /// No authenticated identity is retained for the supplied announced
+    /// destination.
+    SourceIdentityUnknown,
+    /// The derived probe destination already names different public key
+    /// material.
+    DestinationIdentityConflict,
+    /// The bounded native identity table did not retain the alias.
+    IdentityCapacityUnavailable,
+    /// Temporary identity-only snapshot storage could not be reserved.
+    AllocationFailed,
+}
+
+impl core::fmt::Display for ProofProbeIdentityAliasError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::SourceIdentityUnknown => {
+                f.write_str("announced destination identity is not retained")
+            }
+            Self::DestinationIdentityConflict => {
+                f.write_str("probe destination identity conflicts with retained material")
+            }
+            Self::IdentityCapacityUnavailable => {
+                f.write_str("probe destination identity alias could not be retained")
+            }
+            Self::AllocationFailed => {
+                f.write_str("probe destination identity alias allocation failed")
+            }
+        }
+    }
+}
+
+/// Failure to compose one basic, unstamped LXMF message with the node-owned
+/// identity and an optional Sideband-compatible location field.
 ///
 /// This deliberately flattens the pinned packer's error vocabulary so the
 /// firmware-facing transaction neither exposes Rete types nor private keys.
@@ -2850,6 +3197,26 @@ struct IngressPreflight {
     proof_expectation: Option<InboundProofExpectation>,
     local_path_request: Option<DestHash>,
     path_response: Option<DestHash>,
+    derived_broadcast: Option<IngressDerivedBroadcast>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngressDerivedBroadcast {
+    Announce { destination: DestHash },
+    PathRequest { packet_hash: [u8; 32] },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngressDerivedTarget {
+    AllExceptSource,
+    Selected(IngressAnnounceEgress),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IngressDerivedOverride {
+    packet_hash: [u8; 32],
+    received_hops: u8,
+    target: IngressDerivedTarget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2923,6 +3290,7 @@ impl TerminalCommitCounts {
 
 struct NativeReceiptSink<'a, S> {
     sink: &'a mut S,
+    ingress: Option<IngressObservation>,
     committed: TerminalCommitCounts,
 }
 
@@ -2930,6 +3298,15 @@ impl<'a, S> NativeReceiptSink<'a, S> {
     fn new(sink: &'a mut S) -> Self {
         Self {
             sink,
+            ingress: None,
+            committed: TerminalCommitCounts::default(),
+        }
+    }
+
+    fn with_ingress(sink: &'a mut S, ingress: IngressObservation) -> Self {
+        Self {
+            sink,
+            ingress: Some(ingress),
             committed: TerminalCommitCounts::default(),
         }
     }
@@ -2951,7 +3328,7 @@ impl<S: ReceiptTerminalSink> rete_stack::ReceiptTerminalSink for NativeReceiptSi
         &mut self,
         candidate: rete_stack::ReceiptCandidate,
     ) -> Result<Self::Reservation<'_>, rete_stack::ReceiptSinkFull> {
-        let candidate = ReceiptCandidate::from_native(candidate);
+        let candidate = ReceiptCandidate::from_native(candidate, self.ingress);
         let reservation = self
             .sink
             .try_reserve(candidate)
@@ -3032,6 +3409,69 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             request_dispatches: core::array::from_fn(|_| None),
         })
     }
+
+    /// Construct an owning node directly in caller-provided storage.
+    ///
+    /// This is the large-node startup path for embedded products. It avoids a
+    /// complete native Rete node temporary and initializes the capacity-sized
+    /// request-dispatch table one element at a time. On error, `destination`
+    /// remains uninitialized and may be reused for another construction
+    /// attempt.
+    #[allow(
+        unsafe_code,
+        reason = "audited field projections initialize one MaybeUninit EmbeddedNode in place"
+    )]
+    #[inline(never)]
+    pub fn new_in<'a>(
+        destination: &'a mut MaybeUninit<Self>,
+        identity: Identity,
+        app_name: &str,
+        aspects: &[&str],
+        config: EmbeddedNodeConfig,
+    ) -> Result<&'a mut Self, rete_core::Error> {
+        let destination_ptr = destination.as_mut_ptr();
+
+        // SAFETY: `destination_ptr` comes from the sole mutable borrow of the
+        // complete uninitialized destination. `addr_of_mut!` does not create a
+        // reference to the uninitialized field, and `MaybeUninit<T>` has the
+        // same size and alignment as `T`. No other field is touched until the
+        // native constructor succeeds, so its error contract leaves the whole
+        // destination reusable.
+        let core_destination = unsafe {
+            &mut *addr_of_mut!((*destination_ptr).core)
+                .cast::<MaybeUninit<NodeCore<HeaplessStorage<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>>>>()
+        };
+        let core = NodeCore::new_in(core_destination, identity, app_name, aspects)?;
+        if config.role == NodeRole::Transport {
+            core.enable_transport();
+        }
+
+        // No fallible operation follows native construction. Each write
+        // targets one distinct field, and the capacity array is initialized
+        // element-wise so no `[None; PATHS]` stack temporary is materialized.
+        // SAFETY: the native constructor initialized `core`; every remaining
+        // field is written exactly once through the exclusive destination
+        // pointer before `assume_init_mut` exposes the complete value.
+        unsafe {
+            addr_of_mut!((*destination_ptr).role).write(config.role);
+            addr_of_mut!((*destination_ptr).max_additional_destinations)
+                .write(config.max_additional_destinations);
+            addr_of_mut!((*destination_ptr).additional_destinations).write(0);
+            addr_of_mut!((*destination_ptr).ingress).write(IngressCounters::default());
+            addr_of_mut!((*destination_ptr).admission).write(AdmissionCounters::default());
+            addr_of_mut!((*destination_ptr).receipt_terminals)
+                .write(ReceiptTerminalCounters::default());
+
+            let request_dispatches = addr_of_mut!((*destination_ptr).request_dispatches)
+                .cast::<Option<RequestDispatchEntry>>();
+            for index in 0..PATHS {
+                request_dispatches.add(index).write(None);
+            }
+
+            Ok(destination.assume_init_mut())
+        }
+    }
+
     /// Primary destination hash.
     pub fn destination_hash(&self) -> DestHash {
         *self.core.dest_hash()
@@ -3044,6 +3484,74 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
     /// a borrow into the sole mutable RNS owner while it verifies a signature.
     pub fn recall_identity(&self, destination: &DestHash) -> Option<[u8; 64]> {
         self.core.transport.recall_identity(destination).copied()
+    }
+
+    /// Derive the canonical `rnstransport.probe` destination for any
+    /// announce-known destination owned by the same retained identity.
+    ///
+    /// This is read-only and performs no path or identity-table mutation.
+    /// `None` means the supplied destination has no authenticated retained
+    /// identity.
+    pub fn proof_probe_destination_for(
+        &self,
+        announced_destination: &DestHash,
+    ) -> Option<DestHash> {
+        let public_key = self.recall_identity(announced_destination)?;
+        let identity_hash = rete_core::identity_hash(&public_key);
+        Some(rete_core::destination_hash(
+            RNSTRANSPORT_PROBE_EXPANDED_NAME,
+            Some(&identity_hash),
+        ))
+    }
+
+    /// Alias an authenticated retained identity under its canonical
+    /// `rnstransport.probe` destination without creating a path.
+    ///
+    /// Rete encrypts destination DATA by destination-keyed identity lookup.
+    /// An announce for another application destination authenticates the
+    /// public key, but does not populate the canonical probe hash. This method
+    /// copies that already-authenticated key through Rete's identity-only
+    /// snapshot restore path. No direct path or route observation is invented.
+    pub fn prepare_proof_probe_destination_for(
+        &mut self,
+        announced_destination: &DestHash,
+    ) -> Result<DestHash, ProofProbeIdentityAliasError> {
+        let public_key = self
+            .recall_identity(announced_destination)
+            .ok_or(ProofProbeIdentityAliasError::SourceIdentityUnknown)?;
+        let identity_hash = rete_core::identity_hash(&public_key);
+        let probe_destination =
+            rete_core::destination_hash(RNSTRANSPORT_PROBE_EXPANDED_NAME, Some(&identity_hash));
+
+        if let Some(retained) = self.recall_identity(&probe_destination) {
+            return if retained == public_key {
+                Ok(probe_destination)
+            } else {
+                Err(ProofProbeIdentityAliasError::DestinationIdentityConflict)
+            };
+        }
+
+        let mut identities = Vec::new();
+        identities
+            .try_reserve_exact(1)
+            .map_err(|_| ProofProbeIdentityAliasError::AllocationFailed)?;
+        identities.push(rete_transport::IdentityEntry {
+            dest_hash: probe_destination,
+            pub_key: public_key,
+        });
+        self.core
+            .transport
+            .load_snapshot(&rete_transport::Snapshot {
+                version: 1,
+                paths: Vec::new(),
+                identities,
+            });
+
+        match self.recall_identity(&probe_destination) {
+            Some(retained) if retained == public_key => Ok(probe_destination),
+            Some(_) => Err(ProofProbeIdentityAliasError::DestinationIdentityConflict),
+            None => Err(ProofProbeIdentityAliasError::IdentityCapacityUnavailable),
+        }
     }
 
     /// Recall an announce-learned identity only for its exact `lxmf.delivery` hash.
@@ -3122,6 +3630,27 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         Ok(hash)
     }
 
+    /// Register the canonical Reticulum proof-probe responder destination.
+    ///
+    /// Python Reticulum's `rnprobe` utility addresses the inbound Single
+    /// destination `rnstransport.probe`. The responder does not accept Links
+    /// and emits an immediate delivery proof for every valid DATA packet.
+    pub fn register_probe_destination(&mut self) -> Result<DestHash, DestinationRegistrationError> {
+        let destination = self.register_destination(
+            RNSTRANSPORT_PROBE_APPLICATION_NAME,
+            &[RNSTRANSPORT_PROBE_ASPECT],
+            DestinationType::Single,
+            Direction::In,
+        )?;
+        let registered = self
+            .core
+            .get_destination_mut(&destination)
+            .expect("a destination returned by registration must remain registered");
+        registered.accepts_links = false;
+        registered.set_proof_strategy(rete_stack::ProofStrategy::ProveAll);
+        Ok(destination)
+    }
+
     /// Configure default application data for ordinary announces and local
     /// path responses from one registered destination.
     pub fn set_destination_announce_app_data(
@@ -3176,21 +3705,62 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         self.core.register_peer(peer, app_name, aspects, now)
     }
 
-    /// Inspect a learned route without exposing mutable Rete state.
+    fn project_route(destination: DestHash, path: &rete_transport::Path) -> RouteSnapshot {
+        RouteSnapshot {
+            destination,
+            via: path.via,
+            hops: path.hops,
+            received_on: path.received_on.map(InterfaceId),
+            learned_at_seconds: path.learned_at,
+            last_accessed_at_seconds: path.last_accessed,
+            expires_after_seconds: path.expiry_time(),
+        }
+    }
+
+    /// Inspect one retained route without exposing mutable Rete state.
     pub fn route(&self, destination: &DestHash) -> Option<RouteSnapshot> {
         self.core
             .transport
             .get_path(destination)
-            .map(|path| RouteSnapshot {
-                via: path.via,
-                hops: path.hops,
-                received_on: path.received_on.map(InterfaceId),
-            })
+            .map(|path| Self::project_route(*destination, path))
+    }
+
+    /// Visit a copy-only snapshot of every currently retained route.
+    ///
+    /// The callback runs synchronously under this immutable node borrow, so no
+    /// route mutation can interleave with the traversal. Native map iteration
+    /// order is deliberately unspecified; callers needing stable presentation
+    /// must copy and sort by destination. The returned count is bounded by
+    /// this node's `PATHS` const generic.
+    pub fn visit_routes(&self, mut visitor: impl FnMut(RouteSnapshot)) -> usize {
+        let mut visited = 0;
+        for (destination, path) in self.core.transport.iter_paths() {
+            visitor(Self::project_route(*destination, path));
+            visited += 1;
+        }
+        visited
+    }
+
+    /// Number of currently retained native route entries.
+    pub fn route_count(&self) -> usize {
+        self.core.transport.path_count()
     }
 
     /// Whether an exact destination currently has a retained route.
     pub fn has_path(&self, destination: &DestHash) -> bool {
         self.core.transport.get_path(destination).is_some()
+    }
+
+    /// Remove one exact retained route.
+    ///
+    /// This is intentionally narrower than native operator-wide path-table
+    /// controls. Delivery orchestration uses it to discard a destination route
+    /// whose DATA receipt timed out before beginning fresh path discovery.
+    /// The return value reports whether the route existed before removal.
+    pub fn remove_path(&mut self, destination: &DestHash) -> bool {
+        let retained = self.core.transport.get_path(destination).is_some();
+        self.core.transport.remove_path(destination);
+        retained
     }
 
     /// Construct one tagged Reticulum path request for broadcast across every
@@ -3387,7 +3957,98 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         interface: InterfaceId,
         rng: &mut R,
     ) -> IngressReport {
-        let preflight = match self.preflight_ingest(raw, interface) {
+        self.ingest_at_with_broadcast_scope(
+            raw,
+            now,
+            link_now,
+            interface,
+            IngressBroadcastScope::SharedMedium,
+            rng,
+        )
+    }
+
+    /// Precise Link-clock ingress with explicit media-aware broadcast scope.
+    pub fn ingest_at_with_broadcast_scope<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        interface: InterfaceId,
+        broadcast_scope: IngressBroadcastScope,
+        rng: &mut R,
+    ) -> IngressReport {
+        self.ingest_at_from_origin_with_broadcast_policy(
+            raw,
+            now,
+            link_now,
+            interface,
+            IngressOrigin::RemoteInterface,
+            IngressBroadcastPolicy::new(broadcast_scope),
+            rng,
+        )
+    }
+
+    /// Precise Link-clock ingress with media topology and an optional exact
+    /// announce-egress restriction.
+    pub fn ingest_at_with_broadcast_policy<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        interface: InterfaceId,
+        policy: IngressBroadcastPolicy,
+        rng: &mut R,
+    ) -> IngressReport {
+        self.ingest_at_from_origin_with_broadcast_policy(
+            raw,
+            now,
+            link_now,
+            interface,
+            IngressOrigin::RemoteInterface,
+            policy,
+            rng,
+        )
+    }
+
+    /// Route one complete packet supplied by a trusted local client.
+    ///
+    /// Local-origin injection is deliberately separate from normal ingress:
+    /// only this path may use Rete's temporary HEADER_1 forwarding
+    /// compatibility seam. Physical and remote stream interfaces must use
+    /// [`Self::ingest`] or another remote-ingress variant.
+    pub fn ingest_local_origin<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        interface: InterfaceId,
+        rng: &mut R,
+    ) -> IngressReport {
+        self.ingest_at_from_origin_with_broadcast_policy(
+            raw,
+            now,
+            MonotonicInstant::from_secs(now),
+            interface,
+            IngressOrigin::LocalOrigin,
+            IngressBroadcastPolicy::default(),
+            rng,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "origin-aware ingress keeps both clocks, interface, trust boundary, media policy and entropy owner explicit"
+    )]
+    fn ingest_at_from_origin_with_broadcast_policy<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        interface: InterfaceId,
+        origin: IngressOrigin,
+        policy: IngressBroadcastPolicy,
+        rng: &mut R,
+    ) -> IngressReport {
+        let preflight = match self.preflight_ingest(raw, interface, origin) {
             Ok(preflight) => preflight,
             Err(report) => return report,
         };
@@ -3402,6 +4063,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             native,
             preflight,
             interface,
+            policy,
             TerminalCommitCounts::default(),
         )
     }
@@ -3451,11 +4113,109 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         R: RngCore + CryptoRng,
         S: ReceiptTerminalSink,
     {
-        let preflight = match self.preflight_ingest(raw, interface) {
+        self.ingest_with_receipt_sink_at_with_broadcast_scope(
+            raw,
+            now,
+            link_now,
+            interface,
+            IngressBroadcastScope::SharedMedium,
+            rng,
+            sink,
+        )
+    }
+
+    /// Receipt-atomic ingress with explicit media-aware broadcast scope.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "receipt-atomic ingress keeps each clock, interface, media policy, entropy owner and terminal sink explicit"
+    )]
+    pub fn ingest_with_receipt_sink_at_with_broadcast_scope<R, S>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        interface: InterfaceId,
+        broadcast_scope: IngressBroadcastScope,
+        rng: &mut R,
+        sink: &mut S,
+    ) -> Result<IngressReport, ReceiptReservationUnavailable>
+    where
+        R: RngCore + CryptoRng,
+        S: ReceiptTerminalSink,
+    {
+        self.ingest_observed_with_receipt_sink_at_with_broadcast_scope(
+            raw,
+            now,
+            link_now,
+            IngressObservation::remote(interface, None),
+            broadcast_scope,
+            rng,
+            sink,
+        )
+    }
+
+    /// Receipt-atomic ingress with exact interface provenance and optional
+    /// physical-link signal values.
+    ///
+    /// The observation is synchronously bound to both application events and
+    /// a valid proof's terminal receipt. This keeps proof correlation and its
+    /// final-hop signal measurement in the same transaction; callers must not
+    /// reconstruct that association from a separate event stream.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "observed receipt-atomic ingress keeps each clock, provenance, media policy, entropy owner and terminal sink explicit"
+    )]
+    pub fn ingest_observed_with_receipt_sink_at_with_broadcast_scope<R, S>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        ingress: IngressObservation,
+        broadcast_scope: IngressBroadcastScope,
+        rng: &mut R,
+        sink: &mut S,
+    ) -> Result<IngressReport, ReceiptReservationUnavailable>
+    where
+        R: RngCore + CryptoRng,
+        S: ReceiptTerminalSink,
+    {
+        self.ingest_observed_with_receipt_sink_at_with_broadcast_policy(
+            raw,
+            now,
+            link_now,
+            ingress,
+            IngressBroadcastPolicy::new(broadcast_scope),
+            rng,
+            sink,
+        )
+    }
+
+    /// Receipt-atomic ingress with exact provenance, media topology and an
+    /// optional exact announce-egress restriction.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "observed receipt-atomic ingress keeps each clock, provenance, routing policy, entropy owner and terminal sink explicit"
+    )]
+    pub fn ingest_observed_with_receipt_sink_at_with_broadcast_policy<R, S>(
+        &mut self,
+        raw: &[u8],
+        now: u64,
+        link_now: MonotonicInstant,
+        ingress: IngressObservation,
+        policy: IngressBroadcastPolicy,
+        rng: &mut R,
+        sink: &mut S,
+    ) -> Result<IngressReport, ReceiptReservationUnavailable>
+    where
+        R: RngCore + CryptoRng,
+        S: ReceiptTerminalSink,
+    {
+        let interface = ingress.interface();
+        let preflight = match self.preflight_ingest(raw, interface, ingress.origin()) {
             Ok(preflight) => preflight,
             Err(report) => return Ok(report),
         };
-        let mut native_sink = NativeReceiptSink::new(sink);
+        let mut native_sink = NativeReceiptSink::with_ingress(sink, ingress);
         self.arm_retained_proof(&preflight);
         let native = self.core.handle_ingest_with_receipt_sink_at(
             raw,
@@ -3478,7 +4238,10 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         };
         self.answer_local_path_request(&mut native, &preflight, now, rng);
         self.suppress_path_response_rebroadcast(&mut native, &preflight);
-        Ok(self.finish_ingest(native, preflight, interface, native_sink.committed))
+        let mut report =
+            self.finish_ingest(native, preflight, interface, policy, native_sink.committed);
+        report.actions.attach_exact_ingress_observation(ingress);
+        Ok(report)
     }
 
     #[allow(
@@ -3489,6 +4252,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         &mut self,
         raw: &[u8],
         interface: InterfaceId,
+        origin: IngressOrigin,
     ) -> Result<IngressPreflight, IngressReport> {
         self.ingress.seen = self.ingress.seen.saturating_add(1);
 
@@ -3526,7 +4290,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             ));
         }
 
-        if let Err(reason) = self.preflight_h1_reverse_admission(&packet, interface) {
+        if let Err(reason) = self.preflight_h1_reverse_admission(&packet, interface, origin) {
             return Err(self.reject(reason, metadata));
         }
 
@@ -3558,6 +4322,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 && packet.dest_type == DestType::Single
                 && packet.context == CONTEXT_PATH_RESPONSE)
                 .then(|| DestHash::from_slice(packet.destination_hash)),
+            derived_broadcast: ingress_derived_broadcast(&packet),
         })
     }
 
@@ -3804,6 +4569,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         mut native: IngestOutcome,
         mut preflight: IngressPreflight,
         interface: InterfaceId,
+        policy: IngressBroadcastPolicy,
         terminal_commits: TerminalCommitCounts,
     ) -> IngressReport {
         self.reclaim_native_request_terminals(&native.events);
@@ -3887,6 +4653,21 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let after = self.core.transport.stats();
         let native_duplicate = after.packets_dropped_dedup > preflight.before_duplicate;
         let native_invalid = after.packets_dropped_invalid > preflight.before_invalid;
+        let derived_override = if !native_duplicate && !native_invalid {
+            preflight
+                .derived_broadcast
+                .and_then(|derived| ingress_derived_override(&native, derived, policy))
+        } else {
+            None
+        };
+        if let (Some(IngressDerivedBroadcast::Announce { .. }), Some(derived_override)) =
+            (preflight.derived_broadcast, derived_override)
+        {
+            self.remove_retargeted_announce_retry(
+                derived_override.packet_hash,
+                derived_override.received_hops,
+            );
+        }
         let identity = self.core.identity();
         let proof_expectation = preflight.proof_expectation.take();
         let retained_proof = if native_duplicate || native_invalid {
@@ -3996,8 +4777,43 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         IngressReport {
             disposition,
             metadata,
-            actions: resolve_ingest_actions(native, events, interface, retained_proof),
+            actions: resolve_ingest_actions(
+                native,
+                events,
+                interface,
+                retained_proof,
+                derived_override,
+            ),
         }
+    }
+
+    fn remove_retargeted_announce_retry(&mut self, packet_hash: [u8; 32], received_hops: u8) {
+        let pending = self.core.transport.announce_count();
+        let mut removed = false;
+        for _ in 0..pending {
+            let Some(announce) = self.core.transport.next_announce() else {
+                break;
+            };
+            let is_exact_retry = !removed
+                && !announce.local
+                && !announce.block_rebroadcasts
+                && announce.tx_count > 0
+                && announce.received_hops == received_hops
+                && Packet::parse(&announce.raw).is_ok_and(|packet| {
+                    packet.packet_type == PacketType::Announce
+                        && packet.compute_hash() == packet_hash
+                });
+            if is_exact_retry {
+                removed = true;
+            } else {
+                let requeued = self.core.transport.queue_announce(announce);
+                debug_assert!(requeued, "popped announce must fit its original queue");
+            }
+        }
+        debug_assert!(
+            removed,
+            "an immediately forwarded received announce must retain one native retry"
+        );
     }
 
     fn preflight_link_request(
@@ -4093,6 +4909,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         &mut self,
         packet: &Packet<'_>,
         interface: InterfaceId,
+        origin: IngressOrigin,
     ) -> Result<(), IngressDropReason> {
         if self.role != NodeRole::Transport
             || packet.header_type != HeaderType::Header1
@@ -4105,8 +4922,13 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let destination = DestHash::from_slice(packet.destination_hash);
         if destination == rete_transport::PATH_REQUEST_DEST
             || self.core.transport.is_local_destination(&destination)
-            || self.core.transport.get_path(&destination).is_none()
         {
+            return Ok(());
+        }
+        if origin == IngressOrigin::RemoteInterface {
+            return Err(IngressDropReason::Header1RemoteDataForwardingDisabled);
+        }
+        if self.core.transport.get_path(&destination).is_none() {
             return Ok(());
         }
         let packet_hash = packet.compute_hash();
@@ -4191,6 +5013,12 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                     .header1_remote_link_request_disabled
                     .saturating_add(1);
             }
+            IngressDropReason::Header1RemoteDataForwardingDisabled => {
+                self.ingress.header1_remote_data_forwarding_disabled = self
+                    .ingress
+                    .header1_remote_data_forwarding_disabled
+                    .saturating_add(1);
+            }
             IngressDropReason::Header2NotAddressedToUs { .. } => {
                 self.ingress.header2_filtered = self.ingress.header2_filtered.saturating_add(1);
             }
@@ -4240,7 +5068,8 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         content: &[u8],
         output: &mut [u8],
     ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
-        let composed = self.compose_basic_lxmf(destination, timestamp_unix_ms, title, content)?;
+        let composed =
+            self.compose_basic_lxmf(destination, timestamp_unix_ms, title, content, None)?;
         // Python performs signed subtraction here. Its canonical empty-title,
         // empty-content payload is 15 bytes, producing content_size = -1 and
         // remaining opportunistic. Compare the untranslated payload length so
@@ -4250,6 +5079,59 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             let content_size = composed.payload_len - LXMF_SELECTION_OVERHEAD;
             return Err(PrepareBasicLxmfError::PayloadTooLarge {
                 actual: content_size,
+                maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
+            });
+        }
+        if composed.packed.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(destination.as_ref()) {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let carrier = composed
+            .packed
+            .get(LXMF_DESTINATION_HASH_LENGTH..)
+            .ok_or(PrepareBasicLxmfError::Invariant)?;
+        if carrier.len() > MAX_OPPORTUNISTIC_LXMF_CARRIER {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let output_len = output.len();
+        let carrier_output =
+            output
+                .get_mut(..carrier.len())
+                .ok_or(PrepareBasicLxmfError::OutputTooSmall {
+                    required: carrier.len(),
+                    available: output_len,
+                })?;
+        carrier_output.copy_from_slice(carrier);
+        Ok(PreparedBasicLxmf {
+            carrier_len: carrier.len() as u16,
+            carrier_sha256: Sha256::digest(carrier).into(),
+            message_id: composed.message_id,
+            destination: *destination,
+        })
+    }
+
+    /// Compose and sign one opportunistic LXMF carrier with a location snapshot.
+    ///
+    /// The location is encoded as Sideband's `FIELD_TELEMETRY` binary sensor
+    /// map and is therefore covered by the LXMF message ID and signature.
+    pub fn prepare_basic_lxmf_with_location_into(
+        &self,
+        destination: &DestHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        location: SidebandLocationTelemetry,
+        output: &mut [u8],
+    ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
+        let composed = self.compose_basic_lxmf(
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            Some(location),
+        )?;
+        if composed.payload_len > LXMF_SELECTION_OVERHEAD + MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE {
+            return Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: composed.payload_len - LXMF_SELECTION_OVERHEAD,
                 maximum: MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE,
             });
         }
@@ -4295,11 +5177,56 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         content: &[u8],
         output: &mut [u8],
     ) -> Result<PreparedBasicDirectLxmf, PrepareBasicLxmfError> {
-        let composed = self.compose_basic_lxmf(destination, timestamp_unix_ms, title, content)?;
+        let composed =
+            self.compose_basic_lxmf(destination, timestamp_unix_ms, title, content, None)?;
         if composed.payload_len > LXMF_SELECTION_OVERHEAD + MAX_DIRECT_LXMF_CONTENT_SIZE {
             let content_size = composed.payload_len - LXMF_SELECTION_OVERHEAD;
             return Err(PrepareBasicLxmfError::PayloadTooLarge {
                 actual: content_size,
+                maximum: MAX_DIRECT_LXMF_CONTENT_SIZE,
+            });
+        }
+        if composed.packed.len() > MAX_DIRECT_LXMF_WIRE
+            || composed.packed.get(..LXMF_DESTINATION_HASH_LENGTH) != Some(destination.as_ref())
+        {
+            return Err(PrepareBasicLxmfError::Invariant);
+        }
+        let output_len = output.len();
+        let wire_output = output.get_mut(..composed.packed.len()).ok_or(
+            PrepareBasicLxmfError::OutputTooSmall {
+                required: composed.packed.len(),
+                available: output_len,
+            },
+        )?;
+        wire_output.copy_from_slice(&composed.packed);
+        Ok(PreparedBasicDirectLxmf {
+            wire_len: composed.packed.len() as u16,
+            wire_sha256: Sha256::digest(&composed.packed).into(),
+            message_id: composed.message_id,
+            destination: *destination,
+        })
+    }
+
+    /// Compose and sign one complete direct-LXMF message with a location snapshot.
+    pub fn prepare_basic_direct_lxmf_with_location_into(
+        &self,
+        destination: &DestHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        location: SidebandLocationTelemetry,
+        output: &mut [u8],
+    ) -> Result<PreparedBasicDirectLxmf, PrepareBasicLxmfError> {
+        let composed = self.compose_basic_lxmf(
+            destination,
+            timestamp_unix_ms,
+            title,
+            content,
+            Some(location),
+        )?;
+        if composed.payload_len > LXMF_SELECTION_OVERHEAD + MAX_DIRECT_LXMF_CONTENT_SIZE {
+            return Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: composed.payload_len - LXMF_SELECTION_OVERHEAD,
                 maximum: MAX_DIRECT_LXMF_CONTENT_SIZE,
             });
         }
@@ -4330,6 +5257,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         timestamp_unix_ms: u64,
         title: &[u8],
         content: &[u8],
+        location: Option<SidebandLocationTelemetry>,
     ) -> Result<ComposedBasicLxmf, PrepareBasicLxmfError> {
         if timestamp_unix_ms == 0 {
             return Err(PrepareBasicLxmfError::InvalidTimestamp);
@@ -4344,13 +5272,20 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             .registered_lxmf_delivery_source()
             .ok_or(PrepareBasicLxmfError::DeliveryDestinationUnavailable)?;
         let timestamp = timestamp_unix_ms as f64 / 1_000.0;
+        let mut fields = BTreeMap::new();
+        if let Some(location) = location {
+            let mut telemetry = [0_u8; MAX_ENCODED_SIDEBAND_LOCATION_TELEMETRY_BYTES];
+            let encoded = encode_sideband_location_telemetry(location, &mut telemetry)
+                .map_err(|_| PrepareBasicLxmfError::Invariant)?;
+            fields.insert(FIELD_TELEMETRY, telemetry[..encoded].to_vec());
+        }
         let message = LXMessage::new(
             *destination,
             source,
             self.core.identity(),
             title,
             content,
-            BTreeMap::new(),
+            fields,
             timestamp,
         )
         .map_err(|error| match error {
@@ -4694,7 +5629,6 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         }
 
         let target = self.destination_target(destination);
-
         let prepared = self
             .core
             .prepare_data_packet_into(destination, plaintext, rng, now, output)
@@ -4725,7 +5659,66 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
             packet_len: prepared.data.len() as u16,
             target,
             receipt: ReceiptId::from_native(prepared.receipt),
+            destination: *destination,
         })
+    }
+
+    /// Park one still-outstanding destination-DATA receipt until an interface
+    /// returns its owning transmission attempt.
+    ///
+    /// Rete's zero timeout means that maintenance does not expire the receipt.
+    /// Proof validation remains active, so an unusually fast proof can still
+    /// complete the exact attempt before its interface completion is
+    /// reconciled. Product code must later arm or cancel every parked receipt.
+    pub fn park_data_receipt(&mut self, prepared: PreparedData, parked_at: u64) -> bool {
+        self.replace_data_receipt(prepared, parked_at, 0)
+    }
+
+    /// Restart one still-outstanding destination-DATA receipt at an interface
+    /// transmission boundary retained by the product owner.
+    ///
+    /// Pinned Rete registers DATA receipts while constructing the packet and
+    /// exposes no timestamp-update operation. The adapter therefore removes and
+    /// immediately re-registers the same complete packet hash with the same
+    /// destination key and native timeout. This operation is valid only while
+    /// the exact prepared receipt is still outstanding; it never resurrects a
+    /// delivered, timed-out, cancelled, or unknown receipt.
+    ///
+    /// Ordinary Link-DATA receipts cannot use this operation because the pinned
+    /// dependency does not publicly expose their registration primitive.
+    pub fn rearm_data_receipt(&mut self, prepared: PreparedData, sent_at: u64) -> bool {
+        self.replace_data_receipt(prepared, sent_at, rete_transport::RECEIPT_TIMEOUT)
+    }
+
+    fn replace_data_receipt(&mut self, prepared: PreparedData, sent_at: u64, timeout: u64) -> bool {
+        let receipt = prepared.receipt();
+        let Some(destination_public_key) = self
+            .core
+            .transport
+            .recall_identity(&prepared.destination)
+            .copied()
+        else {
+            return false;
+        };
+        if self
+            .core
+            .transport
+            .receipt_status(receipt.as_bytes())
+            .is_none()
+            || !self.core.transport.cancel_receipt(receipt.as_bytes())
+        {
+            return false;
+        }
+
+        self.core
+            .transport
+            .register_receipt(
+                *receipt.as_bytes(),
+                destination_public_key,
+                sent_at,
+                timeout,
+            )
+            .is_ok()
     }
 
     /// Cancel an outstanding destination-DATA receipt by its complete packet
@@ -5964,6 +6957,7 @@ fn resolve_ingest_actions(
     events: Vec<ApplicationEvent>,
     source: InterfaceId,
     retained_proof: Option<RetainedApplicationProof>,
+    mut derived_override: Option<IngressDerivedOverride>,
 ) -> NodeActions {
     let events = match retained_proof {
         Some(retained_proof) => ApplicationEvents::retained(events, retained_proof),
@@ -5974,10 +6968,113 @@ fn resolve_ingest_actions(
         packets: native
             .packets
             .into_iter()
-            .map(|packet| resolve_packet(packet, source))
+            .filter_map(|packet| {
+                if derived_override.is_some_and(|candidate| candidate.matches(&packet)) {
+                    let candidate = derived_override
+                        .take()
+                        .expect("a matching derived override remains present");
+                    return resolve_packet_with_derived_target(packet, source, candidate.target);
+                }
+                Some(resolve_packet(packet, source))
+            })
             .collect(),
         unroutable_packets: 0,
     }
+}
+
+impl IngressDerivedOverride {
+    fn matches(self, packet: &OutboundPacket) -> bool {
+        Packet::parse(&packet.data).is_ok_and(|parsed| parsed.compute_hash() == self.packet_hash)
+    }
+}
+
+fn ingress_derived_broadcast(packet: &Packet<'_>) -> Option<IngressDerivedBroadcast> {
+    if packet.packet_type == PacketType::Announce && packet.dest_type == DestType::Single {
+        return Some(IngressDerivedBroadcast::Announce {
+            destination: DestHash::from_slice(packet.destination_hash),
+        });
+    }
+    if packet.header_type == HeaderType::Header1
+        && packet.packet_type == PacketType::Data
+        && packet.dest_type == DestType::Plain
+        && packet.context == CONTEXT_NONE
+        && packet.destination_hash == rete_transport::PATH_REQUEST_DEST.as_ref()
+    {
+        return Some(IngressDerivedBroadcast::PathRequest {
+            packet_hash: packet.compute_hash(),
+        });
+    }
+    None
+}
+
+fn ingress_derived_override(
+    native: &IngestOutcome,
+    derived: IngressDerivedBroadcast,
+    policy: IngressBroadcastPolicy,
+) -> Option<IngressDerivedOverride> {
+    let target = match derived {
+        IngressDerivedBroadcast::Announce { .. } => match policy.announce_egress() {
+            Some(egress) => IngressDerivedTarget::Selected(egress),
+            None if policy.scope() == IngressBroadcastScope::PointToPoint => {
+                IngressDerivedTarget::AllExceptSource
+            }
+            None => return None,
+        },
+        IngressDerivedBroadcast::PathRequest { .. }
+            if policy.scope() == IngressBroadcastScope::PointToPoint =>
+        {
+            IngressDerivedTarget::AllExceptSource
+        }
+        IngressDerivedBroadcast::PathRequest { .. } => return None,
+    };
+    let matching = native.packets.iter().rposition(|outbound| {
+        if outbound.routing != PacketRouting::All {
+            return false;
+        }
+        let Ok(packet) = Packet::parse(&outbound.data) else {
+            return false;
+        };
+        match derived {
+            IngressDerivedBroadcast::Announce { destination, .. } => {
+                packet.packet_type == PacketType::Announce
+                    && packet.destination_hash == destination.as_ref()
+            }
+            IngressDerivedBroadcast::PathRequest { packet_hash } => {
+                packet.header_type == HeaderType::Header1
+                    && packet.packet_type == PacketType::Data
+                    && packet.dest_type == DestType::Plain
+                    && packet.context == CONTEXT_NONE
+                    && packet.destination_hash == rete_transport::PATH_REQUEST_DEST.as_ref()
+                    && packet.compute_hash() == packet_hash
+            }
+        }
+    });
+    let index = matching?;
+    let forwarded = Packet::parse(&native.packets[index].data)
+        .expect("the selected derived broadcast was already parsed");
+    Some(IngressDerivedOverride {
+        packet_hash: forwarded.compute_hash(),
+        received_hops: forwarded.hops,
+        target,
+    })
+}
+
+fn resolve_packet_with_derived_target(
+    packet: OutboundPacket,
+    source: InterfaceId,
+    target: IngressDerivedTarget,
+) -> Option<TxPacket> {
+    let protocol_token = packet.protocol_token();
+    let target = match target {
+        IngressDerivedTarget::AllExceptSource => TxTarget::AllExcept(source),
+        IngressDerivedTarget::Selected(egress) if egress.is_empty() => return None,
+        IngressDerivedTarget::Selected(egress) => TxTarget::Selected(egress),
+    };
+    Some(TxPacket {
+        bytes: packet.data,
+        target,
+        protocol_token,
+    })
 }
 
 fn resolve_packet(packet: OutboundPacket, source: InterfaceId) -> TxPacket {
@@ -6193,6 +7290,7 @@ mod tests {
             binding,
             data,
             context,
+            ..
         }) = projection
         else {
             panic!("non-DATA event must return through the unchanged projection")
@@ -6303,13 +7401,17 @@ mod tests {
     fn inbound_data_projection_preserves_maximum_encrypted_data() {
         let payload = vec![0xa5; MAX_DATA_PAYLOAD];
         let expected_pointer = payload.as_ptr();
+        let ingress =
+            IngressObservation::new(InterfaceId(3), Some(IngressSignalObservation::new(-87, 6)));
         let projection = project_inbound_data(ApplicationEvent::DataReceived {
             destination: [0x33; rete_core::TRUNCATED_HASH_LEN],
             payload,
+            ingress: Some(ingress),
         });
         let InboundDataProjection::Data(data) = projection else {
             panic!("maximum encrypted DATA must project")
         };
+        assert_eq!(data.ingress(), Some(ingress));
         let (_, payload) = data.into_parts();
         assert_eq!(payload.len(), MAX_DATA_PAYLOAD);
         assert_eq!(payload.as_ptr(), expected_pointer);
@@ -6322,6 +7424,7 @@ mod tests {
         let projection = project_inbound_data(ApplicationEvent::DataReceived {
             destination: [0x66; rete_core::TRUNCATED_HASH_LEN],
             payload,
+            ingress: None,
         });
         let InboundDataProjection::Data(data) = projection else {
             panic!("projection must leave mailbox and destination-size policy to its caller")
@@ -6335,6 +7438,7 @@ mod tests {
         let data = project_inbound_data(ApplicationEvent::DataReceived {
             destination,
             payload: vec![0xde, 0xad, 0xbe, 0xef],
+            ingress: None,
         });
         let data_debug = format!("{data:?}");
         assert!(data_debug.contains("payload_len: 4"));
@@ -6348,6 +7452,7 @@ mod tests {
             ),
             data: vec![0xca, 0xfe, 0xba, 0xbe],
             context: 0x55,
+            ingress: None,
         });
         let other_debug = format!("{other:?}");
         assert_eq!(other_debug, "Other(..)");
@@ -6514,6 +7619,7 @@ mod tests {
                 identity: observed_identity,
                 hops: 3,
                 app_data: Some(data),
+                ingress: None,
             } if *observed_destination == *destination.as_bytes()
                 && *observed_identity == *identity.as_bytes()
                 && data == &[0xa1, 0xa2]
@@ -6523,11 +7629,15 @@ mod tests {
             ApplicationEvent::DataReceived {
                 destination: observed,
                 payload,
+                ingress: None,
             } if *observed == *destination.as_bytes() && payload == &[0xb1, 0xb2]
         ));
         assert!(matches!(
             &projected[2],
-            ApplicationEvent::ProofReceived { packet_hash } if packet_hash == &[0xc1; 32]
+            ApplicationEvent::ProofReceived {
+                packet_hash,
+                ingress: None,
+            } if packet_hash == &[0xc1; 32]
         ));
         assert!(matches!(
             &projected[3],
@@ -6550,6 +7660,7 @@ mod tests {
                 binding,
                 data,
                 context: 7,
+                ingress: None,
             } if binding.link() == link.as_bytes()
                 && binding.destination() == destination.as_bytes()
                 && data == &[0xd1, 0xd2]
@@ -6687,6 +7798,62 @@ mod tests {
     }
 
     #[test]
+    fn ingress_observation_attaches_to_bounded_ingress_originated_events() {
+        let mut actions = NodeActions::without_retained_proofs(
+            vec![
+                ApplicationEvent::AnnounceReceived {
+                    destination: [0x11; rete_core::TRUNCATED_HASH_LEN],
+                    identity: [0x22; rete_core::TRUNCATED_HASH_LEN],
+                    hops: 2,
+                    app_data: None,
+                    ingress: None,
+                },
+                ApplicationEvent::DataReceived {
+                    destination: [0x33; rete_core::TRUNCATED_HASH_LEN],
+                    payload: vec![0x44],
+                    ingress: None,
+                },
+                ApplicationEvent::ProofReceived {
+                    packet_hash: [0x55; 32],
+                    ingress: None,
+                },
+                ApplicationEvent::LinkData {
+                    binding: test_link_binding(
+                        [0x66; rete_core::TRUNCATED_HASH_LEN],
+                        [0x77; rete_core::TRUNCATED_HASH_LEN],
+                        ApplicationLinkRole::Responder,
+                    ),
+                    data: vec![0x88],
+                    context: LINK_DATA_CONTEXT_NONE,
+                    ingress: None,
+                },
+                ApplicationEvent::Tick {
+                    expired_paths: 0,
+                    closed_links: 0,
+                },
+            ],
+            Vec::new(),
+            0,
+        );
+
+        actions.attach_ingress_observation(7, Some((-91, 4)));
+
+        let expected =
+            IngressObservation::new(InterfaceId(7), Some(IngressSignalObservation::new(-91, 4)));
+        for event in &actions.events.as_slice()[..4] {
+            let observation = match event {
+                ApplicationEvent::AnnounceReceived { ingress, .. }
+                | ApplicationEvent::DataReceived { ingress, .. }
+                | ApplicationEvent::ProofReceived { ingress, .. }
+                | ApplicationEvent::LinkData { ingress, .. } => *ingress,
+                _ => panic!("test event changed variant"),
+            };
+            assert_eq!(observation, Some(expected));
+        }
+        assert!(matches!(actions.events[4], ApplicationEvent::Tick { .. }));
+    }
+
+    #[test]
     fn application_event_debug_redacts_owned_bodies_and_public_key() {
         let resource = ApplicationEvent::ResourceComplete {
             link: [0x11; rete_core::TRUNCATED_HASH_LEN],
@@ -6735,6 +7902,229 @@ mod tests {
             EmbeddedNodeConfig::endpoint(),
         )
         .unwrap()
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "the successful in-place test value is explicitly dropped after its borrow ends"
+    )]
+    fn in_place_construction_matches_value_construction() {
+        let by_value = TestNode::new(
+            identity(41),
+            "reticulum",
+            &["embedded"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut destination = MaybeUninit::<TestNode>::uninit();
+        {
+            let in_place = TestNode::new_in(
+                &mut destination,
+                identity(41),
+                "reticulum",
+                &["embedded"],
+                EmbeddedNodeConfig::transport(),
+            )
+            .unwrap();
+
+            assert_eq!(in_place.destination_hash(), by_value.destination_hash());
+            assert_eq!(in_place.identity_hash(), by_value.identity_hash());
+            assert_eq!(in_place.role(), by_value.role());
+            assert_eq!(in_place.metrics(), by_value.metrics());
+        }
+
+        // SAFETY: `new_in` returned success above and the resulting reference
+        // no longer exists, so the slot contains exactly one initialized node.
+        unsafe { destination.assume_init_drop() };
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "the successful retry value is explicitly dropped after its borrow ends"
+    )]
+    fn failed_in_place_construction_leaves_destination_reusable() {
+        let mut destination = MaybeUninit::<TestNode>::uninit();
+        let oversized_name = "x".repeat(130);
+        let failure = TestNode::new_in(
+            &mut destination,
+            identity(42),
+            &oversized_name,
+            &[],
+            EmbeddedNodeConfig::endpoint(),
+        );
+        assert!(matches!(failure, Err(rete_core::Error::BufferTooSmall)));
+
+        let expected = TestNode::new(
+            identity(42),
+            "reticulum",
+            &["retry"],
+            EmbeddedNodeConfig::endpoint(),
+        )
+        .unwrap();
+        {
+            let retried = TestNode::new_in(
+                &mut destination,
+                identity(42),
+                "reticulum",
+                &["retry"],
+                EmbeddedNodeConfig::endpoint(),
+            )
+            .unwrap();
+            assert_eq!(retried.destination_hash(), expected.destination_hash());
+            assert_eq!(retried.metrics(), expected.metrics());
+        }
+
+        // SAFETY: the failed attempt left the slot uninitialized and the
+        // retry returned success; its resulting reference no longer exists.
+        unsafe { destination.assume_init_drop() };
+    }
+
+    #[test]
+    fn canonical_probe_registration_is_inbound_single_prove_all_without_links() {
+        let mut responder = node(201);
+        let destination = responder.register_probe_destination().unwrap();
+        let identity_hash = responder.identity_hash();
+        assert_eq!(
+            destination,
+            rete_core::destination_hash(RNSTRANSPORT_PROBE_EXPANDED_NAME, Some(&identity_hash))
+        );
+
+        let registered = responder
+            .core
+            .get_destination(&destination)
+            .expect("registered probe destination remains visible");
+        assert_eq!(registered.app_name, RNSTRANSPORT_PROBE_APPLICATION_NAME);
+        assert_eq!(registered.aspects.as_slice(), &[RNSTRANSPORT_PROBE_ASPECT]);
+        assert_eq!(registered.direction, Direction::In);
+        assert_eq!(registered.dest_type, DestinationType::Single);
+        assert!(!registered.accepts_links);
+        assert_eq!(
+            registered.proof_strategy,
+            rete_stack::ProofStrategy::ProveAll
+        );
+    }
+
+    #[test]
+    fn canonical_probe_destination_returns_a_proof_with_exact_ingress_signal() {
+        let mut sender = node(202);
+        let mut responder = node(203);
+        let probe_destination = responder.register_probe_destination().unwrap();
+        sender
+            .register_peer(
+                &identity(203),
+                RNSTRANSPORT_PROBE_APPLICATION_NAME,
+                &[RNSTRANSPORT_PROBE_ASPECT],
+                100,
+            )
+            .unwrap();
+
+        let mut rng = CounterRng::default();
+        let mut output = [0_u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &probe_destination,
+                b"standard proof probe",
+                101,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+        let received = responder.ingest(
+            &output[..usize::from(prepared.packet_len())],
+            101,
+            InterfaceId(7),
+            &mut rng,
+        );
+        assert!(received.actions.events.iter().any(|event| matches!(
+            event,
+            ApplicationEvent::DataReceived {
+                destination,
+                payload,
+                ..
+            } if *destination == *probe_destination.as_bytes()
+                && payload == b"standard proof probe"
+        )));
+        assert_eq!(received.actions.packets.len(), 1);
+        let proof = &received.actions.packets[0];
+        assert_eq!(proof.target(), TxTarget::Only(InterfaceId(7)));
+
+        let ingress =
+            IngressObservation::new(InterfaceId(9), Some(IngressSignalObservation::new(-88, 7)));
+        let expected = ReceiptCandidate {
+            kind: ReceiptKind::Data,
+            receipt: prepared.receipt(),
+            ingress: Some(ingress),
+        };
+        let mut sink = RecordingReceiptSink::default();
+        sender
+            .ingest_observed_with_receipt_sink_at_with_broadcast_scope(
+                proof.bytes(),
+                102,
+                MonotonicInstant::from_secs(102),
+                ingress,
+                IngressBroadcastScope::SharedMedium,
+                &mut rng,
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(sink.terminals, [ReceiptTerminal::Delivered(expected)]);
+    }
+
+    #[test]
+    fn probe_destination_derives_from_any_retained_announce_identity() {
+        let mut owner = node(204);
+        let peer = identity(205);
+        owner
+            .register_peer(&peer, LXMF_APPLICATION_NAME, &[LXMF_DELIVERY_ASPECT], 100)
+            .unwrap();
+        let identity_hash = peer.hash();
+        let announced =
+            rete_core::destination_hash(LXMF_DELIVERY_EXPANDED_NAME, Some(&identity_hash));
+        let expected =
+            rete_core::destination_hash(RNSTRANSPORT_PROBE_EXPANDED_NAME, Some(&identity_hash));
+        assert_eq!(
+            owner.proof_probe_destination_for(&announced),
+            Some(expected)
+        );
+        assert!(!owner.has_path(&expected));
+        let mut rng = CounterRng::default();
+        let mut output = [0xa5_u8; RNS_MTU];
+        assert_eq!(
+            owner.prepare_data_into(&expected, b"identity alias", 101, &mut rng, &mut output),
+            Err(PrepareDataError::UnknownDestination)
+        );
+        assert!(output.iter().all(|byte| *byte == 0xa5));
+
+        assert_eq!(
+            owner.prepare_proof_probe_destination_for(&announced),
+            Ok(expected)
+        );
+        assert_eq!(
+            owner.prepare_proof_probe_destination_for(&announced),
+            Ok(expected),
+            "identity aliasing is idempotent"
+        );
+        assert_eq!(owner.recall_identity(&expected), Some(peer.public_key()));
+        assert!(
+            !owner.has_path(&expected),
+            "identity aliasing must not fabricate a direct path"
+        );
+        let prepared = owner
+            .prepare_data_into(&expected, b"identity alias", 102, &mut rng, &mut output)
+            .expect("the promoted identity enables probe DATA encryption");
+        assert_eq!(prepared.target(), TxTarget::All);
+        assert!(owner.cancel_data_receipt(prepared.receipt()));
+
+        assert_eq!(
+            owner.proof_probe_destination_for(&DestHash::from([0xee; 16])),
+            None
+        );
+        assert_eq!(
+            owner.prepare_proof_probe_destination_for(&DestHash::from([0xee; 16])),
+            Err(ProofProbeIdentityAliasError::SourceIdentityUnknown)
+        );
     }
 
     fn fixture_hash(encoded: &str) -> DestHash {
@@ -7019,6 +8409,7 @@ mod tests {
                 binding,
                 data,
                 context: LINK_DATA_CONTEXT_NONE,
+                ..
             }] if binding.link() == link_id.as_bytes()
                 && binding.destination() == destination.as_bytes()
                 && binding.role() == ApplicationLinkRole::Responder
@@ -7039,6 +8430,7 @@ mod tests {
         let expected = ReceiptCandidate {
             kind: ReceiptKind::LinkData,
             receipt: prepared.receipt(),
+            ingress: Some(IngressObservation::new(InterfaceId(3), None)),
         };
         let mut sink = RecordingReceiptSink::default();
         let delivered = initiator
@@ -7374,6 +8766,7 @@ mod tests {
         let expected = ReceiptCandidate {
             kind: ReceiptKind::LinkData,
             receipt: expiring.receipt(),
+            ingress: None,
         };
         let mut sink = RecordingReceiptSink::default();
         let report = sender.tick_with_receipt_sink(231, &mut rng, &mut sink);
@@ -7428,6 +8821,82 @@ mod tests {
             })
         );
         assert!(opportunistic.iter().all(|byte| *byte == 0x62));
+    }
+
+    #[test]
+    fn basic_lxmf_location_is_sideband_compatible_and_changes_message_identity() {
+        let node = python_lxmf_fixture_node();
+        let destination = fixture_hash("021e68345db8a80c29d0c2f193baa5f4");
+        let location = SidebandLocationTelemetry::new(
+            44_123_456,
+            -73_987_654,
+            12_345,
+            678,
+            12_345,
+            250,
+            1_785_700_123,
+        );
+        let mut located_wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let located = node
+            .prepare_basic_direct_lxmf_with_location_into(
+                &destination,
+                1_785_700_123_456,
+                b"location",
+                b"meet me here",
+                location,
+                &mut located_wire,
+            )
+            .unwrap();
+        let decoded = LXMessage::unpack(
+            &located_wire[..usize::from(located.wire_len())],
+            Some(node.core.identity()),
+        )
+        .unwrap();
+        assert_eq!(decoded.fields.len(), 1);
+        let telemetry = decoded.fields.get(&FIELD_TELEMETRY).unwrap();
+        let mut expected = [0_u8; MAX_ENCODED_SIDEBAND_LOCATION_TELEMETRY_BYTES];
+        let expected_len = encode_sideband_location_telemetry(location, &mut expected).unwrap();
+        assert_eq!(telemetry, &expected[..expected_len]);
+
+        let mut plain_wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        let plain = node
+            .prepare_basic_direct_lxmf_into(
+                &destination,
+                1_785_700_123_456,
+                b"location",
+                b"meet me here",
+                &mut plain_wire,
+            )
+            .unwrap();
+        assert_ne!(located.message_id(), plain.message_id());
+
+        let maximum_located_content = vec![0x42; 268];
+        let mut boundary_wire = [0_u8; MAX_DIRECT_LXMF_WIRE];
+        node.prepare_basic_direct_lxmf_with_location_into(
+            &destination,
+            1_785_700_123_456,
+            b"",
+            &maximum_located_content,
+            location,
+            &mut boundary_wire,
+        )
+        .expect("268 content bytes exactly fit with current Sideband location fields");
+
+        let oversized_located_content = vec![0x42; 269];
+        assert_eq!(
+            node.prepare_basic_direct_lxmf_with_location_into(
+                &destination,
+                1_785_700_123_456,
+                b"",
+                &oversized_located_content,
+                location,
+                &mut boundary_wire,
+            ),
+            Err(PrepareBasicLxmfError::PayloadTooLarge {
+                actual: MAX_DIRECT_LXMF_CONTENT_SIZE + 1,
+                maximum: MAX_DIRECT_LXMF_CONTENT_SIZE,
+            })
+        );
     }
 
     #[test]
@@ -9186,6 +10655,7 @@ mod tests {
                 binding,
                 data,
                 context: LINK_DATA_CONTEXT_NONE,
+                ..
             }] if binding.link() == link_id.as_bytes()
                 && binding.destination() == delivery.as_bytes()
                 && binding.role() == ApplicationLinkRole::Responder
@@ -9294,7 +10764,7 @@ mod tests {
             .unwrap();
         let packet_hash = Packet::parse(data.bytes()).unwrap().compute_hash();
         let preflight = responder
-            .preflight_ingest(data.bytes(), InterfaceId(7))
+            .preflight_ingest(data.bytes(), InterfaceId(7), IngressOrigin::RemoteInterface)
             .unwrap();
         assert!(matches!(
             preflight.proof_expectation,
@@ -9328,6 +10798,7 @@ mod tests {
                 binding,
                 data,
                 context: LINK_DATA_CONTEXT_NONE,
+                ..
             }] if binding.link() == link_id.as_bytes()
                 && binding.destination() == responder.destination_hash().as_bytes()
                 && binding.role() == ApplicationLinkRole::Responder
@@ -9401,7 +10872,7 @@ mod tests {
             .unwrap();
         let packet_hash = Packet::parse(data.bytes()).unwrap().compute_hash();
         let preflight = responder
-            .preflight_ingest(data.bytes(), InterfaceId(7))
+            .preflight_ingest(data.bytes(), InterfaceId(7), IngressOrigin::RemoteInterface)
             .unwrap();
         assert!(matches!(
             preflight.proof_expectation,
@@ -9425,6 +10896,7 @@ mod tests {
                 binding,
                 data,
                 context: LINK_DATA_CONTEXT_NONE,
+                ..
             }] if binding.link() == link_id.as_bytes()
                 && binding.destination() == responder.destination_hash().as_bytes()
                 && binding.role() == ApplicationLinkRole::Responder
@@ -9537,6 +11009,7 @@ mod tests {
                 binding,
                 data,
                 context: LINK_DATA_CONTEXT_NONE,
+                ..
             }] if binding.link() == link_id.as_bytes()
                 && binding.role() == ApplicationLinkRole::Responder
                 && data == b"links now disabled"
@@ -9760,6 +11233,188 @@ mod tests {
     }
 
     #[test]
+    fn shared_lora_bystander_does_not_repeat_remote_direct_header1_data() {
+        let mut sender = node(140);
+        let mut receiver = node(141);
+        let mut bystander = TestNode::new(
+            identity(142),
+            "reticulum",
+            &["bystander"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let receiver_identity = identity(141);
+        let destination = receiver.destination_hash();
+        let lora = InterfaceId(1);
+        let mut rng = CounterRng::default();
+
+        for participant in [&mut sender, &mut bystander] {
+            participant
+                .register_peer(&receiver_identity, "reticulum", &["embedded"], 1)
+                .unwrap();
+            let mut direct = rete_transport::Path::direct(1);
+            direct.received_on = Some(lora.0);
+            assert!(participant.core.transport.insert_path(destination, direct));
+        }
+
+        let mut raw = [0_u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &destination,
+                b"direct shared-medium payload",
+                2,
+                &mut rng,
+                &mut raw,
+            )
+            .unwrap();
+        let wire = &raw[..usize::from(prepared.packet_len())];
+        let packet = Packet::parse(wire).unwrap();
+        assert_eq!(packet.header_type, HeaderType::Header1);
+        assert_eq!(prepared.target(), TxTarget::Only(lora));
+
+        let before = bystander.metrics();
+        let overheard = bystander.ingest(wire, 2, lora, &mut rng);
+        assert_eq!(
+            overheard.disposition,
+            IngressDisposition::Rejected(IngressDropReason::Header1RemoteDataForwardingDisabled)
+        );
+        assert!(overheard.actions.events.is_empty());
+        assert!(overheard.actions.packets.is_empty());
+        let after = bystander.metrics();
+        assert_eq!(
+            after.ingress.header1_remote_data_forwarding_disabled,
+            before
+                .ingress
+                .header1_remote_data_forwarding_disabled
+                .saturating_add(1)
+        );
+        assert_eq!(
+            after.transport.packets_received,
+            before.transport.packets_received
+        );
+        assert_eq!(
+            after.transport.packets_forwarded,
+            before.transport.packets_forwarded
+        );
+        assert_eq!(
+            after.capacity.reverse_entries,
+            before.capacity.reverse_entries
+        );
+
+        let received = receiver.ingest(wire, 2, lora, &mut rng);
+        assert_eq!(received.disposition, IngressDisposition::Processed);
+        assert!(received.actions.events.iter().any(|event| matches!(
+            event,
+            ApplicationEvent::DataReceived { payload, .. }
+                if payload == b"direct shared-medium payload"
+        )));
+    }
+
+    #[test]
+    fn shared_lora_selected_header2_relay_forwards_while_bystander_stays_silent() {
+        let mut sender = node(150);
+        let mut relay = TestNode::new(
+            identity(151),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut bystander = TestNode::new(
+            identity(152),
+            "reticulum",
+            &["bystander"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut receiver = node(153);
+        let receiver_identity = identity(153);
+        let destination = receiver.destination_hash();
+        let relay_identity = relay.identity_hash();
+        let lora = InterfaceId(1);
+        let mut rng = CounterRng::default();
+
+        sender
+            .register_peer(&receiver_identity, "reticulum", &["embedded"], 1)
+            .unwrap();
+        let mut via_relay = rete_transport::Path::via_repeater(relay_identity, 2, 1);
+        via_relay.received_on = Some(lora.0);
+        assert!(sender.core.transport.insert_path(destination, via_relay));
+
+        for participant in [&mut relay, &mut bystander] {
+            participant
+                .register_peer(&receiver_identity, "reticulum", &["embedded"], 1)
+                .unwrap();
+            let mut direct = rete_transport::Path::direct(1);
+            direct.received_on = Some(lora.0);
+            assert!(participant.core.transport.insert_path(destination, direct));
+        }
+
+        let mut raw = [0_u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &destination,
+                b"selected relay payload",
+                2,
+                &mut rng,
+                &mut raw,
+            )
+            .unwrap();
+        let wire = &raw[..usize::from(prepared.packet_len())];
+        let packet = Packet::parse(wire).unwrap();
+        assert_eq!(packet.header_type, HeaderType::Header2);
+        assert_eq!(packet.transport_id, Some(relay_identity.as_ref()));
+        assert_eq!(prepared.target(), TxTarget::Only(lora));
+
+        let ignored = bystander.ingest(wire, 2, lora, &mut rng);
+        assert!(matches!(
+            ignored.disposition,
+            IngressDisposition::Rejected(IngressDropReason::Header2NotAddressedToUs {
+                transport_id,
+            }) if transport_id == relay_identity
+        ));
+        assert!(ignored.actions.packets.is_empty());
+
+        let relayed = relay.ingest(wire, 2, lora, &mut rng);
+        assert_eq!(relayed.disposition, IngressDisposition::Processed);
+        assert_eq!(relayed.actions.packets.len(), 1);
+        assert_eq!(relayed.actions.packets[0].target(), TxTarget::Only(lora));
+        let forwarded_wire = relayed.actions.packets[0].bytes();
+        let forwarded = Packet::parse(forwarded_wire).unwrap();
+        assert_eq!(forwarded.header_type, HeaderType::Header1);
+        assert_eq!(forwarded.hops, 1);
+
+        let bystander_before = bystander.metrics();
+        let repeated = bystander.ingest(forwarded_wire, 3, lora, &mut rng);
+        assert_eq!(
+            repeated.disposition,
+            IngressDisposition::Rejected(IngressDropReason::Header1RemoteDataForwardingDisabled)
+        );
+        assert!(repeated.actions.packets.is_empty());
+        let bystander_after = bystander.metrics();
+        assert_eq!(
+            bystander_after
+                .ingress
+                .header1_remote_data_forwarding_disabled,
+            bystander_before
+                .ingress
+                .header1_remote_data_forwarding_disabled
+                .saturating_add(1)
+        );
+        assert_eq!(
+            bystander_after.transport.packets_forwarded,
+            bystander_before.transport.packets_forwarded
+        );
+
+        let received = receiver.ingest(forwarded_wire, 3, lora, &mut rng);
+        assert_eq!(received.disposition, IngressDisposition::Processed);
+        assert!(received.actions.events.iter().any(|event| matches!(
+            event,
+            ApplicationEvent::DataReceived { payload, .. } if payload == b"selected relay payload"
+        )));
+    }
+
+    #[test]
     fn header2_relay_link_capacity_is_typed_and_transactional() {
         let mut relay = TestNode::new(
             identity(30),
@@ -9936,7 +11591,11 @@ mod tests {
         let admitted = endpoint.ingest(&raw[..len], 4, InterfaceId(1), &mut rng);
         assert!(matches!(
             admitted.actions.events.as_slice(),
-            [ApplicationEvent::DataReceived { destination, payload }]
+            [ApplicationEvent::DataReceived {
+                destination,
+                payload,
+                ..
+            }]
                 if *destination == *plain_destination.as_bytes()
                     && payload == b"local plain payload"
         ));
@@ -9987,7 +11646,11 @@ mod tests {
         assert_eq!(admitted.disposition, IngressDisposition::Processed);
         assert!(matches!(
             admitted.actions.events.as_slice(),
-            [ApplicationEvent::DataReceived { destination, payload }]
+            [ApplicationEvent::DataReceived {
+                destination,
+                payload,
+                ..
+            }]
                 if *destination == *plain_destination.as_bytes()
                     && payload == b"must terminate locally"
         ));
@@ -10169,7 +11832,8 @@ mod tests {
             .build()
             .unwrap();
         let covered_hash = Packet::parse(&data[..data_len]).unwrap().compute_hash();
-        let forwarded_data = transport.ingest(&data[..data_len], 1, InterfaceId(1), &mut rng);
+        let forwarded_data =
+            transport.ingest_local_origin(&data[..data_len], 1, InterfaceId(1), &mut rng);
         assert_eq!(forwarded_data.disposition, IngressDisposition::Processed);
         assert_eq!(forwarded_data.actions.packets.len(), 1);
         assert_eq!(
@@ -10231,7 +11895,8 @@ mod tests {
                 .payload(&[tag])
                 .build()
                 .unwrap();
-            let report = relay.ingest(&raw[..len], u64::from(tag), InterfaceId(tag), &mut rng);
+            let report =
+                relay.ingest_local_origin(&raw[..len], u64::from(tag), InterfaceId(tag), &mut rng);
             assert_eq!(report.disposition, IngressDisposition::Processed);
             assert_eq!(report.actions.packets.len(), 1);
             assert_eq!(
@@ -10259,7 +11924,7 @@ mod tests {
             .payload(&[overflow_tag])
             .build()
             .unwrap();
-        let report = relay.ingest(
+        let report = relay.ingest_local_origin(
             &raw[..len],
             u64::from(overflow_tag),
             InterfaceId(overflow_tag),
@@ -10308,7 +11973,7 @@ mod tests {
             .unwrap();
         let mut rng = CounterRng::default();
 
-        let report = relay.ingest(&raw[..len], 2, InterfaceId(6), &mut rng);
+        let report = relay.ingest_local_origin(&raw[..len], 2, InterfaceId(6), &mut rng);
         assert_eq!(report.disposition, IngressDisposition::NativeInvalid);
         assert!(report.actions.events.is_empty());
         assert!(report.actions.packets.is_empty());
@@ -10397,8 +12062,10 @@ mod tests {
                 proof_expectation: None,
                 local_path_request: None,
                 path_response: None,
+                derived_broadcast: None,
             },
             InterfaceId(1),
+            IngressBroadcastPolicy::default(),
             TerminalCommitCounts::default(),
         );
         assert_eq!(
@@ -10444,7 +12111,7 @@ mod tests {
         let key: [u8; rete_core::TRUNCATED_HASH_LEN] = packet_hash[..rete_core::TRUNCATED_HASH_LEN]
             .try_into()
             .unwrap();
-        let first = relay.ingest(&raw[..len], 2, InterfaceId(6), &mut rng);
+        let first = relay.ingest_local_origin(&raw[..len], 2, InterfaceId(6), &mut rng);
         assert_eq!(first.disposition, IngressDisposition::Processed);
         assert_eq!(first.actions.packets.len(), 1);
         assert_eq!(
@@ -10476,7 +12143,7 @@ mod tests {
             );
         }
 
-        let conflict = relay.ingest(&raw[..len], 20, InterfaceId(5), &mut rng);
+        let conflict = relay.ingest_local_origin(&raw[..len], 20, InterfaceId(5), &mut rng);
         assert_eq!(
             conflict.disposition,
             IngressDisposition::Rejected(IngressDropReason::ReverseRouteConflict {
@@ -10495,7 +12162,7 @@ mod tests {
             Some((6, 7, 2))
         );
 
-        let replay = relay.ingest(&raw[..len], 21, InterfaceId(5), &mut rng);
+        let replay = relay.ingest_local_origin(&raw[..len], 21, InterfaceId(5), &mut rng);
         assert_eq!(replay.disposition, IngressDisposition::NativeDuplicate);
         assert_eq!(relay.metrics().transport.packets_forwarded, 1);
         assert_eq!(relay.metrics().capacity.reverse_entries.used, 1);
@@ -10841,6 +12508,7 @@ mod tests {
         let expected = ReceiptCandidate {
             kind: ReceiptKind::Data,
             receipt: prepared.receipt(),
+            ingress: Some(IngressObservation::new(InterfaceId(1), None)),
         };
 
         let mut invalid_proof = proof.clone();
@@ -10941,6 +12609,7 @@ mod tests {
         let expected = ReceiptCandidate {
             kind: ReceiptKind::Data,
             receipt: prepared.receipt(),
+            ingress: Some(IngressObservation::new(InterfaceId(4), None)),
         };
         let mut sink = RecordingReceiptSink::default();
         let delivered = sender
@@ -11266,7 +12935,11 @@ mod tests {
             .build()
             .unwrap();
         let direct = receiver
-            .preflight_ingest(&raw[..direct_len], InterfaceId(1))
+            .preflight_ingest(
+                &raw[..direct_len],
+                InterfaceId(1),
+                IngressOrigin::RemoteInterface,
+            )
             .unwrap();
         assert!(direct.proof_expectation.is_some());
 
@@ -11281,7 +12954,11 @@ mod tests {
             .build()
             .unwrap();
         let header2 = receiver
-            .preflight_ingest(&raw[..header2_len], InterfaceId(1))
+            .preflight_ingest(
+                &raw[..header2_len],
+                InterfaceId(1),
+                IngressOrigin::RemoteInterface,
+            )
             .unwrap();
         assert!(header2.proof_expectation.is_none());
 
@@ -11295,7 +12972,11 @@ mod tests {
             .build()
             .unwrap();
         let plain = receiver
-            .preflight_ingest(&raw[..plain_len], InterfaceId(1))
+            .preflight_ingest(
+                &raw[..plain_len],
+                InterfaceId(1),
+                IngressOrigin::RemoteInterface,
+            )
             .unwrap();
         assert!(plain.proof_expectation.is_none());
     }
@@ -11798,8 +13479,10 @@ mod tests {
                 )),
                 local_path_request: None,
                 path_response: None,
+                derived_broadcast: None,
             },
             InterfaceId(7),
+            IngressBroadcastPolicy::default(),
             TerminalCommitCounts::default(),
         );
         assert_eq!(
@@ -11907,6 +13590,7 @@ mod tests {
         let expected = ReceiptCandidate {
             kind: ReceiptKind::Data,
             receipt: prepared.receipt(),
+            ingress: None,
         };
         let mut sink = RecordingReceiptSink {
             refuse: true,
@@ -11948,6 +13632,51 @@ mod tests {
         assert_eq!(sink.terminals, [ReceiptTerminal::TimedOut(expected)]);
         assert_eq!(sink.active_reservations, 0);
         assert_eq!(sender.metrics().capacity.receipts.used, 0);
+    }
+
+    #[test]
+    fn rearmed_data_receipt_gets_a_full_native_timeout_budget() {
+        let mut sender = node(106);
+        let receiver = node(107);
+        sender
+            .register_peer(&identity(107), "reticulum", &["embedded"], 100)
+            .unwrap();
+        let mut rng = CounterRng::default();
+        let mut output = [0u8; RNS_MTU];
+        let prepared = sender
+            .prepare_data_into(
+                &receiver.destination_hash(),
+                b"queue time must not spend the proof window",
+                100,
+                &mut rng,
+                &mut output,
+            )
+            .unwrap();
+
+        assert!(sender.park_data_receipt(prepared, 100));
+        assert_eq!(sender.metrics().capacity.receipts.used, 1);
+
+        let mut sink = RecordingReceiptSink::default();
+        let old_deadline = sender.tick_with_receipt_sink(140, &mut rng, &mut sink);
+        assert_eq!(old_deadline.timed_out_receipts, 0);
+        assert!(sink.terminals.is_empty());
+        assert_eq!(sender.metrics().capacity.receipts.used, 1);
+
+        assert!(sender.rearm_data_receipt(prepared, 145));
+
+        let exact_deadline = sender.tick_with_receipt_sink(175, &mut rng, &mut sink);
+        assert_eq!(exact_deadline.timed_out_receipts, 0);
+        assert!(sink.terminals.is_empty());
+
+        let expired = sender.tick_with_receipt_sink(176, &mut rng, &mut sink);
+        assert_eq!(expired.timed_out_receipts, 1);
+        assert!(matches!(
+            sink.terminals.as_slice(),
+            [ReceiptTerminal::TimedOut(candidate)]
+                if candidate.receipt() == prepared.receipt()
+        ));
+        assert_eq!(sender.metrics().capacity.receipts.used, 0);
+        assert!(!sender.rearm_data_receipt(prepared, 177));
     }
 
     #[test]
@@ -12088,6 +13817,7 @@ mod tests {
         let expected = ReceiptCandidate {
             kind: ReceiptKind::Channel,
             receipt: retry_receipt,
+            ingress: Some(IngressObservation::new(InterfaceId(2), None)),
         };
         assert_eq!(
             obsolete.disposition,
@@ -12239,6 +13969,236 @@ mod tests {
     }
 
     #[test]
+    fn point_to_point_announce_retargets_only_its_forward_and_drops_only_its_retry() {
+        let mut relay = TestNode::new(
+            identity(63),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let relay_destination = relay.destination_hash();
+        let mut peer = node(64);
+        let peer_destination = peer.destination_hash();
+        let mut rng = CounterRng::default();
+
+        relay.queue_announce(None, 100, &mut rng).unwrap();
+        peer.queue_announce(None, 100, &mut rng).unwrap();
+        let inbound = peer.flush_announces(100, &mut rng).remove(0);
+        let inbound_wire_hash: [u8; 32] = Sha256::digest(inbound.bytes()).into();
+
+        let report = relay.ingest_at_with_broadcast_scope(
+            inbound.bytes(),
+            100,
+            MonotonicInstant::from_secs(100),
+            InterfaceId(7),
+            IngressBroadcastScope::PointToPoint,
+            &mut rng,
+        );
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(report.actions.packets.len(), 2);
+
+        let local = report
+            .actions
+            .packets
+            .iter()
+            .find(|packet| {
+                Packet::parse(packet.bytes()).is_ok_and(|parsed| {
+                    parsed.packet_type == PacketType::Announce
+                        && parsed.destination_hash == relay_destination.as_ref()
+                })
+            })
+            .expect("the unrelated due local announce remains in the same envelope");
+        assert_eq!(local.target(), TxTarget::All);
+
+        let forwarded = report
+            .actions
+            .packets
+            .iter()
+            .find(|packet| {
+                Packet::parse(packet.bytes()).is_ok_and(|parsed| {
+                    parsed.packet_type == PacketType::Announce
+                        && parsed.destination_hash == peer_destination.as_ref()
+                })
+            })
+            .expect("the received announce is forwarded immediately");
+        assert_eq!(forwarded.target(), TxTarget::AllExcept(InterfaceId(7)));
+        let forwarded_wire_hash: [u8; 32] = Sha256::digest(forwarded.bytes()).into();
+        assert_ne!(
+            inbound_wire_hash, forwarded_wire_hash,
+            "transport forwarding rebuilds the received announce wire image"
+        );
+
+        assert_eq!(
+            relay.metrics().capacity.announces.used,
+            1,
+            "only the unrelated local announce retry remains queued"
+        );
+        let delayed = relay.tick(106, &mut rng);
+        assert_eq!(delayed.packets.len(), 1);
+        assert_eq!(delayed.packets[0].target(), TxTarget::All);
+        let delayed_packet = Packet::parse(delayed.packets[0].bytes()).unwrap();
+        assert_eq!(delayed_packet.destination_hash, relay_destination.as_ref());
+    }
+
+    #[test]
+    fn explicit_announce_egress_suppresses_only_the_matching_forward() {
+        let mut relay = TestNode::new(
+            identity(69),
+            "reticulum",
+            &["boundary-relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let relay_destination = relay.destination_hash();
+        let mut peer = node(70);
+        let peer_destination = peer.destination_hash();
+        let mut rng = CounterRng::default();
+
+        relay.queue_announce(None, 100, &mut rng).unwrap();
+        peer.queue_announce(None, 100, &mut rng).unwrap();
+        let inbound = peer.flush_announces(100, &mut rng).remove(0);
+        let report = relay.ingest_at_with_broadcast_policy(
+            inbound.bytes(),
+            100,
+            MonotonicInstant::from_secs(100),
+            InterfaceId(2),
+            IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+                .with_announce_egress(IngressAnnounceEgress::empty()),
+            &mut rng,
+        );
+
+        assert_eq!(report.disposition, IngressDisposition::Processed);
+        assert_eq!(report.actions.events.len(), 1);
+        assert!(matches!(
+            &report.actions.events[0],
+            ApplicationEvent::AnnounceReceived { destination, .. }
+                if destination == peer_destination.as_bytes()
+        ));
+        assert!(relay.has_path(&peer_destination));
+        assert_eq!(report.actions.packets.len(), 1);
+        let local = &report.actions.packets[0];
+        assert_eq!(local.target(), TxTarget::All);
+        assert_eq!(
+            Packet::parse(local.bytes()).unwrap().destination_hash,
+            relay_destination.as_ref()
+        );
+        assert_eq!(
+            relay.metrics().capacity.announces.used,
+            1,
+            "the suppressed nonlocal retry is removed while the unrelated local announce remains"
+        );
+    }
+
+    #[test]
+    fn explicit_announce_egress_retains_exact_selected_interface_ids() {
+        let mut relay = TestNode::new(
+            identity(71),
+            "reticulum",
+            &["selected-egress-relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut peer = node(72);
+        let mut rng = CounterRng::default();
+        peer.queue_announce(None, 100, &mut rng).unwrap();
+        let inbound = peer.flush_announces(100, &mut rng).remove(0);
+        let selected = IngressAnnounceEgress::from_bits((1 << 3) | (1 << 7));
+
+        let report = relay.ingest_at_with_broadcast_policy(
+            inbound.bytes(),
+            100,
+            MonotonicInstant::from_secs(100),
+            InterfaceId(2),
+            IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+                .with_announce_egress(selected),
+            &mut rng,
+        );
+
+        assert_eq!(report.actions.packets.len(), 1);
+        assert_eq!(
+            report.actions.packets[0].target(),
+            TxTarget::Selected(selected)
+        );
+        assert_eq!(relay.metrics().capacity.announces.used, 0);
+    }
+
+    #[test]
+    fn shared_medium_announce_keeps_same_interface_forward_and_native_retry() {
+        let mut relay = TestNode::new(
+            identity(65),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut peer = node(66);
+        let mut rng = CounterRng::default();
+        peer.queue_announce(None, 100, &mut rng).unwrap();
+        let inbound = peer.flush_announces(100, &mut rng).remove(0);
+
+        let report = relay.ingest_at_with_broadcast_scope(
+            inbound.bytes(),
+            100,
+            MonotonicInstant::from_secs(100),
+            InterfaceId(3),
+            IngressBroadcastScope::SharedMedium,
+            &mut rng,
+        );
+        assert_eq!(report.actions.packets.len(), 1);
+        assert_eq!(report.actions.packets[0].target(), TxTarget::All);
+        assert_eq!(relay.metrics().capacity.announces.used, 1);
+
+        let delayed = relay.tick(106, &mut rng);
+        assert_eq!(delayed.packets.len(), 1);
+        assert_eq!(delayed.packets[0].target(), TxTarget::All);
+        assert_eq!(relay.metrics().capacity.announces.used, 0);
+    }
+
+    #[test]
+    fn point_to_point_unknown_path_request_excludes_only_its_source() {
+        let mut relay = TestNode::new(
+            identity(67),
+            "reticulum",
+            &["relay"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let requester = TestNode::new(
+            identity(68),
+            "reticulum",
+            &["requester"],
+            EmbeddedNodeConfig::transport(),
+        )
+        .unwrap();
+        let mut rng = CounterRng::default();
+        let request = requester
+            .request_path(&DestHash::from([0xa5; TRUNCATED_HASH_LEN]), &mut rng)
+            .unwrap();
+
+        let report = relay.ingest_at_with_broadcast_policy(
+            request.bytes(),
+            100,
+            MonotonicInstant::from_secs(100),
+            InterfaceId(9),
+            IngressBroadcastPolicy::new(IngressBroadcastScope::PointToPoint)
+                .with_announce_egress(IngressAnnounceEgress::empty()),
+            &mut rng,
+        );
+        assert_eq!(report.actions.packets.len(), 1);
+        assert_eq!(
+            report.actions.packets[0].target(),
+            TxTarget::AllExcept(InterfaceId(9))
+        );
+        assert_eq!(
+            Packet::parse(report.actions.packets[0].bytes())
+                .unwrap()
+                .compute_hash(),
+            Packet::parse(request.bytes()).unwrap().compute_hash()
+        );
+    }
+
+    #[test]
     fn received_secondary_announce_enables_targeted_data_preparation() {
         let mut receiver = node(61);
         let delivery = receiver
@@ -12278,6 +14238,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(prepared.target(), TxTarget::Only(InterfaceId(7)));
+    }
+
+    #[test]
+    fn route_visitor_copies_complete_retained_path_fields() {
+        let mut sender = node(63);
+        let mut receiver = node(64);
+        let destination = receiver.destination_hash();
+        let mut rng = CounterRng::default();
+
+        receiver.queue_announce(None, 100, &mut rng).unwrap();
+        let announce = receiver
+            .flush_announces(100, &mut rng)
+            .into_iter()
+            .next()
+            .expect("the queued announce must be ready immediately");
+        let learned = sender.ingest(announce.bytes(), 200, InterfaceId(7), &mut rng);
+        assert_eq!(learned.disposition, IngressDisposition::Processed);
+
+        let mut output = [0; RNS_MTU];
+        sender
+            .prepare_data_into(
+                &destination,
+                b"touch retained path",
+                240,
+                &mut rng,
+                &mut output,
+            )
+            .expect("retained direct path must prepare DATA");
+
+        let point = sender
+            .route(&destination)
+            .expect("route must remain retained");
+        assert_eq!(point.destination, destination);
+        assert_eq!(point.via, None);
+        assert_eq!(point.hops, 1);
+        assert_eq!(point.received_on, Some(InterfaceId(7)));
+        assert_eq!(point.learned_at_seconds, 200);
+        assert_eq!(point.last_accessed_at_seconds, 240);
+        assert_eq!(
+            point.expires_after_seconds,
+            rete_transport::transport::PATH_EXPIRES
+        );
+
+        let mut copied = Vec::new();
+        let visited = sender.visit_routes(|route| copied.push(route));
+        assert_eq!(visited, 1);
+        assert_eq!(visited, sender.route_count());
+        assert_eq!(copied, [point]);
     }
 
     #[test]

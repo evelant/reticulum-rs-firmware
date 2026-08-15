@@ -41,6 +41,43 @@ impl OrdinaryPacketGeneration {
     }
 }
 
+/// Copy-only identity of one exact ordinary packet dispatch generation.
+///
+/// The stable slot alone is insufficient because the externally allocated
+/// packet buffer is reused. Carrying the generation lets a product correlate
+/// router admission with the eventual interface-actor completion without
+/// retaining packet bytes or depending on a concrete transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrdinaryDispatchToken {
+    slot: OrdinaryPacketSlotId,
+    generation: OrdinaryPacketGeneration,
+}
+
+impl OrdinaryDispatchToken {
+    /// Stable external-buffer slot used by this dispatch.
+    pub const fn slot_id(self) -> OrdinaryPacketSlotId {
+        self.slot
+    }
+
+    /// Exact reuse generation of the stable slot.
+    pub const fn generation(self) -> OrdinaryPacketGeneration {
+        self.generation
+    }
+}
+
+/// Interface-actor observation for one ordinary packet hop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrdinaryTransmissionOutcome {
+    /// The concrete transport confirmed the complete logical packet was sent.
+    Transmitted,
+    /// Complete transmission was not confirmed.
+    ///
+    /// This includes pre-authorization rejection, expiry, cancellation,
+    /// partial/faulted transmission, and recovery paths. It deliberately does
+    /// not claim that zero bytes reached a physical transport.
+    NotConfirmed,
+}
+
 /// Scalar metadata bound to one ordinary protocol-action packet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OrdinaryPreparedPacket {
@@ -64,6 +101,14 @@ impl OrdinaryPreparedPacket {
     /// Generation that distinguishes this use of the stable slot.
     pub const fn generation(self) -> OrdinaryPacketGeneration {
         self.generation
+    }
+
+    /// Exact transport-neutral token for this packet-buffer generation.
+    pub const fn dispatch_token(self) -> OrdinaryDispatchToken {
+        OrdinaryDispatchToken {
+            slot: self.slot,
+            generation: self.generation,
+        }
     }
 
     /// Complete native Reticulum packet length.
@@ -881,13 +926,30 @@ impl<'a> OrdinaryAuthorizedTx<'a> {
         })
     }
 
-    /// Complete this authorized hop as transmitted or possibly transmitted.
+    /// Complete this authorized hop without a confirmed complete transmission.
+    ///
+    /// Use [`Self::complete_transmitted`] only when the concrete interface
+    /// actor observed successful completion of the entire logical packet.
     pub fn complete(self, code: TxCompletionCode) -> OrdinaryTxCompletion<'a> {
         OrdinaryTxCompletion {
             job: self.job,
             kind: OrdinaryCompletionKind::Authorized {
                 code,
                 stop_fanout: false,
+                transmission: OrdinaryTransmissionOutcome::NotConfirmed,
+            },
+        }
+    }
+
+    /// Complete this authorized hop after the concrete interface confirmed the
+    /// entire logical packet was transmitted.
+    pub fn complete_transmitted(self, code: TxCompletionCode) -> OrdinaryTxCompletion<'a> {
+        OrdinaryTxCompletion {
+            job: self.job,
+            kind: OrdinaryCompletionKind::Authorized {
+                code,
+                stop_fanout: false,
+                transmission: OrdinaryTransmissionOutcome::Transmitted,
             },
         }
     }
@@ -899,6 +961,7 @@ impl<'a> OrdinaryAuthorizedTx<'a> {
             kind: OrdinaryCompletionKind::Authorized {
                 code,
                 stop_fanout: true,
+                transmission: OrdinaryTransmissionOutcome::NotConfirmed,
             },
         }
     }
@@ -938,6 +1001,7 @@ impl<'a> OrdinaryExpiredAuthorizedTx<'a> {
             kind: OrdinaryCompletionKind::Authorized {
                 code,
                 stop_fanout: false,
+                transmission: OrdinaryTransmissionOutcome::NotConfirmed,
             },
         }
     }
@@ -950,6 +1014,7 @@ impl<'a> OrdinaryExpiredAuthorizedTx<'a> {
             kind: OrdinaryCompletionKind::Authorized {
                 code,
                 stop_fanout: true,
+                transmission: OrdinaryTransmissionOutcome::NotConfirmed,
             },
         }
     }
@@ -1020,6 +1085,7 @@ enum OrdinaryCompletionKind {
     Authorized {
         code: TxCompletionCode,
         stop_fanout: bool,
+        transmission: OrdinaryTransmissionOutcome,
     },
     RecoveryFault(TxCompletionCode),
 }
@@ -1035,6 +1101,15 @@ impl OrdinaryTxCompletion<'_> {
     /// Metadata for the exact packet owner carried by this completion.
     pub const fn prepared(&self) -> OrdinaryPreparedPacket {
         self.job.packet
+    }
+
+    /// Concrete actor's terminal transmission observation for this exact hop.
+    pub const fn transmission_outcome(&self) -> OrdinaryTransmissionOutcome {
+        match self.kind {
+            OrdinaryCompletionKind::Authorized { transmission, .. } => transmission,
+            OrdinaryCompletionKind::Unpermitted { .. }
+            | OrdinaryCompletionKind::RecoveryFault(_) => OrdinaryTransmissionOutcome::NotConfirmed,
+        }
     }
 }
 
@@ -1915,7 +1990,9 @@ impl<const PACKET_BUFFERS: usize> OrdinaryActionOwner<PACKET_BUFFERS> {
                 let _ = (code.get(), denial);
                 (false, stop_fanout)
             }
-            OrdinaryCompletionKind::Authorized { code, stop_fanout } => {
+            OrdinaryCompletionKind::Authorized {
+                code, stop_fanout, ..
+            } => {
                 let _ = code.get();
                 (true, stop_fanout)
             }
@@ -2351,7 +2428,7 @@ mod tests {
             )
             .unwrap();
         let forwarding = relay
-            .ingest(
+            .ingest_local_origin(
                 &forwarded_bytes[..usize::from(forwarded.packet_len())],
                 3,
                 RnsInterfaceId(5),
@@ -3011,13 +3088,16 @@ mod tests {
             authorized.frame(owner_time(23)),
             Err(OrdinaryFrameError::AlreadyTaken)
         ));
-        let returned = match owner
-            .complete_tx(
-                authorized.complete(TxCompletionCode::new(0x4155)),
-                owner_time(24),
-            )
-            .unwrap()
-        {
+        let completion = authorized.complete_transmitted(TxCompletionCode::new(0x4155));
+        assert_eq!(
+            completion.prepared().dispatch_token(),
+            packet.dispatch_token()
+        );
+        assert_eq!(
+            completion.transmission_outcome(),
+            OrdinaryTransmissionOutcome::Transmitted
+        );
+        let returned = match owner.complete_tx(completion, owner_time(24)).unwrap() {
             OrdinaryCompletionDisposition::Returned(returned) => returned,
             OrdinaryCompletionDisposition::Next(_) => panic!("single route fanned out"),
             OrdinaryCompletionDisposition::Quarantined(_) => panic!("valid grant quarantined"),
@@ -3337,8 +3417,13 @@ mod tests {
         };
         assert_eq!(expired.deadline(), deadline(30));
         assert_eq!(expired.reservation(), reservation);
+        let completion = expired.complete(TxCompletionCode::new(9));
+        assert_eq!(
+            completion.transmission_outcome(),
+            OrdinaryTransmissionOutcome::NotConfirmed
+        );
         let returned = match second_owner
-            .complete_tx(expired.complete(TxCompletionCode::new(9)), owner_time(30))
+            .complete_tx(completion, owner_time(30))
             .unwrap()
         {
             OrdinaryCompletionDisposition::Returned(returned) => returned,

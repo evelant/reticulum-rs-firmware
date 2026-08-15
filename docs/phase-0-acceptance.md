@@ -211,6 +211,7 @@ cargo +esp check --locked \
 cargo +esp build --locked --release \
   -p reticulum-heltec-tracker-v2 \
   --target xtensa-esp32s3-none-elf
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --target xtensa-esp32s3-none-elf

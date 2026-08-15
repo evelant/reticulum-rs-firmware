@@ -28,9 +28,11 @@ use btleplug::{
 };
 #[cfg(target_os = "macos")]
 use futures_util::StreamExt;
-use reticulum_device_api_ble::INITIAL_ATT_VALUE_BYTES;
 #[cfg(target_os = "macos")]
 use reticulum_device_api_ble::{LOCAL_NAME_PREFIX, RX_UUID_U128, SERVICE_UUID_U128, TX_UUID_U128};
+use reticulum_device_api_ble::{
+    MAXIMUM_ATT_VALUE_BYTES, MINIMUM_ATT_VALUE_BYTES as SAFE_ATT_VALUE_BYTES,
+};
 #[cfg(target_os = "macos")]
 use tokio::{
     runtime::Builder,
@@ -133,9 +135,9 @@ struct SharedRx {
 
 impl SharedRx {
     fn push(&self, bytes: &[u8]) -> Result<(), String> {
-        if bytes.is_empty() || bytes.len() > INITIAL_ATT_VALUE_BYTES {
+        if bytes.is_empty() || bytes.len() > MAXIMUM_ATT_VALUE_BYTES {
             return Err(format!(
-                "TX indication length {} is outside 1..={INITIAL_ATT_VALUE_BYTES}",
+                "TX indication length {} is outside 1..={MAXIMUM_ATT_VALUE_BYTES}",
                 bytes.len()
             ));
         }
@@ -797,7 +799,7 @@ async fn write_fragments(
     operation_timeout: Duration,
     stats: &AtomicStats,
 ) -> Result<usize, String> {
-    for fragment in bytes.chunks(INITIAL_ATT_VALUE_BYTES) {
+    for fragment in bytes.chunks(SAFE_ATT_VALUE_BYTES) {
         deadline(
             "writing BLE RX fragment with response",
             operation_timeout,
@@ -836,7 +838,7 @@ where
 
 #[cfg(target_os = "macos")]
 const fn fragment_count(length: usize) -> usize {
-    length.div_ceil(INITIAL_ATT_VALUE_BYTES)
+    length.div_ceil(SAFE_ATT_VALUE_BYTES)
 }
 
 #[cfg(target_os = "macos")]
@@ -904,17 +906,17 @@ mod tests {
     #[test]
     fn fragment_policy_covers_every_boundary_without_empty_fragments() {
         assert_eq!(fragment_count(1), 1);
-        assert_eq!(fragment_count(INITIAL_ATT_VALUE_BYTES), 1);
-        assert_eq!(fragment_count(INITIAL_ATT_VALUE_BYTES + 1), 2);
-        let input = vec![0x5a; INITIAL_ATT_VALUE_BYTES * 2 + 7];
-        let chunks = input.chunks(INITIAL_ATT_VALUE_BYTES).collect::<Vec<_>>();
+        assert_eq!(fragment_count(SAFE_ATT_VALUE_BYTES), 1);
+        assert_eq!(fragment_count(SAFE_ATT_VALUE_BYTES + 1), 2);
+        let input = vec![0x5a; SAFE_ATT_VALUE_BYTES * 2 + 7];
+        let chunks = input.chunks(SAFE_ATT_VALUE_BYTES).collect::<Vec<_>>();
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks.concat(), input);
         assert!(chunks.iter().all(|chunk| !chunk.is_empty()));
         assert!(
             chunks
                 .iter()
-                .all(|chunk| chunk.len() <= INITIAL_ATT_VALUE_BYTES)
+                .all(|chunk| chunk.len() <= SAFE_ATT_VALUE_BYTES)
         );
     }
 
@@ -941,7 +943,7 @@ mod tests {
     fn receive_queue_rejects_invalid_fragments_and_is_terminal_on_disconnect() {
         let receive = SharedRx::default();
         assert!(receive.push(&[]).is_err());
-        assert!(receive.push(&[0_u8; INITIAL_ATT_VALUE_BYTES + 1]).is_err());
+        assert!(receive.push(&[0_u8; MAXIMUM_ATT_VALUE_BYTES + 1]).is_err());
         receive.terminate("gone");
         let error = receive
             .read(&mut [0_u8; 1], Duration::from_millis(1))
@@ -952,11 +954,11 @@ mod tests {
     #[test]
     fn receive_queue_enforces_byte_bound_without_reordering_existing_data() {
         let receive = SharedRx::default();
-        for _ in 0..(MAX_RX_BYTES / INITIAL_ATT_VALUE_BYTES) {
-            receive.push(&[0x7a; INITIAL_ATT_VALUE_BYTES]).unwrap();
+        for _ in 0..(MAX_RX_BYTES / MAXIMUM_ATT_VALUE_BYTES) {
+            receive.push(&[0x7a; MAXIMUM_ATT_VALUE_BYTES]).unwrap();
         }
         receive
-            .push(&[0x7a; MAX_RX_BYTES % INITIAL_ATT_VALUE_BYTES])
+            .push(&[0x7a; MAX_RX_BYTES % MAXIMUM_ATT_VALUE_BYTES])
             .unwrap();
         assert!(receive.push(&[0x7b]).is_err());
         let state = receive

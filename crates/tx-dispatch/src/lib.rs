@@ -1179,8 +1179,8 @@ mod tests {
     use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
     use rand_core::{CryptoRng, RngCore};
     use reticulum_node_core::{
-        AttemptOutcome, DestinationHash, InterfaceSet, MonotonicSeconds, NodeConfig, NodeIdentity,
-        NodeInstanceId, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
+        AttemptOutcome, AttemptToken, DestinationHash, InterfaceSet, MonotonicSeconds, NodeConfig,
+        NodeIdentity, NodeInstanceId, PrepareDataRequest, RoutedTxJob, TxAuthorizationCandidate,
         TxCompletionDisposition, TxPacketBuffer, TxPermitDenialReason, TxPolicyDecision,
         TxRecoveryPriorPhase, TxRecoveryReason,
     };
@@ -1281,6 +1281,22 @@ mod tests {
 
     fn identity(tag: u8) -> NodeIdentity {
         NodeIdentity::from_private_key(&[tag; 64]).expect("test identity must be valid")
+    }
+
+    fn proof_for(receiver_tag: u8, attempt: AttemptToken) -> std::vec::Vec<u8> {
+        let identity = reticulum_rns_rete::identity_from_private_key(&[receiver_tag; 64]).unwrap();
+        let signature = identity.sign(attempt.as_bytes()).unwrap();
+        std::eprintln!(
+            "attempt={:02x?} signature={:02x?}",
+            attempt.as_bytes(),
+            signature
+        );
+        let mut proof = std::vec![0u8; 19 + 32 + 64];
+        proof[0] = 0x03;
+        proof[2..18].copy_from_slice(&attempt.as_bytes()[..16]);
+        proof[19..51].copy_from_slice(attempt.as_bytes());
+        proof[51..].copy_from_slice(&signature);
+        proof
     }
 
     fn node<const BUFFERS: usize>(tag: u8, aspect: &str) -> TestNode<BUFFERS> {
@@ -1781,6 +1797,7 @@ mod tests {
             &mut rng,
         );
         let handle = job.attempt_handle();
+        let attempt = job.attempt();
         let (node_ports, dispatcher_ports) = TERMINAL_HANDOFF.take().split();
         let (mut data, mut permit) = TxPermitServer::from_node_handoff(node_ports);
         let mut dispatcher = NoRfTxDispatcher::new(dispatcher_ports, config(5_000));
@@ -1797,8 +1814,14 @@ mod tests {
             dispatcher.step(MonotonicMillis::new(100_102)),
             NoRfTxDispatcherStep::Advanced
         );
-        let report = owner.tick(MonotonicSeconds::new(132), &mut rng);
-        assert_eq!(report.timed_out_attempts, 1);
+        owner
+            .ingest(
+                &proof_for(8, attempt),
+                MonotonicSeconds::new(132),
+                PacketInterfaceId::new(1),
+                &mut rng,
+            )
+            .unwrap();
         let mut policy = RecordingPolicy::allowing();
         assert_eq!(
             permit.step(&mut owner, MonotonicMillis::new(100_103), &mut policy),
@@ -1843,7 +1866,7 @@ mod tests {
         assert_eq!(ptr::from_ref(&*returned), pointer);
         assert_eq!(
             owner.acknowledge_terminal(handle).unwrap().outcome(),
-            AttemptOutcome::DeliveryTimeout
+            AttemptOutcome::Delivered
         );
     }
 

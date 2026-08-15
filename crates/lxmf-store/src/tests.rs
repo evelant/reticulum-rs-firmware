@@ -6,9 +6,13 @@ use embedded_storage::nor_flash::{
     ErrorType, MultiwriteNorFlash, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
     check_erase, check_read, check_write,
 };
-use reticulum_lxmf_model::{AuthenticatedMaterialFingerprint, NormalizedWire};
+use reticulum_lxmf_model::{
+    AuthenticatedMaterialFingerprint, InboundInterfaceId, InboundSignalObservation,
+    InboundTransportObservation, NormalizedWire,
+};
 use reticulum_lxmf_wire::{MessageView, WireLimits};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{string::String, vec, vec::Vec};
 
 const PARTITION_SIZE: usize = EXTENT_SIZE * 4;
@@ -290,6 +294,7 @@ fn install_incomplete_record_start(
     );
     let header = encode_header(
         binding(PARTITION_SIZE),
+        PHYSICAL_FORMAT_VERSION,
         MessageHandle::new(handle).unwrap(),
         0,
         extent_count,
@@ -354,6 +359,124 @@ fn commit_mount_and_remount_preserve_receipt_and_metadata() {
         Some(candidate.metadata())
     );
     assert_eq!(remounted_access.backend().erases, 0);
+}
+
+#[test]
+fn commit_and_remount_preserve_first_arrival_transport_observation() {
+    let wire = complete_wire(0x22, 600, 0xa5);
+    let metadata = metadata(
+        1,
+        9,
+        0x22,
+        0x33,
+        7,
+        CarrierProvenance::Complete,
+        normal_stamp(),
+        wire.len(),
+        wire.len(),
+    )
+    .with_ingress_observation(Some(InboundTransportObservation::new(
+        InboundInterfaceId::new(7),
+        Some(InboundSignalObservation::new(-101, -4)),
+    )));
+    let candidate =
+        InboundMessageCandidate::new(metadata, NormalizedWire::Contiguous(&wire)).unwrap();
+    let mut access = bound(TestNor::erased(PARTITION_SIZE));
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
+    let receipt = match mounted.commit(&mut access, candidate).unwrap() {
+        LxmfCommitOutcome::Committed(receipt) => receipt,
+        other => panic!("unexpected outcome {other:?}"),
+    };
+
+    assert_eq!(mounted.metadata(receipt.handle()), Some(metadata));
+    let mut remounted_index = index::<4>();
+    let remounted = mount(&mut access, &mut remounted_index).unwrap();
+    assert_eq!(remounted.metadata(receipt.handle()), Some(metadata));
+}
+
+#[test]
+fn current_mount_reads_legacy_v1_records_and_appends_v2_records() {
+    let legacy_wire = complete_wire(0x22, 600, 0xa5);
+    let legacy = complete_candidate(&legacy_wire, 1, 9, 0x22, 7, normal_stamp());
+    let legacy_digest = digest_candidate_wire(legacy);
+    let legacy_header = encode_header(
+        binding(PARTITION_SIZE),
+        LEGACY_PHYSICAL_FORMAT_VERSION,
+        MessageHandle::new(1).unwrap(),
+        0,
+        1,
+        legacy.metadata(),
+        legacy_digest,
+    );
+    let legacy_record_digest = digest_candidate_record(&legacy_header, legacy);
+    let legacy_footer = encode_footer(
+        LEGACY_PHYSICAL_FORMAT_VERSION,
+        MessageHandle::new(1).unwrap(),
+        1,
+        legacy_wire.len() as u32,
+        legacy_digest,
+        legacy_record_digest,
+        true,
+    );
+    let mut legacy_fixture_digest = Sha256::new();
+    legacy_fixture_digest.update(legacy_header);
+    legacy_fixture_digest.update(&legacy_wire);
+    legacy_fixture_digest.update(legacy_footer);
+    assert_eq!(
+        hex::encode(legacy_fixture_digest.finalize()),
+        "fa34742c3cf86f0a96580cfe9fa4e6849941605b05e80a3912b90a837b9e2a3b"
+    );
+    let mut access = bound(TestNor::erased(PARTITION_SIZE));
+    access.backend_mut().bytes[..EXTENT_HEADER_SIZE].copy_from_slice(&legacy_header);
+    access.backend_mut().bytes[EXTENT_HEADER_SIZE..EXTENT_HEADER_SIZE + legacy_wire.len()]
+        .copy_from_slice(&legacy_wire);
+    access.backend_mut().bytes[EXTENT_SIZE - RECORD_FOOTER_SIZE..EXTENT_SIZE]
+        .copy_from_slice(&legacy_footer);
+
+    let mut mounted_index = index::<4>();
+    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
+    assert_eq!(
+        mounted.metadata(MessageHandle::new(1).unwrap()),
+        Some(legacy.metadata())
+    );
+
+    let current_wire = complete_wire(0x33, 600, 0x5a);
+    let current_metadata = metadata(
+        2,
+        8,
+        0x33,
+        0x44,
+        9,
+        CarrierProvenance::Complete,
+        normal_stamp(),
+        current_wire.len(),
+        current_wire.len(),
+    )
+    .with_ingress_observation(Some(InboundTransportObservation::new(
+        InboundInterfaceId::new(4),
+        Some(InboundSignalObservation::new(-88, 7)),
+    )));
+    let current =
+        InboundMessageCandidate::new(current_metadata, NormalizedWire::Contiguous(&current_wire))
+            .unwrap();
+    let current_receipt = match mounted.commit(&mut access, current).unwrap() {
+        LxmfCommitOutcome::Committed(receipt) => receipt,
+        other => panic!("unexpected outcome {other:?}"),
+    };
+    assert_eq!(current_receipt.handle().get(), 2);
+
+    let mut remounted_index = index::<4>();
+    let remounted = mount(&mut access, &mut remounted_index).unwrap();
+    assert_eq!(remounted.message_count(), 2);
+    assert_eq!(
+        remounted.metadata(MessageHandle::new(1).unwrap()),
+        Some(legacy.metadata())
+    );
+    assert_eq!(
+        remounted.metadata(current_receipt.handle()),
+        Some(current_metadata)
+    );
 }
 
 #[test]
@@ -1328,6 +1451,7 @@ fn incomplete_multi_extent_header_cannot_hide_unknown_programmed_interior_media(
     install_incomplete_record_start(&mut access, candidate, 3, 9);
     let expected_continuation = encode_header(
         binding(PARTITION_SIZE),
+        PHYSICAL_FORMAT_VERSION,
         MessageHandle::new(9).unwrap(),
         1,
         3,
@@ -1410,6 +1534,7 @@ fn standalone_continuation_with_incomplete_marker_fails_closed() {
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let header = encode_header(
         binding(PARTITION_SIZE),
+        PHYSICAL_FORMAT_VERSION,
         MessageHandle::new(9).unwrap(),
         1,
         3,
@@ -1433,6 +1558,7 @@ fn decoded_record_start_extending_beyond_bound_range_fails_closed() {
     let candidate = complete_candidate(&wire, 1, 1, 0x22, 1, normal_stamp());
     let header = encode_header(
         binding(PARTITION_SIZE),
+        PHYSICAL_FORMAT_VERSION,
         MessageHandle::new(9).unwrap(),
         0,
         3,

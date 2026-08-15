@@ -76,8 +76,8 @@ async fn main(spawner: Spawner) -> ! {
         board::DEFAULT_FREQUENCY_HZ,
     );
     info!(
-        "phase0 runtime patch: esp_rtos_main_stack_slice={}",
-        env!("RETICULUM_ESP_RTOS_MAIN_STACK_PATCH"),
+        "phase0 runtime source: esp_rtos_source={}",
+        env!("RETICULUM_ESP_RTOS_UPSTREAM_IDENTITY"),
     );
     info!("RF interlock active; SX1262 reset and KCT8103L controls are held low");
 

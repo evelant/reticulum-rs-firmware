@@ -172,6 +172,46 @@ impl InterfaceCost {
     }
 }
 
+/// Peer topology behind one Reticulum packet interface.
+///
+/// This is transport-neutral forwarding policy rather than a concrete bearer
+/// type. A radio, stream, or future interface actor selects the topology that
+/// matches the peers reachable through its one logical slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterfaceTopology {
+    /// Multiple peers can be reached through the same logical interface.
+    ///
+    /// A packet received from one peer may therefore legitimately need to be
+    /// rebroadcast on the ingress interface to reach another peer.
+    SharedMedium,
+    /// The logical interface has exactly one remote peer.
+    ///
+    /// Rebroadcasting an ingress broadcast on the same interface can only
+    /// reflect it to the peer that supplied it.
+    PointToPoint,
+}
+
+/// Announce-propagation role of one Reticulum interface.
+///
+/// This initial product surface implements the `full`, `boundary`, and
+/// `internal` subset of Reticulum's interface-mode matrix. It is independent
+/// of concrete bearer type and separate from peer topology.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnnouncePropagationMode {
+    /// Default Reticulum interface behavior.
+    Full,
+    /// Interface facing a substantially different or public network segment.
+    Boundary,
+    /// Interface belonging to the private side of a boundary.
+    Internal,
+}
+
+impl AnnouncePropagationMode {
+    const fn accepts_from(self, source: Self) -> bool {
+        !matches!((source, self), (Self::Boundary, Self::Internal))
+    }
+}
+
 /// Transport-neutral properties interpreted by an interface actor or future
 /// route policy, never by a concrete-radio branch in this registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,10 +220,15 @@ pub struct InterfaceProperties {
     config: InterfaceConfigId,
     advertised_bitrate: Option<AdvertisedBitrate>,
     cost: InterfaceCost,
+    topology: InterfaceTopology,
+    announce_mode: AnnouncePropagationMode,
 }
 
 impl InterfaceProperties {
-    /// Construct one complete transport-neutral property snapshot.
+    /// Construct a shared-medium transport-neutral property snapshot.
+    ///
+    /// Shared-medium preserves the original routing behavior. Point-to-point
+    /// actors must opt in with [`Self::with_topology`].
     pub const fn new(
         logical_mtu: LogicalMtu,
         config: InterfaceConfigId,
@@ -195,7 +240,21 @@ impl InterfaceProperties {
             config,
             advertised_bitrate,
             cost,
+            topology: InterfaceTopology::SharedMedium,
+            announce_mode: AnnouncePropagationMode::Full,
         }
+    }
+
+    /// Select the peer topology behind this logical interface.
+    pub const fn with_topology(mut self, topology: InterfaceTopology) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    /// Select this interface's announce-propagation role.
+    pub const fn with_announce_mode(mut self, mode: AnnouncePropagationMode) -> Self {
+        self.announce_mode = mode;
+        self
     }
 
     /// Maximum complete native Reticulum packet length.
@@ -216,6 +275,16 @@ impl InterfaceProperties {
     /// Product-owned relative interface cost.
     pub const fn cost(self) -> InterfaceCost {
         self.cost
+    }
+
+    /// Peer topology used for ingress-broadcast forwarding policy.
+    pub const fn topology(self) -> InterfaceTopology {
+        self.topology
+    }
+
+    /// Reticulum announce-propagation role.
+    pub const fn announce_mode(self) -> AnnouncePropagationMode {
+        self.announce_mode
     }
 }
 
@@ -452,6 +521,15 @@ pub enum EligibleInterfaceSetError {
     InterfaceOutsideProfile(InterfaceDescriptor),
 }
 
+/// Failure to derive the exact egress set for an ingress-derived announce.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnnounceEgressSetError {
+    /// The supplied ingress interface is not registered.
+    SourceUnavailable(PacketInterfaceId),
+    /// A registered identity cannot fit the compact route profile.
+    InterfaceOutsideProfile(InterfaceDescriptor),
+}
+
 /// Fixed-capacity authoritative packet-interface registry.
 ///
 /// Lookup is a bounded linear scan. The intended embedded profile has only a
@@ -557,6 +635,46 @@ impl<const SLOTS: usize> InterfaceRegistry<SLOTS> {
             }
         }
         Ok(eligible)
+    }
+
+    /// Derive the exact currently-online egress set for an announce learned on
+    /// `source`.
+    ///
+    /// Point-to-point topology excludes reflection to the source interface.
+    /// The supported Reticulum mode matrix additionally blocks only
+    /// boundary-to-internal propagation; internal-to-boundary and all Full
+    /// interactions remain allowed.
+    pub fn announce_egress_interfaces(
+        &self,
+        source: PacketInterfaceId,
+    ) -> Result<InterfaceSet, AnnounceEgressSetError> {
+        let Some(source_descriptor) = self.descriptor(source) else {
+            return Err(AnnounceEgressSetError::SourceUnavailable(source));
+        };
+        let source_properties = source_descriptor.properties;
+        let mut egress = InterfaceSet::empty();
+        for descriptor in self.slots.iter().filter_map(|slot| slot.descriptor) {
+            let interface = descriptor.lease.interface;
+            let Some(with_interface) = egress.with(interface) else {
+                return Err(AnnounceEgressSetError::InterfaceOutsideProfile(descriptor));
+            };
+            if !descriptor.online {
+                continue;
+            }
+            if interface == source && source_properties.topology == InterfaceTopology::PointToPoint
+            {
+                continue;
+            }
+            if !descriptor
+                .properties
+                .announce_mode
+                .accepts_from(source_properties.announce_mode)
+            {
+                continue;
+            }
+            egress = with_interface;
+        }
+        Ok(egress)
     }
 
     /// Validate one lease against the current authoritative record.
@@ -695,6 +813,33 @@ impl InterfaceIngressAuthority {
     }
 }
 
+/// Optional transport-neutral physical-link values for one ingress packet.
+///
+/// Radio actors can supply whole-dB RSSI and SNR. Stream and other interfaces
+/// leave this observation absent rather than fabricating radio measurements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IngressSignalObservation {
+    rssi_dbm: i16,
+    snr_db: i16,
+}
+
+impl IngressSignalObservation {
+    /// Construct one complete physical-link signal observation.
+    pub const fn new(rssi_dbm: i16, snr_db: i16) -> Self {
+        Self { rssi_dbm, snr_db }
+    }
+
+    /// Received signal strength in whole dBm.
+    pub const fn rssi_dbm(self) -> i16 {
+        self.rssi_dbm
+    }
+
+    /// Signal-to-noise ratio in whole dB.
+    pub const fn snr_db(self) -> i16 {
+        self.snr_db
+    }
+}
+
 /// Internal queue envelope pairing one sealed fabric buffer with actor
 /// provenance.
 ///
@@ -727,6 +872,11 @@ impl ValidatedIngress {
     /// Complete authoritative interface descriptor for diagnostics/policy.
     pub const fn descriptor(&self) -> InterfaceDescriptor {
         self.descriptor
+    }
+
+    /// Optional physical-link signal values supplied by the interface actor.
+    pub const fn signal(&self) -> Option<IngressSignalObservation> {
+        self.packet.signal()
     }
 
     /// Recover the unchanged completed native packet owner.
@@ -827,6 +977,16 @@ impl AvailableIngressBuffer {
 
     /// Seal a nonempty initialized prefix for immutable node ingestion.
     pub fn seal(self, packet_len: usize) -> Result<SealedIngressPacket, IngressPacketSealFailure> {
+        self.seal_with_signal(packet_len, None)
+    }
+
+    /// Seal a nonempty initialized prefix with optional physical-link signal
+    /// values observed by this interface actor.
+    pub fn seal_with_signal(
+        self,
+        packet_len: usize,
+        signal: Option<IngressSignalObservation>,
+    ) -> Result<SealedIngressPacket, IngressPacketSealFailure> {
         if packet_len == 0 {
             return Err(IngressPacketSealFailure {
                 reason: IngressPacketLengthError::Zero,
@@ -847,6 +1007,7 @@ impl AvailableIngressBuffer {
             origin: self.origin,
             storage: self.storage,
             packet_len,
+            signal,
         })
     }
 }
@@ -904,6 +1065,7 @@ pub struct SealedIngressPacket {
     origin: &'static IngressFabricOrigin,
     storage: &'static mut IngressBufferStorage,
     packet_len: usize,
+    signal: Option<IngressSignalObservation>,
 }
 
 impl SealedIngressPacket {
@@ -927,6 +1089,11 @@ impl SealedIngressPacket {
     /// Borrow exactly the initialized immutable native packet bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.storage.bytes[..self.packet_len]
+    }
+
+    /// Optional physical-link signal values supplied by the interface actor.
+    pub const fn signal(&self) -> Option<IngressSignalObservation> {
+        self.signal
     }
 
     fn recycle(self) -> AvailableIngressBuffer {
@@ -2415,6 +2582,15 @@ where
         self.registry.eligible_interfaces()
     }
 
+    /// Derive the exact currently-online egress set for an announce learned on
+    /// one registered ingress interface.
+    pub fn announce_egress_interfaces(
+        &self,
+        source: PacketInterfaceId,
+    ) -> Result<InterfaceSet, AnnounceEgressSetError> {
+        self.registry.announce_egress_interfaces(source)
+    }
+
     /// Consume, validate, apply or reject, and acknowledge at most one actor
     /// lifecycle request in bounded round-robin order.
     ///
@@ -2538,6 +2714,7 @@ where
             });
         }
         let packet_len = packet.packet_len;
+        let signal = packet.signal;
         match queue.available_ingress.try_send(packet.recycle()) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(buffer)) => Err(IngressBufferReturnFailure {
@@ -2547,6 +2724,7 @@ where
                     origin: buffer.origin,
                     storage: buffer.storage,
                     packet_len,
+                    signal,
                 },
             }),
         }
@@ -3042,6 +3220,67 @@ mod tests {
         register_peer(&mut sender, 2, "peer");
         let destination = receiver.destination_hash();
         (sender, destination, CounterRng(3))
+    }
+
+    #[test]
+    fn announce_egress_uses_exact_source_and_mode_pair_without_bearer_knowledge() {
+        let mtu = LogicalMtu::try_new(500).expect("test MTU must be nonzero");
+        let properties = |config| {
+            InterfaceProperties::new(
+                mtu,
+                InterfaceConfigId::new(config),
+                None,
+                InterfaceCost::new(0),
+            )
+        };
+        let mut registry = InterfaceRegistry::<3>::new();
+        registry
+            .register(
+                InterfaceQueueId::new(0),
+                PacketInterfaceId::new(1),
+                properties(1).with_announce_mode(AnnouncePropagationMode::Internal),
+                true,
+            )
+            .expect("internal shared-medium interface registers");
+        registry
+            .register(
+                InterfaceQueueId::new(1),
+                PacketInterfaceId::new(2),
+                properties(2)
+                    .with_topology(InterfaceTopology::PointToPoint)
+                    .with_announce_mode(AnnouncePropagationMode::Boundary),
+                true,
+            )
+            .expect("boundary point-to-point interface registers");
+        registry
+            .register(
+                InterfaceQueueId::new(2),
+                PacketInterfaceId::new(3),
+                properties(3).with_announce_mode(AnnouncePropagationMode::Full),
+                true,
+            )
+            .expect("full interface registers");
+
+        assert_eq!(
+            registry
+                .announce_egress_interfaces(PacketInterfaceId::new(2))
+                .expect("registered boundary source resolves"),
+            interfaces(&[3]),
+            "a boundary announce cannot enter Internal and cannot reflect to its point-to-point source"
+        );
+        assert_eq!(
+            registry
+                .announce_egress_interfaces(PacketInterfaceId::new(1))
+                .expect("registered internal source resolves"),
+            interfaces(&[1, 2, 3]),
+            "an Internal announce can repeat on its shared medium and cross the boundary"
+        );
+        assert_eq!(
+            registry.announce_egress_interfaces(PacketInterfaceId::new(9)),
+            Err(AnnounceEgressSetError::SourceUnavailable(
+                PacketInterfaceId::new(9)
+            ))
+        );
     }
 
     fn rns_identity(tag: u8) -> reticulum_rns_rete::Identity {
@@ -3764,13 +4003,18 @@ mod tests {
         let authority = actors[0]
             .bind_ingress(first)
             .expect("matching actor must bind ingress authority");
-        let buffer = actors[0]
+        let mut buffer = actors[0]
             .try_receive_ingress_buffer()
             .expect("split must seed the first reusable buffer");
         let id = buffer.id();
-        let packet = seal_bytes(buffer, b"native ingress");
+        buffer.capacity_mut()[..b"native ingress".len()].copy_from_slice(b"native ingress");
+        let signal = IngressSignalObservation::new(-93, 5);
+        let packet = buffer
+            .seal_with_signal(b"native ingress".len(), Some(signal))
+            .expect("valid signalled ingress must seal");
         assert_eq!(packet.id(), id);
         assert_eq!(packet.as_bytes(), b"native ingress");
+        assert_eq!(packet.signal(), Some(signal));
         actors[0]
             .try_send_ingress(authority, packet)
             .expect("current ingress must enter the actor queue");
@@ -3781,6 +4025,7 @@ mod tests {
             .expect("completed ingress must be queued");
         assert_eq!(validated.interface(), first.lease().interface());
         assert_eq!(validated.descriptor(), first);
+        assert_eq!(validated.signal(), Some(signal));
         let packet = validated.into_packet();
         assert_eq!(packet.id(), id);
         assert_eq!(packet.as_ref(), b"native ingress");
@@ -3795,6 +4040,7 @@ mod tests {
         assert_eq!(actors[0].available_ingress_buffers(), 0);
         let packet = seal_bytes(reused, b"again");
         assert_eq!(packet.as_bytes(), b"again");
+        assert_eq!(packet.signal(), None);
         router
             .try_return_ingress_buffer(packet)
             .expect("unsubmitted acquired buffer may be explicitly recycled");

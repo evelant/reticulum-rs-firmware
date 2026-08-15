@@ -1,5 +1,6 @@
 use reticulum_storage_model::{
     AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
+    AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG,
     AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AcceptOutcome, AcceptanceCandidate, Accepted,
     ApplyError, ApplyOutcome, AuditEntry, AuditEvent, AuthorizationSnapshot,
     AuthorizationSnapshotError, BootRecoveryDecision, BootRecoveryMarker, ContentSha256,
@@ -76,6 +77,30 @@ fn accepted<const N: usize>(
         principal(principal_tag),
         key(key_tag),
         intent(0x33, payload),
+        authorization(principal_tag),
+    );
+    match index.plan_accept(candidate) {
+        AcceptOutcome::Accepted(planned) => {
+            let JournalEntry::Accepted(accepted) = planned.entry() else {
+                panic!("acceptance planner returned a non-acceptance record")
+            };
+            assert_eq!(index.apply_planned(planned), Ok(ApplyOutcome::Applied));
+            accepted
+        }
+        other => panic!("unexpected acceptance result: {other:?}"),
+    }
+}
+
+fn accepted_lxmf<const N: usize>(
+    index: &mut SubmissionIndex<N>,
+    principal_tag: u8,
+    key_tag: u8,
+    trailing: &[u8],
+) -> Accepted {
+    let candidate = AcceptanceCandidate::new(
+        principal(principal_tag),
+        key(key_tag),
+        lxmf_intent(0x33, trailing),
         authorization(principal_tag),
     );
     match index.plan_accept(candidate) {
@@ -405,7 +430,8 @@ fn authorization_snapshot_rejects_noncanonical_or_insufficient_facts() {
     assert_eq!(valid.authority_revision(), 7);
     assert_eq!(valid.policy_version(), 2);
     assert_eq!(valid.granted_permission_bits(), submit);
-    assert_eq!(AUTHORIZATION_KNOWN_PERMISSION_BITS, 0b11);
+    assert_eq!(AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG, 0b100);
+    assert_eq!(AUTHORIZATION_KNOWN_PERMISSION_BITS, 0b111);
 
     for (candidate, expected) in [
         (
@@ -1302,6 +1328,82 @@ fn boot_policy_replays_only_queued_and_marks_interrupted_states() {
         awaiting.boot_recovery(id, 78),
         Ok(BootRecoveryDecision::AlreadyFinal)
     );
+}
+
+#[test]
+fn boot_policy_replays_pending_lxmf_without_mutating_its_durable_state() {
+    let mut preparing = live::<1>(SubmissionId::new(20));
+    let preparing_id = accepted_lxmf(&mut preparing, 1, 1, b"preparing").id();
+    append_planned_transition(
+        &mut preparing,
+        transition(preparing_id, 1, LifecycleState::Preparing),
+    );
+    let preparing_before = preparing.get(preparing_id).unwrap();
+    assert_eq!(
+        preparing.boot_recovery(preparing_id, 90),
+        Ok(BootRecoveryDecision::ReplayPendingLxmf)
+    );
+    assert_eq!(preparing.get(preparing_id), Some(preparing_before));
+}
+
+#[test]
+fn boot_policy_never_replays_an_lxmf_quarantine_awaiting_its_deferred_final() {
+    let mut preparing = live::<1>(SubmissionId::new(22));
+    let id = accepted_lxmf(&mut preparing, 1, 1, b"quarantined").id();
+    append_planned_transition(&mut preparing, transition(id, 1, LifecycleState::Preparing));
+    let audit = AuditEntry::new(
+        id,
+        2,
+        AuditEvent::TransportQuarantined {
+            rns_attempt_token: details(22).rns_attempt_token(),
+            may_have_transmitted: true,
+            reason: TransportRecoveryReason::Invariant,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        append_planned_audit(&mut preparing, audit),
+        ApplyOutcome::Applied
+    );
+
+    let BootRecoveryDecision::FinalizeInterrupted(finalize) =
+        preparing.boot_recovery(id, 92).unwrap()
+    else {
+        panic!("a durable quarantine must not resume the LXMF delivery loop")
+    };
+    assert_eq!(finalize.revision(), 3);
+    assert!(matches!(
+        finalize.state(),
+        LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::Internal(
+            InternalFailure::InterruptedByReset(marker)
+        ))) if marker == BootRecoveryMarker::new(92, InterruptedState::Preparing)
+    ));
+}
+
+#[test]
+fn boot_policy_finalizes_legacy_awaiting_lxmf_as_interrupted() {
+    let mut awaiting = live::<1>(SubmissionId::new(21));
+    let id = accepted_lxmf(&mut awaiting, 1, 1, b"legacy-awaiting").id();
+    append_planned_transition(&mut awaiting, transition(id, 1, LifecycleState::Preparing));
+    append_planned_transition(
+        &mut awaiting,
+        transition(id, 2, LifecycleState::AwaitingDelivery(details(21))),
+    );
+
+    let BootRecoveryDecision::FinalizeInterrupted(finalize) =
+        awaiting.boot_recovery(id, 91).unwrap()
+    else {
+        panic!("legacy awaiting LXMF state must not resume")
+    };
+    assert_eq!(finalize.revision(), 3);
+    assert!(matches!(
+        finalize.state(),
+        LifecycleState::Final(FinalDisposition::Failed(SubmissionFailure::Internal(
+            InternalFailure::InterruptedByReset(marker)
+        ))) if marker == BootRecoveryMarker::new(91, InterruptedState::AwaitingDelivery)
+    ));
+    append_planned_transition(&mut awaiting, finalize);
+    assert!(awaiting.get(id).unwrap().state().is_final());
 }
 
 #[test]

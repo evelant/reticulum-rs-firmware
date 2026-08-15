@@ -71,6 +71,15 @@ fn handoff() -> &'static mut DeviceApiHandoff<NoopRawMutex, TestGrant> {
     Box::leak(Box::new(DeviceApiHandoff::new()))
 }
 
+#[test]
+fn message_explicit_zeroization_clears_payload_and_retained_scratch() {
+    let mut message = message(0xa5, 17);
+    assert!(message.full_buffer().iter().any(|byte| *byte != 0));
+    message.zeroize_contents();
+    assert_eq!(message.encoded(), &[0; 17]);
+    assert!(message.full_buffer().iter().all(|byte| *byte == 0));
+}
+
 fn poll_once<F>(future: core::pin::Pin<&mut F>) -> Poll<F::Output>
 where
     F: Future,

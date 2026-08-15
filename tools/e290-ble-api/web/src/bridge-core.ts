@@ -3,8 +3,9 @@ export const FRAME_WRITE = 1;
 export const FRAME_INDICATION = 2;
 export const MAX_SOCKET_BUFFER_BYTES = 64 * 1024;
 export const MAX_PRE_READY_INDICATION_FRAMES = 32;
+export const MAXIMUM_PROFILE_FRAGMENT_BYTES = 248;
 export const MAX_PRE_READY_INDICATION_BYTES =
-  MAX_PRE_READY_INDICATION_FRAMES * (20 + 2);
+  MAX_PRE_READY_INDICATION_FRAMES * (MAXIMUM_PROFILE_FRAGMENT_BYTES + 2);
 
 export type BridgeProfile = Readonly<{
   bridgeProtocol: number;
@@ -133,7 +134,7 @@ export function parseBridgeProfile(value: unknown): BridgeProfile {
     profile.maximumFragmentBytes,
     "maximumFragmentBytes",
     1,
-    20,
+    MAXIMUM_PROFILE_FRAGMENT_BYTES,
   );
   const operationTimeoutMs = requireInteger(
     profile.operationTimeoutMs,

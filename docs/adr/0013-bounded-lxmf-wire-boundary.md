@@ -184,12 +184,16 @@ mount-gates registration and scheduling of opportunistic and direct-packet
 Resource ingress remains disabled. This source composition does not become
 powered direct-LXMF evidence until the dedicated two-board trial passes.
 
-The initial product retry policy has no age or attempt expiry for
+The product retry policy has no age or attempt expiry for
 `SourceIdentityUnavailable`; it preserves the exact event in case a later
-announce supplies the key. The fixed owner bounds RAM, but sixteen unresolved
-sources can occupy every E290 application-event slot until reboot. A later
-source-discovery tranche must select explicit identity retention and retry
-expiry/attempt behavior before hostile or sustained deployment.
+announce supplies the key. Current E290 scheduling wakes the exact source on
+an authenticated announce and otherwise uses a five-second initial base plus
+at most 20 percent deterministic jitter, then exponential bases whose complete
+interval remains below five minutes. The fixed
+owner bounds RAM and the cadence prevents a tight generation/log loop, but
+sixteen unresolved sources can still occupy every E290 application-event slot
+until reboot. Hostile or sustained deployment therefore still needs an
+explicit retention or expiry policy.
 
 ### Reuse LXMF-rs selectively and preserve attribution
 

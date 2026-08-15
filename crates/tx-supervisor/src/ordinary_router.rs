@@ -13,11 +13,12 @@ use reticulum_node_core::{
     OrdinaryActionAdmissionRequest, OrdinaryActionBatch, OrdinaryActionCapacitySnapshot,
     OrdinaryActionOwner, OrdinaryAuthorizationErrorKind, OrdinaryAuthorizationFailure,
     OrdinaryBufferPool, OrdinaryBufferPoolError, OrdinaryCompletionDisposition,
-    OrdinaryCompletionError, OrdinaryCompletionFailure, OrdinaryPacketReturnParkFailure,
-    OrdinaryPacketSlotId, OrdinaryPreparedPacket, OrdinaryQuarantineReason, OrdinaryTxCompletion,
-    OrdinaryTxJob, OrdinaryTxPermitReply, OrdinaryTxPermitRequest, OrdinaryTxQuarantine,
-    OutboundProtocolToken, PacketInterfaceId, TxAuthorizationCandidate, TxAuthorizationPolicy,
-    TxCompletionCode, TxLeaseDeadline, TxOwnerScope, TxPolicyDecision, TxPolicyDenial,
+    OrdinaryCompletionError, OrdinaryCompletionFailure, OrdinaryDispatchToken,
+    OrdinaryPacketReturnParkFailure, OrdinaryPacketSlotId, OrdinaryPreparedPacket,
+    OrdinaryQuarantineReason, OrdinaryTransmissionOutcome, OrdinaryTxCompletion, OrdinaryTxJob,
+    OrdinaryTxPermitReply, OrdinaryTxPermitRequest, OrdinaryTxQuarantine, OutboundProtocolToken,
+    PacketInterfaceId, TxAuthorizationCandidate, TxAuthorizationPolicy, TxCompletionCode,
+    TxLeaseDeadline, TxOwnerScope, TxPolicyDecision, TxPolicyDenial,
 };
 
 /// Product policy for ordinary jobs rejected before they enter an actor queue.
@@ -377,6 +378,31 @@ impl OrdinaryCompletionAcceptFailure {
     }
 }
 
+/// Transport-neutral observation retained from one concrete actor completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrdinaryRouterCompletionObservation {
+    token: OrdinaryDispatchToken,
+    interface: PacketInterfaceId,
+    transmission: OrdinaryTransmissionOutcome,
+}
+
+impl OrdinaryRouterCompletionObservation {
+    /// Exact packet-buffer generation returned by the concrete actor.
+    pub const fn token(self) -> OrdinaryDispatchToken {
+        self.token
+    }
+
+    /// Interface that owned this completed serialized hop.
+    pub const fn interface(self) -> PacketInterfaceId {
+        self.interface
+    }
+
+    /// Concrete actor's terminal transmission observation.
+    pub const fn transmission(self) -> OrdinaryTransmissionOutcome {
+        self.transmission
+    }
+}
+
 /// Successful completion reconciliation performed by one coordinator step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrdinaryRouterCompletionProgress {
@@ -386,11 +412,15 @@ pub enum OrdinaryRouterCompletionProgress {
         slot: OrdinaryPacketSlotId,
         /// Next selected interface.
         interface: PacketInterfaceId,
+        /// Exact completed hop that caused this fan-out advance.
+        completed: OrdinaryRouterCompletionObservation,
     },
     /// The exact packet buffer returned to the reusable pool.
     Returned {
         /// Stable owner slot.
         slot: OrdinaryPacketSlotId,
+        /// Exact completed final hop returned to the reusable pool.
+        completed: OrdinaryRouterCompletionObservation,
     },
 }
 
@@ -406,6 +436,8 @@ pub enum OrdinaryRouterStep {
     Routed {
         /// Stable packet-owner slot.
         slot: OrdinaryPacketSlotId,
+        /// Exact slot-generation correlation carried through the actor.
+        token: OrdinaryDispatchToken,
         /// Selected interface.
         interface: PacketInterfaceId,
         /// Opaque LINKREQUEST or LRPROOF timing token, when present.
@@ -450,6 +482,8 @@ pub enum OrdinaryRouterStep {
     PacketStaged {
         /// Stable packet-owner slot.
         slot: OrdinaryPacketSlotId,
+        /// Exact slot generation staged for later router or actor completion.
+        token: OrdinaryDispatchToken,
     },
     /// Events and unroutable count are ready for the runtime to take.
     NonPacketActionsReady,
@@ -956,6 +990,11 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
             .take()
             .expect("selected completion slot must remain occupied");
         let prepared = completion.prepared();
+        let completed = OrdinaryRouterCompletionObservation {
+            token: prepared.dispatch_token(),
+            interface: prepared.interface(),
+            transmission: completion.transmission_outcome(),
+        };
         if self.active[index] != Some(prepared) {
             self.set_slot_fault(
                 index,
@@ -993,7 +1032,11 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
                 }
                 self.pending_jobs[index] = Some(job);
                 Some(OrdinaryRouterStep::Completion(
-                    OrdinaryRouterCompletionProgress::Next { slot, interface },
+                    OrdinaryRouterCompletionProgress::Next {
+                        slot,
+                        interface,
+                        completed,
+                    },
                 ))
             }
             Ok(OrdinaryCompletionDisposition::Returned(returned)) => {
@@ -1003,7 +1046,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
                     Ok(_) => {
                         self.dispatch_accepted[index] = false;
                         Some(OrdinaryRouterStep::Completion(
-                            OrdinaryRouterCompletionProgress::Returned { slot },
+                            OrdinaryRouterCompletionProgress::Returned { slot, completed },
                         ))
                     }
                     Err(failure) => {
@@ -1042,6 +1085,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
             .take()
             .expect("selected route slot must remain occupied");
         let slot = job.slot_id();
+        let token = job.prepared().dispatch_token();
         let interface = job.interface();
         let prepared = job.prepared();
         if now >= job.deadline().instant() {
@@ -1066,6 +1110,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
                 self.dispatch_accepted[index] = true;
                 Some(OrdinaryRouterStep::Routed {
                     slot,
+                    token,
                     interface,
                     protocol_token: prepared.protocol_token(),
                     first_dispatch,
@@ -1153,6 +1198,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
             return None;
         };
         let slot = job.slot_id();
+        let token = job.prepared().dispatch_token();
         let index = usize::from(slot.get());
         if index >= PACKET_BUFFERS {
             self.set_input_fault(
@@ -1181,7 +1227,7 @@ impl<const PACKET_BUFFERS: usize> OrdinaryRouterCoordinator<PACKET_BUFFERS> {
         if batch.remaining_packet_count() == 0 {
             self.batch = None;
         }
-        Some(OrdinaryRouterStep::PacketStaged { slot })
+        Some(OrdinaryRouterStep::PacketStaged { slot, token })
     }
 
     fn admit_once<M, const SLOTS: usize, const QUEUE_DEPTH: usize>(
@@ -1580,15 +1626,16 @@ mod tests {
             coordinator.step(&mut router, MonotonicMillis::new(10)),
             OrdinaryRouterStep::PacketStaged { .. }
         ));
-        assert!(matches!(
-            coordinator.step(&mut router, MonotonicMillis::new(10)),
+        let first_dispatch_token = match coordinator.step(&mut router, MonotonicMillis::new(10)) {
             OrdinaryRouterStep::Routed {
+                token: dispatch_token,
                 interface,
                 protocol_token: Some(actual),
                 first_dispatch: true,
                 ..
-            } if interface == PacketInterfaceId::new(2) && actual == token
-        ));
+            } if interface == PacketInterfaceId::new(2) && actual == token => dispatch_token,
+            other => panic!("first LINKREQUEST dispatch was not correlated: {other:?}"),
+        };
 
         let InterfaceTxJob::Ordinary(first) = actors[0]
             .try_receive_job()
@@ -1619,13 +1666,21 @@ mod tests {
             .unwrap_or_else(|failure| {
                 panic!("first completion must correlate: {:?}", failure.reason())
             });
-        assert!(matches!(
-            coordinator.step(&mut router, MonotonicMillis::new(20)),
+        match coordinator.step(&mut router, MonotonicMillis::new(20)) {
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Next {
                 interface,
+                completed,
                 ..
-            }) if interface == PacketInterfaceId::new(9)
-        ));
+            }) if interface == PacketInterfaceId::new(9) => {
+                assert_eq!(completed.token(), first_dispatch_token);
+                assert_eq!(completed.interface(), PacketInterfaceId::new(2));
+                assert_eq!(
+                    completed.transmission(),
+                    OrdinaryTransmissionOutcome::NotConfirmed
+                );
+            }
+            other => panic!("first unconfirmed hop did not advance exactly: {other:?}"),
+        }
         assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(20)),
             OrdinaryRouterStep::Routed {
@@ -1753,22 +1808,24 @@ mod tests {
                     failure.reason()
                 )
             });
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(20)),
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Next {
-                slot: expected_slot,
-                interface: PacketInterfaceId::new(9),
-            })
-        );
-        assert_eq!(
+                slot,
+                interface,
+                ..
+            }) if slot == expected_slot && interface == PacketInterfaceId::new(9)
+        ));
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(20)),
             OrdinaryRouterStep::Routed {
-                slot: expected_slot,
-                interface: PacketInterfaceId::new(9),
+                slot,
+                interface,
                 protocol_token: None,
                 first_dispatch: false,
-            }
-        );
+                ..
+            } if slot == expected_slot && interface == PacketInterfaceId::new(9)
+        ));
 
         let InterfaceTxJob::Ordinary(second) = actors[1]
             .try_receive_job()
@@ -1799,12 +1856,13 @@ mod tests {
             .unwrap_or_else(|failure| {
                 panic!("second completion must be accepted: {:?}", failure.reason())
             });
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(30)),
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
-                slot: expected_slot,
-            })
-        );
+                slot,
+                ..
+            }) if slot == expected_slot
+        ));
         assert_eq!(coordinator.parked_count(), 1);
         assert_eq!(coordinator.active_count(), 0);
         assert_eq!(coordinator.capacities().active, 0);
@@ -2016,12 +2074,13 @@ mod tests {
         coordinator
             .try_accept_completion(first_completion)
             .unwrap_or_else(|failure| panic!("first completion must fit: {:?}", failure.reason()));
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(20)),
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
-                slot: first_slot,
-            })
-        );
+                slot,
+                ..
+            }) if slot == first_slot
+        ));
 
         let second_completion = second_ticket
             .complete(second.cancel(TxCompletionCode::new(0x406)))
@@ -2038,12 +2097,13 @@ mod tests {
         coordinator
             .try_accept_completion(second_completion)
             .unwrap_or_else(|failure| panic!("second completion must fit: {:?}", failure.reason()));
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(20)),
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
-                slot: second_slot,
-            })
-        );
+                slot,
+                ..
+            }) if slot == second_slot
+        ));
         assert_eq!(coordinator.parked_count(), 2);
         assert_eq!(coordinator.active_count(), 0);
     }
@@ -2124,12 +2184,13 @@ mod tests {
             .unwrap_or_else(|failure| {
                 panic!("independent completion failed: {:?}", failure.reason())
             });
-        assert_eq!(
+        assert!(matches!(
             primary.step(&mut router, MonotonicMillis::new(20)),
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
-                slot: second_slot,
-            })
-        );
+                slot,
+                ..
+            }) if slot == second_slot
+        ));
 
         let InterfaceTxJob::Ordinary(blocking_job) = actors[0]
             .try_receive_job()
@@ -2154,12 +2215,13 @@ mod tests {
         blocker
             .try_accept_completion(completion)
             .unwrap_or_else(|failure| panic!("blocker completion failed: {:?}", failure.reason()));
-        assert_eq!(
+        assert!(matches!(
             blocker.step(&mut router, MonotonicMillis::new(20)),
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
-                slot: blocking_slot,
-            })
-        );
+                slot,
+                ..
+            }) if slot == blocking_slot
+        ));
 
         let first_route = primary.step(&mut router, MonotonicMillis::new(20));
         assert!(matches!(
@@ -2192,12 +2254,13 @@ mod tests {
         primary
             .try_accept_completion(completion)
             .unwrap_or_else(|failure| panic!("LoRa completion failed: {:?}", failure.reason()));
-        assert_eq!(
+        assert!(matches!(
             primary.step(&mut router, MonotonicMillis::new(30)),
             OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
-                slot: first_slot,
-            })
-        );
+                slot,
+                ..
+            }) if slot == first_slot
+        ));
         assert_eq!(primary.parked_count(), 2);
         assert_eq!(blocker.parked_count(), 1);
         assert_eq!(primary.fault(), None);
@@ -2236,8 +2299,32 @@ mod tests {
         let mut coordinator = coordinator::<1>(&mut node);
         let (mut router, mut actors, _) = configure_router::<1>();
         let mut rng = CounterRng::default();
-        let actions = announce_actions(&mut node, 10, &mut rng);
-        route_one_announce(&mut coordinator, &mut router, actions);
+        let actions = source_only_actions(2, &mut rng);
+        coordinator
+            .try_offer_actions(actions, admission(10))
+            .unwrap_or_else(|failure| panic!("source-only proof: {:?}", failure.reason()));
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::ActionsAdmitted { packet_count: 1 }
+        ));
+        assert_eq!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::NonPacketActionsReady
+        );
+        let _ = coordinator
+            .take_non_packet_actions()
+            .expect("proof event output must remain explicit");
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::PacketStaged { .. }
+        ));
+        assert!(matches!(
+            coordinator.step(&mut router, MonotonicMillis::new(10)),
+            OrdinaryRouterStep::Routed {
+                interface,
+                ..
+            } if interface == PacketInterfaceId::new(2)
+        ));
 
         let InterfaceTxJob::Ordinary(job) = actors[0]
             .try_receive_job()
@@ -2247,6 +2334,7 @@ mod tests {
         };
         let (ticket, job) = job.into_parts();
         let slot = job.slot_id();
+        let dispatch_token = job.prepared().dispatch_token();
         let requirements = TxPermitRequirements::try_new(TxPermitResourceId::new([0x54; 16]), 1)
             .expect("test requirements must be nonzero");
         let (pending, request) = job.begin_permit(requirements);
@@ -2271,7 +2359,7 @@ mod tests {
             assert_eq!(frame.prepared().slot_id(), slot);
         }
         let completion = ticket
-            .complete(authorized.cancel(TxCompletionCode::new(0x40b)))
+            .complete(authorized.complete_transmitted(TxCompletionCode::new(0x40b)))
             .unwrap_or_else(|_| panic!("authorized completion must match its ticket"));
         actors[0]
             .try_send_completion(completion)
@@ -2290,10 +2378,16 @@ mod tests {
                     failure.reason()
                 )
             });
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(30)),
-            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned { slot })
-        );
+            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
+                slot: returned_slot,
+                completed,
+            }) if returned_slot == slot
+                && completed.token() == dispatch_token
+                && completed.interface() == PacketInterfaceId::new(2)
+                && completed.transmission() == OrdinaryTransmissionOutcome::Transmitted
+        ));
         assert_eq!(coordinator.parked_count(), 1);
         assert_eq!(coordinator.fault(), None);
     }
@@ -2320,7 +2414,7 @@ mod tests {
         let _ = coordinator
             .take_non_packet_actions()
             .expect("non-packet output must remain explicit");
-        let OrdinaryRouterStep::PacketStaged { slot } =
+        let OrdinaryRouterStep::PacketStaged { slot, .. } =
             coordinator.step(&mut router, MonotonicMillis::new(10))
         else {
             panic!("admitted owner was not staged")
@@ -2331,10 +2425,13 @@ mod tests {
             OrdinaryRouterStep::PendingJobExpired { slot }
         );
         assert!(actors[0].try_receive_job().is_none());
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(15)),
-            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned { slot })
-        );
+            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
+                slot: returned_slot,
+                ..
+            }) if returned_slot == slot
+        ));
         assert_eq!(coordinator.parked_count(), 1);
         assert_eq!(coordinator.next_deadline(), None);
     }
@@ -2504,10 +2601,13 @@ mod tests {
                     failure.reason()
                 )
             });
-        assert_eq!(
+        assert!(matches!(
             coordinator.step(&mut router, MonotonicMillis::new(30)),
-            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned { slot })
-        );
+            OrdinaryRouterStep::Completion(OrdinaryRouterCompletionProgress::Returned {
+                slot: returned_slot,
+                ..
+            }) if returned_slot == slot
+        ));
         assert_eq!(coordinator.active_count(), 0);
         assert_eq!(coordinator.parked_count(), 2);
         assert_eq!(coordinator.fault_residue_count(), 1);

@@ -1,200 +1,230 @@
 # Reticulum appliance client
 
-This is the universal Expo client for the Reticulum appliance. The same TypeScript/React Native
-source targets web, iOS, and Android. Native projects are generated with Expo Continuous Native
-Generation and are deliberately not committed.
+This directory contains the universal Expo application for the Reticulum
+appliance. One authored TypeScript/React Native surface targets web, iOS, and
+Android. Native projects are generated with Expo Continuous Native Generation
+and are deliberately not committed.
 
-The embedded browser build is an Expo single-page export. A Bun TypeScript build step validates
-Expo's output, embeds Metro-owned image resources into the bundle, and reduces the runtime to the
-three fixed files served by `reticulum-lxmf-chat-service`:
+For prerequisites and exact build/install commands, use the
+[app getting-started guide](../../docs/getting-started/app.md). For the
+fileless BLE setup flow, use the [pairing guide](../../docs/getting-started/pairing.md).
 
-- `app.js`
-- `index.html`
-- `style.css`
+## Contributor loop
 
-The adjacent tracked `manifest.json` records deterministic build provenance; it is not served to
-the browser.
-
-Wire DTOs in `src/generated/api.ts` are generated from Rust. Never edit or duplicate them by hand.
-
-## Toolchain
-
-Bun `1.3.13` at revision `bf2e2cecf` is required. Package versions and the Bun lockfile are exact.
-Expo SDK 57 requires Metro for universal React Native bundling. All project-owned scripts are
-TypeScript launched by Bun, and Bun owns package installation and the lockfile. Expo's native CNG
-command retains its upstream Node runtime because Bun 1.3.13 corrupts the copied Xcode project when
-it runs that command directly. There are no authored JavaScript files or Node-owned project scripts.
-The native Rust boundary additionally requires the repository's pinned Rust toolchain and:
-
-- Android SDK/NDK, `cargo-ndk`, and the four Rust Android targets listed by
-  `scripts/native-bindings.ts`; or
-- Xcode, CocoaPods, and the `aarch64-apple-ios` and `aarch64-apple-ios-sim` Rust targets.
-
-The checked iOS XCFramework contains arm64 device and Apple-Silicon arm64 simulator slices. An Intel
-iOS simulator is not currently a native-build target.
+From this directory:
 
 ```sh
 bun install --frozen-lockfile
 bun run verify
+bun run web
 ```
 
-Use `bun run api:generate` after changing Rust wire types and `bun run build:web` after changing the
-client. `bun run assets:check` performs two clean Expo exports to detect nondeterminism before it
-compares the tracked embedded assets. `bun run native:verify` is the opt-in macOS/mobile-toolchain
-gate: it regenerates both native bindings, checks tracked output drift, and tests and lints the Rust
-bridge. The ordinary `bun run verify` remains portable and does not require Android or Apple tools.
+After installing a native Debug build, use `bun run start` for the normal
+Metro/Fast Refresh loop. Expo Go cannot run this project because the app
+contains a custom native TurboModule.
 
-## Development
+The platform wrappers own the complete native preparation sequence:
 
 ```sh
-bun run web
 bun run ios
 bun run android
 ```
 
-`bun run ios` and `bun run android` regenerate the platform's Rust/UniFFI bindings, run a clean Expo
-prebuild through the Expo CLI's Node shebang, and invoke `expo run:ios` or `expo run:android`.
-Arguments after `--` are forwarded to Expo, for example `bun run ios -- --device`. The resulting
-application-level `ios/` and `android/` projects, XCFramework, JNI archives, and platform build
-outputs are disposable and ignored. After the development client is installed,
-`bun run start` provides the ordinary Metro/Fast Refresh loop for TypeScript-only
-changes. `bun run prebuild` remains available when only generated native
-projects are needed.
+Each wrapper regenerates the selected Rust/UniFFI bindings, performs a clean
+Expo prebuild, compiles the native app, installs it, and launches it. Do not run
+binding generation or prebuild first unless you specifically need one of those
+intermediate products.
 
-An iOS Debug build deliberately skips embedding JavaScript and therefore needs a reachable Metro
-server. Use a Release configuration for a self-contained physical-device artifact:
+For a self-contained Release that is built, installed, launched, and
+artifact-verified on a selected device:
 
 ```sh
-bun run ios -- --configuration Release --device <device-udid> --no-bundler
+bun run release:ios
+bun run release:android
 ```
 
-`--no-bundler` prevents Expo from leaving a development server running; the Release Xcode build
-still invokes Metro once to embed `main.jsbundle` in the signed application. Before installation,
-verify that the generated `Release-iphoneos/ReticulumAppliance.app/main.jsbundle` exists and is
-nonempty.
+Each command opens Expo's device picker when `--device` is omitted. Pass an
+exact target with `bun run release:ios -- --device <UDID>` or
+`bun run release:android -- --device <device-name>`. Release wrappers compile the
+embedded Rust bridge with Cargo's release profile as well as selecting the
+native platform's Release configuration.
 
-The app defaults to the appliance's same-origin HTTP API on web. Native builds
-default to a Rust-owned app-private profile store. Each canonical credential is
-keyed by its validated device ID and has its own identity-bound SQLite
-database; atomic metadata selects the one profile opened by the current
-native session. The Appliances sheet lists these generated, secret-free
-summaries, switches only after the current BLE/SQLite owner closes, and can
-quiesce the active profile before reusing secure BLE onboarding to add another
-board. On first launch after this change, Rust migrates the prior
-`reticulum-device-credential.rdpkey` and
-`reticulum-lxmf-chat-alpha-schema3.sqlite3` files into that credential's
-profile. Invalid legacy state remains available to the existing explicit
-recovery boundary. Generated TypeScript receives public profile summaries, not
-credential bytes or profile filesystem paths. This already provides durable
-contacts, timelines, and idempotent outbox writes while offline. BLE is the
-default native bearer: React
-Native owns foreground scanning, GATT connection, indications, and write-with-response, while Rust
-owns the activated credential, authenticated session, protocol framing, and LXMF state. The initial
-BLE attempt runs in the background only after the native bridge has validated an app-private
-credential, so an absent credential or radio never blocks the offline database. The credential's
-E290 device ID selects the exact Rust-generated advertised name rather than whichever matching
-board happens to advertise first. While the app remains foregrounded, an unsuccessful attempt
-re-arms after two seconds without overlapping the prior GATT operation; retries suspend when the
-app backgrounds and resume when it becomes active again. The Reconnect action also retries
-discovery and the complete GATT link explicitly. Foreground phone-native
-fileless pairing is implemented and powered-qualified on iOS; BLE background
-restoration remains unimplemented. USB OTG and USB serial/JTAG remain explicit
-unavailable connector stubs and do not silently fall back or claim a device
-connection.
+## Generated boundaries
 
-The **Nearby** contact action reads the connected E290's bounded projection of
-authenticated `lxmf.delivery` announces through that same BLE session. It does
-not scan the other Reticulum node from the phone. Refresh returns at most the
-board profile's 32 peers, Rust bounds and decodes the boot-scoped API pages and
-announce display data, and one tap adds or opens the existing durable contact.
-Manual hexadecimal destination entry remains available. This public peer
-discovery is separate from credential import and appliance authorization;
-future QR or native-proximity contact cards cannot grant device control.
+- `src/generated/api.ts` is generated from serialized Rust DTOs. Run
+  `bun run api:generate` after changing the Rust wire contract.
+- `modules/appliance-native` packages the Rust application core through
+  UniFFI and a React Native TurboModule.
+- `bun run native:bindings:ios` and `bun run native:bindings:android`
+  regenerate one native bridge without running the app.
+- `bun run native:verify` checks both platform bindings and the Rust bridge;
+  it requires both Apple and Android toolchains.
+- `bun run build:web` updates the tracked embedded assets under
+  `../../crates/lxmf-chat-service/assets`; it does not produce a conventional
+  standalone `dist` deployment.
 
-On compact native layouts, the conversation workspace is keyboard-aware and scrollable. iOS uses
-padding plus interactive keyboard dismissal, Android uses height avoidance plus drag dismissal,
-and taps on visible actions remain enabled while the keyboard is open. The
-[bounded physical iOS proof](../../docs/e290-expo-ios-ble-lora-proof.md) qualified title/body
-entry, composer scrolling, and Send-button reachability; it did not qualify rotation,
-accessibility text scaling, external keyboards, or Android keyboard variants.
+Never hand-edit generated TypeScript, C++, Kotlin, Objective-C++, CMake,
+Gradle, podspec, framework, or JNI output. Project-owned scripts remain
+TypeScript executed by the exact Bun version in `package.json`.
 
-On a fresh native install, the first-run screen can scan for the generated BLE service and list
-nearby appliances by advertised name, platform identifier, and RSSI. The user must select a row
-explicitly; the app never auto-selects the first advertisement. This bounded scan does not connect,
-subscribe, call the Rust authenticated actor, send credentials, or treat the advertised name as
-identity or provisioning state. The selected row is retained through the operating-system Bluetooth
-security prompt, board physical-presence checks, and Rust-owned credential activation described by
-[ADR 0019](../../docs/adr/0019-secure-ble-appliance-onboarding.md). When a discovery name exactly
-matches a saved profile's generated expected name, the UI offers **Switch** and never starts a new
-pairing ceremony from that hint.
+## Source layout
 
-The alpha **credential import** path remains a secondary development fallback. Pair the intended
-board through the qualified USB managed-profile workflow, make a temporary copy of its exact
-96-byte Active `credential.rdpkey`, name the transfer copy with that board's normalized USB serial,
-transfer it to the phone, and choose it in the system file picker. Verify the filename: the current
-create-only alpha imports the first canonical credential immediately and has no secret-free
-board-identity confirmation screen. The native store and Appliances sheet
-retain multiple device-keyed profiles and expose explicit switching; adding a
-board after setup uses the fileless secure BLE onboarding flow rather than
-credential-file import. The Expo layer copies an imported selection to an
-app-owned cache path without reading its bytes, Rust validates and create-only
-publishes a mode-`0600` canonical credential into that device's profile,
-reopens the matching SQLite owner, and the Expo layer removes its cache copy in
-a `finally` path. On iOS it also deletes
-the picker-created temporary copy after staging. Cancelled, malformed, and failed imports do not
-start BLE or replace an existing credential. The original transfer file remains outside the app's
-control and must be deleted by the user after a successful import.
+```text
+src/app/                 Expo Router screens
+src/generated/           Rust-generated serialized API types
+src/lib/                 Client state, transport adapters, and tests
+modules/appliance-native Native Rust/UniFFI/TurboModule package
+scripts/                 Bun TypeScript build and verification tools
+```
 
-This import deliberately makes another usable copy of an authentication secret. The canonical
-file currently lives in the app's private Documents directory rather than
-Keychain/Keystore and may be included in platform backups. Treat the import
-workflow as an alpha bridge for development and manual recovery, not the
-normal provisioning design: integrated secure BLE onboarding now pairs the
-phone directly without copying a credential file. Production work must give
-each client independently revocable authority, exclude secrets from backup,
-and add explicit credential replacement, factory-reset/recovery, and
-multi-phone lifecycle UX.
+## Messaging and activity
 
-Expo SDK 57's Android file picker takes a persistable content-provider permission and exposes no
-API to release it. The app does not persist the selected URI itself, but Android can retain that
-read grant until the source is removed or the app is uninstalled. A production Android import
-needs a small native picker/release owner (or direct pairing) so successful and failed imports can
-revoke the grant deterministically.
+The Messages workspace lists saved contacts, authenticated inbound message
+requests, and outbound-only unsaved conversations separately. An inbound sender
+does not need to be saved or have a reciprocal contact before its conversation
+can be opened and replied to. Saving or renaming a contact changes only the
+phone-local display name; the authenticated LXMF destination remains fixed.
 
-Set `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` to the E290 proof endpoint
-`192.168.4.1:29716` to opt a native development build into the first raw-TCP Wi-Fi proof connector.
-The connector reloads the active profile's app-private credential for every
-handshake and uses the separately transcript-bound Wi-Fi session suite. For the
-current proof, use the same first-run credential import after pairing over the qualified USB
-workflow. Fileless phone pairing is available in BLE builds; Keychain/Keystore
-migration, SoftAP joining, and credential rotation remain follow-up work. The
-session authenticates and integrity-protects API records but adds no
-application-layer confidentiality; the initial appliance SoftAP must therefore
-retain WPA2 and this path must not be described as the final wireless security
-profile.
+The Activity workspace and each message's **Details and actions** sheet query
+the same bounded per-profile journal. It records durable inbound imports and
+outbound queue, acceptance, status, and retry transitions. Times are when the
+app store observed the mutation—not RF or remote timestamps. Packet length and
+SHA-256 evidence may be available for outbound material. An inbound message's
+details also show its immutable first-arrival interface and paired RSSI/SNR
+when the appliance retained them. These are receiver-local final-hop values and
+may describe a relay. Outbound messages and older records correctly show no
+receiver observation; the app never substitutes a Nearby announce reading.
 
-The BLE connector currently uses that same active profile's app-private
-credential. It scans only for the Rust-generated GATT service, subscribes
-to the generated TX indication characteristic before declaring the link ready, and caps initial
-writes to the generated characteristic value bound. A generation-aware command pump rejects stale
-callbacks and reports every platform write exactly once. Platform writes and individual GATT setup
-or teardown operations have a thirty-second bound, while the platform connection attempt has its
-own 90-second deadline because CoreBluetooth has no native connection timeout and a freshly
-rebooted board may take substantially longer than one ordinary GATT operation to produce a
-connection callback. For an E290 credential, the
-bridge derives the exact `reticulum-e290-<MAC suffix>` target from the authenticated device ID.
-`EXPO_PUBLIC_APPLIANCE_BLE_NAME` remains an explicit diagnostic fallback for a pre-existing
-canonical credential whose namespace does not provide a derivable board name. The current BLE
-file-import path rejects such a credential before publication and requires an E290-derived target.
-The advertised name and selected filename are discovery hints, not authentication: the suite-3
-handshake must still return the credential-bound device ID before Rust accepts the session. Like
-the current USB and Wi-Fi profiles, BLE authenticates and integrity-protects device-API records but
-does not add application-layer confidentiality; do not use this alpha bearer for sensitive
-content.
+Each message composer has an **Attach phone location** switch. Activity also
+stores the phone-local default used when a new composer opens; each draft can
+override it. When enabled, queueing requests a fresh high-accuracy foreground
+fix and remains visibly unsent if permission or capture fails. API 1.17 carries
+the fixed-point sample to the board, which encodes Sideband-compatible LXMF
+`FIELD_TELEMETRY` (`0x02`) and signs it into the immutable message. Automatic
+board-owned carrier retries and explicit terminal-row replacements reuse that
+original location and message identity instead of sampling again. Received and
+sent timeline rows show the attached location;
+the details sheet shows coordinates, altitude, speed, bearing, accuracy, update
+time, and an **Open Map** action backed by OpenStreetMap.
 
-Set `EXPO_PUBLIC_APPLIANCE_URL` to retain the interim native HTTP adapter during development, then
-open a `reticulum-appliance://connect?cap=...` link to bootstrap a session. The current Rust alpha
-server binds loopback and enforces browser-origin headers, so remote native HTTP still needs a
-deliberate server transport/authentication policy before it can connect. Both adapters implement
-the same client boundary and consume Rust-generated semantic DTOs, so adding the remaining USB
-connector work does not require changing screens or duplicating interface types.
+This recipient-visible location is an LXMF application field, not Reticulum
+routing metadata, board GNSS, the position of a relay, or the exact point of RF
+emission. Arbitrary LXMF fields, attachments, and Resources remain future work.
+
+Each conversation also exposes **Measure path** when the connected appliance
+advertises API 1.14 probe support. It begins one volatile Reticulum
+path-and-proof request and reports round-trip time, route hops, return
+interface, and optional final-hop signal. This validates Reticulum reachability
+to an enabled responder only—not LXMF service, application throughput, or the
+RSSI at which the remote node received the request. Public nodes may disable
+the responder.
+
+API 1.16 adds a separate packet-correlated RF trace below the Activity journal
+and inside each message's details. The runtime imports the board's boot-aware
+bounded pages into the per-appliance SQLite database, so route selection,
+terminal LoRa DATA dispatch, physical-frame `TxDone`, logical RX RSSI/SNR, and
+delivery-proof or timeout evidence survive after collection. Correlated rows
+include the exact board attempt token and the app-created submission's opt-in
+queue-time phone-location stamp. Use **Export JSON** for a lossless complete snapshot or **Export CSV**
+for analysis. Exports exclude message bodies and credentials but can include
+precise coordinates, peer identities, packet hashes, and timing.
+
+The separate **Field location telemetry** switch is a phone-local durable
+diagnostic preference: once enabled it remains enabled across app restarts and
+appliance switches
+until explicitly turned off. Collection remains foreground-only, and the
+preference file stores only that boolean—not coordinates or observations.
+Available phone fixes retain platform-reported horizontal accuracy, altitude,
+and vertical accuracy. When the app first imports an inbound message it also
+stores the latest available receiver-phone fix with that message; duplicate
+imports never replace or backfill the original observation.
+
+Board event time is monotonic since boot, app import time is a separate wall
+clock, and phone location is captured when the app-created submission was
+queued. Later board-owned carrier attempts reuse that stamp. An outgoing trace
+cannot report the remote receiver's RSSI. If the UI reports incomplete
+history, events were already missing from at least one bounded board ring; the
+export preserves that warning rather than presenting a partial capture as
+complete.
+
+## Transmission map
+
+The Map workspace renders the same per-profile activity and RF evidence with
+MapLibre on web, iOS, and Android. It shows one marker for each retained
+app-created outbound submission that has a phone-location sample, plus
+sender-attached locations from the loaded message activity history. Selecting
+a marker loads its complete message-scoped RF trace when available.
+
+For a newly imported inbound message that has both a sender-attached location
+and a retained receiver-phone fix, the map draws a solid sender-to-receiver
+line. Its label shows horizontal endpoint distance and both reported phone
+elevations; details also show horizontal and vertical accuracy, elevation
+difference, three-dimensional endpoint separation, and receiver-local
+final-hop RSSI/SNR when available. The receiver fix is the phone position when
+the foreground app imported the board inbox—not necessarily the board's
+position or the exact RF-arrival position. On a relayed route the line is still
+end-to-end phone separation while signal values describe only the final hop.
+
+Dashed lines separately connect chronological outbound queue observations for
+visual comparison; they are not RF paths, Reticulum routes, board GNSS tracks,
+or traveled tracks. Older records created before receiver-location capture
+remain honest and do not gain an inferred reception line.
+
+The default online basemap is OpenFreeMap's Liberty style. Set
+`EXPO_PUBLIC_MAP_STYLE_URL` while building to use another MapLibre-compatible
+style. The observations and their details remain browsable if the basemap is
+offline, but map tiles require network access. Adding or changing MapLibre
+requires a native rebuild; Expo Go cannot load the native map module.
+
+## Message notifications
+
+Native builds can present a local phone notification when the foreground app,
+or an app returning to the foreground, discovers a newly imported LXMF
+message. Notification taps select the owning appliance profile and open the
+message's conversation. A small per-profile ledger in the app document
+directory records the durable activity-event watermark; the first observation
+establishes a baseline rather than replaying historical messages.
+
+This is intentionally not yet a locked-phone BLE guarantee. BLE byte delivery
+is currently owned by foreground JavaScript. Reliable delivery while suspended
+or after an OS-eligible process relaunch requires a native BLE mailbox
+characteristic watcher, Core Bluetooth restoration/AccessorySetupKit on iOS,
+and Android companion-device background integration. The current notification
+ledger and tap payload are isolated so that native phase can reuse them.
+
+## Radio and route diagnostics
+
+The Network workspace includes a collapsible **Radio & Routes** panel for the
+API-1.12 node snapshot and complete bounded retained-route read. It shows
+applied LoRa profile/power, RX/TX/CAD observations and counters, registered
+interfaces, Reticulum counters, route resolution, and observed/retained/usable
+counts. Requested +14/+17/+20/+22 dBm selection lives in the same panel and
+retains the network configuration's reboot-to-apply behavior.
+
+With API 1.15, the panel distinguishes the latest terminal DATA and ordinary
+jobs. The latest DATA row includes its selected interface, complete encoded
+packet length, and selectable SHA-256, using the same length/hash definition as
+message details. It is prepared-packet correlation evidence, including for
+channel-access rejection before authorization; it must not be read as proof of
+RF transmission or remote delivery. Ordinary traffic can replace the aggregate
+last-TX row without hiding the separately retained latest DATA evidence.
+
+Polling runs only while the app is foregrounded, the Network workspace is
+visible, and the active appliance session is ready. The controller permits one
+read at a time, keeps the last good snapshot after a transient failure, and
+rejects results from a previous appliance or activation generation. Rust owns
+route paging and restarts a bounded read when the revision or total count
+changes between pages.
+
+These values must not be presented as a general RF scan or peer-presence list.
+Last LoRa RX is conservative whole-packet metadata for the most recently
+accepted logical packet (the field-wise weaker RSSI and SNR across both frames
+for a split packet), not arbitrary recent RF energy or the latest physical
+frame. Retained routes are routing evidence rather than connected/reachable
+peers, and **local LRU use** means this node's route-table access—not when that
+peer was last heard.
+
+The web target uses the same-origin HTTP service. Native builds use the Rust
+profile/database owner and foreground BLE by default. USB and Wi-Fi connector
+surfaces remain explicit development or future-work boundaries; they do not
+silently replace BLE.

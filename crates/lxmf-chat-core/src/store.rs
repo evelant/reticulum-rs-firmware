@@ -1,10 +1,15 @@
 use core::fmt;
 
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::vec::Vec;
 
 use crate::{
-    AcceptanceIds, Contact, DestinationHash, InboundMessage, MessageId, OutboxId, OutboxMaterial,
-    OutboxRecord, OutboxStatus, ReconcileWork, SubmissionId, SubmissionState, TimelineEntry,
+    AcceptanceIds, AttemptLocationStamp, Contact, ConversationPeer, DestinationHash,
+    InboundMessage, InboundRecord, MessageActivityPage, MessageActivityPageRequest, MessageId,
+    OutboxId, OutboxMaterial, OutboxRecord, OutboxStatus, ReconcileWork, RfTraceBootId,
+    RfTraceEventSequence, RfTraceImportBatch, RfTracePage, RfTracePageRequest, RnsAttemptToken,
+    SubmissionId, SubmissionState, TimelineEntry,
 };
 
 /// Result of binding an unbound database to one authenticated device.
@@ -45,6 +50,51 @@ pub enum OutboxCommitOutcome {
     Existing(OutboxId),
 }
 
+/// Result of creating a replacement device submission for an existing row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutboxRetryOutcome {
+    /// A terminal device submission was cleared and the same row was requeued.
+    Requeued(OutboxId),
+    /// The row already has unfinished work, so no replacement was added.
+    AlreadyPending(OutboxId),
+}
+
+/// Legacy app-owned automatic-rearm result.
+///
+/// Retained only for schema/migration and store-conformance fixtures.
+/// Production clients must not schedule from this API; firmware owns
+/// unattended LXMF retry while the durable submission remains `Preparing`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutomaticOutboxRetryOutcome {
+    /// A terminal submission was cleared, the historical budget was charged
+    /// once, and the same row was requeued.
+    Requeued(OutboxId),
+    /// The row already has unfinished work, so no replacement or budget charge
+    /// was added.
+    AlreadyPending(OutboxId),
+    /// The row consumed its lifetime automatic retry budget and was left in
+    /// its retryable terminal state for explicit user action.
+    BudgetExhausted(OutboxId),
+}
+
+impl AutomaticOutboxRetryOutcome {
+    /// Stable outbox identifier retained by every outcome.
+    pub const fn outbox_id(self) -> OutboxId {
+        match self {
+            Self::Requeued(id) | Self::AlreadyPending(id) | Self::BudgetExhausted(id) => id,
+        }
+    }
+}
+
+impl OutboxRetryOutcome {
+    /// Stable outbox identifier retained by either outcome.
+    pub const fn outbox_id(self) -> OutboxId {
+        match self {
+            Self::Requeued(id) | Self::AlreadyPending(id) => id,
+        }
+    }
+}
+
 impl OutboxCommitOutcome {
     /// Stable outbox identifier for either idempotent outcome.
     pub const fn outbox_id(self) -> OutboxId {
@@ -74,16 +124,53 @@ pub enum StatusProjectionOutcome {
     IgnoredStale,
 }
 
+/// Result of atomically importing one bounded board RF trace page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RfTraceImportOutcome {
+    inserted: usize,
+    existing: usize,
+    correlations_added: usize,
+}
+
+impl RfTraceImportOutcome {
+    pub(crate) const fn new(inserted: usize, existing: usize, correlations_added: usize) -> Self {
+        Self {
+            inserted,
+            existing,
+            correlations_added,
+        }
+    }
+
+    /// Newly inserted board observations.
+    pub const fn inserted(self) -> usize {
+        self.inserted
+    }
+
+    /// Exact already-durable observations encountered during replay.
+    pub const fn existing(self) -> usize {
+        self.existing
+    }
+
+    /// Previously uncorrelated rows enriched from immutable acceptance activity.
+    pub const fn correlations_added(self) -> usize {
+        self.correlations_added
+    }
+}
+
 /// Invalid opaque in-memory image detected while rebuilding indexes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageError {
     /// Image schema does not match this implementation.
     SchemaVersion,
-    /// A destination, message, outbox, idempotency key, acceptance ID, or
-    /// timeline sequence appeared more than once.
+    /// A destination, message, outbox, idempotency key, acceptance ID,
+    /// timeline sequence, or activity ID appeared more than once.
     DuplicateKey,
     /// An outbox row's acceptance and status contradicted one another.
     InconsistentOutbox,
+    /// Retained activity referenced an impossible row or exceeded its bound.
+    InconsistentActivity,
+    /// RF trace boot, event, or message-correlation state was inconsistent.
+    InconsistentRfTrace,
     /// A persisted next-ID counter was zero or did not exceed retained values.
     InvalidNextCounter,
 }
@@ -101,12 +188,27 @@ pub enum ChatStoreError {
     SubmissionNotFound(SubmissionId),
     /// One outbox row was assigned a different acceptance pair.
     AcceptanceConflict(OutboxId),
+    /// The named outbox row is delivered, cancelled, or explicitly rejected.
+    OutboxNotRetryable(OutboxId),
+    /// A retry reused the device-API key that names the terminal attempt.
+    RetryIdempotencyKeyUnchanged(OutboxId),
     /// A submission or message ID is already assigned to another outbox row.
     AcceptanceIdAlreadyBound,
     /// Awaiting and delivered packet evidence disagreed.
     PacketEvidenceChanged,
     /// A durable terminal state was contradicted by a different terminal.
     TerminalStatusConflict,
+    /// One boot identifier was reused with a different immutable radio profile.
+    RfTraceBootProfileConflict(RfTraceBootId),
+    /// One boot-local sequence was reused for different RF evidence.
+    RfTraceEventConflict {
+        /// Trace-producing boot.
+        boot_id: RfTraceBootId,
+        /// Conflicting boot-local event sequence.
+        event_sequence: RfTraceEventSequence,
+    },
+    /// One hop-invariant token resolved to different immutable attempts.
+    RfTraceAttemptTokenConflict(RnsAttemptToken),
     /// A local monotonically allocated identifier cannot advance safely.
     IdentifierExhausted,
     /// An opaque in-memory image failed restart validation.
@@ -127,6 +229,10 @@ impl fmt::Display for ChatStoreError {
             Self::AcceptanceConflict(_) => {
                 formatter.write_str("outbox acceptance identifiers conflict")
             }
+            Self::OutboxNotRetryable(_) => formatter.write_str("outbox record is not retryable"),
+            Self::RetryIdempotencyKeyUnchanged(_) => {
+                formatter.write_str("outbox retry requires a fresh idempotency key")
+            }
             Self::AcceptanceIdAlreadyBound => {
                 formatter.write_str("acceptance identifier is already bound")
             }
@@ -136,6 +242,14 @@ impl fmt::Display for ChatStoreError {
             Self::TerminalStatusConflict => {
                 formatter.write_str("device status contradicts a durable terminal state")
             }
+            Self::RfTraceBootProfileConflict(_) => {
+                formatter.write_str("RF trace boot profile conflicts with retained metadata")
+            }
+            Self::RfTraceEventConflict { .. } => {
+                formatter.write_str("RF trace sequence conflicts with retained packet evidence")
+            }
+            Self::RfTraceAttemptTokenConflict(_) => formatter
+                .write_str("RF trace attempt token conflicts with a retained message attempt"),
             Self::IdentifierExhausted => formatter.write_str("local identifier space exhausted"),
             Self::InvalidImage(_) => formatter.write_str("in-memory persistence image is invalid"),
         }
@@ -145,10 +259,10 @@ impl fmt::Display for ChatStoreError {
 /// Persistent chat storage boundary.
 ///
 /// Implementations must make each mutation atomic. In particular,
-/// [`Self::commit_outbound`] must commit all exact retry material before it
-/// returns an identifier, and [`Self::record_acceptance`] must commit both
-/// acceptance IDs together. Adapters must not leak storage rows or connection
-/// types into the domain model.
+/// [`Self::commit_outbound`] must commit all exact message and API-attempt
+/// material before it returns an identifier, and [`Self::record_acceptance`]
+/// must commit both acceptance IDs together. Adapters must not leak storage
+/// rows or connection types into the domain model.
 pub trait ChatStore {
     /// Adapter-specific failure type.
     type Error;
@@ -162,6 +276,13 @@ pub trait ChatStore {
     /// Return all contacts in deterministic destination order.
     fn contacts(&self) -> Result<Vec<Contact>, Self::Error>;
 
+    /// Return the union of saved contacts and peers present in message history.
+    ///
+    /// Peers are ordered by most-recent message first, followed by contacts
+    /// without messages in destination order. An authenticated sender does not
+    /// become a contact merely by appearing in this projection.
+    fn conversation_peers(&self) -> Result<Vec<ConversationPeer>, Self::Error>;
+
     /// Report whether an authenticated inbound message ID is already retained.
     fn contains_inbound(&self, message_id: MessageId) -> Result<bool, Self::Error>;
 
@@ -169,13 +290,92 @@ pub trait ChatStore {
     fn commit_inbound(
         &mut self,
         message: InboundMessage,
+    ) -> Result<InboundCommitOutcome, Self::Error> {
+        self.commit_inbound_with_receiver_location(message, None)
+    }
+
+    /// Commit one inbound message and the receiver phone's current fix in one
+    /// atomic mutation.
+    ///
+    /// The receiver fix belongs only to the first insertion. Implementations
+    /// must not fabricate or backfill it when the message is already present.
+    fn commit_inbound_with_receiver_location(
+        &mut self,
+        message: InboundMessage,
+        receiver_location: Option<crate::PhoneLocationSample>,
     ) -> Result<InboundCommitOutcome, Self::Error>;
 
     /// Commit exact outbound material before any device send attempt.
     fn commit_outbound(
         &mut self,
         material: OutboxMaterial,
+    ) -> Result<OutboxCommitOutcome, Self::Error> {
+        self.commit_outbound_with_location(material, AttemptLocationStamp::not_observed())
+    }
+
+    /// Commit exact outbound material and its initial app-submission location
+    /// stamp in one atomic mutation.
+    fn commit_outbound_with_location(
+        &mut self,
+        material: OutboxMaterial,
+        location: AttemptLocationStamp,
     ) -> Result<OutboxCommitOutcome, Self::Error>;
+
+    /// Create a transitional replacement for a legacy or permanently terminal
+    /// row using a fresh device request key.
+    ///
+    /// This is not a carrier attempt inside the board-owned delivery loop.
+    /// Implementations preserve the row identifier, timeline sequence, signed
+    /// LXMF material, and message identity while clearing only the previous
+    /// device acceptance and lifecycle projection.
+    fn retry_outbox(
+        &mut self,
+        outbox_id: OutboxId,
+        idempotency_key: crate::IdempotencyKey,
+    ) -> Result<OutboxRetryOutcome, Self::Error> {
+        self.retry_outbox_with_location(
+            outbox_id,
+            idempotency_key,
+            AttemptLocationStamp::not_observed(),
+        )
+    }
+
+    /// Create a replacement terminal-row submission and atomically retain the
+    /// phone location state for that app-created submission.
+    fn retry_outbox_with_location(
+        &mut self,
+        outbox_id: OutboxId,
+        idempotency_key: crate::IdempotencyKey,
+        location: AttemptLocationStamp,
+    ) -> Result<OutboxRetryOutcome, Self::Error>;
+
+    /// Exercise the legacy bounded app-owned automatic-rearm policy.
+    ///
+    /// This exists only for schema/migration and store-conformance fixtures;
+    /// production clients must not call or schedule it. A successful rearm
+    /// increments the historical count exactly once. An unfinished row and an
+    /// exhausted row are mutation-free. Explicit [`Self::retry_outbox`] calls
+    /// neither consume nor reset that compatibility count.
+    fn retry_outbox_automatically(
+        &mut self,
+        outbox_id: OutboxId,
+        idempotency_key: crate::IdempotencyKey,
+    ) -> Result<AutomaticOutboxRetryOutcome, Self::Error> {
+        self.retry_outbox_automatically_with_location(
+            outbox_id,
+            idempotency_key,
+            AttemptLocationStamp::not_observed(),
+        )
+    }
+
+    /// Exercise the legacy automatic-rearm fixture while atomically retaining
+    /// its historical app-submission phone-location stamp.
+    fn retry_outbox_automatically_with_location(
+        &mut self,
+        outbox_id: OutboxId,
+        idempotency_key: crate::IdempotencyKey,
+        location: AttemptLocationStamp,
+    ) -> Result<AutomaticOutboxRetryOutcome, Self::Error>;
 
     /// Atomically attach the device acceptance identifier pair.
     fn record_acceptance(
@@ -200,8 +400,132 @@ pub trait ChatStore {
         peer: DestinationHash,
     ) -> Result<Vec<TimelineEntry>, Self::Error>;
 
+    /// Return one bounded newest-first page of immutable message activity.
+    fn message_activity(
+        &self,
+        request: MessageActivityPageRequest,
+    ) -> Result<MessageActivityPage, Self::Error>;
+
+    /// Atomically import one bounded packet-keyed RF trace page.
+    ///
+    /// `(boot_id, event_sequence)` is the replay key. Exact duplicates are
+    /// no-ops except that a now-known immutable submission acceptance may fill
+    /// a previously absent message correlation. A conflicting replay fails
+    /// without partial mutation.
+    fn import_rf_trace_batch(
+        &mut self,
+        batch: RfTraceImportBatch,
+    ) -> Result<RfTraceImportOutcome, Self::Error>;
+
+    /// Return one bounded newest-first page of durable RF trace events.
+    fn rf_trace(&self, request: RfTracePageRequest) -> Result<RfTracePage, Self::Error>;
+
+    /// Return terminal rows eligible under the legacy automatic-rearm fixture.
+    ///
+    /// Production runtimes must not schedule from this query. It is retained
+    /// for migration and store-conformance tests in stable outbox order.
+    fn retryable_outbox(&self) -> Result<Vec<OutboxRecord>, Self::Error>;
+
     /// Query exact work needed after restart or device reconnect.
     fn reconcile(&self) -> Result<Vec<ReconcileWork>, Self::Error>;
+}
+
+pub(crate) fn observed_unix_ms() -> Option<u64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    u64::try_from(millis).ok()
+}
+
+struct ConversationPeerAccumulator {
+    saved_name: Option<String>,
+    message_count: usize,
+    inbound_message_count: usize,
+    last_message: Option<TimelineEntry>,
+}
+
+impl ConversationPeerAccumulator {
+    fn contact(contact: &Contact) -> Self {
+        Self {
+            saved_name: Some(contact.display_name().to_owned()),
+            message_count: 0,
+            inbound_message_count: 0,
+            last_message: None,
+        }
+    }
+
+    const fn message_only() -> Self {
+        Self {
+            saved_name: None,
+            message_count: 0,
+            inbound_message_count: 0,
+            last_message: None,
+        }
+    }
+
+    fn observe(&mut self, message: TimelineEntry, inbound: bool) {
+        self.message_count = self.message_count.saturating_add(1);
+        if inbound {
+            self.inbound_message_count = self.inbound_message_count.saturating_add(1);
+        }
+        let replaces_last = self.last_message.as_ref().is_none_or(|last| {
+            (message.timestamp(), message.sequence()) > (last.timestamp(), last.sequence())
+        });
+        if replaces_last {
+            self.last_message = Some(message);
+        }
+    }
+}
+
+pub(crate) fn project_conversation_peers<'a>(
+    contacts: impl Iterator<Item = &'a Contact>,
+    inbound: impl Iterator<Item = &'a InboundRecord>,
+    outbox: impl Iterator<Item = &'a OutboxRecord>,
+) -> Vec<ConversationPeer> {
+    let mut peers = BTreeMap::<DestinationHash, ConversationPeerAccumulator>::new();
+    for contact in contacts {
+        peers.insert(
+            contact.destination(),
+            ConversationPeerAccumulator::contact(contact),
+        );
+    }
+    for record in inbound {
+        peers
+            .entry(record.message().source())
+            .or_insert_with(ConversationPeerAccumulator::message_only)
+            .observe(TimelineEntry::inbound(record), true);
+    }
+    for record in outbox {
+        peers
+            .entry(record.material().destination())
+            .or_insert_with(ConversationPeerAccumulator::message_only)
+            .observe(TimelineEntry::outbound(record), false);
+    }
+
+    let mut result: Vec<_> = peers
+        .into_iter()
+        .map(|(peer, accumulator)| {
+            ConversationPeer::new(
+                peer,
+                accumulator.saved_name,
+                accumulator.message_count,
+                accumulator.inbound_message_count,
+                accumulator.last_message,
+            )
+        })
+        .collect();
+    result.sort_by(|left, right| {
+        match (left.last_message(), right.last_message()) {
+            (Some(left_last), Some(right_last)) => (right_last.timestamp(), right_last.sequence())
+                .cmp(&(left_last.timestamp(), left_last.sequence())),
+            (Some(_), None) => core::cmp::Ordering::Less,
+            (None, Some(_)) => core::cmp::Ordering::Greater,
+            (None, None) => left.peer().cmp(&right.peer()),
+        }
+        .then_with(|| left.peer().cmp(&right.peer()))
+    });
+    result
 }
 
 pub(crate) fn project_outbox_status(

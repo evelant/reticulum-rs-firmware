@@ -149,13 +149,14 @@ independent of the web toolchain.
 
 ## Runtime behavior
 
-- The client can onboard a managed device, add local contacts, inspect
-  conversations, queue basic LXMF messages, request an immediate
-  synchronization pass, and force reconnect.
-- A send commits its timestamp, idempotency key, destination, title, and
-  content to SQLite before any device request. The HTTP response means the
-  local row is durable; the background actor performs device submission and
-  status projection afterward.
+- The client can onboard a managed device, add or rename local contacts,
+  inspect saved and unsaved conversations, query durable message activity,
+  queue or retry basic LXMF messages, request an immediate synchronization
+  pass, and force reconnect.
+- A send commits its timestamp, idempotency key, destination, title, content,
+  and optional LXMF message location to SQLite before any device request. The
+  HTTP response means the local row is durable; the background actor performs
+  device submission and status projection afterward.
 - Reconciliation rotates through pending rows one operation at a time so a
   long-lived submission cannot indefinitely hide later work.
 - Inbox polling processes one authenticated summary per turn. The cursor is
@@ -173,12 +174,32 @@ independent of the web toolchain.
   authoritative snapshots and timelines rather than treating events as
   mutable state.
 
-SQLite schema 2 retains one authenticated binding consisting of the device ID,
-primary Reticulum destination, and local `lxmf.delivery` destination. A new or
+Current SQLite schema 9 retains schema 2's authenticated binding consisting of
+the device ID, primary Reticulum destination, and local `lxmf.delivery`
+destination plus schema 3's historical app-owned automatic-rearm count. It
+retains the schema-4 one-based app-created device-submission field and bounded
+immutable message-activity journal, schema 5's nullable first-arrival interface/RSSI/SNR
+on inbound messages, and a closed queue-time phone-location stamp on every
+initial or explicit replacement submission. Board-owned carrier retries reuse
+that original stamp. The loopback host service does not collect phone
+location, so its app submissions retain an explicit unavailable state; the native app
+can privately supply a foreground phone fix to the shared runtime. A new or
 migrated unbound database is bound on the service's first authenticated
-connection. Every later connection must match all three values. Migration from
-schema 1 cannot infer which board produced existing rows, so migrate only a
-database already known to belong to that board.
+connection.
+Schema 7 adds idempotently imported packet-correlated RF trace boots and events
+without rebuilding schema-6 message/activity/location state. Schema 8 adds the
+optional seven-value Sideband message-location projection to both inbound and
+outbox rows; it remains separate from the app-submission field-test location
+stamp reused by board-owned carrier retries. Schema 9 adds the immutable
+receiver-phone location captured when the app first imports an inbound
+message; duplicate imports never replace or backfill that observation.
+Every later connection must match all three values. Migration from schema 1
+cannot infer which board produced existing rows, so migrate only a database
+already known to belong to that board. Pre-schema-4 rows are retained, but
+their earlier transitions cannot be reconstructed and the journal reports
+`history_incomplete`. Pre-schema-5 inbound rows retain unknown ingress rather
+than fabricating radio evidence. Migrating schema 5 marks legacy attempt
+locations `not_observed` and history incomplete instead of fabricating a fix.
 
 ## Loopback API boundary
 
@@ -193,9 +214,17 @@ The current JSON API is private to the bundled alpha client:
 | `POST /api/v1/onboarding/recover` | Resume or physically confirm abort of recoverable Pending state |
 | `GET /api/v1/snapshot` | Connection, device, outbox, contact, and import state |
 | `GET /api/v1/contacts` | List local contacts |
+| `GET /api/v1/conversations` | List the union of contacts and durable inbound/outbound conversation peers |
+| `GET /api/v1/nearby` | Read recently observed authenticated LXMF announces |
+| `GET /api/v1/radio-routes` | Read bounded local radio, interface, RNS-counter, and retained-route diagnostics |
+| `POST /api/v1/reticulum/probes` | Begin or idempotently replay one volatile Reticulum path-and-proof probe |
+| `POST /api/v1/reticulum/probes/poll` | Poll one principal-owned boot-scoped probe |
 | `PUT /api/v1/contacts/{destination}` | Add or rename one contact |
 | `GET /api/v1/conversations/{destination}` | Read one stable timeline |
 | `POST /api/v1/messages` | Durably enqueue exact outbound material |
+| `POST /api/v1/messages/retry` | Create a replacement durable device submission for one legacy or permanently terminal outbox row without changing its LXMF identity |
+| `POST /api/v1/activity/query` | Page newest-first durable activity globally or for one timeline row |
+| `POST /api/v1/radio-trace/query` | Page newest-first durable route/radio/proof evidence globally or for one timeline row |
 | `POST /api/v1/sync` | Make inbox and outbox work immediately due |
 | `POST /api/v1/reconnect` | Drop the current session and reconnect |
 | `GET /api/v1/events` | Receive bounded snapshot invalidations over SSE |
@@ -233,7 +262,7 @@ or simultaneous bidirectional scheduling.
 Still deferred are activation-ambiguous repair, cross-platform host filesystem
 policy and BLE backends, host restart qualification, concurrent-process
 locking, notifications, broader browser compatibility and accessibility
-testing, database encryption, physical installed-native-client qualification,
+testing, database encryption, physical Android installed-client qualification,
 device-served Wi-Fi or USB networking, wireless onboarding, simultaneous
 bidirectional BLE/LoRa scheduling, NomadNet/Micron,
 direct/Resource/propagated LXMF, pressure/fill testing, and soak.

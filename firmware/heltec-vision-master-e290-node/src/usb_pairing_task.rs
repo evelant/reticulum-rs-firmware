@@ -17,7 +17,7 @@ use esp_hal::{
     peripherals::USB_DEVICE,
     ram,
     rng::Trng,
-    usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx},
+    usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx},
 };
 use reticulum_device_api_framing::{DecodeEvent, FramedRecord, Record, StreamDecoder};
 use reticulum_device_api_handoff::BearerHandoff;
@@ -903,7 +903,7 @@ pub async fn run(
 }
 
 fn receive_usb_request(
-    rx: &mut esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>,
+    rx: &mut esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>,
     mut context: PreAuthenticationRxContext<'_>,
     authenticated_session: &mut UsbAuthenticatedSession,
 ) -> bool {
@@ -956,7 +956,7 @@ fn receive_usb_request(
 }
 
 fn receive_decode_event(
-    rx: &mut esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>,
+    rx: &mut esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>,
     decoder: &mut StreamDecoder,
     reset_generation: u32,
 ) -> Option<DecodeEvent> {
@@ -1383,7 +1383,7 @@ fn retire_transmission(transmission: &mut Option<PendingTransmission>) {
     }
 }
 
-fn discard_rx_fifo(rx: &mut esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>) {
+fn discard_rx_fifo(rx: &mut esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, Blocking>) {
     let mut discarded = [0_u8; config::USB_PAIRING_MAX_BYTES_PER_POLL];
     let _ = rx.drain_rx_fifo(&mut discarded);
 }

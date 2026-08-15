@@ -235,6 +235,26 @@ pub trait LxmfInboxPort {
         offset: u32,
         max_bytes: api::LxmfReadLength,
     ) -> Result<Option<api::LxmfReadChunk>, LxmfInboxPortError>;
+
+    /// Read the durable client-collection watermark and current mailbox tail.
+    ///
+    /// The default keeps pre-notification product ports source-compatible while
+    /// exposing the operation as unavailable until durable watermark storage is
+    /// deliberately integrated.
+    fn mailbox_status(&mut self) -> Result<api::LxmfMailboxStatus, LxmfInboxPortError> {
+        Err(LxmfInboxPortError::Unavailable)
+    }
+
+    /// Monotonically acknowledge every committed message through `through`.
+    ///
+    /// Repeating or regressing behind the current watermark must succeed
+    /// without physical mutation and return the current status.
+    fn acknowledge_mailbox_through(
+        &mut self,
+        _through: api::LxmfMessageHandle,
+    ) -> Result<api::LxmfMailboxStatus, LxmfInboxPortError> {
+        Err(LxmfInboxPortError::Unavailable)
+    }
 }
 
 /// Source-free semantic input for basic LXMF composition and durable acceptance.
@@ -250,6 +270,7 @@ pub struct LxmfComposeRequest<'a> {
     timestamp_unix_ms: u64,
     title: &'a [u8],
     content: &'a [u8],
+    location: Option<api::LxmfMessageLocation>,
     idempotency_key: storage::IdempotencyKey,
     authorization: storage::AuthorizationSnapshot,
 }
@@ -264,6 +285,7 @@ impl<'a> LxmfComposeRequest<'a> {
         timestamp_unix_ms: u64,
         title: &'a [u8],
         content: &'a [u8],
+        location: Option<api::LxmfMessageLocation>,
         idempotency_key: storage::IdempotencyKey,
         authorization: storage::AuthorizationSnapshot,
     ) -> Self {
@@ -273,6 +295,7 @@ impl<'a> LxmfComposeRequest<'a> {
             timestamp_unix_ms,
             title,
             content,
+            location,
             idempotency_key,
             authorization,
         }
@@ -301,6 +324,11 @@ impl<'a> LxmfComposeRequest<'a> {
     /// Exact borrowed binary content.
     pub const fn content(self) -> &'a [u8] {
         self.content
+    }
+
+    /// Optional phone location frozen into the signed LXMF payload.
+    pub const fn location(self) -> Option<api::LxmfMessageLocation> {
+        self.location
     }
 
     /// Principal-scoped idempotency key.
@@ -475,6 +503,162 @@ pub trait NomadFetchPort {
         principal: api::PrincipalId,
         id: api::NomadFetchId,
     ) -> Result<Option<api::NomadFetchPollResponse>, NomadFetchPortError>;
+}
+
+/// Principal-scoped result of beginning one volatile Reticulum proof probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReticulumProbeStartDisposition {
+    /// A fresh probe was accepted.
+    Accepted(api::ProbeId),
+    /// The same principal and idempotency key already own an identical probe.
+    Replay(api::ProbeId),
+    /// The idempotency key already names different semantic content.
+    IdempotencyConflict,
+    /// The bounded volatile probe owner is currently occupied.
+    CapacityExhausted,
+}
+
+/// Closed failure vocabulary exposed by the volatile Reticulum probe port.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReticulumProbePortError {
+    /// The product profile or current runtime has disabled proof probes.
+    Unavailable,
+    /// The supplied semantic request cannot be prepared by the product owner.
+    InvalidRequest,
+    /// The sole volatile request owner is temporarily occupied.
+    Busy,
+    /// Reticulum or another product-owned backend failed.
+    Backend,
+    /// The request owner latched a fault.
+    Faulted,
+    /// The owner returned a result that contradicts the portable contract.
+    Invariant,
+}
+
+/// Narrow authenticated, transport-neutral port for one volatile proof probe.
+///
+/// The port deliberately has no durable-submission or physical-interface
+/// methods. Product implementations correlate one ordinary Reticulum DATA
+/// receipt in boot-scoped memory and must not consume append-only message
+/// journal capacity for measurement traffic.
+pub trait ReticulumProbePort {
+    /// Current product/runtime availability of Reticulum proof probes.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Begin or idempotently replay one principal-owned probe.
+    fn start(
+        &mut self,
+        principal: api::PrincipalId,
+        request: api::ProbeStartRequest,
+    ) -> Result<ReticulumProbeStartDisposition, ReticulumProbePortError>;
+
+    /// Poll one principal-owned probe.
+    ///
+    /// Missing and foreign identifiers must both return `Ok(None)`.
+    fn poll(
+        &mut self,
+        principal: api::PrincipalId,
+        id: api::ProbeId,
+    ) -> Result<Option<api::ProbePollResponse>, ReticulumProbePortError>;
+}
+
+/// Narrow volatile port for scheduling the node's ordinary service announces.
+///
+/// The adapter owns authentication and capability gating. Implementations only
+/// coalesce one already-authorized request into their product scheduler; they
+/// do not transmit synchronously from this call.
+pub trait ManualServiceAnnouncePort {
+    /// Current product/runtime availability of manual ordinary announces.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Queue ordinary primary, LXMF, and NomadNet announces.
+    ///
+    /// Repeated requests must return `AlreadyPending` instead of allocating
+    /// another queue entry.
+    fn queue_service_announce(&mut self) -> api::ManualServiceAnnounceDisposition;
+}
+
+/// Closed failure vocabulary exposed by the read-only diagnostics port.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeDiagnosticsPortError {
+    /// The complete product profile does not currently provide diagnostics.
+    Unavailable,
+    /// The cross-cutting diagnostics owner is temporarily occupied.
+    Busy,
+    /// One runtime owner could not provide a coherent snapshot.
+    Backend,
+    /// A runtime owner has latched a diagnostic-source fault.
+    Faulted,
+    /// The product projection contradicted the portable diagnostics contract.
+    Invariant,
+}
+
+/// Narrow authenticated read-only port for node and route diagnostics.
+///
+/// Implementations snapshot cross-interface runtime state without exposing
+/// radio, Reticulum, storage, or actor owner types through this boundary.
+pub trait NodeDiagnosticsPort {
+    /// Read one bounded cross-interface node diagnostics snapshot.
+    fn node_diagnostics(
+        &mut self,
+    ) -> Result<api::NodeDiagnosticsSnapshot, NodeDiagnosticsPortError>;
+
+    /// Read one bounded lexicographically ordered route diagnostics page.
+    fn route_diagnostics_page(
+        &mut self,
+        request: api::RouteDiagnosticsRequest,
+    ) -> Result<api::RouteDiagnosticsPage, NodeDiagnosticsPortError>;
+
+    /// Read one bounded boot-scoped packet-correlated radio trace page.
+    fn radio_trace_page(
+        &mut self,
+        request: api::RadioTracePageRequest,
+    ) -> Result<api::RadioTracePage, NodeDiagnosticsPortError>;
+}
+
+/// Closed failure vocabulary exposed by the desired-network configuration port.
+#[cfg(feature = "experimental-network-config")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkConfigPortError {
+    /// The build or current product profile does not provide network management.
+    Unavailable,
+    /// The decoded request is incompatible with current desired-network state.
+    InvalidRequest,
+    /// Another exact retained configuration mutation currently owns the service.
+    Busy,
+    /// Desired-network state could not be read or committed reliably.
+    Backend,
+    /// The supplied physical storage binding did not match the mounted owner.
+    Binding,
+    /// The mounted owner detected contradictory persisted media.
+    Faulted,
+    /// The product owner returned a result that contradicts the portable contract.
+    Invariant,
+}
+
+/// Narrow authenticated port for redacted desired-network state and runtime status.
+///
+/// The adapter supplies the authenticated principal to mutation so product
+/// implementations can safely correlate ambiguous retries without accepting
+/// identity from the decoded request. Configuration reads and runtime status
+/// contain no Wi-Fi credential bytes.
+#[cfg(feature = "experimental-network-config")]
+pub trait NetworkConfigPort {
+    /// Current product/runtime availability of network management.
+    fn availability(&mut self) -> CapabilityAvailability;
+
+    /// Read the complete redacted desired configuration.
+    fn configuration(&mut self) -> Result<api::NetworkConfigSnapshot, NetworkConfigPortError>;
+
+    /// Commit, replay, or reject one principal-correlated compare-and-swap mutation.
+    fn mutate(
+        &mut self,
+        principal: api::PrincipalId,
+        request: api::NetworkConfigMutationRequest<'_>,
+    ) -> Result<api::NetworkConfigMutationOutcome, NetworkConfigPortError>;
+
+    /// Read secret-free Wi-Fi/TCP state, retry phase, and typed last failure.
+    fn status(&mut self) -> Result<api::NetworkRuntimeStatus, NetworkConfigPortError>;
 }
 
 /// Authorize and dispatch one decoded logical request against a narrow
@@ -775,6 +959,173 @@ where
     }
 }
 
+/// Authorize and dispatch the complete appliance surface plus network management
+/// and manual ordinary announces.
+///
+/// This additive composition preserves the existing submission, inbox, LXMF,
+/// nearby-peer, and NomadNet owners while keeping desired-network storage and
+/// runtime status and the volatile announce scheduler behind independent ports.
+/// Stateful requests invoke only their owning port; capability reporting is the
+/// sole operation that consults every owner.
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+pub fn dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config_ports<P, N, W, A>(
+    port: &mut P,
+    nomad_port: &mut N,
+    network_config_port: &mut W,
+    manual_service_announce_port: &mut A,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+    W: NetworkConfigPort,
+    A: ManualServiceAnnouncePort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => {
+                dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_and_network_config_ports(
+                    port,
+                    nomad_port,
+                    network_config_port,
+                    manual_service_announce_port,
+                    identity,
+                    context,
+                    request,
+                )
+            }
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
+/// Authorize and dispatch the complete appliance surface through one product owner.
+///
+/// This is the preferred composition when submission, inbox, LXMF, peer
+/// discovery, desired-network state, and the ordinary-announce scheduler share
+/// one product façade. The owner crosses dispatch exactly once, preserving
+/// exclusive access to the physical device while NomadNet remains an
+/// independent volatile request owner.
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+pub fn dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config<P, N>(
+    port: &mut P,
+    nomad_port: &mut N,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NetworkConfigPort
+        + ManualServiceAnnouncePort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_and_network_config(
+                port, nomad_port, identity, context, request, operation,
+            ),
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
+/// Authorize and dispatch the complete appliance surface plus one volatile
+/// Reticulum path-and-proof probe owner.
+///
+/// The flash-owning product façade and NomadNet owner remain unchanged. Probe
+/// state is deliberately independent and boot-scoped so measurement traffic
+/// cannot consume durable submission-journal capacity.
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+pub fn dispatch_with_inbox_lxmf_peer_discovery_nomad_network_config_and_probe<P, N, Q>(
+    port: &mut P,
+    nomad_port: &mut N,
+    probe_port: &mut Q,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    envelope: RequestEnvelope<'_>,
+) -> ResponseEnvelope
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NetworkConfigPort
+        + ManualServiceAnnouncePort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+    Q: ReticulumProbePort,
+{
+    let request_id = envelope.request_id;
+    let request = envelope.request;
+    let operation = request.operation();
+    let response = if envelope.version.major != ApiVersion::CURRENT.major {
+        api_error(ApiErrorCode::UnsupportedVersion, operation)
+    } else {
+        match authorize_request(context, &request) {
+            Ok(()) => {
+                dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_network_config_and_probe(
+                    port, nomad_port, probe_port, identity, context, request, operation,
+                )
+            }
+            Err(error) => authorization_error(error, operation),
+        }
+    };
+    ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id,
+        response,
+    }
+}
+
 fn dispatch_authorized<P>(
     port: &mut P,
     identity: api::IdentitySummary,
@@ -929,6 +1280,337 @@ where
         other => dispatch_authorized_with_inbox_lxmf_and_peer_discovery(
             port, identity, context, other, operation,
         ),
+    }
+}
+
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+fn dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_and_network_config_ports<P, N, W, A>(
+    port: &mut P,
+    nomad_port: &mut N,
+    network_config_port: &mut W,
+    manual_service_announce_port: &mut A,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+) -> DeviceResponse
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+    W: NetworkConfigPort,
+    A: ManualServiceAnnouncePort,
+{
+    let operation = request.operation();
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && SubmissionPort::availability(port) == CapabilityAvailability::Available;
+            let capabilities =
+                api::CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+                    submit_available,
+                    InboundMailboxPort::availability(port),
+                    LxmfInboxPort::availability(port),
+                    LxmfComposePort::availability(port),
+                    PeerDiscoveryPort::availability(port),
+                    PeerDiscoveryPort::max_app_data_bytes(port),
+                )
+                .with_dispatch_nomad(nomad_port.availability())
+                .with_dispatch_network_config(network_config_port.availability())
+                .with_dispatch_manual_service_announce(
+                    manual_service_announce_port.availability(),
+                );
+            DeviceResponse::SystemCapabilities(capabilities)
+        }
+        DeviceRequest::NodeDiagnostics => match NodeDiagnosticsPort::node_diagnostics(port) {
+            Ok(snapshot) => DeviceResponse::NodeDiagnostics(snapshot),
+            Err(error) => node_diagnostics_port_error(error, operation),
+        },
+        DeviceRequest::RouteDiagnosticsPage(request) => {
+            match NodeDiagnosticsPort::route_diagnostics_page(port, request) {
+                Ok(page) => DeviceResponse::RouteDiagnosticsPage(page),
+                Err(error) => node_diagnostics_port_error(error, operation),
+            }
+        }
+        DeviceRequest::RadioTracePage(request) => {
+            match NodeDiagnosticsPort::radio_trace_page(port, request) {
+                Ok(page) => DeviceResponse::RadioTracePage(page),
+                Err(error) => node_diagnostics_port_error(error, operation),
+            }
+        }
+        DeviceRequest::ManualServiceAnnounce => {
+            if manual_service_announce_port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            DeviceResponse::ManualServiceAnnounce(
+                manual_service_announce_port.queue_service_announce(),
+            )
+        }
+        DeviceRequest::NetworkConfigGet => {
+            if network_config_port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match network_config_port.configuration() {
+                Ok(configuration) => DeviceResponse::NetworkConfig(configuration),
+                Err(error) => network_config_port_error(error, operation),
+            }
+        }
+        DeviceRequest::NetworkConfigMutate(request) => {
+            let Some(principal) = context.principal() else {
+                return api_error(ApiErrorCode::AuthenticationRequired, operation);
+            };
+            if network_config_port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match network_config_port.mutate(principal, request) {
+                Ok(outcome) => DeviceResponse::NetworkConfigMutation(outcome),
+                Err(error) => network_config_port_error(error, operation),
+            }
+        }
+        DeviceRequest::NetworkStatus => {
+            if network_config_port.availability() != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match network_config_port.status() {
+                Ok(status) => DeviceResponse::NetworkStatus(status),
+                Err(error) => network_config_port_error(error, operation),
+            }
+        }
+        other => dispatch_authorized_with_inbox_lxmf_peer_discovery_and_nomad(
+            port, nomad_port, identity, context, other, operation,
+        ),
+    }
+}
+
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+fn dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_and_network_config<P, N>(
+    port: &mut P,
+    nomad_port: &mut N,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NetworkConfigPort
+        + ManualServiceAnnouncePort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let submit_available = cfg!(feature = "experimental-rns-data")
+                && SubmissionPort::availability(port) == CapabilityAvailability::Available;
+            let capabilities =
+                api::CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
+                    submit_available,
+                    InboundMailboxPort::availability(port),
+                    LxmfInboxPort::availability(port),
+                    LxmfComposePort::availability(port),
+                    PeerDiscoveryPort::availability(port),
+                    PeerDiscoveryPort::max_app_data_bytes(port),
+                )
+                .with_dispatch_nomad(nomad_port.availability())
+                .with_dispatch_network_config(NetworkConfigPort::availability(port))
+                .with_dispatch_manual_service_announce(ManualServiceAnnouncePort::availability(
+                    port,
+                ));
+            DeviceResponse::SystemCapabilities(capabilities)
+        }
+        DeviceRequest::NodeDiagnostics => match NodeDiagnosticsPort::node_diagnostics(port) {
+            Ok(snapshot) => DeviceResponse::NodeDiagnostics(snapshot),
+            Err(error) => node_diagnostics_port_error(error, operation),
+        },
+        DeviceRequest::RouteDiagnosticsPage(request) => {
+            match NodeDiagnosticsPort::route_diagnostics_page(port, request) {
+                Ok(page) => DeviceResponse::RouteDiagnosticsPage(page),
+                Err(error) => node_diagnostics_port_error(error, operation),
+            }
+        }
+        DeviceRequest::RadioTracePage(request) => {
+            match NodeDiagnosticsPort::radio_trace_page(port, request) {
+                Ok(page) => DeviceResponse::RadioTracePage(page),
+                Err(error) => node_diagnostics_port_error(error, operation),
+            }
+        }
+        DeviceRequest::ManualServiceAnnounce => {
+            if ManualServiceAnnouncePort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            DeviceResponse::ManualServiceAnnounce(
+                ManualServiceAnnouncePort::queue_service_announce(port),
+            )
+        }
+        DeviceRequest::NetworkConfigGet => {
+            if NetworkConfigPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match NetworkConfigPort::configuration(port) {
+                Ok(configuration) => DeviceResponse::NetworkConfig(configuration),
+                Err(error) => network_config_port_error(error, operation),
+            }
+        }
+        DeviceRequest::NetworkConfigMutate(request) => {
+            let Some(principal) = context.principal() else {
+                return api_error(ApiErrorCode::AuthenticationRequired, operation);
+            };
+            if NetworkConfigPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match NetworkConfigPort::mutate(port, principal, request) {
+                Ok(outcome) => DeviceResponse::NetworkConfigMutation(outcome),
+                Err(error) => network_config_port_error(error, operation),
+            }
+        }
+        DeviceRequest::NetworkStatus => {
+            if NetworkConfigPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match NetworkConfigPort::status(port) {
+                Ok(status) => DeviceResponse::NetworkStatus(status),
+                Err(error) => network_config_port_error(error, operation),
+            }
+        }
+        other => dispatch_authorized_with_inbox_lxmf_peer_discovery_and_nomad(
+            port, nomad_port, identity, context, other, operation,
+        ),
+    }
+}
+
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+fn dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_network_config_and_probe<P, N, Q>(
+    port: &mut P,
+    nomad_port: &mut N,
+    probe_port: &mut Q,
+    identity: api::IdentitySummary,
+    context: &DispatchContext,
+    request: DeviceRequest<'_>,
+    operation: u16,
+) -> DeviceResponse
+where
+    P: SubmissionPort
+        + InboundMailboxPort
+        + LxmfInboxPort
+        + LxmfComposePort
+        + PeerDiscoveryPort
+        + NetworkConfigPort
+        + ManualServiceAnnouncePort
+        + NodeDiagnosticsPort,
+    N: NomadFetchPort,
+    Q: ReticulumProbePort,
+{
+    match request {
+        DeviceRequest::SystemCapabilities => {
+            let response =
+                dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_and_network_config(
+                    port,
+                    nomad_port,
+                    identity,
+                    context,
+                    DeviceRequest::SystemCapabilities,
+                    operation,
+                );
+            match response {
+                DeviceResponse::SystemCapabilities(capabilities) => {
+                    DeviceResponse::SystemCapabilities(
+                        capabilities.with_dispatch_reticulum_probe(probe_port.availability()),
+                    )
+                }
+                _ => unreachable!("the complete dispatcher must answer capability reads"),
+            }
+        }
+        DeviceRequest::ReticulumProbeStart(request) => {
+            dispatch_reticulum_probe_start(probe_port, context, request, operation)
+        }
+        DeviceRequest::ReticulumProbePoll(request) => {
+            dispatch_reticulum_probe_poll(probe_port, context, request.id(), operation)
+        }
+        other => dispatch_authorized_with_inbox_lxmf_peer_discovery_nomad_and_network_config(
+            port, nomad_port, identity, context, other, operation,
+        ),
+    }
+}
+
+fn dispatch_reticulum_probe_start<Q>(
+    port: &mut Q,
+    context: &DispatchContext,
+    request: api::ProbeStartRequest,
+    operation: u16,
+) -> DeviceResponse
+where
+    Q: ReticulumProbePort,
+{
+    let Some(principal) = context.principal() else {
+        return api_error(ApiErrorCode::AuthenticationRequired, operation);
+    };
+    if port.availability() != CapabilityAvailability::Available {
+        return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+    }
+    match port.start(principal, request) {
+        Ok(ReticulumProbeStartDisposition::Accepted(id)) => {
+            DeviceResponse::ReticulumProbeStartAccepted(api::ProbeStartAccepted::new(
+                id,
+                api::ProbeStartOutcome::Accepted,
+            ))
+        }
+        Ok(ReticulumProbeStartDisposition::Replay(id)) => {
+            DeviceResponse::ReticulumProbeStartAccepted(api::ProbeStartAccepted::new(
+                id,
+                api::ProbeStartOutcome::Replayed,
+            ))
+        }
+        Ok(ReticulumProbeStartDisposition::IdempotencyConflict) => {
+            api_error(ApiErrorCode::IdempotencyConflict, operation)
+        }
+        Ok(ReticulumProbeStartDisposition::CapacityExhausted) => {
+            api_error(ApiErrorCode::CapacityExhausted, operation)
+        }
+        Err(error) => reticulum_probe_port_error(error, operation),
+    }
+}
+
+fn dispatch_reticulum_probe_poll<Q>(
+    port: &mut Q,
+    context: &DispatchContext,
+    id: api::ProbeId,
+    operation: u16,
+) -> DeviceResponse
+where
+    Q: ReticulumProbePort,
+{
+    let Some(principal) = context.principal() else {
+        return api_error(ApiErrorCode::AuthenticationRequired, operation);
+    };
+    if port.availability() != CapabilityAvailability::Available {
+        return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+    }
+    match port.poll(principal, id) {
+        Ok(Some(response)) => DeviceResponse::ReticulumProbePoll(response),
+        Ok(None) => api_error(ApiErrorCode::NotFound, operation),
+        Err(error) => reticulum_probe_port_error(error, operation),
     }
 }
 
@@ -1198,11 +1880,30 @@ where
                 Err(error) => lxmf_port_error(error, operation),
             }
         }
+        DeviceRequest::LxmfMailboxStatus => {
+            if LxmfInboxPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match LxmfInboxPort::mailbox_status(port) {
+                Ok(status) => DeviceResponse::LxmfMailboxStatus(status),
+                Err(error) => lxmf_port_error(error, operation),
+            }
+        }
+        DeviceRequest::LxmfMailboxAcknowledge { through } => {
+            if LxmfInboxPort::availability(port) != CapabilityAvailability::Available {
+                return api_error(ApiErrorCode::CapabilityUnavailable, operation);
+            }
+            match LxmfInboxPort::acknowledge_mailbox_through(port, through) {
+                Ok(status) => DeviceResponse::LxmfMailboxAcknowledged(status),
+                Err(error) => lxmf_port_error(error, operation),
+            }
+        }
         DeviceRequest::LxmfBasicSend {
             destination,
             timestamp_unix_ms,
             title,
             content,
+            location,
             idempotency_key,
         } => {
             let Some(principal) = context.principal() else {
@@ -1220,6 +1921,7 @@ where
                 timestamp_unix_ms,
                 title,
                 content,
+                location,
                 storage::IdempotencyKey::new(idempotency_key.0),
                 authorization,
             );
@@ -1328,8 +2030,8 @@ fn acceptance_response(
 fn port_error(error: SubmissionPortError, operation: u16) -> DeviceResponse {
     let code = match error {
         SubmissionPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
-        SubmissionPortError::Busy
-        | SubmissionPortError::Backend
+        SubmissionPortError::Busy => ApiErrorCode::RetryLater,
+        SubmissionPortError::Backend
         | SubmissionPortError::Binding
         | SubmissionPortError::Faulted => ApiErrorCode::Internal,
     };
@@ -1352,10 +2054,10 @@ fn lxmf_port_error(error: LxmfInboxPortError, operation: u16) -> DeviceResponse 
     let code = match error {
         LxmfInboxPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
         LxmfInboxPortError::InvalidRequest => ApiErrorCode::InvalidRequest,
-        LxmfInboxPortError::Busy
-        | LxmfInboxPortError::Backend
-        | LxmfInboxPortError::Binding
-        | LxmfInboxPortError::Faulted => ApiErrorCode::Internal,
+        LxmfInboxPortError::Busy => ApiErrorCode::RetryLater,
+        LxmfInboxPortError::Backend | LxmfInboxPortError::Binding | LxmfInboxPortError::Faulted => {
+            ApiErrorCode::Internal
+        }
     };
     api_error(code, operation)
 }
@@ -1381,6 +2083,54 @@ fn nomad_port_error(error: NomadFetchPortError, operation: u16) -> DeviceRespons
         | NomadFetchPortError::Backend
         | NomadFetchPortError::Faulted
         | NomadFetchPortError::Invariant => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+fn reticulum_probe_port_error(error: ReticulumProbePortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        ReticulumProbePortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        ReticulumProbePortError::InvalidRequest => ApiErrorCode::InvalidRequest,
+        ReticulumProbePortError::Busy => ApiErrorCode::CapacityExhausted,
+        ReticulumProbePortError::Backend
+        | ReticulumProbePortError::Faulted
+        | ReticulumProbePortError::Invariant => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+fn node_diagnostics_port_error(error: NodeDiagnosticsPortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        NodeDiagnosticsPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        NodeDiagnosticsPortError::Busy
+        | NodeDiagnosticsPortError::Backend
+        | NodeDiagnosticsPortError::Faulted
+        | NodeDiagnosticsPortError::Invariant => ApiErrorCode::Internal,
+    };
+    api_error(code, operation)
+}
+
+#[cfg(all(
+    feature = "experimental-rns-inbox",
+    feature = "experimental-lxmf",
+    feature = "experimental-nomad",
+    feature = "experimental-network-config"
+))]
+fn network_config_port_error(error: NetworkConfigPortError, operation: u16) -> DeviceResponse {
+    let code = match error {
+        NetworkConfigPortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
+        NetworkConfigPortError::InvalidRequest => ApiErrorCode::InvalidRequest,
+        NetworkConfigPortError::Busy
+        | NetworkConfigPortError::Backend
+        | NetworkConfigPortError::Binding
+        | NetworkConfigPortError::Faulted
+        | NetworkConfigPortError::Invariant => ApiErrorCode::Internal,
     };
     api_error(code, operation)
 }
@@ -1417,8 +2167,8 @@ fn lxmf_compose_port_error(error: LxmfComposePortError, operation: u16) -> Devic
     let code = match error {
         LxmfComposePortError::Unavailable => ApiErrorCode::CapabilityUnavailable,
         LxmfComposePortError::InvalidRequest => ApiErrorCode::InvalidRequest,
-        LxmfComposePortError::Busy
-        | LxmfComposePortError::Backend
+        LxmfComposePortError::Busy => ApiErrorCode::RetryLater,
+        LxmfComposePortError::Backend
         | LxmfComposePortError::Binding
         | LxmfComposePortError::Faulted
         | LxmfComposePortError::Invariant => ApiErrorCode::Internal,

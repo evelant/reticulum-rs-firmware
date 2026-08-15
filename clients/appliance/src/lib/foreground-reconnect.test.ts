@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  ensureForegroundConnection,
   ForegroundReconnect,
   foregroundReconnectMessage,
   type RetryScheduler,
@@ -23,6 +24,25 @@ function recordingScheduler(retries: ScheduledRetry[]): RetryScheduler {
 }
 
 describe("foreground reconnect gate", () => {
+  test("prefers non-destructive ensure for automatic recovery and preserves a legacy fallback", async () => {
+    const events: string[] = [];
+    await ensureForegroundConnection({
+      async ensureConnected(): Promise<void> {
+        events.push("ensure");
+      },
+      async reconnect(): Promise<void> {
+        events.push("reconnect");
+      },
+    });
+    await ensureForegroundConnection({
+      async reconnect(): Promise<void> {
+        events.push("legacy reconnect");
+      },
+    });
+
+    expect(events).toEqual(["ensure", "legacy reconnect"]);
+  });
+
   test("coalesces an active attempt and re-arms it after settlement", () => {
     const scheduled: ScheduledRetry[] = [];
     let retryRequests = 0;
@@ -111,6 +131,31 @@ describe("foreground reconnect gate", () => {
     reconnect.suspend();
     reconnect.settle();
     expect(scheduled).toHaveLength(1);
+  });
+
+  test("keeps automatic reconnect inhibited after bond repair until an explicit action allows it", () => {
+    const scheduled: ScheduledRetry[] = [];
+    let retryRequests = 0;
+    const reconnect = new ForegroundReconnect(
+      () => {
+        retryRequests += 1;
+      },
+      2_000,
+      recordingScheduler(scheduled),
+    );
+
+    expect(reconnect.begin(0)).toBeTrue();
+    reconnect.settle();
+    reconnect.inhibit();
+
+    expect(scheduled[0]?.cancelled).toBeTrue();
+    scheduled[0]?.callback();
+    expect(retryRequests).toBe(0);
+    expect(reconnect.begin(0)).toBeFalse();
+    expect(reconnect.begin(1)).toBeFalse();
+
+    reconnect.allow();
+    expect(reconnect.begin(1)).toBeTrue();
   });
 
   test("rejects invalid retry delays", () => {

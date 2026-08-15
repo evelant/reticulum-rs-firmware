@@ -21,9 +21,8 @@ const COMPLETE_FILE: &str = "artifact-preparation.complete";
 const MANIFEST_FILE: &str = "artifact-preparation.json";
 const PREPARED_HASH_FILE: &str = "prepared-artifacts.sha256";
 
-const ARTIFACT_RUSTFLAGS: &str = "-C link-arg=-nostartfiles -Z emit-stack-sizes";
-const ARTIFACT_RUSTFLAG_ARGUMENTS: &[&str] =
-    &["-C", "link-arg=-nostartfiles", "-Z", "emit-stack-sizes"];
+const ARTIFACT_RUSTFLAGS: &str = phase1_tooling::XTENSA_FINAL_LINK_RUSTFLAGS;
+const ARTIFACT_RUSTFLAG_ARGUMENTS: &[&str] = phase1_tooling::XTENSA_FINAL_LINK_RUSTFLAG_ARGUMENTS;
 const MAXIMUM_STACK_FRAME_BYTES: u64 = 49_152;
 
 const PACKAGE: &str = "reticulum-heltec-tracker-v2";
@@ -2092,7 +2091,7 @@ fn decode_uleb128(bytes: &[u8]) -> Result<(u64, usize), String> {
 }
 
 fn validate_mode_strings(strings: &str, mode: InspectionMode) -> Result<(), String> {
-    const ESP_RTOS_MAIN_STACK_PATCH_ID: &str = "esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2";
+    const ESP_RTOS_UPSTREAM_IDENTITY: &str = "esp-rtos-upstream-b50efcb-stack-words-v1";
     const NORMAL_IDENTITY_MARKERS: &[&str] = &[
         "phase1 artifact identity: mode=",
         "phase1 lab-rx active: board=",
@@ -2136,7 +2135,7 @@ fn validate_mode_strings(strings: &str, mode: InspectionMode) -> Result<(), Stri
             mode,
             &[
                 "action=immediate_rf_inert_quarantine",
-                ESP_RTOS_MAIN_STACK_PATCH_ID,
+                ESP_RTOS_UPSTREAM_IDENTITY,
             ],
         )?;
     }
@@ -2766,6 +2765,7 @@ mod tests {
         assert!(!normal.env.contains_key("GITHUB_TOKEN"));
         assert!(!normal.env.keys().any(|name| name.starts_with("ESP_")));
         assert!(normal.env["CARGO_ENCODED_RUSTFLAGS"].contains("emit-stack-sizes"));
+        assert!(normal.env["CARGO_ENCODED_RUSTFLAGS"].contains("code-model=large"));
         assert!(normal.env["CARGO_ENCODED_RUSTFLAGS"].contains(phase1_tooling::BUILD_ROOT_REMAP));
         assert!(normal.env["CARGO_ENCODED_RUSTFLAGS"].contains(phase1_tooling::RUSTUP_HOME_REMAP));
         assert_eq!(normal_save.args[0], "save-image");
@@ -3012,25 +3012,25 @@ mod tests {
         let hook =
             "42000000 <__zero_bss>:\n  entry a1, 0\n  movi.n a2, 1\n  retw.n\n\n4200004a <next>:\n";
         validate_zero_bss_hook(hook).unwrap();
-        let runtime_patch = "esp-rtos-0.3.0-cpu0-cpu1-main-stack-words-v2";
+        let runtime_source = "esp-rtos-upstream-b50efcb-stack-words-v1";
         let normal = format!(
-            "action=immediate_rf_inert_quarantine {runtime_patch} phase1 artifact identity: mode= phase1 lab-rx active: board= heltec-tracker-v2lab-rx"
+            "action=immediate_rf_inert_quarantine {runtime_source} phase1 artifact identity: mode= phase1 lab-rx active: board= heltec-tracker-v2lab-rx"
         );
         validate_mode_strings(&normal, InspectionMode::Normal).unwrap();
         assert!(validate_mode_strings(&normal, InspectionMode::Backpressure).is_err());
         let pressure = format!(
-            "action=immediate_rf_inert_quarantine {runtime_patch} lab-rx-backpressure-hil first_awaiting_continuation phase1 backpressure HIL triggered: phase1 backpressure HIL completed:"
+            "action=immediate_rf_inert_quarantine {runtime_source} lab-rx-backpressure-hil first_awaiting_continuation phase1 backpressure HIL triggered: phase1 backpressure HIL completed:"
         );
         validate_mode_strings(&pressure, InspectionMode::Backpressure).unwrap();
         assert!(validate_mode_strings(&pressure, InspectionMode::Normal).is_err());
         let electrical = format!(
-            "action=immediate_rf_inert_quarantine {runtime_patch} lab-rx-electrical-hil;regulator=dcdc;rx_gain=boosted"
+            "action=immediate_rf_inert_quarantine {runtime_source} lab-rx-electrical-hil;regulator=dcdc;rx_gain=boosted"
         );
         validate_mode_strings(&electrical, InspectionMode::ElectricalDcdcBoosted).unwrap();
         assert!(validate_mode_strings(&electrical, InspectionMode::ElectricalLdoBoosted).is_err());
         assert!(validate_mode_strings(&electrical, InspectionMode::Normal).is_err());
         let returned = format!(
-            "action=immediate_rf_inert_quarantine {runtime_patch} lab-rx-returned-fault-hil;trigger=get-irq-status-after-set-rx;policy=repeat-until-quarantine phase1 returned-fault HIL evidence: get_irq_status_rejected_before_spi= set_rx_forwarded= fired="
+            "action=immediate_rf_inert_quarantine {runtime_source} lab-rx-returned-fault-hil;trigger=get-irq-status-after-set-rx;policy=repeat-until-quarantine phase1 returned-fault HIL evidence: get_irq_status_rejected_before_spi= set_rx_forwarded= fired="
         );
         validate_mode_strings(
             &returned,

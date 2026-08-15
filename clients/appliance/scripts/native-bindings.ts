@@ -6,6 +6,7 @@ import { assertExpectedBun } from "./toolchain.ts";
 
 type NativePlatform = "android" | "ios";
 type NativePreparation = NativePlatform | "all";
+export type NativeBuildProfile = "debug" | "release";
 
 const clientDirectory = fileURLToPath(new URL("../", import.meta.url));
 const repositoryDirectory = resolve(clientDirectory, "../..");
@@ -293,23 +294,31 @@ async function requireGeneratedPaths(paths: readonly string[]): Promise<void> {
   }
 }
 
-async function buildPlatform(platform: NativePlatform, toolchain: string): Promise<void> {
+export function nativeBindingBuildArguments(
+  platform: NativePlatform,
+  profile: NativeBuildProfile,
+): readonly string[] {
+  return [
+    process.execPath,
+    "x",
+    "--bun",
+    "ubrn",
+    "build",
+    platform,
+    ...(profile === "release" ? ["--release"] : []),
+    "--config",
+    "ubrn.config.yaml",
+    "--and-generate",
+  ];
+}
+
+async function buildPlatform(
+  platform: NativePlatform,
+  toolchain: string,
+  profile: NativeBuildProfile,
+): Promise<void> {
   const environment = await buildEnvironment(platform, toolchain);
-  await run(
-    [
-      process.execPath,
-      "x",
-      "--bun",
-      "ubrn",
-      "build",
-      platform,
-      "--config",
-      "ubrn.config.yaml",
-      "--and-generate",
-    ],
-    moduleDirectory,
-    environment,
-  );
+  await run(nativeBindingBuildArguments(platform, profile), moduleDirectory, environment);
   await normalizeGeneratedText();
   if (platform === "android") {
     await writeAndroidCompatibilityFiles();
@@ -318,7 +327,10 @@ async function buildPlatform(platform: NativePlatform, toolchain: string): Promi
   await requireGeneratedPaths([...requiredCommonPaths, ...requiredPlatformPaths[platform]]);
 }
 
-export async function prepareNativeBindings(preparation: NativePreparation): Promise<void> {
+export async function prepareNativeBindings(
+  preparation: NativePreparation,
+  profile: NativeBuildProfile = "debug",
+): Promise<void> {
   assertExpectedBun();
   const toolchain = await rustToolchainChannel();
   const platforms: readonly NativePlatform[] =
@@ -331,7 +343,7 @@ export async function prepareNativeBindings(preparation: NativePreparation): Pro
     ...commonGeneratedPaths,
     ...platforms.flatMap((platform) => platformGeneratedPaths[platform]),
   ]);
-  for (const platform of platforms) await buildPlatform(platform, toolchain);
+  for (const platform of platforms) await buildPlatform(platform, toolchain, profile);
 }
 
 async function generatedSnapshot(): Promise<GeneratedSnapshot> {

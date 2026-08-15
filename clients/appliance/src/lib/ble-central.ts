@@ -14,6 +14,7 @@ import {
   type BleDriverDisconnectEvent,
   type BleDriverIndicationEvent,
   type BleGattDiscovery,
+  conservativeSingleWriteBytes,
   ForegroundBleCentral,
   MINIMUM_WRITE_WITH_RESPONSE_BYTES,
 } from "./ble-central-core.ts";
@@ -30,7 +31,7 @@ export type {
   BleScanOptions,
 } from "./ble-central-types.ts";
 
-const PREFERRED_ANDROID_ATT_MTU = 247;
+const PREFERRED_ANDROID_ATT_MTU = 251;
 
 let managerStarted: Promise<void> | undefined;
 
@@ -125,11 +126,26 @@ class ReactNativeBleManagerDriver implements BleCentralDriver {
     await requirePoweredBluetooth();
   }
 
+  async connectedPeripherals(serviceUuid: string): Promise<readonly BleDiscoveredPeripheral[]> {
+    let peripherals = await BleManager.getConnectedPeripherals([serviceUuid]);
+    if (Platform.OS === "ios" && peripherals.length === 0) {
+      // react-native-ble-manager 12.5 inserts CoreBluetooth peripherals first
+      // retrieved from another native owner into its cache without returning
+      // them from that call. A second lookup returns the now-retained entries.
+      peripherals = await BleManager.getConnectedPeripherals([serviceUuid]);
+    }
+    return peripherals.map((peripheral) => ({
+      id: peripheral.id,
+      name: advertisedPeripheralName(peripheral.advertising?.localName, peripheral.name),
+      rssi: peripheral.rssi,
+    }));
+  }
+
   onDiscovered(listener: (peripheral: BleDiscoveredPeripheral) => void): () => void {
     const subscription = BleManager.onDiscoverPeripheral((peripheral: Peripheral) => {
       listener({
         id: peripheral.id,
-        name: advertisedPeripheralName(peripheral.advertising.localName, peripheral.name),
+        name: advertisedPeripheralName(peripheral.advertising?.localName, peripheral.name),
         rssi: peripheral.rssi,
       });
     });
@@ -205,7 +221,11 @@ class ReactNativeBleManagerDriver implements BleCentralDriver {
   async maximumWriteWithResponseBytes(peripheralId: string): Promise<number> {
     try {
       if (Platform.OS === "ios") {
-        return await BleManager.getMaximumWriteValueLengthForWithResponse(peripheralId);
+        const [withResponse, withoutResponse] = await Promise.all([
+          BleManager.getMaximumWriteValueLengthForWithResponse(peripheralId),
+          BleManager.getMaximumWriteValueLengthForWithoutResponse(peripheralId),
+        ]);
+        return conservativeSingleWriteBytes([withResponse, withoutResponse]);
       }
       if (Platform.OS === "android" && androidApiLevel() >= 21) {
         const mtu = await BleManager.requestMTU(peripheralId, PREFERRED_ANDROID_ATT_MTU);

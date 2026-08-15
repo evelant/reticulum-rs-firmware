@@ -28,7 +28,7 @@
 //! radio dispatcher are still separate boundaries.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 mod data_permit;
@@ -58,9 +58,10 @@ pub use node_interface::{
     NodeInterfaceOrdinaryOfferFailure, NodeInterfaceQueuedIngressProcessed,
     NodeInterfaceSupervisor, NodeInterfaceSupervisorBuildError,
     NodeInterfaceSupervisorBuildFailure, NodeInterfaceSupervisorBuildSuccess,
-    NodeInterfaceSupervisorFault, NodeInterfaceSupervisorPass, NodeInterfaceSupervisorTransition,
-    NodeInterfaceTerminalIngressActions, NodeInterfaceTickAccepted, NodeInterfaceTickActionFailure,
-    NodeInterfaceTickResult,
+    NodeInterfaceSupervisorFault, NodeInterfaceSupervisorInit, NodeInterfaceSupervisorPass,
+    NodeInterfaceSupervisorTransition, NodeInterfaceTerminalIngressActions,
+    NodeInterfaceTickAccepted, NodeInterfaceTickActionFailure, NodeInterfaceTickResult,
+    RouteDiagnosticsEntry, RouteDiagnosticsSnapshot, RouteExpiryState, RouteInterfaceResolution,
 };
 
 pub use ordinary_permit::{
@@ -72,10 +73,13 @@ pub use ordinary_router::{
     OrdinaryCompletionAcceptError, OrdinaryCompletionAcceptFailure,
     OrdinaryPermitAuthorizationError, OrdinaryPermitAuthorizationFailure, OrdinaryRouterAdmission,
     OrdinaryRouterBuildError, OrdinaryRouterBuildFailure, OrdinaryRouterBusyReason,
-    OrdinaryRouterCompletionProgress, OrdinaryRouterConfig, OrdinaryRouterCoordinator,
-    OrdinaryRouterFault, OrdinaryRouterFaultResidueKind, OrdinaryRouterOfferError,
-    OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions, OrdinaryRouterStep,
+    OrdinaryRouterCompletionObservation, OrdinaryRouterCompletionProgress, OrdinaryRouterConfig,
+    OrdinaryRouterCoordinator, OrdinaryRouterFault, OrdinaryRouterFaultResidueKind,
+    OrdinaryRouterOfferError, OrdinaryRouterOfferFailure, OrdinaryRouterRejectedActions,
+    OrdinaryRouterStep,
 };
+
+pub use reticulum_node_core::LxmfMessageLocation;
 
 use core::future::{Future, pending};
 
@@ -958,14 +962,14 @@ mod tests {
 
     use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
     use reticulum_node_core::{
-        AttemptOutcome, AttemptUnsentReason, DestinationHash, InterfaceSet, MonotonicSeconds,
-        NodeConfig, NodeIdentity, NodeInstanceId, PacketInterfaceId, TxCompletionCode,
-        TxPacketBuffer, TxPermitReservation,
+        AttemptOutcome, AttemptToken, AttemptUnsentReason, DestinationHash, InterfaceSet,
+        MonotonicSeconds, NodeConfig, NodeIdentity, NodeInstanceId, PacketInterfaceId,
+        TxCompletionCode, TxPacketBuffer, TxPermitReservation,
     };
     use reticulum_tx_dispatch::{NoRfTxDispatcherConfig, TxDispatcherCompletionCodes};
     use reticulum_tx_handoff::TxHandoff;
     use static_cell::{ConstStaticCell, StaticCell};
-    use std::boxed::Box;
+    use std::{boxed::Box, vec, vec::Vec};
 
     use super::*;
 
@@ -1099,6 +1103,17 @@ mod tests {
 
     fn identity(tag: u8) -> NodeIdentity {
         NodeIdentity::from_private_key(&[tag; 64]).expect("test identity must be valid")
+    }
+
+    fn proof_for(receiver_tag: u8, attempt: AttemptToken) -> Vec<u8> {
+        let identity = reticulum_rns_rete::identity_from_private_key(&[receiver_tag; 64]).unwrap();
+        let signature = identity.sign(attempt.as_bytes()).unwrap();
+        let mut proof = vec![0u8; 19 + 32 + 64];
+        proof[0] = 0x03;
+        proof[2..18].copy_from_slice(&attempt.as_bytes()[..16]);
+        proof[19..51].copy_from_slice(attempt.as_bytes());
+        proof[51..].copy_from_slice(&signature);
+        proof
     }
 
     fn node(tag: u8, aspect: &str) -> TestNode {
@@ -1288,14 +1303,21 @@ mod tests {
             other => panic!("fresh preparation was not queued: {other:?}"),
         };
 
-        let maintenance = supervisor.owner.tick(MonotonicSeconds::new(33), &mut rng);
-        assert_eq!(maintenance.timed_out_attempts, 1);
+        supervisor
+            .owner
+            .ingest(
+                &proof_for(26, queued.attempt()),
+                MonotonicSeconds::new(33),
+                PacketInterfaceId::new(1),
+                &mut rng,
+            )
+            .unwrap();
         let terminal = supervisor
             .terminal_attempts()
             .next()
             .expect("timeout must be visible through the facade");
         assert_eq!(terminal.handle(), queued.attempt_handle());
-        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+        assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
         assert_eq!(
             supervisor.acknowledge_terminal(terminal.handle()),
             Err(AcknowledgeError::PacketStillBound)

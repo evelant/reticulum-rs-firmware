@@ -50,14 +50,14 @@ use reticulum_interface_router::{
     OrdinaryCompletionTicket,
 };
 use reticulum_node_core::{
-    AuthorizedFrameObservation, AuthorizedTx, ExpiredAuthorizedTx, MonotonicMillis,
-    OrdinaryAuthorizedTx, OrdinaryExpiredAuthorizedTx, OrdinaryPermitPendingTx,
-    OrdinaryPermitReplyMismatch, OrdinaryPermitResolution, OrdinaryTxCompletion, OrdinaryTxJob,
-    OrdinaryTxPermitReply, OrdinaryTxPermitRequest, OrdinaryUnpermittedTx, PacketInterfaceId,
-    PermitPendingTx, PermitReplyMismatch, PermitResolution, RoutedTxJob, TxAuthorizationCandidate,
-    TxAuthorizationPolicy, TxCompletion, TxCompletionCode, TxFrameError, TxPermitReply,
-    TxPermitRequest, TxPermitRequirements, TxPermitReservation, TxPermitResourceId,
-    TxPolicyDecision, TxPolicyDenial, UnpermittedTx,
+    AttemptHandle, AttemptToken, AuthorizedFrameObservation, AuthorizedTx, EncodedPacketSha256,
+    ExpiredAuthorizedTx, MonotonicMillis, OrdinaryAuthorizedTx, OrdinaryExpiredAuthorizedTx,
+    OrdinaryPermitPendingTx, OrdinaryPermitReplyMismatch, OrdinaryPermitResolution,
+    OrdinaryTxCompletion, OrdinaryTxJob, OrdinaryTxPermitReply, OrdinaryTxPermitRequest,
+    OrdinaryUnpermittedTx, PacketInterfaceId, PermitPendingTx, PermitReplyMismatch,
+    PermitResolution, RoutedTxJob, TxAuthorizationCandidate, TxAuthorizationPolicy, TxCompletion,
+    TxCompletionCode, TxFrameError, TxPermitReply, TxPermitRequest, TxPermitRequirements,
+    TxPermitReservation, TxPermitResourceId, TxPolicyDecision, TxPolicyDenial, UnpermittedTx,
 };
 use reticulum_radio_interface::{
     BoundedRxObservation, BoundedRxOutcome, LabRxProfile, LogicalPacketAccessAction,
@@ -314,7 +314,61 @@ pub struct DispatchReport {
     outcome: DispatchOutcome,
     frame_count: u8,
     progress: Option<PacketTxProgress>,
+    data_packet: Option<DataPacketDispatchObservation>,
     authorized_frame: Option<AuthorizedFrameObservation>,
+}
+
+/// Copy-only identity of one prepared DATA packet selected for radio dispatch.
+///
+/// Unlike [`AuthorizedFrameObservation`], this evidence does not assert that
+/// packet bytes were exposed to the radio or reached RF. It is available as
+/// soon as routing selected the exact interface, so pre-authorization channel
+/// access and control-plane failures remain correlatable with app-side packet
+/// evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DataPacketDispatchObservation {
+    attempt_handle: AttemptHandle,
+    attempt: AttemptToken,
+    interface: PacketInterfaceId,
+    packet_len: u16,
+    encoded_packet_sha256: EncodedPacketSha256,
+}
+
+impl DataPacketDispatchObservation {
+    fn from_job(job: &RoutedTxJob<'_>) -> Self {
+        Self {
+            attempt_handle: job.attempt_handle(),
+            attempt: job.attempt(),
+            interface: job.interface(),
+            packet_len: job.packet_len(),
+            encoded_packet_sha256: job.prepared().encoded_packet_sha256(),
+        }
+    }
+
+    /// Generation-checked same-boot identity of this DATA attempt.
+    pub const fn attempt_handle(self) -> AttemptHandle {
+        self.attempt_handle
+    }
+
+    /// Hop-invariant Reticulum proof-correlation hash for this DATA attempt.
+    pub const fn attempt(self) -> AttemptToken {
+        self.attempt
+    }
+
+    /// Exact Reticulum interface selected for this dispatch attempt.
+    pub const fn interface(self) -> PacketInterfaceId {
+        self.interface
+    }
+
+    /// Complete encoded interface-packet length.
+    pub const fn packet_len(self) -> u16 {
+        self.packet_len
+    }
+
+    /// SHA-256 over every byte in the complete encoded interface packet.
+    pub const fn encoded_packet_sha256(self) -> EncodedPacketSha256 {
+        self.encoded_packet_sha256
+    }
 }
 
 /// Exact expected and received observations retained after an acknowledgement mismatch.
@@ -352,6 +406,23 @@ impl DispatchReport {
             outcome,
             frame_count,
             progress,
+            data_packet: None,
+            authorized_frame: None,
+        }
+    }
+
+    const fn data(
+        outcome: DispatchOutcome,
+        frame_count: u8,
+        progress: Option<PacketTxProgress>,
+        data_packet: DataPacketDispatchObservation,
+    ) -> Self {
+        Self {
+            family: DispatchFamily::Data,
+            outcome,
+            frame_count,
+            progress,
+            data_packet: Some(data_packet),
             authorized_frame: None,
         }
     }
@@ -385,6 +456,14 @@ impl DispatchReport {
     /// cancellation cannot safely assert that zero frames reached RF.
     pub const fn progress(self) -> Option<PacketTxProgress> {
         self.progress
+    }
+
+    /// Prepared DATA packet identity retained for every DATA terminal outcome.
+    ///
+    /// This does not imply authorization or RF exposure. Ordinary reports have
+    /// no DATA packet observation.
+    pub const fn data_packet(self) -> Option<DataPacketDispatchObservation> {
+        self.data_packet
     }
 
     /// Exact authorized DATA frame observed before interface-specific framing.
@@ -661,6 +740,7 @@ struct DispatchMeta {
     aggregate_airtime_us: u64,
     permit_resource: TxPermitResourceId,
     airtime_profile: LabRxProfile,
+    data_packet: Option<DataPacketDispatchObservation>,
 }
 
 impl DispatchMeta {
@@ -671,6 +751,7 @@ impl DispatchMeta {
         aggregate_airtime_us: u64,
         permit_resource: TxPermitResourceId,
         airtime_profile: LabRxProfile,
+        data_packet: Option<DataPacketDispatchObservation>,
     ) -> Option<Self> {
         let deadline_us = deadline_ms.checked_mul(1_000)?;
         Some(Self {
@@ -680,7 +761,22 @@ impl DispatchMeta {
             aggregate_airtime_us,
             permit_resource,
             airtime_profile,
+            data_packet,
         })
+    }
+
+    fn data_report(
+        self,
+        outcome: DispatchOutcome,
+        progress: Option<PacketTxProgress>,
+    ) -> DispatchReport {
+        DispatchReport::data(
+            outcome,
+            self.frame_count,
+            progress,
+            self.data_packet
+                .expect("DATA dispatch metadata must retain packet evidence"),
+        )
     }
 }
 
@@ -1353,17 +1449,18 @@ where
                 let (ticket, job) = interface_job.into_parts();
                 self.active_ticket = ActiveCompletionTicket::Data(ticket);
                 if !config_matches {
+                    let data_packet = DataPacketDispatchObservation::from_job(&job);
                     self.active = ActiveFamily::Data;
                     return self.finish_data_unpermitted_job(
                         job,
-                        DispatchReport::new(
-                            DispatchFamily::Data,
+                        DispatchReport::data(
                             DispatchOutcome::InterfaceConfigurationMismatch {
                                 expected: self.config.expected_interface_config,
                                 stamped: stamped_config,
                             },
                             0,
                             None,
+                            data_packet,
                         ),
                         false,
                     );
@@ -1412,6 +1509,7 @@ where
 
     fn start_data(&mut self, job: RoutedTxJob<'static>, now_us: u64) -> RadioTxDispatcherStep {
         self.active = ActiveFamily::Data;
+        let data_packet = DataPacketDispatchObservation::from_job(&job);
         let airtime_profile = self.radio.airtime_profile();
         let permit_resource =
             TxPermitResourceId::new(self.radio.configuration_fingerprint().as_bytes());
@@ -1424,16 +1522,17 @@ where
                     airtime.aggregate_time_on_air_us(),
                     permit_resource,
                     airtime_profile,
+                    Some(data_packet),
                 ) {
                     Some(meta) => meta,
                     None => {
                         return self.finish_data_unpermitted_job(
                             job,
-                            DispatchReport::new(
-                                DispatchFamily::Data,
+                            DispatchReport::data(
                                 DispatchOutcome::DeadlineConversionOverflow,
                                 airtime.frame_count(),
                                 None,
+                                data_packet,
                             ),
                             false,
                         );
@@ -1442,11 +1541,11 @@ where
                 if !self.radio.is_active() {
                     return self.finish_data_unpermitted_job(
                         job,
-                        DispatchReport::new(
-                            DispatchFamily::Data,
+                        DispatchReport::data(
                             DispatchOutcome::RadioInactive,
                             airtime.frame_count(),
                             None,
+                            data_packet,
                         ),
                         true,
                     );
@@ -1464,11 +1563,11 @@ where
                     }
                     Err(rejection) => self.finish_data_unpermitted_job(
                         job,
-                        DispatchReport::new(
-                            DispatchFamily::Data,
+                        DispatchReport::data(
                             DispatchOutcome::AccessRejected(rejection),
                             airtime.frame_count(),
                             None,
+                            data_packet,
                         ),
                         false,
                     ),
@@ -1476,11 +1575,11 @@ where
             }
             Err(error) => self.finish_data_unpermitted_job(
                 job,
-                DispatchReport::new(
-                    DispatchFamily::Data,
+                DispatchReport::data(
                     DispatchOutcome::AirtimeRejected(error),
                     0,
                     None,
+                    data_packet,
                 ),
                 true,
             ),
@@ -1518,6 +1617,7 @@ where
             airtime.aggregate_time_on_air_us(),
             permit_resource,
             airtime_profile,
+            None,
         ) {
             Some(meta) => meta,
             None => {
@@ -1598,12 +1698,7 @@ where
                 meta,
             } => {
                 if now_us >= meta.grace_deadline_us {
-                    let report = DispatchReport::new(
-                        DispatchFamily::Data,
-                        DispatchOutcome::ControlPlaneRecovery,
-                        meta.frame_count,
-                        None,
-                    );
+                    let report = meta.data_report(DispatchOutcome::ControlPlaneRecovery, None);
                     self.record_report(report);
                     self.data_state = DataState::Return {
                         completion: pending
@@ -1652,12 +1747,7 @@ where
                     };
                     RadioTxDispatcherStep::Advanced
                 } else if now_us >= meta.grace_deadline_us {
-                    let report = DispatchReport::new(
-                        DispatchFamily::Data,
-                        DispatchOutcome::ControlPlaneRecovery,
-                        meta.frame_count,
-                        None,
-                    );
+                    let report = meta.data_report(DispatchOutcome::ControlPlaneRecovery, None);
                     self.record_report(report);
                     self.data_state = DataState::Return {
                         completion: pending
@@ -1729,12 +1819,7 @@ where
                 RadioTxDispatcherStep::NeedTransmit(DispatchFamily::Data)
             }
             DataState::Expired { owner, meta } => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::AuthorizationExpired,
-                    meta.frame_count,
-                    None,
-                );
+                let report = meta.data_report(DispatchOutcome::AuthorizationExpired, None);
                 self.record_report(report);
                 self.data_state = DataState::Return {
                     completion: owner.complete(self.config.completion_codes.expired_authorization),
@@ -1743,12 +1828,7 @@ where
                 RadioTxDispatcherStep::Advanced
             }
             DataState::Unpermitted { owner, meta } => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::PermitDenied,
-                    meta.frame_count,
-                    None,
-                );
+                let report = meta.data_report(DispatchOutcome::PermitDenied, None);
                 self.record_report(report);
                 self.data_state = DataState::Return {
                     completion: owner.complete(self.config.completion_codes.unpermitted),
@@ -2473,13 +2553,11 @@ where
                 }
             }
             Err(fault) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
+                let report = meta.data_report(
                     DispatchOutcome::CadFault {
                         phase: fault.phase(),
                         class: fault.class(),
                     },
-                    meta.frame_count,
                     None,
                 );
                 self.record_report(report);
@@ -2590,12 +2668,8 @@ where
             || self.radio.airtime_profile() != meta.airtime_profile
         {
             self.radio.shutdown();
-            let report = DispatchReport::new(
-                DispatchFamily::Data,
-                DispatchOutcome::RadioConfigurationChangedAfterPermit,
-                meta.frame_count,
-                None,
-            );
+            let report =
+                meta.data_report(DispatchOutcome::RadioConfigurationChangedAfterPermit, None);
             self.record_report(report);
             self.data_state = DataState::Return {
                 completion: owner.complete(self.config.completion_codes.post_grant_rejection),
@@ -2610,12 +2684,8 @@ where
         match access.permit_granted(now_us, reserved_us) {
             Ok(LogicalPacketAccessAction::TransmitLogicalPacket { .. }) => {}
             Ok(LogicalPacketAccessAction::Reject(rejection)) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::PostGrantAccessRejected(rejection),
-                    meta.frame_count,
-                    None,
-                );
+                let report =
+                    meta.data_report(DispatchOutcome::PostGrantAccessRejected(rejection), None);
                 self.record_report(report);
                 self.data_state = DataState::Return {
                     completion: owner.complete(self.config.completion_codes.post_grant_rejection),
@@ -2624,12 +2694,7 @@ where
                 return RadioOperationStep::Terminal(report);
             }
             Ok(_) | Err(_) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::FrameInvariantRecovery,
-                    meta.frame_count,
-                    None,
-                );
+                let report = meta.data_report(DispatchOutcome::FrameInvariantRecovery, None);
                 self.record_report(report);
                 self.data_state = DataState::Return {
                     completion: owner
@@ -2661,13 +2726,9 @@ where
         let frames = match frames {
             Ok(frames) => frames,
             Err(_) => {
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::FrameInvariantRecovery,
-                    meta.frame_count,
-                    None,
-                )
-                .with_authorized_frame(Some(authorized_frame));
+                let report = meta
+                    .data_report(DispatchOutcome::FrameInvariantRecovery, None)
+                    .with_authorized_frame(Some(authorized_frame));
                 self.record_report(report);
                 let completion =
                     owner.recovery_fault(self.config.completion_codes.frame_invariant_recovery);
@@ -2683,13 +2744,9 @@ where
             }
         };
         if !self.radio.is_active() {
-            let report = DispatchReport::new(
-                DispatchFamily::Data,
-                DispatchOutcome::RadioInactive,
-                meta.frame_count,
-                Some(PacketTxProgress::none()),
-            )
-            .with_authorized_frame(Some(authorized_frame));
+            let report = meta
+                .data_report(DispatchOutcome::RadioInactive, None)
+                .with_authorized_frame(Some(authorized_frame));
             self.record_report(report);
             let completion = owner.complete(self.config.completion_codes.tx_fault);
             self.gate_data_completion_on_authorized_frame(
@@ -2722,13 +2779,9 @@ where
                 let progress = observation.progress();
                 if progress.completed_frame_count() != meta.frame_count {
                     self.radio.shutdown();
-                    let report = DispatchReport::new(
-                        DispatchFamily::Data,
-                        DispatchOutcome::FrameInvariantRecovery,
-                        meta.frame_count,
-                        Some(progress),
-                    )
-                    .with_authorized_frame(Some(authorized_frame));
+                    let report = meta
+                        .data_report(DispatchOutcome::FrameInvariantRecovery, Some(progress))
+                        .with_authorized_frame(Some(authorized_frame));
                     self.record_report(report);
                     let completion =
                         owner.recovery_fault(self.config.completion_codes.frame_invariant_recovery);
@@ -2742,15 +2795,17 @@ where
                     );
                     return RadioOperationStep::Terminal(report);
                 }
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::Transmitted,
-                    meta.frame_count,
-                    Some(progress),
-                )
-                .with_authorized_frame(Some(authorized_frame));
+                let report = meta
+                    .data_report(DispatchOutcome::Transmitted, Some(progress))
+                    .with_authorized_frame(Some(authorized_frame));
                 self.record_report(report);
-                let completion = owner.complete(self.config.completion_codes.transmitted);
+                let completion = match physical_completion_millis(progress, meta.frame_count) {
+                    Some(completed_at) => owner.complete_transmitted(
+                        self.config.completion_codes.transmitted,
+                        completed_at,
+                    ),
+                    None => owner.complete(self.config.completion_codes.transmitted),
+                };
                 self.gate_data_completion_on_authorized_frame(
                     completion,
                     DataAfterReturn::Resume,
@@ -2762,13 +2817,9 @@ where
                 let progress = fault.progress();
                 if progress.completed_frame_count() > meta.frame_count {
                     self.radio.shutdown();
-                    let report = DispatchReport::new(
-                        DispatchFamily::Data,
-                        DispatchOutcome::FrameInvariantRecovery,
-                        meta.frame_count,
-                        Some(progress),
-                    )
-                    .with_authorized_frame(Some(authorized_frame));
+                    let report = meta
+                        .data_report(DispatchOutcome::FrameInvariantRecovery, Some(progress))
+                        .with_authorized_frame(Some(authorized_frame));
                     self.record_report(report);
                     let completion =
                         owner.recovery_fault(self.config.completion_codes.frame_invariant_recovery);
@@ -2782,18 +2833,27 @@ where
                     );
                     return RadioOperationStep::Terminal(report);
                 }
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::TxFault {
-                        phase: fault.fault().phase(),
-                        class: fault.fault().class(),
-                    },
-                    meta.frame_count,
-                    Some(progress),
-                )
-                .with_authorized_frame(Some(authorized_frame));
+                let report = meta
+                    .data_report(
+                        DispatchOutcome::TxFault {
+                            phase: fault.fault().phase(),
+                            class: fault.fault().class(),
+                        },
+                        Some(progress),
+                    )
+                    .with_authorized_frame(Some(authorized_frame));
                 self.record_report(report);
-                let completion = owner.complete(self.config.completion_codes.tx_fault);
+                let completion = if progress.completed_frame_count() == meta.frame_count {
+                    match physical_completion_millis(progress, meta.frame_count) {
+                        Some(completed_at) => owner.complete_transmitted(
+                            self.config.completion_codes.tx_fault,
+                            completed_at,
+                        ),
+                        None => owner.complete(self.config.completion_codes.tx_fault),
+                    }
+                } else {
+                    owner.complete(self.config.completion_codes.tx_fault)
+                };
                 self.gate_data_completion_on_authorized_frame(
                     completion,
                     DataAfterReturn::Disable {
@@ -2965,7 +3025,8 @@ where
                 );
                 self.record_report(report);
                 self.ordinary_state = OrdinaryState::Return {
-                    completion: owner.complete(self.config.completion_codes.transmitted),
+                    completion: owner
+                        .complete_transmitted(self.config.completion_codes.transmitted),
                     after: OrdinaryAfterReturn::Resume,
                 };
                 RadioOperationStep::Terminal(report)
@@ -3034,11 +3095,11 @@ where
         match self.active {
             ActiveFamily::Data => {
                 let state = mem::replace(&mut self.data_state, DataState::Transitioning);
-                let (completion, frame_count, authorized_frame) = match state {
+                let (completion, meta, authorized_frame) = match state {
                     DataState::CadInFlight { job, meta, .. } => (
                         job.return_unpermitted()
                             .complete(self.config.completion_codes.cancelled_radio_operation),
-                        meta.frame_count,
+                        meta,
                         None,
                     ),
                     DataState::TxInFlight {
@@ -3047,7 +3108,7 @@ where
                         authorized_frame,
                     } => (
                         owner.complete(self.config.completion_codes.cancelled_radio_operation),
-                        meta.frame_count,
+                        meta,
                         Some(authorized_frame),
                     ),
                     state => {
@@ -3056,13 +3117,9 @@ where
                     }
                 };
                 self.radio.shutdown();
-                let report = DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::CancelledRadioOperation,
-                    frame_count,
-                    None,
-                )
-                .with_authorized_frame(authorized_frame);
+                let report = meta
+                    .data_report(DispatchOutcome::CancelledRadioOperation, None)
+                    .with_authorized_frame(authorized_frame);
                 self.record_report(report);
                 let after = DataAfterReturn::Disable {
                     fault: DispatcherFault::RadioUnavailable,
@@ -3429,10 +3486,8 @@ where
                     self.radio.shutdown();
                     return self.finish_data_unpermitted_job(
                         job,
-                        DispatchReport::new(
-                            DispatchFamily::Data,
+                        meta.data_report(
                             DispatchOutcome::RadioConfigurationChangedBeforePermit,
-                            meta.frame_count,
                             None,
                         ),
                         true,
@@ -3456,12 +3511,7 @@ where
             }
             LogicalPacketAccessAction::Reject(rejection) => self.finish_data_unpermitted_job(
                 job,
-                DispatchReport::new(
-                    DispatchFamily::Data,
-                    DispatchOutcome::AccessRejected(rejection),
-                    meta.frame_count,
-                    None,
-                ),
+                meta.data_report(DispatchOutcome::AccessRejected(rejection), None),
                 false,
             ),
             LogicalPacketAccessAction::TransmitLogicalPacket { .. } => {
@@ -3599,12 +3649,7 @@ where
         job: RoutedTxJob<'static>,
         meta: DispatchMeta,
     ) -> RadioTxDispatcherStep {
-        let report = DispatchReport::new(
-            DispatchFamily::Data,
-            DispatchOutcome::FrameInvariantRecovery,
-            meta.frame_count,
-            None,
-        );
+        let report = meta.data_report(DispatchOutcome::FrameInvariantRecovery, None);
         self.record_report(report);
         self.data_state = DataState::Return {
             completion: job.recovery_fault(self.config.completion_codes.frame_invariant_recovery),
@@ -3644,12 +3689,7 @@ where
         meta: DispatchMeta,
     ) -> RadioTxDispatcherStep {
         let (pending, reply) = mismatch.into_parts();
-        let report = DispatchReport::new(
-            DispatchFamily::Data,
-            DispatchOutcome::ControlPlaneRecovery,
-            meta.frame_count,
-            None,
-        );
+        let report = meta.data_report(DispatchOutcome::ControlPlaneRecovery, None);
         self.record_report(report);
         self.data_state = DataState::Return {
             completion: pending.recovery_fault(self.config.completion_codes.control_plane_recovery),
@@ -3705,7 +3745,7 @@ where
                 },
             ),
         };
-        let report = DispatchReport::new(DispatchFamily::Data, outcome, meta.frame_count, None);
+        let report = meta.data_report(outcome, None);
         self.record_report(report);
         self.data_state = DataState::Return { completion, after };
         RadioOperationStep::Terminal(report)
@@ -3897,6 +3937,19 @@ const fn monotonic_millis_ceiling(now_us: u64) -> MonotonicMillis {
     let whole_ms = now_us / 1_000;
     let partial_ms = if now_us.is_multiple_of(1_000) { 0 } else { 1 };
     MonotonicMillis::new(whole_ms + partial_ms)
+}
+
+fn physical_completion_millis(
+    progress: PacketTxProgress,
+    frame_count: u8,
+) -> Option<MonotonicMillis> {
+    let final_frame = usize::from(frame_count.saturating_sub(1));
+    // A missing timestamp does not erase completed-frame evidence. Returning
+    // `None` deliberately selects the conservative authorized-completion path,
+    // whose receipt boundary is the node owner's later reconciliation sample.
+    progress
+        .frame_completed_at_us(final_frame)
+        .map(monotonic_millis_ceiling)
 }
 
 /// Current Embassy monotonic time in whole microseconds.
@@ -4469,8 +4522,7 @@ mod tests {
     }
 
     fn config(maximum_cad_attempts: u8) -> RadioTxDispatcherConfig {
-        RadioTxDispatcherConfig::new(
-            TEST_INTERFACE_CONFIG,
+        config_with_access(
             LogicalPacketAccessConfig::try_new(
                 maximum_cad_attempts,
                 10,
@@ -4481,6 +4533,13 @@ mod tests {
                 100,
             )
             .unwrap(),
+        )
+    }
+
+    fn config_with_access(channel_access: LogicalPacketAccessConfig) -> RadioTxDispatcherConfig {
+        RadioTxDispatcherConfig::new(
+            TEST_INTERFACE_CONFIG,
+            channel_access,
             500_000,
             3,
             RadioTxCompletionCodes::new(
@@ -4780,6 +4839,7 @@ mod tests {
             b"durable authorized frame gate",
             100_000,
         );
+        let expected_data_packet = DataPacketDispatchObservation::from_job(&job);
         let data_handoff = Box::leak(Box::new(DataPermitHandoff::<NoopRawMutex>::new()));
         let ordinary_handoff = Box::leak(Box::new(OrdinaryPermitHandoff::<NoopRawMutex>::new()));
         let (mut data_node, data_dispatch) = data_handoff.split();
@@ -4817,7 +4877,27 @@ mod tests {
             RadioOperationStep::Terminal(report) => report,
             other => panic!("DATA TX did not terminate: {other:?}"),
         };
-        assert!(report.authorized_frame().is_some());
+        let authorized_frame = report
+            .authorized_frame()
+            .expect("authorized frame evidence");
+        assert_eq!(report.data_packet(), Some(expected_data_packet));
+        assert_eq!(
+            authorized_frame.attempt_handle(),
+            expected_data_packet.attempt_handle()
+        );
+        assert_eq!(authorized_frame.attempt(), expected_data_packet.attempt());
+        assert_eq!(
+            authorized_frame.interface(),
+            expected_data_packet.interface()
+        );
+        assert_eq!(
+            authorized_frame.packet_len(),
+            usize::from(expected_data_packet.packet_len())
+        );
+        assert_eq!(
+            authorized_frame.encoded_packet_sha256(),
+            expected_data_packet.encoded_packet_sha256()
+        );
         (owner, dispatcher, router, report)
     }
 
@@ -4893,6 +4973,96 @@ mod tests {
             Ok(TxCompletionDisposition::Available(_))
         ));
         assert_eq!(dispatcher.inner.phase(), RadioTxDispatcherPhase::Idle);
+    }
+
+    #[test]
+    fn final_txdone_followed_by_cleanup_fault_retains_physical_timestamp() {
+        let (mut owner, mut dispatcher, mut router, report) = terminal_data_gate_fixture(
+            84,
+            TxScript::Fault(PacketTxProgress::first_completed(1_000_500)),
+            None,
+        );
+        assert_eq!(report.frame_count(), 1);
+        assert!(matches!(report.outcome(), DispatchOutcome::TxFault { .. }));
+        assert_eq!(report.progress().unwrap().completed_frame_count(), 1);
+        let expected = report.authorized_frame().unwrap();
+
+        assert_eq!(
+            dispatcher.inner.step(1_000_600),
+            RadioTxDispatcherStep::Advanced
+        );
+        assert_eq!(
+            dispatcher.authorized_frames.requests().try_receive(),
+            Some(expected)
+        );
+        dispatcher
+            .authorized_frames
+            .acknowledgements()
+            .try_send(expected)
+            .unwrap_or_else(|_| panic!("matching acknowledgement channel full"));
+        assert_eq!(
+            dispatcher.inner.step(60_000_000),
+            RadioTxDispatcherStep::Advanced
+        );
+        assert_eq!(
+            dispatcher.inner.step(60_000_001),
+            RadioTxDispatcherStep::Disabled(DispatcherFault::RadioUnavailable)
+        );
+        let completion = take_data_completion(&mut router);
+        assert!(matches!(
+            owner.complete_tx(completion, MonotonicMillis::new(60_001)),
+            Ok(TxCompletionDisposition::Available(_))
+        ));
+
+        let mut rng = CounterRng::default();
+        let timeout = owner.tick(MonotonicSeconds::new(60), &mut rng);
+        assert_eq!(timeout.timed_out_attempts, 1);
+    }
+
+    #[test]
+    fn missing_txdone_timestamp_uses_post_return_reconciliation_boundary() {
+        let (mut owner, mut dispatcher, mut router, report) = terminal_data_gate_fixture(
+            85,
+            TxScript::Fault(PacketTxProgress::first_completed_timestamp_missing()),
+            None,
+        );
+        assert_eq!(report.frame_count(), 1);
+        assert!(matches!(report.outcome(), DispatchOutcome::TxFault { .. }));
+        assert_eq!(report.progress().unwrap().completed_frame_count(), 1);
+        let expected = report.authorized_frame().unwrap();
+
+        assert_eq!(
+            dispatcher.inner.step(1_000_600),
+            RadioTxDispatcherStep::Advanced
+        );
+        assert_eq!(
+            dispatcher.authorized_frames.requests().try_receive(),
+            Some(expected)
+        );
+        dispatcher
+            .authorized_frames
+            .acknowledgements()
+            .try_send(expected)
+            .unwrap_or_else(|_| panic!("matching acknowledgement channel full"));
+        assert_eq!(
+            dispatcher.inner.step(60_000_000),
+            RadioTxDispatcherStep::Advanced
+        );
+        assert_eq!(
+            dispatcher.inner.step(60_000_001),
+            RadioTxDispatcherStep::Disabled(DispatcherFault::RadioUnavailable)
+        );
+        let completion = take_data_completion(&mut router);
+        assert!(matches!(
+            owner.complete_tx(completion, MonotonicMillis::new(60_001)),
+            Ok(TxCompletionDisposition::Available(_))
+        ));
+
+        let mut rng = CounterRng::default();
+        let before_reconciliation_deadline = owner.tick(MonotonicSeconds::new(90), &mut rng);
+        assert_eq!(before_reconciliation_deadline.timed_out_attempts, 0);
+        let after_reconciliation_deadline = owner.tick(MonotonicSeconds::new(92), &mut rng);
+        assert_eq!(after_reconciliation_deadline.timed_out_attempts, 1);
     }
 
     #[test]
@@ -5704,6 +5874,10 @@ mod tests {
         assert_eq!(report.authorized_frame(), None);
         assert_eq!(dispatcher.step(2_000_600), RadioTxDispatcherStep::Advanced);
         let completion = take_ordinary_completion(&mut router);
+        assert_eq!(
+            completion.transmission_outcome(),
+            reticulum_node_core::OrdinaryTransmissionOutcome::Transmitted
+        );
         assert!(matches!(
             ordinary_owner.complete_tx(completion, MonotonicMillis::new(2_001)),
             Ok(OrdinaryCompletionDisposition::Returned(_))
@@ -5722,6 +5896,110 @@ mod tests {
         ConstStaticCell::new(DataPermitHandoff::new());
     static BUSY_ORDINARY_HANDOFF: ConstStaticCell<OrdinaryPermitHandoff<NoopRawMutex>> =
         ConstStaticCell::new(OrdinaryPermitHandoff::new());
+    static BUSY_RECOVERY_ORDINARY_BUFFER: ConstStaticCell<OrdinaryPacketBuffer> =
+        ConstStaticCell::new(OrdinaryPacketBuffer::new());
+    static BUSY_RECOVERY_ORDINARY_REFS: StaticCell<[&'static mut OrdinaryPacketBuffer; 1]> =
+        StaticCell::new();
+    static BUSY_RECOVERY_DATA_HANDOFF: ConstStaticCell<DataPermitHandoff<NoopRawMutex>> =
+        ConstStaticCell::new(DataPermitHandoff::new());
+    static BUSY_RECOVERY_ORDINARY_HANDOFF: ConstStaticCell<OrdinaryPermitHandoff<NoopRawMutex>> =
+        ConstStaticCell::new(OrdinaryPermitHandoff::new());
+
+    #[test]
+    fn ordinary_control_packet_survives_one_transient_busy_frame() {
+        let mut owner = node::<1>(93, "busy-recovery-ordinary");
+        let mut ordinary_owner = owner.take_ordinary_action_owner::<1>().unwrap();
+        let ordinary_buffer = BUSY_RECOVERY_ORDINARY_BUFFER.take();
+        let ordinary_refs = BUSY_RECOVERY_ORDINARY_REFS.init([ordinary_buffer]);
+        let ordinary_job =
+            prepare_ordinary(&mut owner, &mut ordinary_owner, ordinary_refs, 8, 100_000);
+        let (_, data_dispatch) = BUSY_RECOVERY_DATA_HANDOFF.take().split();
+        let (mut ordinary_node, ordinary_dispatch) = BUSY_RECOVERY_ORDINARY_HANDOFF.take().split();
+        let channel_access = LogicalPacketAccessConfig::try_new_with_busy_retry_holdoff(
+            3, 10, 20, 500_000, 100_000, 100, 100, 100,
+        )
+        .unwrap();
+        let (mut dispatcher, mut router) = test_dispatcher(
+            MockRadio::new(
+                vec![
+                    CadScript::Observation {
+                        busy: true,
+                        at_us: 1_000_100,
+                    },
+                    CadScript::Observation {
+                        busy: false,
+                        at_us: 1_500_300,
+                    },
+                ],
+                vec![TxScript::SuccessOne(1_500_700)],
+            ),
+            CounterRng::default(),
+            data_dispatch,
+            ordinary_dispatch,
+            config_with_access(channel_access),
+        );
+        route_ordinary(&mut router, ordinary_job);
+
+        assert_eq!(dispatcher.step(1_000_000), RadioTxDispatcherStep::Advanced);
+        assert!(matches!(
+            dispatcher.step(1_000_050),
+            RadioTxDispatcherStep::NeedCad(DispatchFamily::Ordinary)
+        ));
+        assert!(matches!(
+            block_on(dispatcher.perform_radio_operation(1_000_051)),
+            RadioOperationStep::CadObserved {
+                family: DispatchFamily::Ordinary,
+                activity_detected: true,
+                observed_at_us: 1_000_100,
+            }
+        ));
+        let retry_at_us = match dispatcher.step(1_100_000) {
+            RadioTxDispatcherStep::WaitUntil {
+                family: DispatchFamily::Ordinary,
+                retry_at_us,
+            } => retry_at_us,
+            other => panic!("ordinary retry did not retain its busy holdoff: {other:?}"),
+        };
+        assert!(retry_at_us > 1_500_100);
+        assert!(retry_at_us <= 1_500_120);
+        assert!(matches!(
+            dispatcher.step(1_500_200),
+            RadioTxDispatcherStep::NeedCad(DispatchFamily::Ordinary)
+        ));
+        assert!(matches!(
+            block_on(dispatcher.perform_radio_operation(1_500_201)),
+            RadioOperationStep::CadObserved {
+                family: DispatchFamily::Ordinary,
+                activity_detected: false,
+                observed_at_us: 1_500_300,
+            }
+        ));
+
+        grant_ordinary(
+            &mut dispatcher,
+            &mut ordinary_node,
+            &mut ordinary_owner,
+            &mut ExactPolicy,
+            1_500_400,
+        );
+        let report = match block_on(dispatcher.perform_radio_operation(1_500_500)) {
+            RadioOperationStep::Terminal(report) => report,
+            other => panic!("ordinary TX did not terminate: {other:?}"),
+        };
+        assert_eq!(report.family(), DispatchFamily::Ordinary);
+        assert_eq!(report.outcome(), DispatchOutcome::Transmitted);
+        assert_eq!(dispatcher.step(1_500_800), RadioTxDispatcherStep::Advanced);
+        let completion = take_ordinary_completion(&mut router);
+        assert_eq!(
+            completion.transmission_outcome(),
+            reticulum_node_core::OrdinaryTransmissionOutcome::Transmitted
+        );
+        assert!(matches!(
+            ordinary_owner.complete_tx(completion, MonotonicMillis::new(1_501)),
+            Ok(OrdinaryCompletionDisposition::Returned(_))
+        ));
+        assert_eq!(dispatcher.radio().captured.len(), 1);
+    }
 
     #[test]
     fn busy_retry_exhaustion_never_requests_a_permit_or_transmits() {
@@ -5744,6 +6022,7 @@ mod tests {
             b"busy",
             100_000,
         );
+        let expected_data_packet = DataPacketDispatchObservation::from_job(&job);
         let (mut data_node, data_dispatch) = BUSY_DATA_HANDOFF.take().split();
         let (_, ordinary_dispatch) = BUSY_ORDINARY_HANDOFF.take().split();
         let (mut dispatcher, mut router) = test_dispatcher(
@@ -5786,6 +6065,8 @@ mod tests {
                 attempts: 2
             })
         );
+        assert_eq!(report.data_packet(), Some(expected_data_packet));
+        assert_eq!(report.authorized_frame(), None);
         assert!(data_node.requests().try_receive().is_none());
         assert!(dispatcher.radio().captured.is_empty());
         assert_eq!(dispatcher.step(1_000_400), RadioTxDispatcherStep::Advanced);
@@ -6988,6 +7269,10 @@ mod tests {
             RadioTxDispatcherStep::Disabled(DispatcherFault::InternalInvariant)
         );
         let completion = take_ordinary_completion(&mut router);
+        assert_eq!(
+            completion.transmission_outcome(),
+            reticulum_node_core::OrdinaryTransmissionOutcome::NotConfirmed
+        );
         let quarantine = match ordinary_owner
             .complete_tx(completion, MonotonicMillis::new(2_001))
             .expect("ordinary frame-count correlation")

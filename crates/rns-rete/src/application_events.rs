@@ -1421,6 +1421,7 @@ mod tests {
         ApplicationEvent::DataReceived {
             destination: [tag; 16],
             payload: vec![tag, tag.wrapping_add(1), tag.wrapping_add(2)],
+            ingress: None,
         }
     }
 
@@ -1694,7 +1695,11 @@ mod tests {
             .expect("the unchanged token still authorizes its original owner");
         assert!(matches!(
             first.event(),
-            ApplicationEvent::DataReceived { destination, payload }
+            ApplicationEvent::DataReceived {
+                destination,
+                payload,
+                ..
+            }
                 if destination[0] == 0x81 && payload.as_ptr() == first_payload_pointer
         ));
         first.discard(ApplicationEventDiscardReason::Superseded);
@@ -2221,6 +2226,7 @@ mod tests {
                 vec![ApplicationEvent::DataReceived {
                     destination: [0x31; 16],
                     payload: b"secret-application-payload".to_vec(),
+                    ingress: None,
                 }],
                 vec![],
                 0,

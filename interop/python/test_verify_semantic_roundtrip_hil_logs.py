@@ -81,8 +81,8 @@ class EventBuilder:
         )
         self.add(verifier.EXPECTED_PROFILE)
         self.add(
-            "tx-hil stage=runtime-patch "
-            f"esp_rtos_main_stack_slice={verifier.EXPECTED_RUNTIME_PATCH}"
+            "tx-hil stage=runtime-source "
+            f"esp_rtos_source={verifier.EXPECTED_RUNTIME_SOURCE}"
         )
         self.add(
             "tx-hil stage=radio-init status=PASS "
@@ -368,13 +368,13 @@ class VerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(verifier.VerificationError, "exactly one counted"):
             verifier.verify_segments(missing_reset, render(responder_events()))
 
-    def test_runtime_patch_identity_is_exact(self) -> None:
+    def test_runtime_source_identity_is_exact(self) -> None:
         initiator = initiator_events()
-        patch = event_index(initiator, "stage=runtime-patch")
-        initiator[patch] = initiator[patch].replace(
-            verifier.EXPECTED_RUNTIME_PATCH, "unexpected-patch"
+        source = event_index(initiator, "stage=runtime-source")
+        initiator[source] = initiator[source].replace(
+            verifier.EXPECTED_RUNTIME_SOURCE, "unexpected-source"
         )
-        with self.assertRaisesRegex(verifier.VerificationError, "runtime patch identity"):
+        with self.assertRaisesRegex(verifier.VerificationError, "runtime source identity"):
             verifier.verify_segments(render(initiator), render(responder_events()))
 
     def test_cross_board_packet_hash_mismatch_fails(self) -> None:

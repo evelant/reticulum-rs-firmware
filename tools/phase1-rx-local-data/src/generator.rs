@@ -268,6 +268,7 @@ mod tests {
             [ApplicationEvent::DataReceived {
                 destination: observed_destination,
                 payload,
+                ..
             }]
                 if *observed_destination == destination && payload == PLAINTEXT
         ));

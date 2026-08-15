@@ -1,7 +1,5 @@
 //! Permanent LoRa actor task for interface slot zero.
 
-use core::num::NonZeroU64;
-
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
@@ -12,9 +10,9 @@ use reticulum_heltec_vision_master_e290_node::runtime_measurement::{
     RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE,
 };
 use reticulum_interface_router::{
-    ActorIngressSendError, AvailableIngressBuffer, InterfaceIngressActorHandoff,
-    InterfaceIngressAuthority, InterfaceLifecycleActorError, InterfaceLifecycleActorHandoff,
-    InterfaceLifecycleState, SealedIngressPacket,
+    ActorIngressSendError, AvailableIngressBuffer, IngressSignalObservation,
+    InterfaceIngressActorHandoff, InterfaceIngressAuthority, InterfaceLifecycleActorError,
+    InterfaceLifecycleActorHandoff, InterfaceLifecycleState, SealedIngressPacket,
 };
 use reticulum_radio_interface::{
     RNODE_HW_MTU, SX1262_FRAME_MTU, TimedReceiveOutcome, TimedRnodeRx,
@@ -27,10 +25,15 @@ use reticulum_radio_tx_dispatch::{
 };
 
 use crate::{ProductDispatcher, config};
+use reticulum_heltec_vision_master_e290_node::radio_diagnostics::{
+    AcceptedLoRaPacketObservation, RadioDiagnosticsCell,
+};
 
 #[embassy_executor::task]
 pub async fn run(
     dispatcher: &'static mut ProductDispatcher,
+    timing: config::RadioTaskTiming,
+    diagnostics: &'static RadioDiagnosticsCell,
     mut ingress: InterfaceIngressActorHandoff<
         CriticalSectionRawMutex,
         { config::INTERFACE_QUEUE_DEPTH },
@@ -38,11 +41,7 @@ pub async fn run(
     mut lifecycle: InterfaceLifecycleActorHandoff<CriticalSectionRawMutex>,
     authority: InterfaceIngressAuthority,
 ) {
-    let fragment_timeout = NonZeroU64::new(
-        reticulum_board_heltec_vision_master_e290_radio::E290_NA915_DEV_PROFILE
-            .fragment_timeout_us(),
-    )
-    .expect("the validated E290 profile has a non-zero fragment timeout");
+    let fragment_timeout = timing.fragment_timeout_us();
     let mut receiver = TimedRnodeRx::new(fragment_timeout);
     let mut physical = [0_u8; SX1262_FRAME_MTU];
     let mut native = [0_u8; RNODE_HW_MTU];
@@ -53,27 +52,31 @@ pub async fn run(
     info!(
         "e290-node stage=lora-actor status=READY fragment_timeout_us={} rx_watchdog_us={} cad_watchdog_us={} tx_watchdog_us={} max_packet_airtime_us={}",
         fragment_timeout.get(),
-        dispatcher.maximum_receive_operation_us().get(),
-        config::CAD_OPERATION_WATCHDOG_US,
-        config::TX_OPERATION_WATCHDOG_US,
-        config::MAXIMUM_LOGICAL_PACKET_AIRTIME_US,
+        timing.receive_operation_watchdog_us().get(),
+        timing.cad_operation_watchdog_us(),
+        timing.tx_operation_watchdog_us(),
+        timing.maximum_logical_packet_airtime_us(),
     );
     match lifecycle
         .request_state(authority.lease(), InterfaceLifecycleState::Ready)
         .await
     {
-        Ok(descriptor) => info!(
-            "e290-node stage=lora-actor status=ONLINE interface={} generation={} queue={}",
-            descriptor.lease().interface().get(),
-            descriptor.lease().generation().get(),
-            descriptor.lease().queue().get(),
-        ),
+        Ok(descriptor) => {
+            diagnostics.mark_online();
+            info!(
+                "e290-node stage=lora-actor status=ONLINE interface={} generation={} queue={}",
+                descriptor.lease().interface().get(),
+                descriptor.lease().generation().get(),
+                descriptor.lease().queue().get(),
+            );
+        }
         Err(reason) => {
             error!(
                 "e290-node stage=lora-actor status=FAIL reason=lifecycle-ready:{reason:?} action=report-offline-and-fail-stop"
             );
             fail_stop(
                 dispatcher,
+                diagnostics,
                 &mut lifecycle,
                 authority,
                 available.take(),
@@ -96,12 +99,14 @@ pub async fn run(
         if let Some(packet) = sealed_pending.take() {
             match ingress.try_send(authority, packet) {
                 Ok(()) => {
+                    diagnostics.record_ingress_enqueued();
                     #[cfg(feature = "runtime-measurement-hil")]
                     RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                         .record_ingress_enqueued(now_us() / 1_000);
                 }
                 Err(failure) => match failure.reason() {
                     ActorIngressSendError::QueueFull(_) => {
+                        diagnostics.record_ingress_deferred();
                         #[cfg(feature = "runtime-measurement-hil")]
                         RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                             .record_ingress_deferred(now_us() / 1_000);
@@ -109,6 +114,7 @@ pub async fn run(
                         sealed_pending = Some(packet);
                     }
                     reason => {
+                        diagnostics.record_ingress_failed();
                         #[cfg(feature = "runtime-measurement-hil")]
                         RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                             .record_ingress_failed(now_us() / 1_000);
@@ -118,6 +124,7 @@ pub async fn run(
                         );
                         fail_stop(
                             dispatcher,
+                            diagnostics,
                             &mut lifecycle,
                             authority,
                             available.take(),
@@ -138,14 +145,16 @@ pub async fn run(
             && available.is_some()
             && (!rx_serviced_since_tx_check || receiver.pending().is_some())
         {
-            match receive_once(dispatcher, &mut physical).await {
+            match receive_once(dispatcher, diagnostics, &mut physical, timing).await {
                 RadioReceiveStep::Frame(observation) => {
                     let Some(frame) = observation.payload(&physical) else {
+                        diagnostics.record_invalid_physical_frame();
                         error!(
                             "e290-node stage=lora-rx status=FAIL reason=observation-length action=actor-fail-stop-no-further-radio-operations"
                         );
                         fail_stop(
                             dispatcher,
+                            diagnostics,
                             &mut lifecycle,
                             authority,
                             available.take(),
@@ -153,24 +162,46 @@ pub async fn run(
                         )
                         .await
                     };
-                    match receiver.feed(
+                    let outcome = receiver.feed(
                         frame,
                         observation.received_at_us(),
                         observation.signal(),
                         &mut native,
-                    ) {
+                    );
+                    let accepted = match outcome {
+                        Ok(TimedReceiveOutcome::Packet {
+                            packet_len, signal, ..
+                        }) => Some(AcceptedLoRaPacketObservation::new(
+                            observation.received_at_us(),
+                            u16::try_from(packet_len)
+                                .expect("the admitted base RNS packet length fits in u16"),
+                            signal,
+                        )),
+                        _ => None,
+                    };
+                    diagnostics.record_receive_pipeline(receiver.diagnostics(), accepted);
+                    match outcome {
                         Ok(TimedReceiveOutcome::AwaitingContinuation { .. }) => {
                             // A partial logical packet retains RX priority until
                             // it completes or its profile-derived deadline expires.
                             continue;
                         }
-                        Ok(TimedReceiveOutcome::Packet { packet_len, .. }) => {
+                        Ok(TimedReceiveOutcome::Packet {
+                            packet_len, signal, ..
+                        }) => {
                             #[cfg(feature = "runtime-measurement-hil")]
                             RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                                 .record_logical_rx_completed(now_us() / 1_000);
+                            let _ = diagnostics.record_logical_rx(
+                                observation.received_at_us(),
+                                authority.lease().interface().get(),
+                                &native[..packet_len],
+                                signal,
+                            );
                             let mut buffer = available.take().expect("RX requires an exact buffer");
                             let Some(destination) = buffer.capacity_mut().get_mut(..packet_len)
                             else {
+                                diagnostics.record_ingress_failed();
                                 #[cfg(feature = "runtime-measurement-hil")]
                                 RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                                     .record_ingress_failed(now_us() / 1_000);
@@ -182,15 +213,23 @@ pub async fn run(
                                 continue;
                             };
                             destination.copy_from_slice(&native[..packet_len]);
-                            match buffer.seal(packet_len) {
+                            match buffer.seal_with_signal(
+                                packet_len,
+                                Some(IngressSignalObservation::new(
+                                    signal.rssi_dbm,
+                                    signal.snr_db,
+                                )),
+                            ) {
                                 Ok(packet) => match ingress.try_send(authority, packet) {
                                     Ok(()) => {
+                                        diagnostics.record_ingress_enqueued();
                                         #[cfg(feature = "runtime-measurement-hil")]
                                         RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                                             .record_ingress_enqueued(now_us() / 1_000);
                                     }
                                     Err(failure) => match failure.reason() {
                                         ActorIngressSendError::QueueFull(_) => {
+                                            diagnostics.record_ingress_deferred();
                                             #[cfg(feature = "runtime-measurement-hil")]
                                             RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                                                 .record_ingress_deferred(now_us() / 1_000);
@@ -198,6 +237,7 @@ pub async fn run(
                                             sealed_pending = Some(packet);
                                         }
                                         reason => {
+                                            diagnostics.record_ingress_failed();
                                             #[cfg(feature = "runtime-measurement-hil")]
                                             RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                                                 .record_ingress_failed(now_us() / 1_000);
@@ -207,6 +247,7 @@ pub async fn run(
                                             );
                                             fail_stop(
                                                 dispatcher,
+                                                diagnostics,
                                                 &mut lifecycle,
                                                 authority,
                                                 available.take(),
@@ -217,6 +258,7 @@ pub async fn run(
                                     },
                                 },
                                 Err(failure) => {
+                                    diagnostics.record_ingress_failed();
                                     #[cfg(feature = "runtime-measurement-hil")]
                                     RETICULUM_RUNTIME_PROOF_TRACE_EVIDENCE
                                         .record_ingress_failed(now_us() / 1_000);
@@ -241,6 +283,7 @@ pub async fn run(
                 RadioReceiveStep::SchedulerYield => {
                     if receiver.pending().is_some() {
                         let _ = receiver.expire(now_us());
+                        diagnostics.record_receive_pipeline(receiver.diagnostics(), None);
                         if receiver.pending().is_some() {
                             continue;
                         }
@@ -248,9 +291,11 @@ pub async fn run(
                     rx_serviced_since_tx_check = true;
                 }
                 RadioReceiveStep::InvalidFrame => {
+                    diagnostics.record_invalid_physical_frame();
                     warn!("e290-node stage=lora-rx status=DROP reason=invalid-physical-frame");
                     if receiver.pending().is_some() {
                         let _ = receiver.expire(now_us());
+                        diagnostics.record_receive_pipeline(receiver.diagnostics(), None);
                         if receiver.pending().is_some() {
                             continue;
                         }
@@ -261,9 +306,10 @@ pub async fn run(
                     rx_serviced_since_tx_check = true;
                 }
                 RadioReceiveStep::CancelledFutureNeedsRecovery => {
-                    recover_cancelled_and_drain(dispatcher).await;
+                    recover_cancelled_and_drain(dispatcher, diagnostics).await;
                     fail_stop(
                         dispatcher,
+                        diagnostics,
                         &mut lifecycle,
                         authority,
                         available.take(),
@@ -277,6 +323,7 @@ pub async fn run(
                     );
                     fail_stop(
                         dispatcher,
+                        diagnostics,
                         &mut lifecycle,
                         authority,
                         available.take(),
@@ -285,11 +332,13 @@ pub async fn run(
                     .await
                 }
                 RadioReceiveStep::InvalidObservation { len } => {
+                    diagnostics.record_invalid_physical_frame();
                     error!(
                         "e290-node stage=lora-rx status=FAIL reason=invalid-observation len={len} action=actor-fail-stop-no-further-radio-operations"
                     );
                     fail_stop(
                         dispatcher,
+                        diagnostics,
                         &mut lifecycle,
                         authority,
                         available.take(),
@@ -303,6 +352,7 @@ pub async fn run(
                     );
                     fail_stop(
                         dispatcher,
+                        diagnostics,
                         &mut lifecycle,
                         authority,
                         available.take(),
@@ -320,7 +370,7 @@ pub async fn run(
         }
 
         let phase_before = dispatcher.phase();
-        let dispatch_progress = drive_dispatcher_once(dispatcher).await;
+        let dispatch_progress = drive_dispatcher_once(dispatcher, diagnostics, timing).await;
         match dispatch_progress {
             DispatchProgress::NeedJob => {
                 rx_serviced_since_tx_check = false;
@@ -339,6 +389,7 @@ pub async fn run(
             DispatchProgress::Disabled => {
                 fail_stop(
                     dispatcher,
+                    diagnostics,
                     &mut lifecycle,
                     authority,
                     available.take(),
@@ -353,12 +404,14 @@ pub async fn run(
 #[cfg(not(feature = "runtime-measurement-hil"))]
 async fn receive_once(
     dispatcher: &mut ProductDispatcher,
+    diagnostics: &RadioDiagnosticsCell,
     physical: &mut [u8; SX1262_FRAME_MTU],
+    timing: config::RadioTaskTiming,
 ) -> RadioReceiveStep {
-    let watchdog = dispatcher.maximum_receive_operation_us().get();
-    let scheduler_yield = Timer::after(Duration::from_micros(config::RX_SCHEDULER_YIELD_US));
+    let watchdog = timing.receive_operation_watchdog_us().get();
+    let scheduler_yield = Timer::after(Duration::from_micros(timing.rx_scheduler_yield_us()));
     let progress_deadline = async {
-        Timer::after(Duration::from_micros(config::RX_PROGRESS_TIMEOUT_US)).await;
+        Timer::after(Duration::from_micros(timing.rx_progress_timeout_us())).await;
     };
     let receive = match dispatcher.start_continuous_receive_until(
         physical,
@@ -374,7 +427,7 @@ async fn receive_once(
             error!(
                 "e290-node stage=lora-rx status=WATCHDOG-EXPIRED watchdog_us={watchdog} action=cancel-recover-actor-fail-stop"
             );
-            recover_cancelled_and_drain(dispatcher).await;
+            recover_cancelled_and_drain(dispatcher, diagnostics).await;
             RadioReceiveStep::Disabled(
                 dispatcher
                     .fault()
@@ -387,13 +440,15 @@ async fn receive_once(
 #[cfg(feature = "runtime-measurement-hil")]
 async fn receive_once(
     dispatcher: &mut ProductDispatcher,
+    diagnostics: &RadioDiagnosticsCell,
     physical: &mut [u8; SX1262_FRAME_MTU],
+    timing: config::RadioTaskTiming,
 ) -> RadioReceiveStep {
     let receive_started_us = now_us();
-    let watchdog = dispatcher.maximum_receive_operation_us().get();
-    let scheduler_yield = Timer::after(Duration::from_micros(config::RX_SCHEDULER_YIELD_US));
+    let watchdog = timing.receive_operation_watchdog_us().get();
+    let scheduler_yield = Timer::after(Duration::from_micros(timing.rx_scheduler_yield_us()));
     let progress_deadline = async {
-        Timer::after(Duration::from_micros(config::RX_PROGRESS_TIMEOUT_US)).await;
+        Timer::after(Duration::from_micros(timing.rx_progress_timeout_us())).await;
     };
     let receive = match dispatcher.start_continuous_receive_until(
         physical,
@@ -415,7 +470,7 @@ async fn receive_once(
             error!(
                 "e290-node stage=lora-rx status=WATCHDOG-EXPIRED watchdog_us={watchdog} action=cancel-recover-actor-fail-stop"
             );
-            recover_cancelled_and_drain(dispatcher).await;
+            recover_cancelled_and_drain(dispatcher, diagnostics).await;
             (
                 RadioReceiveStep::Disabled(
                     dispatcher
@@ -442,16 +497,20 @@ enum DispatchProgress {
     Disabled,
 }
 
-async fn drive_dispatcher_once(dispatcher: &mut ProductDispatcher) -> DispatchProgress {
+async fn drive_dispatcher_once(
+    dispatcher: &mut ProductDispatcher,
+    diagnostics: &RadioDiagnosticsCell,
+    timing: config::RadioTaskTiming,
+) -> DispatchProgress {
     let step = dispatcher.step(now_us());
     if let Some(report) = dispatcher.take_last_report() {
-        log_dispatch_report("step", report);
+        record_and_log_dispatch_report(diagnostics, "step", report);
     }
     match step {
         RadioTxDispatcherStep::Advanced => DispatchProgress::Advanced,
         RadioTxDispatcherStep::NeedJob => DispatchProgress::NeedJob,
         RadioTxDispatcherStep::NeedReceiveRecovery => {
-            recover_cancelled_and_drain(dispatcher).await;
+            recover_cancelled_and_drain(dispatcher, diagnostics).await;
             DispatchProgress::Disabled
         }
         RadioTxDispatcherStep::WaitUntil { retry_at_us, .. } => {
@@ -459,10 +518,22 @@ async fn drive_dispatcher_once(dispatcher: &mut ProductDispatcher) -> DispatchPr
             DispatchProgress::Advanced
         }
         RadioTxDispatcherStep::NeedCad(_) => {
-            run_radio_operation(dispatcher, config::CAD_OPERATION_WATCHDOG_US, "cad").await
+            run_radio_operation(
+                dispatcher,
+                diagnostics,
+                timing.cad_operation_watchdog_us(),
+                "cad",
+            )
+            .await
         }
         RadioTxDispatcherStep::NeedTransmit(_) => {
-            run_radio_operation(dispatcher, config::TX_OPERATION_WATCHDOG_US, "tx").await
+            run_radio_operation(
+                dispatcher,
+                diagnostics,
+                timing.tx_operation_watchdog_us(),
+                "tx",
+            )
+            .await
         }
         RadioTxDispatcherStep::NeedPermitReply {
             grace_deadline_us, ..
@@ -556,6 +627,7 @@ async fn wait_until_or(
 #[cfg(not(feature = "runtime-measurement-hil"))]
 async fn run_radio_operation(
     dispatcher: &mut ProductDispatcher,
+    diagnostics: &RadioDiagnosticsCell,
     watchdog_us: u64,
     operation: &'static str,
 ) -> DispatchProgress {
@@ -565,7 +637,11 @@ async fn run_radio_operation(
     )
     .await
     {
-        Ok(RadioOperationStep::Advanced | RadioOperationStep::CadObserved { .. }) => {
+        Ok(RadioOperationStep::Advanced) => DispatchProgress::Advanced,
+        Ok(RadioOperationStep::CadObserved {
+            activity_detected, ..
+        }) => {
+            diagnostics.record_cad(activity_detected);
             DispatchProgress::Advanced
         }
         Ok(RadioOperationStep::Terminal(report)) => {
@@ -575,7 +651,7 @@ async fn run_radio_operation(
                 );
                 return DispatchProgress::Disabled;
             }
-            log_dispatch_report(operation, report);
+            record_and_log_dispatch_report(diagnostics, operation, report);
             DispatchProgress::Advanced
         }
         Ok(RadioOperationStep::NotReady) => DispatchProgress::Advanced,
@@ -583,7 +659,7 @@ async fn run_radio_operation(
             RadioOperationStep::CancelledFutureNeedsRecovery(_)
             | RadioOperationStep::ReceiveFutureNeedsRecovery,
         ) => {
-            recover_cancelled_and_drain(dispatcher).await;
+            recover_cancelled_and_drain(dispatcher, diagnostics).await;
             DispatchProgress::Disabled
         }
         Ok(RadioOperationStep::Disabled(fault)) => {
@@ -594,7 +670,7 @@ async fn run_radio_operation(
             error!(
                 "e290-node stage=lora-{operation} status=WATCHDOG-EXPIRED watchdog_us={watchdog_us} action=cancel-recover-actor-fail-stop"
             );
-            recover_cancelled_and_drain(dispatcher).await;
+            recover_cancelled_and_drain(dispatcher, diagnostics).await;
             DispatchProgress::Disabled
         }
     }
@@ -603,6 +679,7 @@ async fn run_radio_operation(
 #[cfg(feature = "runtime-measurement-hil")]
 async fn run_radio_operation(
     dispatcher: &mut ProductDispatcher,
+    diagnostics: &RadioDiagnosticsCell,
     watchdog_us: u64,
     operation: &'static str,
 ) -> DispatchProgress {
@@ -622,11 +699,18 @@ async fn run_radio_operation(
                 (DispatchProgress::Disabled, false)
             } else {
                 record_runtime_radio_tx_terminal(operation, report);
-                log_dispatch_report(operation, report);
+                record_and_log_dispatch_report(diagnostics, operation, report);
                 (DispatchProgress::Advanced, false)
             }
         }
-        Ok(RadioOperationStep::Advanced | RadioOperationStep::CadObserved { .. }) => {
+        Ok(RadioOperationStep::Advanced) => {
+            record_runtime_radio_tx_not_confirmed_success(operation);
+            (DispatchProgress::Advanced, false)
+        }
+        Ok(RadioOperationStep::CadObserved {
+            activity_detected, ..
+        }) => {
+            diagnostics.record_cad(activity_detected);
             record_runtime_radio_tx_not_confirmed_success(operation);
             (DispatchProgress::Advanced, false)
         }
@@ -639,7 +723,7 @@ async fn run_radio_operation(
             | RadioOperationStep::ReceiveFutureNeedsRecovery,
         ) => {
             record_runtime_radio_tx_not_confirmed_success(operation);
-            recover_cancelled_and_drain(dispatcher).await;
+            recover_cancelled_and_drain(dispatcher, diagnostics).await;
             (DispatchProgress::Disabled, false)
         }
         Ok(RadioOperationStep::Disabled(fault)) => {
@@ -652,7 +736,7 @@ async fn run_radio_operation(
             error!(
                 "e290-node stage=lora-{operation} status=WATCHDOG-EXPIRED watchdog_us={watchdog_us} action=cancel-recover-actor-fail-stop"
             );
-            recover_cancelled_and_drain(dispatcher).await;
+            recover_cancelled_and_drain(dispatcher, diagnostics).await;
             (DispatchProgress::Disabled, true)
         }
     };
@@ -706,15 +790,18 @@ fn record_runtime_radio_tx_not_confirmed_success(operation: &str) {
 /// `cancelled_cad...` prove that recovery first enters completion return and
 /// that a subsequent `step` preserves the exact owner through durability and
 /// completion return before Disabled.
-async fn recover_cancelled_and_drain(dispatcher: &mut ProductDispatcher) {
+async fn recover_cancelled_and_drain(
+    dispatcher: &mut ProductDispatcher,
+    diagnostics: &RadioDiagnosticsCell,
+) {
     let _ = dispatcher.recover_cancelled_radio_operation();
     if let Some(report) = dispatcher.take_last_report() {
-        log_dispatch_report("recovery", report);
+        record_and_log_dispatch_report(diagnostics, "recovery", report);
     }
     loop {
         let step = dispatcher.step(now_us());
         if let Some(report) = dispatcher.take_last_report() {
-            log_dispatch_report("recovery", report);
+            record_and_log_dispatch_report(diagnostics, "recovery", report);
         }
         match step {
             RadioTxDispatcherStep::Advanced => continue,
@@ -757,7 +844,7 @@ async fn recover_cancelled_and_drain(dispatcher: &mut ProductDispatcher) {
             RadioTxDispatcherStep::NeedReceiveRecovery => {
                 let _ = dispatcher.recover_cancelled_radio_operation();
                 if let Some(report) = dispatcher.take_last_report() {
-                    log_dispatch_report("recovery", report);
+                    record_and_log_dispatch_report(diagnostics, "recovery", report);
                 }
             }
             unexpected => {
@@ -770,7 +857,12 @@ async fn recover_cancelled_and_drain(dispatcher: &mut ProductDispatcher) {
     }
 }
 
-fn log_dispatch_report(operation: &str, report: DispatchReport) {
+fn record_and_log_dispatch_report(
+    diagnostics: &RadioDiagnosticsCell,
+    operation: &str,
+    report: DispatchReport,
+) {
+    diagnostics.record_dispatch_report(report, now_us());
     info!(
         "e290-node stage=lora-{operation} status=TERMINAL family={:?} outcome={:?} frame_count={} progress={:?} authorized_frame={:?}",
         report.family(),
@@ -793,11 +885,13 @@ fn noop_context() -> core::task::Context<'static> {
 
 async fn fail_stop(
     dispatcher: &mut ProductDispatcher,
+    diagnostics: &RadioDiagnosticsCell,
     lifecycle: &mut InterfaceLifecycleActorHandoff<CriticalSectionRawMutex>,
     authority: InterfaceIngressAuthority,
     retained_available: Option<AvailableIngressBuffer>,
     retained_sealed: Option<SealedIngressPacket>,
 ) -> ! {
+    diagnostics.mark_faulted();
     // The actor takes no further radio operations. The dispatcher may already
     // have shut down the radio as part of terminal cancellation recovery, but
     // this generic path does not claim or attempt a separate hardware shutdown.

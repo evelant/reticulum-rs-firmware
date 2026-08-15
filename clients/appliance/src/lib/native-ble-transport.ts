@@ -3,6 +3,7 @@ import type {
   NativeBleOnboardingLike,
   NativeBlePlatformCommand,
 } from "@reticulum/appliance-native";
+import type { BleBondRepairProgress } from "./ble-bond-repair.ts";
 
 import type {
   BleCandidate,
@@ -58,11 +59,13 @@ export interface NativeBleTransportConfig {
   readonly decodeCommand: NativeBleCommandDecoder;
   readonly peripheralName?: string;
   readonly profile: BleGattProfile;
+  readonly recoveryPeripheralName?: string;
 }
 
 const MAX_PLATFORM_REASON_BYTES = 480;
 export const PLATFORM_GATT_WRITE_TIMEOUT_MS = 10_000;
 export const PLATFORM_GATT_SECURITY_CONFIRMATION_RETRY_MS = 250;
+export const PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS = 300_000;
 const textEncoder = new TextEncoder();
 
 function errorText(error: unknown): string {
@@ -141,10 +144,16 @@ class NativeBleLink {
     decodeCommand: NativeBleCommandDecoder,
     writeTimeoutMs: number,
   ): Promise<NativeBleLink> {
-    const generation = appliance.bleLinkConnected(
-      connection.peripheralId,
-      connection.maxWriteWithResponseBytes,
-    );
+    let generation: bigint;
+    try {
+      generation = appliance.bleLinkConnected(
+        connection.peripheralId,
+        connection.maxWriteWithResponseBytes,
+      );
+    } catch (error) {
+      await connection.close().catch(() => undefined);
+      throw error;
+    }
     const link = new NativeBleLink(
       appliance,
       connection,
@@ -312,6 +321,8 @@ export class NativeBleTransport {
   #connectionAbort: AbortController | null = null;
   #disposed = false;
   #peripheralName?: string;
+  #recoveryPeripheralName?: string;
+  #repairingBond = false;
   #reconnecting: Promise<void> | null = null;
   #started = false;
 
@@ -325,6 +336,13 @@ export class NativeBleTransport {
     this.#decodeCommand = config.decodeCommand;
     this.#peripheralName = config.peripheralName;
     this.#profile = config.profile;
+    this.#recoveryPeripheralName = config.recoveryPeripheralName;
+    if (
+      this.#peripheralName !== undefined &&
+      this.#recoveryPeripheralName === this.#peripheralName
+    ) {
+      throw new Error("normal and recovery BLE peripheral names must be distinct");
+    }
     this.#writeTimeoutMs = writeTimeoutMs;
     if (!Number.isFinite(this.#writeTimeoutMs) || this.#writeTimeoutMs <= 0) {
       throw new Error("native BLE platform write timeout must be positive");
@@ -364,35 +382,105 @@ export class NativeBleTransport {
    * bind authenticated protocol bytes to a different physical peripheral.
    */
   configurePeripheralName(peripheralName: string): void {
+    this.configurePeripheralNames(peripheralName, this.#recoveryPeripheralName);
+  }
+
+  /**
+   * Select the normal authenticated advertiser and its distinct bond-recovery
+   * advertiser before the first connection attempt.
+   *
+   * Rust derives both names from the credential and firmware naming contract.
+   * Keeping both explicit here prevents app code from duplicating that
+   * contract, and prevents an ordinary reconnect from capturing a bondless
+   * board that is deliberately advertising only for recovery.
+   */
+  configurePeripheralNames(peripheralName: string, recoveryPeripheralName?: string): void {
     if (this.#disposed) throw new Error("native BLE transport has been disposed");
-    if (this.#peripheralName === peripheralName) return;
+    if (
+      this.#peripheralName === peripheralName &&
+      this.#recoveryPeripheralName === recoveryPeripheralName
+    ) {
+      return;
+    }
     if (this.#started || this.#reconnecting !== null || this.#active !== null) {
       throw new Error("native BLE peripheral must be selected before the transport starts");
     }
+    if (recoveryPeripheralName !== undefined && recoveryPeripheralName === peripheralName) {
+      throw new Error("normal and recovery BLE peripheral names must be distinct");
+    }
     this.#peripheralName = peripheralName;
+    this.#recoveryPeripheralName = recoveryPeripheralName;
   }
 
   start(): void {
     if (this.#started || this.#disposed) return;
     this.#started = true;
-    void this.#beginReconnect(false).catch(() => undefined);
+    void this.ensureLink().catch(() => undefined);
+  }
+
+  /**
+   * Ensure that one usable physical link exists without replacing its
+   * generation. Concurrent setup attempts coalesce, and an already usable link
+   * only wakes the native actor so a delayed client handshake can continue.
+   */
+  async ensureLink(): Promise<void> {
+    if (this.#disposed) throw new Error("native BLE transport has been disposed");
+    this.#started = true;
+    return this.#beginReconnect(false, false);
   }
 
   async reconnect(): Promise<void> {
     if (this.#disposed) throw new Error("native BLE transport has been disposed");
-    return this.#beginReconnect(true);
+    return this.#beginReconnect(true, false);
   }
 
-  async #beginReconnect(replaceExisting: boolean): Promise<void> {
+  /**
+   * Rebuild the exact active-profile link, but wait at the public firmware
+   * security barrier before handing any authenticated protocol bytes to Rust.
+   *
+   * This lets an operator remove a stale platform bond, hold the board's
+   * physical-presence button, and negotiate a replacement bond without
+   * rotating the independent appliance credential or local chat database. The
+   * security leg searches only for the Rust-provided recovery advertiser; once
+   * firmware reports durable security, the authenticated leg searches only for
+   * the ordinary credential-derived advertiser.
+   */
+  async repairBond(onProgress?: BleBondRepairProgress): Promise<void> {
+    if (this.#disposed) throw new Error("native BLE transport has been disposed");
+    if (this.#peripheralName === undefined || this.#recoveryPeripheralName === undefined) {
+      throw new Error(
+        "Bluetooth bond repair requires exact normal and recovery BLE advertising names",
+      );
+    }
+    if (this.#reconnecting !== null) {
+      if (this.#repairingBond) return this.#reconnecting;
+      const previous = this.#reconnecting;
+      this.#connectionAbort?.abort(
+        new Error("ordinary BLE reconnect was superseded by explicit bond repair"),
+      );
+      await previous.catch(() => undefined);
+    }
+    return this.#beginReconnect(true, true, onProgress);
+  }
+
+  async #beginReconnect(
+    replaceExisting: boolean,
+    awaitFreshSecurity: boolean,
+    repairProgress?: BleBondRepairProgress,
+  ): Promise<void> {
     if (this.#disposed) throw new Error("native BLE transport has been disposed");
     if (this.#reconnecting !== null) return this.#reconnecting;
 
-    const reconnecting = this.#reconnect(replaceExisting);
+    const reconnecting = this.#reconnect(replaceExisting, awaitFreshSecurity, repairProgress);
+    this.#repairingBond = awaitFreshSecurity;
     this.#reconnecting = reconnecting;
     try {
       await reconnecting;
     } finally {
-      if (this.#reconnecting === reconnecting) this.#reconnecting = null;
+      if (this.#reconnecting === reconnecting) {
+        this.#reconnecting = null;
+        this.#repairingBond = false;
+      }
     }
   }
 
@@ -409,9 +497,21 @@ export class NativeBleTransport {
     await centralDisposal;
   }
 
-  async #reconnect(replaceExisting: boolean): Promise<void> {
+  async #reconnect(
+    replaceExisting: boolean,
+    awaitFreshSecurity: boolean,
+    repairProgress?: BleBondRepairProgress,
+  ): Promise<void> {
     const abort = new AbortController();
     this.#connectionAbort = abort;
+    const normalName = this.#peripheralName;
+    const recoveryName = this.#recoveryPeripheralName;
+    if (awaitFreshSecurity && (normalName === undefined || recoveryName === undefined)) {
+      throw new Error(
+        "Bluetooth bond repair requires exact normal and recovery BLE advertising names",
+      );
+    }
+    let connection: BleConnection | null = null;
     let link: NativeBleLink | null = null;
     try {
       if (replaceExisting) {
@@ -427,28 +527,73 @@ export class NativeBleTransport {
         await this.#appliance.reconnect({ signal: abort.signal });
         if (this.#disposed) throw new Error("native BLE transport has been disposed");
       } else if (this.#active !== null) {
-        return;
+        const active = this.#active;
+        if (active.usable) {
+          await this.#appliance.ensureConnected({ signal: abort.signal });
+          return;
+        }
+        if (this.#active === active) this.#active = null;
+        await active
+          .close("Discarding an unusable BLE link before automatic recovery")
+          .catch(() => undefined);
       }
 
-      const connection = await this.#central.connect(this.#profile, {
-        peripheralName: this.#peripheralName,
+      if (awaitFreshSecurity) repairProgress?.("searching_recovery_advertisement");
+      connection = await this.#central.connect(this.#profile, {
+        peripheralNameAliases: awaitFreshSecurity ? [normalName as string] : undefined,
+        peripheralName: awaitFreshSecurity ? recoveryName : normalName,
+        // CoreBluetooth may expose the recovery advertisement under its
+        // cached normal name, hence the exact alias above. Do not reclaim an
+        // already-connected normal link here: only a fresh recovery
+        // advertisement proves that the board completed its reset-time bond
+        // clear before this security ceremony.
+        reclaimConnectedPeripheral: false,
+        scanTimeoutMs: awaitFreshSecurity ? PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS : undefined,
         signal: abort.signal,
       });
       if (this.#disposed || abort.signal.aborted) {
-        await connection.close().catch(() => undefined);
         throw new Error("native BLE transport was disposed while connecting");
       }
-      try {
-        link = await NativeBleLink.open(
-          this.#appliance,
+      if (awaitFreshSecurity) {
+        repairProgress?.("waiting_for_physical_presence");
+        await waitForSecurityConfirmation(
           connection,
-          this.#decodeCommand,
-          this.#writeTimeoutMs,
+          this.#profile,
+          abort.signal,
+          PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS,
         );
-      } catch (error) {
-        await connection.close().catch(() => undefined);
-        throw error;
+        const securityConnection = connection;
+        const repairedPeripheralId = securityConnection.peripheralId;
+        repairProgress?.("reopening_authenticated_link");
+        connection = null;
+        await securityConnection.close();
+        if (this.#disposed || abort.signal.aborted) {
+          throw new Error("native BLE transport was disposed after repairing its bond");
+        }
+        // Firmware keeps the recovery name until this central proves that the
+        // newly durable platform bond can carry an authenticated RDA1 session.
+        // Reusing the exact platform identifier from the security leg prevents
+        // another stale profile from reclaiming the sole controller slot
+        // between SMP and the first application-authenticated connection.
+        connection = await this.#central.connect(this.#profile, {
+          connectionTimeoutMs: PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS,
+          peripheralId: repairedPeripheralId,
+          peripheralName: recoveryName,
+          scanTimeoutMs: PLATFORM_BLE_BOND_REPAIR_TIMEOUT_MS,
+          signal: abort.signal,
+        });
+        if (this.#disposed || abort.signal.aborted) {
+          throw new Error("native BLE transport was disposed while reopening its repaired bond");
+        }
       }
+      const linkConnection = connection;
+      connection = null;
+      link = await NativeBleLink.open(
+        this.#appliance,
+        linkConnection,
+        this.#decodeCommand,
+        this.#writeTimeoutMs,
+      );
       this.#active = link;
 
       if (!link.usable) throw new Error("BLE peripheral disconnected during link setup");
@@ -460,12 +605,51 @@ export class NativeBleTransport {
         await link
           .close(platformReason(`Native BLE reconnect failed: ${errorText(error)}`))
           .catch(() => undefined);
+      } else if (connection !== null) {
+        await connection.close().catch(() => undefined);
       }
       throw error;
     } finally {
       if (this.#connectionAbort === abort) this.#connectionAbort = null;
     }
   }
+}
+
+async function waitForSecurityConfirmation(
+  connection: BleConnection,
+  profile: BleGattProfile,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastFailure: unknown = new Error("firmware retained-link state is not ready");
+  while (!signal.aborted) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      const value = await connection.read(
+        profile.securityConfirmationCharacteristicUuid,
+        Math.min(remaining, PLATFORM_GATT_WRITE_TIMEOUT_MS),
+      );
+      if (sameBytes(value, profile.securityConfirmationReadyValue)) return;
+      lastFailure = new Error("firmware retained-link state is not ready");
+    } catch (error) {
+      lastFailure = error;
+    }
+    if (signal.aborted) break;
+    await wait(
+      Math.min(PLATFORM_GATT_SECURITY_CONFIRMATION_RETRY_MS, Math.max(0, deadline - Date.now())),
+    );
+  }
+  if (signal.aborted) {
+    throw new Error("Bluetooth bond repair was cancelled", {
+      cause: signal.reason,
+    });
+  }
+  throw new Error(
+    "Bluetooth bond repair timed out waiting for authenticated board security; forget the board in system Bluetooth settings, reboot while holding GPIO21 until BLE Recovery appears, retry, and hold GPIO21 again when the app asks for physical presence.",
+    { cause: lastFailure },
+  );
 }
 
 /**

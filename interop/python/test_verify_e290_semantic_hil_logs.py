@@ -66,8 +66,8 @@ def common(
         "radio_constructed=false spi_constructed=false "
         "rf_state=reset_low_nss_high",
         verifier.EXPECTED_PROFILE,
-        "e290-semantic-hil stage=runtime-patch "
-        f"esp_rtos_main_stack_slice={verifier.EXPECTED_RUNTIME_PATCH}",
+        "e290-semantic-hil stage=runtime-source "
+        f"esp_rtos_source={verifier.EXPECTED_RUNTIME_SOURCE}",
         "e290-semantic-hil stage=radio-init status=PASS "
         f"role={role} regulator=dcdc rf_switch=dio2 tcxo=dio3_1v8 "
         "tx_budget_packets=2",

@@ -324,6 +324,35 @@ fn clear_is_a_successor_and_cleanup_scrubs_the_old_secret_sector() {
 }
 
 #[test]
+fn backend_errors_during_clear_remount_as_predecessor_or_tombstone() {
+    let mut baseline = FakeNor::erased();
+    drop(commit_bond(&mut baseline, bond(7, true)).unwrap());
+
+    for mutation in 0..3 {
+        let mut flash = baseline.clone().after_full_mutation(mutation);
+        assert_eq!(
+            clear(&mut flash).err(),
+            Some(BondStoreError::Backend(FakeError::Injected))
+        );
+        flash.fail_after_mutation = None;
+        let mounted = mount(&mut flash).expect("one complete authority remains");
+        if mutation == 2 {
+            assert_eq!(mounted.generation().map(NonZeroU64::get), Some(2));
+            assert!(mounted.bond().is_none(), "the committed tombstone wins");
+        } else {
+            assert_eq!(mounted.generation().map(NonZeroU64::get), Some(1));
+            assert_bond(
+                mounted
+                    .bond()
+                    .expect("the predecessor remains authoritative"),
+                7,
+                true,
+            );
+        }
+    }
+}
+
+#[test]
 fn ble_bond_explicit_zeroize_clears_only_secret_fields() {
     let mut owner = bond(9, true);
     let address = *owner.address();
@@ -599,6 +628,26 @@ fn cleanup_backend_failure_never_loses_the_authoritative_successor() {
     let state = mount(&mut flash).expect("successor survives cleanup fault");
     assert_eq!(state.generation().map(NonZeroU64::get), Some(2));
     assert_bond(state.bond().unwrap(), 2, true);
+}
+
+#[test]
+fn cleanup_backend_failure_after_clear_never_restores_the_predecessor() {
+    let mut flash = FakeNor::erased();
+    drop(commit_bond(&mut flash, bond(1, true)).unwrap());
+    let cleared = clear(&mut flash).expect("clear tombstone commits");
+    assert!(cleared.bond().is_none());
+    drop(cleared);
+
+    flash.mutation_count = 0;
+    flash.fail_after_mutation = Some(0);
+    assert_eq!(
+        cleanup(&mut flash).err(),
+        Some(BondStoreError::Backend(FakeError::Injected))
+    );
+    flash.fail_after_mutation = None;
+    let state = mount(&mut flash).expect("clear tombstone survives cleanup fault");
+    assert_eq!(state.generation().map(NonZeroU64::get), Some(2));
+    assert!(state.bond().is_none());
 }
 
 #[test]

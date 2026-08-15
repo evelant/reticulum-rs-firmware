@@ -115,6 +115,7 @@ class E290FlashRunbookPolicyTests(unittest.TestCase):
         docs = ROOT / "docs"
         return (
             ROOT / "README.md",
+            docs / "getting-started" / "firmware-e290.md",
             docs / "heltec-vision-master-e290.md",
             *sorted(docs.glob("e290-*.md")),
         )
@@ -1376,7 +1377,7 @@ class BoundActionTests(unittest.TestCase):
             self.assertEqual(
                 info.partition_table_sha256,
                 # Anchored to espflash 4.5.0 output from the checked-in CSV.
-                "9f183d86eda1be9898f27b6d283a02a5ed730df27151733b965096cbd714aa3a",
+                "52e90f3874d94c4cd2d9b79786a90cd661e3846ccac8ebc45e7d0c107fbe1d0f",
             )
 
     def test_host_guard_matches_checked_in_e290_partition_csv(self) -> None:

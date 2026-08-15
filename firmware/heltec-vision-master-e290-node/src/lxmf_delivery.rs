@@ -6,7 +6,7 @@
 //! their existing owners.
 
 use reticulum_lxmf_durable_ingress::DurableIngressRetentionReason;
-use reticulum_lxmf_ingress::{StampPolicy, WireLimits};
+use reticulum_lxmf_ingress::{DeferredIngress, StampPolicy, WireLimits};
 use reticulum_lxmf_model::MessageId;
 use reticulum_lxmf_store::LxmfCommitError;
 use reticulum_node_core::{
@@ -435,6 +435,41 @@ pub const fn retention_action<E>(
     }
 }
 
+/// Return the exact LXMF source whose retained identity can unblock admission.
+///
+/// Other deferred classes still use periodic bounded retry, but cannot be
+/// woken by an announce because they do not name an identity dependency.
+pub fn admission_deferred_source<E>(
+    reason: &DurableIngressRetentionReason<E>,
+) -> Option<DestinationHash> {
+    match reason {
+        DurableIngressRetentionReason::Deferred(DeferredIngress::SourceIdentityUnavailable {
+            source,
+        }) => Some(DestinationHash::new(*source)),
+        _ => None,
+    }
+}
+
+/// Deterministic bounded exponential delay for an admission-deferred event.
+///
+/// The original FIFO sequence spreads unrelated retained events without an
+/// RNG or new authority. Attempt zero is normalized to the first attempt.
+pub fn admission_retry_delay_ms(attempt: u8, sequence: ApplicationEventSequence) -> u64 {
+    let attempt = attempt.max(1);
+    let exponent = attempt.saturating_sub(1).min(15);
+    let nominal_cap =
+        config::LXMF_ADMISSION_RETRY_MAX_MS.saturating_sub(config::LXMF_ADMISSION_RETRY_MAX_MS / 5);
+    let nominal = config::LXMF_ADMISSION_RETRY_INITIAL_MS
+        .saturating_mul(1_u64 << exponent)
+        .min(nominal_cap);
+    let jitter_cap = (nominal / 5).min(config::LXMF_ADMISSION_RETRY_MAX_MS - nominal);
+    let mixed = sequence
+        .get()
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(u64::from(attempt).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+    nominal + mixed % jitter_cap.saturating_add(1)
+}
+
 /// One opaque exact-event retry owner and its product scheduling evidence.
 #[must_use = "a retained LXMF event retry entry must remain in its bounded set"]
 pub struct LxmfRetryEntry<'slots> {
@@ -442,6 +477,8 @@ pub struct LxmfRetryEntry<'slots> {
     retry_not_before_ms: u64,
     class: LxmfRetryClass,
     message_id: Option<MessageId>,
+    admission_attempt: u8,
+    admission_source: Option<DestinationHash>,
 }
 
 impl<'slots> LxmfRetryEntry<'slots> {
@@ -457,7 +494,24 @@ impl<'slots> LxmfRetryEntry<'slots> {
             retry_not_before_ms,
             class,
             message_id,
+            admission_attempt: 0,
+            admission_source: None,
         }
+    }
+
+    /// Attach the bounded retry history for an admission-deferred event.
+    ///
+    /// Non-admission classes cannot acquire an identity wake dependency.
+    pub const fn with_admission_state(
+        mut self,
+        attempt: u8,
+        source: Option<DestinationHash>,
+    ) -> Self {
+        if matches!(self.class, LxmfRetryClass::AdmissionDeferred) {
+            self.admission_attempt = attempt;
+            self.admission_source = source;
+        }
+        self
     }
 
     /// Exact diagnostic event-slot index. This is not retry authority.
@@ -478,6 +532,21 @@ impl<'slots> LxmfRetryEntry<'slots> {
     /// Authenticated message known to own store reconciliation, when available.
     pub const fn message_id(&self) -> Option<MessageId> {
         self.message_id
+    }
+
+    /// Number of consecutive retries for the same admission dependency.
+    pub const fn admission_attempt(&self) -> u8 {
+        self.admission_attempt
+    }
+
+    /// Exact announced destination whose identity can wake this retry.
+    pub const fn admission_source(&self) -> Option<DestinationHash> {
+        self.admission_source
+    }
+
+    /// Current absolute retry deadline, exposed for bounded diagnostics/tests.
+    pub const fn retry_not_before_ms(&self) -> u64 {
+        self.retry_not_before_ms
     }
 
     /// Consume the scheduling wrapper and recover the only retry authority.
@@ -639,6 +708,24 @@ impl<'slots, const N: usize> LxmfRetrySet<'slots, N> {
         self.entries[selected].take()
     }
 
+    /// Wake admission retries whose exact source identity was just learned.
+    ///
+    /// The retained tokens and FIFO sequence remain unchanged. Entries that
+    /// are already due are not counted as newly woken.
+    pub fn wake_admission_for_source(&mut self, source: DestinationHash, now_ms: u64) -> usize {
+        let mut woken = 0;
+        for entry in self.entries.iter_mut().flatten() {
+            if entry.class == LxmfRetryClass::AdmissionDeferred
+                && entry.admission_source == Some(source)
+                && entry.retry_not_before_ms > now_ms
+            {
+                entry.retry_not_before_ms = now_ms;
+                woken += 1;
+            }
+        }
+        woken
+    }
+
     /// Whether the exact pending-store reconciliation owner is retained.
     pub fn contains_reconciliation_owner(&self, message_id: MessageId) -> bool {
         self.entries.iter().flatten().any(|entry| {
@@ -745,6 +832,7 @@ mod tests {
                 vec![ApplicationEvent::DataReceived {
                     destination: [destination; 16],
                     payload: Vec::from([destination]),
+                    ingress: None,
                 }],
                 vec![],
                 0,
@@ -885,6 +973,116 @@ mod tests {
             retention_action(&missing, None),
             LxmfRetentionAction::Retry(LxmfRetryClass::AdmissionDeferred)
         );
+        assert_eq!(
+            admission_deferred_source(&missing),
+            Some(DestinationHash::new([0x5a; 16]))
+        );
+        assert_eq!(admission_deferred_source(&malformed), None);
+    }
+
+    #[test]
+    fn admission_retry_schedule_is_exponential_staggered_and_bounded() {
+        let mut owner = static_owner::<1>();
+        let token = retry_token(&mut owner, 0x51);
+        let sequence = token.sequence();
+        for (attempt, nominal) in [5_000_u64, 10_000, 20_000, 40_000, 80_000, 160_000]
+            .into_iter()
+            .enumerate()
+        {
+            let attempt = u8::try_from(attempt + 1).expect("six attempts fit u8");
+            let delay = admission_retry_delay_ms(attempt, sequence);
+            assert!(delay >= nominal);
+            assert!(delay <= nominal + nominal / 5);
+        }
+        let first_capped = admission_retry_delay_ms(7, sequence);
+        assert!(first_capped >= config::LXMF_ADMISSION_RETRY_MAX_MS * 4 / 5);
+        assert!(first_capped < config::LXMF_ADMISSION_RETRY_MAX_MS);
+        let capped = admission_retry_delay_ms(u8::MAX, sequence);
+        assert!(capped >= config::LXMF_ADMISSION_RETRY_MAX_MS * 4 / 5);
+        assert!(capped < config::LXMF_ADMISSION_RETRY_MAX_MS);
+        assert_eq!(
+            admission_retry_delay_ms(0, sequence),
+            admission_retry_delay_ms(1, sequence),
+        );
+        owner
+            .try_reacquire_quarantined(token)
+            .expect("schedule inspection preserves exact token")
+            .discard(ApplicationEventDiscardReason::Superseded);
+    }
+
+    #[test]
+    fn exact_source_announce_wakes_only_matching_admission_retries() {
+        let mut owner = static_owner::<3>();
+        let source_a = DestinationHash::new([0xa1; 16]);
+        let source_b = DestinationHash::new([0xb2; 16]);
+        let mut retries = LxmfRetrySet::<3>::new();
+        retries
+            .try_insert(
+                LxmfRetryEntry::new(
+                    retry_token(&mut owner, 1),
+                    100,
+                    LxmfRetryClass::AdmissionDeferred,
+                    None,
+                )
+                .with_admission_state(7, Some(source_a)),
+            )
+            .unwrap_or_else(|_| panic!("first deferred owner fits"));
+        retries
+            .try_insert(
+                LxmfRetryEntry::new(
+                    retry_token(&mut owner, 2),
+                    100,
+                    LxmfRetryClass::AdmissionDeferred,
+                    None,
+                )
+                .with_admission_state(3, Some(source_b)),
+            )
+            .unwrap_or_else(|_| panic!("second deferred owner fits"));
+        retries
+            .try_insert(
+                LxmfRetryEntry::new(
+                    retry_token(&mut owner, 3),
+                    100,
+                    LxmfRetryClass::CrossStoreBusy,
+                    None,
+                )
+                .with_admission_state(99, Some(source_a)),
+            )
+            .unwrap_or_else(|_| panic!("non-admission owner fits"));
+
+        assert_eq!(retries.wake_admission_for_source(source_a, 10), 1);
+        assert!(retries.take_due(9, None).is_none());
+        let woken = retries
+            .take_due(10, None)
+            .expect("the exact identity dependency wakes immediately");
+        assert_eq!(woken.admission_attempt(), 7);
+        assert_eq!(woken.admission_source(), Some(source_a));
+        assert_eq!(woken.retry_not_before_ms(), 10);
+        owner
+            .try_reacquire_quarantined(woken.into_token())
+            .expect("woken owner remains exact")
+            .discard(ApplicationEventDiscardReason::Superseded);
+
+        assert_eq!(retries.wake_admission_for_source(source_a, 10), 0);
+        assert!(retries.take_due(99, None).is_none());
+        assert_eq!(retries.wake_admission_for_source(source_b, 20), 1);
+        let second = retries
+            .take_due(20, None)
+            .expect("independent exact source wakes separately");
+        owner
+            .try_reacquire_quarantined(second.into_token())
+            .expect("second woken owner remains exact")
+            .discard(ApplicationEventDiscardReason::Superseded);
+        let remaining = retries
+            .take_due(100, None)
+            .expect("non-admission retry keeps its original deadline");
+        assert_eq!(remaining.class(), LxmfRetryClass::CrossStoreBusy);
+        assert_eq!(remaining.admission_attempt(), 0);
+        assert_eq!(remaining.admission_source(), None);
+        owner
+            .try_reacquire_quarantined(remaining.into_token())
+            .expect("remaining owner remains exact")
+            .discard(ApplicationEventDiscardReason::Superseded);
     }
 
     #[test]

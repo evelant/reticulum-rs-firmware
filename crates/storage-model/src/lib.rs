@@ -51,7 +51,10 @@ pub const MAX_JOURNAL_RECORD_BYTES: usize = 544;
 /// Maximum lifecycle-transition records for one accepted submission.
 pub const MAX_STATE_TRANSITIONS_PER_SUBMISSION: usize = 3;
 
-/// Maximum transport audit records for one accepted submission attempt.
+/// Maximum durable transport audit records for one accepted submission.
+///
+/// Coherent LXMF carrier recovery is covered by its durable logical delivery
+/// loop and does not consume an attempt-specific audit record.
 pub const MAX_TRANSPORT_AUDITS_PER_SUBMISSION: usize = 1;
 
 /// Maximum committed semantic records, including acceptance, for one
@@ -68,6 +71,14 @@ pub const AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS: u32 = 1 << 0;
 /// Stable persisted bit granting experimental outbound RNS DATA submission.
 pub const AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA: u32 = 1 << 1;
 
+/// Stable persisted bit granting board-owned network configuration mutation.
+///
+/// A submission authorization snapshot retains the authenticated credential's
+/// complete permission vocabulary even though this bit does not itself
+/// authorize a submission.
+pub const AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG: u32 = 1 << 2;
+
 /// Complete permission mask understood by durable authorization schema 3.
 pub const AUTHORIZATION_KNOWN_PERMISSION_BITS: u32 = AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS
-    | AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA;
+    | AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+    | AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG;

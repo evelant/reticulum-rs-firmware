@@ -11,7 +11,7 @@ use std::{
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api_ble::{
-    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, INITIAL_ATT_VALUE_BYTES, RX_UUID, SERVICE_UUID, TX_UUID,
+    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, MAXIMUM_ATT_VALUE_BYTES, RX_UUID, SERVICE_UUID, TX_UUID,
 };
 use reticulum_device_client::{
     ActivatedCredential, ClientConfig, ClientSessionProfile, DeviceClient,
@@ -115,7 +115,7 @@ fn run() -> Result<Value, String> {
             "service_uuid": SERVICE_UUID,
             "rx_uuid": RX_UUID,
             "tx_uuid": TX_UUID,
-            "maximum_fragment_bytes": INITIAL_ATT_VALUE_BYTES,
+            "maximum_fragment_bytes": MAXIMUM_ATT_VALUE_BYTES,
             "write_type": "with_response",
             "tx_delivery": "indication",
         },

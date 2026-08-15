@@ -2,14 +2,27 @@ use std::{collections::VecDeque, io, time::Duration};
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_device_api::{
-    ApiErrorCode, ApiErrorResponse, ApiVersion, DestinationHash, DeviceRequest, DeviceResponse,
-    EncodedPacketSha256, IdempotencyKey, IdentitySummary, LxmfBasicSendAccepted, LxmfMessageHandle,
-    LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation,
-    LxmfPeerDiscoveryPage, LxmfPeerGeneration, LxmfReadChunk, NomadFetchId, NomadFetchPollResponse,
-    NomadFetchStartAccepted, NomadFetchStartOutcome, NomadFetchStartRequest, NomadPage,
-    NomadPagePath, NomadRequestTimestampUnixMs, PreparedPacketDetails, RequestEnvelope,
-    ResponseEnvelope, SubmissionId, SubmissionState, SubmissionStatus, decode_request,
-    encode_response,
+    ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability, CapabilitySnapshot,
+    DestinationHash, DeviceRequest, DeviceResponse, EncodedPacketSha256, IdempotencyKey,
+    IdentityHash, IdentitySummary, IngressObservation, IngressSignal, LxmfBasicSendAccepted,
+    LxmfMailboxStatus, LxmfMessageHandle, LxmfMessageLocation, LxmfMessageSummary,
+    LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation, LxmfPeerDiscoveryPage,
+    LxmfPeerGeneration, LxmfReadChunk, ManualServiceAnnounceDisposition, NodeDiagnosticsSnapshot,
+    NomadFetchId, NomadFetchPollResponse, NomadFetchStartAccepted, NomadFetchStartOutcome,
+    NomadFetchStartRequest, NomadPage, NomadPagePath, NomadRequestTimestampUnixMs,
+    PreparedPacketDetails, ProbeId, ProbePollResponse, ProbeStartAccepted, ProbeStartOutcome,
+    ProbeStartRequest, ProbeSuccess, RadioTraceAppliedLoraProfile, RadioTraceCursor,
+    RadioTracePage, RadioTracePageRequest, RequestEnvelope, ResponseEnvelope, RnsDiagnostics,
+    RouteDiagnosticEntry, RouteDiagnosticResolution, RouteDiagnosticsPage, RouteDiagnosticsRequest,
+    SubmissionId, SubmissionState, SubmissionStatus, decode_request, encode_response,
+};
+#[cfg(feature = "experimental-network-config")]
+use reticulum_device_api::{
+    NetworkConfigMutation, NetworkConfigMutationOutcome, NetworkConfigMutationRequest,
+    NetworkConfigSnapshot, NetworkRuntimeStatus, ReticulumTcpPeerConfigSummary,
+    ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState, ReticulumTcpPeerUpdate,
+    WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate,
+    WifiSsid, WifiStationState,
 };
 use reticulum_device_api_framing::{DecodeEvent, StreamDecoder};
 use reticulum_device_api_handoff::{LocalApiReply, MessageLength, OwnedMessage};
@@ -35,6 +48,10 @@ const NOMAD_REMOTE: DestinationHash = DestinationHash([0x77; 16]);
 const NOMAD_FETCH_ID: NomadFetchId = match NomadFetchId::new([0x88; 8], 3) {
     Ok(id) => id,
     Err(_) => panic!("test fetch ID is valid"),
+};
+const PROBE_ID: ProbeId = match ProbeId::new([0x99; 16]) {
+    Ok(id) => id,
+    Err(_) => panic!("test probe ID is valid"),
 };
 
 struct FixedRng {
@@ -84,11 +101,24 @@ struct MockPeer {
     wire: Vec<u8>,
     request_count: usize,
     last_send: Option<OwnedSend>,
+    last_mailbox_acknowledgement: Option<LxmfMessageHandle>,
     last_peer_cursor: Option<Option<LxmfPeerDiscoveryCursor>>,
     last_nomad_start: Option<OwnedNomadFetch>,
     last_nomad_poll: Option<NomadFetchId>,
+    last_probe_start: Option<ProbeStartRequest>,
+    last_probe_poll: Option<ProbeId>,
+    probe_start_response: DeviceResponse,
+    probe_poll_response: DeviceResponse,
+    last_route_diagnostics_cursor: Option<Option<DestinationHash>>,
+    last_radio_trace_cursor: Option<Option<RadioTraceCursor>>,
+    manual_announce_availability: CapabilityAvailability,
+    manual_announce_disposition: ManualServiceAnnounceDisposition,
+    manual_announce_requests: usize,
+    #[cfg(feature = "experimental-network-config")]
+    last_network_mutation: Option<OwnedNetworkMutation>,
     parameters: ServerParameters,
     max_io_chunk: usize,
+    response_version: ApiVersion,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -97,6 +127,7 @@ struct OwnedSend {
     timestamp_unix_ms: u64,
     title: Vec<u8>,
     content: Vec<u8>,
+    location: Option<LxmfMessageLocation>,
     idempotency_key: IdempotencyKey,
 }
 
@@ -106,6 +137,25 @@ struct OwnedNomadFetch {
     path: String,
     timestamp_unix_ms: u64,
     idempotency_key: IdempotencyKey,
+}
+
+#[cfg(feature = "experimental-network-config")]
+#[derive(Debug, Eq, PartialEq)]
+enum OwnedNetworkMutation {
+    UpsertWifi {
+        profile_id: WifiNetworkProfileId,
+        enabled: bool,
+        priority: u8,
+        ssid: Vec<u8>,
+        replacement_passphrase: Option<Vec<u8>>,
+        expected_revision: u64,
+        idempotency_key: IdempotencyKey,
+    },
+    ReplaceTcpPeer {
+        peer: Option<ReticulumTcpPeerUpdate>,
+        expected_revision: u64,
+        idempotency_key: IdempotencyKey,
+    },
 }
 
 impl MockPeer {
@@ -142,11 +192,28 @@ impl MockPeer {
             wire,
             request_count: 0,
             last_send: None,
+            last_mailbox_acknowledgement: None,
             last_peer_cursor: None,
             last_nomad_start: None,
             last_nomad_poll: None,
+            last_probe_start: None,
+            last_probe_poll: None,
+            probe_start_response: DeviceResponse::ReticulumProbeStartAccepted(
+                ProbeStartAccepted::new(PROBE_ID, ProbeStartOutcome::Accepted),
+            ),
+            probe_poll_response: DeviceResponse::ReticulumProbePoll(ProbePollResponse::Succeeded(
+                sample_probe_success(),
+            )),
+            last_route_diagnostics_cursor: None,
+            last_radio_trace_cursor: None,
+            manual_announce_availability: CapabilityAvailability::Available,
+            manual_announce_disposition: ManualServiceAnnounceDisposition::Queued,
+            manual_announce_requests: 0,
+            #[cfg(feature = "experimental-network-config")]
+            last_network_mutation: None,
             parameters,
             max_io_chunk,
+            response_version: ApiVersion::CURRENT,
         }
     }
 
@@ -197,7 +264,7 @@ impl MockPeer {
                     .expect("client emits canonical logical request");
                 let response = self.dispatch(envelope);
                 let response = ResponseEnvelope {
-                    version: ApiVersion::CURRENT,
+                    version: self.response_version,
                     request_id: envelope.request_id,
                     response,
                 };
@@ -226,6 +293,10 @@ impl MockPeer {
 
     fn dispatch(&mut self, envelope: RequestEnvelope<'_>) -> DeviceResponse {
         match envelope.request {
+            DeviceRequest::SystemCapabilities => DeviceResponse::SystemCapabilities(
+                CapabilitySnapshot::for_dispatch(false)
+                    .with_dispatch_manual_service_announce(self.manual_announce_availability),
+            ),
             DeviceRequest::IdentitySummary => DeviceResponse::IdentitySummary(
                 IdentitySummary::with_lxmf_delivery_destination(PRIMARY, LXMF_LOCAL),
             ),
@@ -243,6 +314,18 @@ impl MockPeer {
                 not_found(envelope.request.operation())
             }
             DeviceRequest::LxmfNext { .. } => not_found(envelope.request.operation()),
+            DeviceRequest::LxmfMailboxStatus => DeviceResponse::LxmfMailboxStatus(
+                LxmfMailboxStatus::new(Some(self.summary.handle()), None).unwrap(),
+            ),
+            DeviceRequest::LxmfMailboxAcknowledge { through }
+                if through == self.summary.handle() =>
+            {
+                self.last_mailbox_acknowledgement = Some(through);
+                DeviceResponse::LxmfMailboxAcknowledged(
+                    LxmfMailboxStatus::new(Some(self.summary.handle()), Some(through)).unwrap(),
+                )
+            }
+            DeviceRequest::LxmfMailboxAcknowledge { .. } => not_found(envelope.request.operation()),
             DeviceRequest::LxmfRead {
                 handle,
                 offset,
@@ -299,6 +382,7 @@ impl MockPeer {
                 timestamp_unix_ms,
                 title,
                 content,
+                location,
                 idempotency_key,
             } => {
                 self.last_send = Some(OwnedSend {
@@ -306,6 +390,7 @@ impl MockPeer {
                     timestamp_unix_ms,
                     title: title.to_vec(),
                     content: content.to_vec(),
+                    location,
                     idempotency_key,
                 });
                 DeviceResponse::LxmfBasicSendAccepted(LxmfBasicSendAccepted::new(
@@ -331,6 +416,76 @@ impl MockPeer {
                     NomadPage::new(b">Metalbeard").unwrap(),
                 ))
             }
+            DeviceRequest::ReticulumProbeStart(request) => {
+                self.last_probe_start = Some(request);
+                self.probe_start_response
+            }
+            DeviceRequest::ReticulumProbePoll(request) => {
+                self.last_probe_poll = Some(request.id());
+                self.probe_poll_response
+            }
+            DeviceRequest::NodeDiagnostics => {
+                DeviceResponse::NodeDiagnostics(sample_node_diagnostics())
+            }
+            DeviceRequest::RouteDiagnosticsPage(request) => {
+                self.last_route_diagnostics_cursor = Some(request.after());
+                DeviceResponse::RouteDiagnosticsPage(sample_route_diagnostics_page())
+            }
+            DeviceRequest::RadioTracePage(request) => {
+                self.last_radio_trace_cursor = Some(request.after());
+                DeviceResponse::RadioTracePage(sample_radio_trace_page())
+            }
+            DeviceRequest::ManualServiceAnnounce => {
+                self.manual_announce_requests += 1;
+                DeviceResponse::ManualServiceAnnounce(self.manual_announce_disposition)
+            }
+            #[cfg(feature = "experimental-network-config")]
+            DeviceRequest::NetworkConfigGet => {
+                DeviceResponse::NetworkConfig(sample_network_config())
+            }
+            #[cfg(feature = "experimental-network-config")]
+            DeviceRequest::NetworkConfigMutate(request) => {
+                self.last_network_mutation = Some(match request.mutation() {
+                    NetworkConfigMutation::UpsertWifi {
+                        profile_id,
+                        network,
+                    } => OwnedNetworkMutation::UpsertWifi {
+                        profile_id,
+                        enabled: network.enabled(),
+                        priority: network.priority(),
+                        ssid: network.ssid().as_bytes().to_vec(),
+                        replacement_passphrase: network
+                            .credential()
+                            .replacement()
+                            .map(<[u8]>::to_vec),
+                        expected_revision: request.expected_revision(),
+                        idempotency_key: request.idempotency_key(),
+                    },
+                    NetworkConfigMutation::ReplaceTcpPeer(peer) => {
+                        OwnedNetworkMutation::ReplaceTcpPeer {
+                            peer,
+                            expected_revision: request.expected_revision(),
+                            idempotency_key: request.idempotency_key(),
+                        }
+                    }
+                    NetworkConfigMutation::RemoveWifi { .. } => {
+                        panic!("mock does not expect a remove mutation")
+                    }
+                    NetworkConfigMutation::ReplaceTcpHostPeer(_)
+                    | NetworkConfigMutation::SetGatewayPolicy(_)
+                    | NetworkConfigMutation::SetRmapConfig(_)
+                    | NetworkConfigMutation::SetLoraTxPower(_)
+                    | NetworkConfigMutation::SetLoraProfile(_) => {
+                        panic!("mock does not expect this network mutation")
+                    }
+                });
+                DeviceResponse::NetworkConfigMutation(NetworkConfigMutationOutcome::Applied {
+                    revision: 8,
+                    reboot_required: true,
+                })
+            }
+            #[cfg(feature = "experimental-network-config")]
+            DeviceRequest::NetworkStatus => DeviceResponse::NetworkStatus(sample_network_status()),
             _ => DeviceResponse::Error(ApiErrorResponse {
                 code: ApiErrorCode::UnsupportedOperation,
                 operation: Some(envelope.request.operation()),
@@ -429,6 +584,99 @@ fn sample_lxmf_summary(handle: u64, wire: &[u8]) -> LxmfMessageSummary {
     .expect("sample summary is valid")
 }
 
+#[cfg(feature = "experimental-network-config")]
+fn sample_network_profile_id() -> WifiNetworkProfileId {
+    WifiNetworkProfileId::new([0x91; 16]).unwrap()
+}
+
+#[cfg(feature = "experimental-network-config")]
+fn sample_network_config() -> NetworkConfigSnapshot {
+    let wifi = WifiNetworkConfigSummary::new(
+        sample_network_profile_id(),
+        true,
+        17,
+        b"field\xffnode",
+        true,
+    )
+    .unwrap();
+    let peer_address = ReticulumTcpPeerIpv4Address::new([192, 0, 2, 44]).unwrap();
+    let peer = ReticulumTcpPeerConfigSummary::new(true, peer_address, 4242).unwrap();
+    NetworkConfigSnapshot::new(7, [Some(wifi), None, None, None], Some(peer)).unwrap()
+}
+
+#[cfg(feature = "experimental-network-config")]
+fn sample_network_status() -> NetworkRuntimeStatus {
+    NetworkRuntimeStatus::new(
+        7,
+        7,
+        WifiStationState::Connected,
+        Some(sample_network_profile_id()),
+        Some(b"field\xffnode"),
+        Some([192, 0, 2, 12]),
+        Some(-71),
+        ReticulumTcpPeerState::Connecting,
+    )
+    .unwrap()
+}
+
+fn sample_node_diagnostics() -> NodeDiagnosticsSnapshot {
+    NodeDiagnosticsSnapshot::new(
+        12_345,
+        [None, None, None, None],
+        None,
+        RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        2,
+        4,
+        3,
+    )
+}
+
+fn sample_probe_success() -> ProbeSuccess {
+    ProbeSuccess::new(
+        1_345,
+        2,
+        IngressObservation::new(7, Some(IngressSignal::new(-94, 5))),
+    )
+}
+
+fn sample_route_diagnostics_page() -> RouteDiagnosticsPage {
+    let entry = RouteDiagnosticEntry::new(
+        DestinationHash([0x31; 16]),
+        Some(IdentityHash::new([0x41; 16])),
+        2,
+        Some(1),
+        RouteDiagnosticResolution::ExactReady,
+        Some(100),
+        Some(50),
+        Some(30_000),
+    );
+    RouteDiagnosticsPage::new(13, 1, [Some(entry), None, None, None], None).unwrap()
+}
+
+fn sample_radio_trace_page() -> RadioTracePage {
+    RadioTracePage::new(
+        99,
+        RadioTraceAppliedLoraProfile::new(
+            [0x91; 16],
+            915_000_000,
+            125_000,
+            12,
+            22,
+            10,
+            5,
+            true,
+            true,
+            false,
+        ),
+        7,
+        7,
+        false,
+        [None; reticulum_device_api::MAX_RADIO_TRACE_PAGE_ENTRIES],
+        None,
+    )
+    .unwrap()
+}
+
 #[test]
 fn activated_state_decoder_rejects_noncanonical_and_non_active_images() {
     let active = active_state();
@@ -474,6 +722,27 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
     assert_eq!(identity.primary_destination(), PRIMARY);
     assert_eq!(identity.lxmf_delivery_destination(), Some(LXMF_LOCAL));
 
+    assert_eq!(
+        client
+            .node_diagnostics()
+            .expect("node diagnostics succeeds"),
+        sample_node_diagnostics()
+    );
+    let route_cursor = DestinationHash([0x20; 16]);
+    assert_eq!(
+        client
+            .route_diagnostics_page(RouteDiagnosticsRequest::new(Some(route_cursor)))
+            .expect("route diagnostics succeeds"),
+        sample_route_diagnostics_page()
+    );
+    let radio_trace_cursor = RadioTraceCursor::new(99, 6);
+    assert_eq!(
+        client
+            .radio_trace_page(RadioTracePageRequest::new(Some(radio_trace_cursor)))
+            .expect("radio trace succeeds"),
+        sample_radio_trace_page()
+    );
+
     let nearby = client
         .lxmf_peer_next(None)
         .expect("nearby peer discovery succeeds");
@@ -496,16 +765,40 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
     let view = message.view().expect("verified message reparses");
     assert_eq!(view.payload().title().as_bytes(), b"hello");
     assert_eq!(view.payload().content().as_bytes(), b"from peer");
+    let mailbox = client
+        .lxmf_mailbox_status()
+        .expect("mailbox status succeeds");
+    assert_eq!(mailbox.latest(), Some(summaries[0].handle()));
+    assert_eq!(mailbox.acknowledged_through(), None);
+    assert_eq!(mailbox.uncollected_count(), 1);
+    let mailbox = client
+        .lxmf_mailbox_acknowledge(summaries[0].handle())
+        .expect("mailbox acknowledgement succeeds");
+    assert_eq!(mailbox.acknowledged_through(), Some(summaries[0].handle()));
+    assert_eq!(mailbox.uncollected_count(), 0);
 
     let idempotency_key = IdempotencyKey([0xcc; 16]);
+    let location = LxmfMessageLocation::new(
+        44_123_456,
+        -73_987_654,
+        12_345,
+        678,
+        27_050,
+        321,
+        1_784_732_099,
+    )
+    .unwrap();
     let accepted = client
-        .lxmf_basic_send(BasicLxmfSend::new(
-            LXMF_REMOTE,
-            1_784_732_100_000,
-            b"subject",
-            b"body",
-            idempotency_key,
-        ))
+        .lxmf_basic_send(
+            BasicLxmfSend::new(
+                LXMF_REMOTE,
+                1_784_732_100_000,
+                b"subject",
+                b"body",
+                idempotency_key,
+            )
+            .with_location(location),
+        )
         .expect("basic send succeeds");
     assert_eq!(accepted.id, SubmissionId(9));
     assert_eq!(accepted.message_id(), &[0xbb; 32]);
@@ -533,10 +826,60 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
             .expect("Nomad fetch poll succeeds"),
         NomadFetchPollResponse::Ready(NomadPage::new(b">Metalbeard").unwrap())
     );
+    assert_eq!(
+        client.announce_now().expect("manual announce queues"),
+        ManualServiceAnnounceDisposition::Queued
+    );
+    #[cfg(feature = "experimental-network-config")]
+    {
+        let config = client
+            .network_config_get()
+            .expect("redacted network config succeeds");
+        assert_eq!(config, sample_network_config());
+
+        let network_key = IdempotencyKey([0xee; 16]);
+        let profile_id = WifiNetworkProfileId::new([0xa1; 16]).unwrap();
+        let network = WifiNetworkUpdate::new(
+            true,
+            23,
+            WifiSsid::new(b"mesh-lab").unwrap(),
+            WifiCredentialUpdate::replace(b"correct horse battery staple").unwrap(),
+        );
+        assert_eq!(
+            client
+                .network_config_mutate(NetworkConfigMutationRequest::new(
+                    NetworkConfigMutation::UpsertWifi {
+                        profile_id,
+                        network,
+                    },
+                    7,
+                    network_key,
+                ))
+                .expect("network mutation succeeds"),
+            NetworkConfigMutationOutcome::Applied {
+                revision: 8,
+                reboot_required: true,
+            }
+        );
+
+        assert_eq!(
+            client.network_status().expect("network status succeeds"),
+            sample_network_status()
+        );
+    }
     assert!(client.is_session_available());
 
     let peer = client.into_transport();
-    assert_eq!(peer.request_count, 11);
+    #[cfg(not(feature = "experimental-network-config"))]
+    assert_eq!(peer.request_count, 18);
+    #[cfg(feature = "experimental-network-config")]
+    assert_eq!(peer.request_count, 21);
+    assert_eq!(
+        peer.last_mailbox_acknowledgement,
+        Some(summaries[0].handle())
+    );
+    assert_eq!(peer.last_route_diagnostics_cursor, Some(Some(route_cursor)));
+    assert_eq!(peer.last_radio_trace_cursor, Some(Some(radio_trace_cursor)));
     assert_eq!(peer.last_peer_cursor, Some(Some(nearby.next_cursor())));
     assert_eq!(
         peer.last_send,
@@ -545,6 +888,7 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
             timestamp_unix_ms: 1_784_732_100_000,
             title: b"subject".to_vec(),
             content: b"body".to_vec(),
+            location: Some(location),
             idempotency_key,
         })
     );
@@ -558,6 +902,60 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
         })
     );
     assert_eq!(peer.last_nomad_poll, Some(NOMAD_FETCH_ID));
+    assert_eq!(peer.manual_announce_requests, 1);
+    #[cfg(feature = "experimental-network-config")]
+    assert_eq!(
+        peer.last_network_mutation,
+        Some(OwnedNetworkMutation::UpsertWifi {
+            profile_id: WifiNetworkProfileId::new([0xa1; 16]).unwrap(),
+            enabled: true,
+            priority: 23,
+            ssid: b"mesh-lab".to_vec(),
+            replacement_passphrase: Some(b"correct horse battery staple".to_vec()),
+            expected_revision: 7,
+            idempotency_key: IdempotencyKey([0xee; 16]),
+        })
+    );
+}
+
+#[test]
+fn located_send_preflights_the_authenticated_device_minor_before_new_wire_shape() {
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let config = ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096);
+    let mut peer = MockPeer::new();
+    peer.response_version = ApiVersion {
+        major: ApiVersion::CURRENT.major,
+        minor: 16,
+    };
+    let mut client = DeviceClient::connect(peer, credential, &mut FixedRng::new(0x99), config)
+        .expect("real client/server handshake succeeds");
+    let location = LxmfMessageLocation::new(44_000_000, -73_000_000, 0, 0, 0, 0, 1_784_000_000)
+        .expect("fixture location is valid");
+
+    assert!(matches!(
+        client.lxmf_basic_send(
+            BasicLxmfSend::new(
+                LXMF_REMOTE,
+                1_784_732_100_000,
+                b"subject",
+                b"body",
+                IdempotencyKey([0xcd; 16]),
+            )
+            .with_location(location),
+        ),
+        Err(ClientError::ApiMinorTooOld {
+            feature: "LXMF message location",
+            required: 17,
+            observed: ApiVersion {
+                major: 1,
+                minor: 16,
+            },
+        })
+    ));
+
+    let peer = client.into_transport();
+    assert_eq!(peer.request_count, 1, "only capabilities preflight is sent");
+    assert_eq!(peer.last_send, None);
 }
 
 #[test]
@@ -609,6 +1007,65 @@ fn ble_gatt_profile_uses_suite_three_across_partial_stream_io() {
 }
 
 #[test]
+fn manual_service_announce_is_capability_gated_without_consuming_the_session() {
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let mut peer = MockPeer::new();
+    peer.manual_announce_availability = CapabilityAvailability::Disabled;
+    let mut client = DeviceClient::connect(
+        peer,
+        credential,
+        &mut FixedRng::new(0x99),
+        ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096),
+    )
+    .expect("handshake succeeds");
+
+    assert!(matches!(
+        client.manual_service_announce(),
+        Err(ClientError::CapabilityUnavailable {
+            operation: super::Operation::ManualServiceAnnounce,
+            availability: CapabilityAvailability::Disabled,
+        })
+    ));
+    assert!(client.is_session_available());
+    assert_eq!(
+        client
+            .identity_summary()
+            .expect("later authenticated operation succeeds")
+            .primary_destination(),
+        PRIMARY
+    );
+
+    let peer = client.into_transport();
+    assert_eq!(peer.request_count, 2);
+    assert_eq!(peer.manual_announce_requests, 0);
+}
+
+#[test]
+fn manual_service_announce_returns_coalesced_device_disposition() {
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let mut peer = MockPeer::new();
+    peer.manual_announce_disposition = ManualServiceAnnounceDisposition::AlreadyPending;
+    let mut client = DeviceClient::connect(
+        peer,
+        credential,
+        &mut FixedRng::new(0x99),
+        ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096),
+    )
+    .expect("handshake succeeds");
+
+    assert_eq!(
+        client
+            .manual_service_announce()
+            .expect("available operation succeeds"),
+        ManualServiceAnnounceDisposition::AlreadyPending
+    );
+
+    let peer = client.into_transport();
+    assert_eq!(peer.request_count, 2);
+    assert_eq!(peer.manual_announce_requests, 1);
+}
+
+#[test]
 fn logical_not_found_does_not_consume_authenticated_session() {
     let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
     let mut client = DeviceClient::connect(
@@ -632,4 +1089,123 @@ fn logical_not_found_does_not_consume_authenticated_session() {
             .primary_destination(),
         PRIMARY
     );
+}
+
+#[test]
+fn reticulum_probe_start_and_poll_capture_exact_requests_and_return_typed_responses() {
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let mut client = DeviceClient::connect(
+        MockPeer::new(),
+        credential,
+        &mut FixedRng::new(0x99),
+        ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096),
+    )
+    .expect("handshake succeeds");
+    let request = ProbeStartRequest::new(NOMAD_REMOTE, IdempotencyKey([0xa2; 16]));
+
+    assert_eq!(
+        client
+            .reticulum_probe_start(request)
+            .expect("probe start succeeds"),
+        ProbeStartAccepted::new(PROBE_ID, ProbeStartOutcome::Accepted)
+    );
+    assert_eq!(
+        client
+            .reticulum_probe_poll(PROBE_ID)
+            .expect("probe poll succeeds"),
+        ProbePollResponse::Succeeded(sample_probe_success())
+    );
+    assert!(client.is_session_available());
+
+    let peer = client.into_transport();
+    assert_eq!(peer.request_count, 2);
+    assert_eq!(peer.last_probe_start, Some(request));
+    assert_eq!(peer.last_probe_poll, Some(PROBE_ID));
+}
+
+#[test]
+fn reticulum_probe_start_and_poll_preserve_typed_api_errors() {
+    let start_error = ApiErrorResponse {
+        code: ApiErrorCode::IdempotencyConflict,
+        operation: Some(reticulum_device_api::OP_EXPERIMENTAL_RETICULUM_PROBE_START),
+    };
+    let poll_error = ApiErrorResponse {
+        code: ApiErrorCode::NotFound,
+        operation: Some(reticulum_device_api::OP_EXPERIMENTAL_RETICULUM_PROBE_POLL),
+    };
+    let mut peer = MockPeer::new();
+    peer.probe_start_response = DeviceResponse::Error(start_error);
+    peer.probe_poll_response = DeviceResponse::Error(poll_error);
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let mut client = DeviceClient::connect(
+        peer,
+        credential,
+        &mut FixedRng::new(0x99),
+        ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096),
+    )
+    .expect("handshake succeeds");
+    let request = ProbeStartRequest::new(NOMAD_REMOTE, IdempotencyKey([0xa3; 16]));
+
+    assert!(matches!(
+        client.reticulum_probe_start(request),
+        Err(ClientError::Api {
+            operation: super::Operation::ReticulumProbeStart,
+            error,
+        }) if error == start_error
+    ));
+    assert!(matches!(
+        client.reticulum_probe_poll(PROBE_ID),
+        Err(ClientError::Api {
+            operation: super::Operation::ReticulumProbePoll,
+            error,
+        }) if error == poll_error
+    ));
+    assert!(client.is_session_available());
+
+    let peer = client.into_transport();
+    assert_eq!(peer.request_count, 2);
+    assert_eq!(peer.last_probe_start, Some(request));
+    assert_eq!(peer.last_probe_poll, Some(PROBE_ID));
+}
+
+#[test]
+fn reticulum_probe_start_and_poll_reject_unexpected_authenticated_response_kinds() {
+    let unexpected_start = DeviceResponse::IdentitySummary(
+        IdentitySummary::with_lxmf_delivery_destination(PRIMARY, LXMF_LOCAL),
+    );
+    let unexpected_poll =
+        DeviceResponse::ManualServiceAnnounce(ManualServiceAnnounceDisposition::Queued);
+    let mut peer = MockPeer::new();
+    peer.probe_start_response = unexpected_start;
+    peer.probe_poll_response = unexpected_poll;
+    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
+    let mut client = DeviceClient::connect(
+        peer,
+        credential,
+        &mut FixedRng::new(0x99),
+        ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096),
+    )
+    .expect("handshake succeeds");
+    let request = ProbeStartRequest::new(NOMAD_REMOTE, IdempotencyKey([0xa4; 16]));
+
+    assert!(matches!(
+        client.reticulum_probe_start(request),
+        Err(ClientError::UnexpectedResponse {
+            operation: super::Operation::ReticulumProbeStart,
+            kind,
+        }) if kind == unexpected_start.kind()
+    ));
+    assert!(matches!(
+        client.reticulum_probe_poll(PROBE_ID),
+        Err(ClientError::UnexpectedResponse {
+            operation: super::Operation::ReticulumProbePoll,
+            kind,
+        }) if kind == unexpected_poll.kind()
+    ));
+    assert!(client.is_session_available());
+
+    let peer = client.into_transport();
+    assert_eq!(peer.request_count, 2);
+    assert_eq!(peer.last_probe_start, Some(request));
+    assert_eq!(peer.last_probe_poll, Some(PROBE_ID));
 }

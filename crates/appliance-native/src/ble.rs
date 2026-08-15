@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use reticulum_device_api_ble::INITIAL_ATT_VALUE_BYTES;
+use reticulum_device_api_ble::{MAXIMUM_ATT_VALUE_BYTES, MINIMUM_ATT_VALUE_BYTES};
 use reticulum_device_client::{ClientConfig, ClientError, ClientSessionProfile, DeviceClient};
 use reticulum_lxmf_chat_app::DeviceClientSession;
 use reticulum_lxmf_chat_runtime::{
@@ -20,7 +20,6 @@ const DEFAULT_IO_SLICE: Duration = Duration::from_millis(100);
 const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const PLATFORM_COMMAND_WAIT: Duration = Duration::from_secs(15);
 const DEFAULT_INBOUND_CAPACITY: usize = 16 * 1024;
-const MAX_GATT_WRITE_BYTES: usize = 512;
 const MAX_PERIPHERAL_ID_BYTES: usize = 256;
 const MAX_PLATFORM_REASON_BYTES: usize = 512;
 
@@ -214,18 +213,17 @@ impl BleHub {
             usize::try_from(max_write_bytes).map_err(|_| NativeBleError::InvalidArgument {
                 reason: "BLE maximum write size does not fit this platform".to_owned(),
             })?;
-        if !(INITIAL_ATT_VALUE_BYTES..=MAX_GATT_WRITE_BYTES).contains(&platform_max_write_bytes) {
+        if platform_max_write_bytes < MINIMUM_ATT_VALUE_BYTES {
             return Err(NativeBleError::InvalidArgument {
                 reason: format!(
-                    "BLE maximum write size must be in {INITIAL_ATT_VALUE_BYTES}..={MAX_GATT_WRITE_BYTES}"
+                    "BLE maximum write size must be at least {MINIMUM_ATT_VALUE_BYTES} bytes"
                 ),
             });
         }
-        // GATT 1.0 deliberately fixes both characteristic values at the
-        // unnegotiated ATT value bound. A larger platform-reported
-        // write-with-response maximum is useful capability information, but it
-        // must not enlarge fragments sent to this firmware profile.
-        let max_write_bytes = platform_max_write_bytes.min(INITIAL_ATT_VALUE_BYTES);
+        // The central reports one conservative single-write capability for the
+        // negotiated link. The generated profile remains the independent upper
+        // bound even when a platform reports a larger controller capability.
+        let max_write_bytes = platform_max_write_bytes.min(MAXIMUM_ATT_VALUE_BYTES);
 
         let mut state = self.lock()?;
         if let Some(link) = state.active.as_ref()
@@ -982,12 +980,12 @@ mod tests {
     }
 
     #[test]
-    fn platform_write_capability_never_enlarges_the_fixed_gatt_profile_value() {
+    fn platform_write_capability_is_capped_by_the_generated_gatt_profile() {
         let (hub, generation, mut stream, _lease) = claimed_hub(BleHubConfig::default(), 512);
         let writer = thread::spawn(move || stream.write(&[0x5a; 512]));
 
         let (token, bytes) = write_command(&hub, generation);
-        assert_eq!(bytes, vec![0x5a; INITIAL_ATT_VALUE_BYTES]);
+        assert_eq!(bytes, vec![0x5a; MAXIMUM_ATT_VALUE_BYTES]);
         hub.write_succeeded(generation, token)
             .expect("profile-bounded write acknowledgement succeeds");
         assert_eq!(
@@ -995,8 +993,20 @@ mod tests {
                 .join()
                 .expect("writer exits")
                 .expect("profile-bounded write succeeds"),
-            INITIAL_ATT_VALUE_BYTES
+            MAXIMUM_ATT_VALUE_BYTES
         );
+    }
+
+    #[test]
+    fn negotiated_platform_write_capability_is_retained_below_the_profile_ceiling() {
+        let (hub, generation, mut stream, _lease) = claimed_hub(BleHubConfig::default(), 61);
+        let writer = thread::spawn(move || stream.write(&[0x6b; 80]));
+
+        let (token, bytes) = write_command(&hub, generation);
+        assert_eq!(bytes, vec![0x6b; 61]);
+        hub.write_succeeded(generation, token)
+            .expect("negotiated-size write acknowledgement succeeds");
+        assert_eq!(writer.join().unwrap().unwrap(), 61);
     }
 
     #[test]
@@ -1185,16 +1195,22 @@ mod tests {
     }
 
     #[test]
-    fn platform_limits_below_the_shared_initial_att_value_are_rejected() {
+    fn platform_limits_below_the_mandatory_att_value_are_rejected() {
         let hub = BleHub::new();
         assert!(matches!(
             hub.link_connected("too-small".to_owned(), 19),
             Err(NativeBleError::InvalidArgument { .. })
         ));
-        assert!(matches!(
-            hub.link_connected("too-large".to_owned(), 513),
-            Err(NativeBleError::InvalidArgument { .. })
-        ));
+    }
+
+    #[test]
+    fn arbitrarily_large_platform_capability_is_capped_before_stream_use() {
+        let (hub, generation, mut stream, _lease) = claimed_hub(BleHubConfig::default(), u32::MAX);
+        let writer = thread::spawn(move || stream.write(&[0x31; MAXIMUM_ATT_VALUE_BYTES + 1]));
+        let (token, bytes) = write_command(&hub, generation);
+        assert_eq!(bytes.len(), MAXIMUM_ATT_VALUE_BYTES);
+        hub.write_succeeded(generation, token).unwrap();
+        assert_eq!(writer.join().unwrap().unwrap(), MAXIMUM_ATT_VALUE_BYTES);
     }
 
     #[test]

@@ -7,9 +7,6 @@ pub const REQUIRED_FLASH_BYTES: usize = 16 * 1024 * 1024;
 pub const DATA_PARTITION_TYPE: u8 = 0x01;
 /// ESP-IDF undefined raw data-partition subtype.
 pub const UNDEFINED_DATA_SUBTYPE: u8 = 0x06;
-/// ESP-IDF standard NVS data-partition subtype.
-pub const NVS_DATA_SUBTYPE: u8 = 0x02;
-
 /// Dedicated immutable Reticulum identity partition label.
 pub const NODE_IDENTITY_LABEL: &str = "node_identity";
 /// Padded partition-table bytes for [`NODE_IDENTITY_LABEL`].
@@ -54,16 +51,27 @@ pub const BLE_BOND_OFFSET: u32 = 0x0061_6000;
 /// BLE bond-store partition length: exactly two 4 KiB erase sectors.
 pub const BLE_BOND_LEN: u32 = 0x0000_2000;
 
-/// Reserved future configuration partition label.
+/// Raw-NOR product configuration arena label.
 pub const DEVICE_CONFIG_LABEL: &str = "device_config";
 /// Padded partition-table bytes for [`DEVICE_CONFIG_LABEL`].
 pub const DEVICE_CONFIG_LABEL_BYTES: [u8; 16] = [
     b'd', b'e', b'v', b'i', b'c', b'e', b'_', b'c', b'o', b'n', b'f', b'i', b'g', 0, 0, 0,
 ];
-/// Reserved future configuration partition absolute flash offset.
+/// Product configuration arena absolute flash offset.
 pub const DEVICE_CONFIG_OFFSET: u32 = 0x0061_8000;
-/// Reserved future configuration partition length.
+/// Product configuration arena length.
 pub const DEVICE_CONFIG_LEN: u32 = 0x0001_8000;
+/// Network configuration store absolute flash offset.
+///
+/// The first physical format owns exactly the first two erase sectors in the
+/// larger product configuration arena.
+pub const NETWORK_CONFIG_OFFSET: u32 = DEVICE_CONFIG_OFFSET;
+/// Network configuration store length: exactly two 4 KiB erase sectors.
+pub const NETWORK_CONFIG_LEN: u32 = 0x0000_2000;
+/// Durable LXMF mailbox collection-watermark offset within the configuration arena.
+pub const LXMF_MAILBOX_STATE_OFFSET: u32 = DEVICE_CONFIG_OFFSET + NETWORK_CONFIG_LEN;
+/// Mailbox collection-watermark length: exactly two 4 KiB erase sectors.
+pub const LXMF_MAILBOX_STATE_LEN: u32 = 0x0000_2000;
 
 /// Durable submission-journal partition label.
 pub const NODE_JOURNAL_LABEL: &str = "node_journal";
@@ -106,6 +114,15 @@ const _: () = assert!(API_CREDENTIALS_OFFSET + API_CREDENTIALS_LEN == BLE_BOND_O
 const _: () = assert!(BLE_BOND_OFFSET.is_multiple_of(0x1000));
 const _: () = assert!(BLE_BOND_LEN == 2 * 0x1000);
 const _: () = assert!(BLE_BOND_OFFSET + BLE_BOND_LEN == DEVICE_CONFIG_OFFSET);
+const _: () = assert!(NETWORK_CONFIG_OFFSET == DEVICE_CONFIG_OFFSET);
+const _: () = assert!(NETWORK_CONFIG_LEN == 2 * 0x1000);
+const _: () =
+    assert!(NETWORK_CONFIG_OFFSET + NETWORK_CONFIG_LEN <= DEVICE_CONFIG_OFFSET + DEVICE_CONFIG_LEN);
+const _: () = assert!(LXMF_MAILBOX_STATE_OFFSET == NETWORK_CONFIG_OFFSET + NETWORK_CONFIG_LEN);
+const _: () = assert!(LXMF_MAILBOX_STATE_LEN == 2 * 0x1000);
+const _: () = assert!(
+    LXMF_MAILBOX_STATE_OFFSET + LXMF_MAILBOX_STATE_LEN <= DEVICE_CONFIG_OFFSET + DEVICE_CONFIG_LEN
+);
 const _: () = assert!(DEVICE_CONFIG_OFFSET + DEVICE_CONFIG_LEN == NODE_JOURNAL_OFFSET);
 const _: () = assert!(NODE_JOURNAL_OFFSET + NODE_JOURNAL_LEN == MESSAGE_STORE_OFFSET);
 const _: () = assert!(MESSAGE_STORE_OFFSET.is_multiple_of(0x1000));

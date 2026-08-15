@@ -1,13 +1,20 @@
 //! Product profile for the first permanent E290 node image.
 
-use reticulum_board_heltec_vision_master_e290_radio::E290_NA915_DEV_PROFILE;
+use core::num::NonZeroU64;
+
+use reticulum_board_heltec_vision_master_e290_radio::{
+    E290_NA915_DEV_CONFIGURATION, E290_NA915_DEV_PROFILE, E290RadioConfiguration,
+};
+#[cfg(feature = "wifi-tcp-proof")]
+use reticulum_interface_router::InterfaceTopology;
 use reticulum_interface_router::{
-    AdvertisedBitrate, InterfaceConfigId, InterfaceCost, InterfaceProperties, LogicalMtu,
+    AdvertisedBitrate, AnnouncePropagationMode, InterfaceConfigId, InterfaceCost,
+    InterfaceProperties, LogicalMtu,
 };
 use reticulum_node_core::{
     MonotonicMillis, OrdinaryActionAdmissionError, TxCompletionCode, TxLeaseDeadline,
 };
-use reticulum_radio_interface::LogicalPacketAccessConfig;
+use reticulum_radio_interface::{LabRxProfile, LogicalPacketAccessConfig};
 use reticulum_radio_tx_dispatch::{RadioTxCompletionCodes, RadioTxDispatcherConfig};
 use reticulum_tx_supervisor::{
     DataPermitServerStep, DataRouterConfig, DataRouterStep, NodeInterfaceOrdinaryOfferError,
@@ -34,11 +41,20 @@ pub const RNS_LXMF_DELIVERY_ASPECTS: [&str; 1] = ["delivery"];
 pub const LXMF_DELIVERY_ANNOUNCE_APP_DATA: [u8; 4] = [0x93, 0xc0, 0xc0, 0x90];
 
 /// Fixed native path-table capacity.
-pub const PATHS: usize = 16;
+///
+/// The production E290 supervisor is allocated in external PSRAM. Keep enough
+/// retained routes for several local LoRa peers plus the announce traffic seen
+/// through an enabled public TCP border interface; the earlier 16-entry proof
+/// profile churned useful local paths under that normal appliance workload.
+pub const PATHS: usize = 64;
 /// Pending local announce capacity.
 pub const ANNOUNCES: usize = 4;
 /// Native packet deduplication capacity.
-pub const DEDUPLICATION: usize = 32;
+///
+/// Retain two packet hashes per path so a four-node shared LoRa mesh and a
+/// public TCP interface cannot immediately evict the duplicate evidence needed
+/// to suppress delayed shared-medium copies.
+pub const DEDUPLICATION: usize = 128;
 /// Fixed Rete link-state capacity.
 pub const LINKS: usize = 4;
 /// Statically owned destination-DATA packet buffers.
@@ -97,8 +113,12 @@ const _: () = assert!(
 );
 const _: () = assert!(LXMF_INDEX_SLOTS == 512);
 const _: () = assert!(LXMF_INDEX_STORAGE_BYTES > 0);
-/// Concrete interface actors in the first LoRa-only executable profile.
+/// Concrete interface actors in the ordinary and station-only profiles.
+#[cfg(not(feature = "wifi-tcp-proof"))]
 pub const INTERFACE_SLOTS: usize = 1;
+/// Concrete LoRa and outbound TCP actors in the border-node profile.
+#[cfg(feature = "wifi-tcp-proof")]
+pub const INTERFACE_SLOTS: usize = 2;
 /// Jobs, completions and ingress buffers available per concrete actor.
 pub const INTERFACE_QUEUE_DEPTH: usize = 2;
 
@@ -122,11 +142,11 @@ pub const DURABLE_RUNTIME_BYTES: usize = core::mem::size_of::<
 >();
 // Keep both reviewed layouts explicit so an otherwise source-compatible field
 // or alignment change cannot silently consume target PSRAM or host-test RAM.
-// Xtensa's 32-bit field layout is 24 bytes smaller than the 64-bit host layout.
+// Xtensa's 32-bit field layout is 32 bytes smaller than the 64-bit host layout.
 #[cfg(target_arch = "xtensa")]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_368;
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 396_560;
 #[cfg(not(target_arch = "xtensa"))]
-const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 389_392;
+const REVIEWED_DURABLE_RUNTIME_BYTES: usize = 396_592;
 const _: [(); REVIEWED_DURABLE_RUNTIME_BYTES] = [(); DURABLE_RUNTIME_BYTES];
 /// Guard against silently growing the PSRAM-backed runtime and its independent
 /// journal-replay scratch index.
@@ -148,10 +168,12 @@ pub const LORA_INTERFACE_CONFIG_ID: InterfaceConfigId = InterfaceConfigId::new(0
 /// Initial relative route cost for LoRa.
 pub const LORA_INTERFACE_COST: InterfaceCost = InterfaceCost::new(10);
 /// Nominal SF7/BW125/CR4/5 PHY bitrate advertised for diagnostics.
-pub const LORA_ADVERTISED_BITRATE: AdvertisedBitrate = match AdvertisedBitrate::try_new(5_468) {
-    Ok(value) => value,
-    Err(_) => panic!("the E290 advertised bitrate must be non-zero"),
-};
+pub const LORA_ADVERTISED_BITRATE: AdvertisedBitrate =
+    lora_advertised_bitrate(E290_NA915_DEV_PROFILE);
+/// Immutable product configuration identity for the first outbound TCP peer.
+pub const TCP_INTERFACE_CONFIG_ID: InterfaceConfigId = InterfaceConfigId::new(0xe290_0002);
+/// Initial relative route cost for a reachable IP peer.
+pub const TCP_INTERFACE_COST: InterfaceCost = InterfaceCost::new(1);
 
 /// Reclaimed internal SRAM assigned to a BLE-capable global allocator.
 ///
@@ -171,6 +193,19 @@ pub const LORA_ADVERTISED_BITRATE: AdvertisedBitrate = match AdvertisedBitrate::
 /// heap qualification rather than treating 72 KiB as a general BLE guarantee.
 #[cfg(feature = "ble-api-proof")]
 pub const INTERNAL_HEAP_BYTES: usize = 72 * 1024;
+/// Additional ordinary DRAM reserved when Wi-Fi and BLE coexist.
+///
+/// The upstream esp-radio coexistence example provisions 128 KiB of internal
+/// heap. The product's reclaimed DRAM2 region is capped at 72 KiB, so this
+/// second region brings the combined Wi-Fi/BLE allocator to 120 KiB while the
+/// linked startup-stack audit still retains a large policy margin. Wi-Fi's
+/// driver callbacks and dynamic RX buffers require strict internal memory;
+/// PSRAM cannot substitute for this region.
+#[cfg(feature = "wifi-station-proof")]
+pub const WIFI_INTERNAL_HEAP_BYTES: usize = 48 * 1024;
+/// Ordinary internal-heap supplement is absent outside the station profile.
+#[cfg(not(feature = "wifi-station-proof"))]
+pub const WIFI_INTERNAL_HEAP_BYTES: usize = 0;
 /// Reclaimed internal SRAM assigned to the ordinary and Wi-Fi allocators.
 ///
 /// These profiles retain their measured 64 KiB reservation. BLE alone claims
@@ -196,49 +231,152 @@ pub const RX_SCHEDULER_YIELD_US: u64 = 253_952;
 
 /// Driver/executor allowance after receive progress before a false-preamble rearm.
 pub const RX_PROGRESS_TIMEOUT_MARGIN_US: u64 = 100_000;
-/// Recoverable deadline from first-polled receive progress to a terminal frame IRQ.
-///
-/// The maximum-frame airtime already includes the complete configured preamble,
-/// so starting this bound at the progress IRQ is conservative for every
-/// admissible 255-byte physical frame. Expiry rearms continuous RX; it does not
-/// authorize TX or fail-stop the actor.
-pub const RX_PROGRESS_TIMEOUT_US: u64 = E290_NA915_DEV_PROFILE
-    .maximum_frame_time_on_air_us()
-    .saturating_add(RX_PROGRESS_TIMEOUT_MARGIN_US);
-
-/// Whole-operation CAD watchdog.
-///
-/// A single SF7/BW125 CAD is only a few symbols. Five hundred milliseconds
-/// deliberately leaves more than two orders of magnitude for SPI, IRQ and
-/// executor latency while remaining finite. Expiry is terminal cancellation,
-/// never a synthetic busy/clear result.
-pub const CAD_OPERATION_WATCHDOG_US: u64 = 500_000;
-
-/// Whole logical-packet TX watchdog, including both maximum-size RNode frames.
-///
-/// The fixed profile needs well under one second of RF time for two 255-byte
-/// frames. This 1.5-second development bound also covers preparation,
-/// inter-frame turnaround, IRQ processing and cleanup. Expiry invokes the
-/// dispatcher's explicit cancellation recovery and permanently fail-stops the
-/// LoRa actor, so it schedules no further radio operations.
-pub const TX_OPERATION_WATCHDOG_US: u64 = 1_500_000;
-/// Exact two-frame airtime ceiling for a 500-byte packet in this profile.
-pub const MAXIMUM_LOGICAL_PACKET_AIRTIME_US: u64 =
-    match E290_NA915_DEV_PROFILE.rnode_packet_airtime(500) {
-        Ok(airtime) => airtime.aggregate_time_on_air_us(),
-        Err(_) => panic!("the fixed E290 profile must represent a base-MTU packet"),
-    };
 /// Bounded dispatcher/driver setup before first predicted RF.
 pub const TX_PRE_FIRST_RF_SETUP_US: u64 = 50_000;
 /// Bounded non-RF gap between split packet frames.
 pub const TX_INTER_FRAME_TURNAROUND_US: u64 = 25_000;
 /// IRQ, SPI cleanup and scheduler latency allowance inside the watchdog.
 pub const TX_DRIVER_AND_SCHEDULER_MARGIN_US: u64 = 500_000;
+/// Additional outer-watchdog headroom beyond the named TX operation bounds.
+pub const TX_OPERATION_WATCHDOG_HEADROOM_US: u64 = 100_000;
+/// SX1262 CAD symbol count pinned by the current `lora-phy` driver.
+pub const CAD_SYMBOLS: u64 = 8;
+/// SPI, IRQ cleanup and executor allowance after CAD symbol time.
+pub const CAD_DRIVER_AND_SCHEDULER_MARGIN_US: u64 = 250_000;
+/// Compatibility floor for the proven SF7/BW125 whole-CAD watchdog.
+pub const CAD_OPERATION_WATCHDOG_MINIMUM_US: u64 = 500_000;
+/// Compatibility floor for the proven SF7/BW125 whole-packet TX watchdog.
+pub const TX_OPERATION_WATCHDOG_MINIMUM_US: u64 = 1_500_000;
+
+/// Complete profile-derived timing values consumed by the permanent LoRa task.
+///
+/// Construction is tied to the same board configuration used to initialize the
+/// dispatcher. This prevents a selectable slow profile from inheriting SF7
+/// receive, CAD, fragmentation or transmit deadlines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RadioTaskTiming {
+    fragment_timeout_us: NonZeroU64,
+    receive_operation_watchdog_us: NonZeroU64,
+    rx_scheduler_yield_us: u64,
+    rx_progress_timeout_us: u64,
+    cad_operation_watchdog_us: u64,
+    tx_operation_watchdog_us: u64,
+    maximum_logical_packet_airtime_us: u64,
+    maximum_tx_operation_required_us: u64,
+}
+
+impl RadioTaskTiming {
+    /// Derive all LoRa actor timing from one board-validated configuration.
+    pub const fn for_configuration(configuration: E290RadioConfiguration) -> Self {
+        let profile = configuration.profile();
+        let fragment_timeout_us = nonzero_timing(profile.fragment_timeout_us());
+        let rx_progress_timeout_us = profile
+            .maximum_frame_time_on_air_us()
+            .saturating_add(RX_PROGRESS_TIMEOUT_MARGIN_US);
+        let cad_required_us = profile
+            .symbol_time_us_ceil()
+            .saturating_mul(CAD_SYMBOLS)
+            .saturating_add(CAD_DRIVER_AND_SCHEDULER_MARGIN_US);
+        let cad_operation_watchdog_us = if cad_required_us > CAD_OPERATION_WATCHDOG_MINIMUM_US {
+            cad_required_us
+        } else {
+            CAD_OPERATION_WATCHDOG_MINIMUM_US
+        };
+        let maximum_logical_packet_airtime_us = match profile.rnode_packet_airtime(500) {
+            Ok(airtime) => airtime.aggregate_time_on_air_us(),
+            Err(_) => u64::MAX,
+        };
+        let maximum_tx_operation_required_us = maximum_logical_packet_airtime_us
+            .saturating_add(TX_PRE_FIRST_RF_SETUP_US)
+            .saturating_add(TX_INTER_FRAME_TURNAROUND_US)
+            .saturating_add(TX_DRIVER_AND_SCHEDULER_MARGIN_US);
+        let profile_tx_watchdog_us =
+            maximum_tx_operation_required_us.saturating_add(TX_OPERATION_WATCHDOG_HEADROOM_US);
+        let tx_operation_watchdog_us = if profile_tx_watchdog_us > TX_OPERATION_WATCHDOG_MINIMUM_US
+        {
+            profile_tx_watchdog_us
+        } else {
+            TX_OPERATION_WATCHDOG_MINIMUM_US
+        };
+
+        Self {
+            fragment_timeout_us,
+            receive_operation_watchdog_us: configuration.maximum_receive_operation_us(),
+            rx_scheduler_yield_us: RX_SCHEDULER_YIELD_US,
+            rx_progress_timeout_us,
+            cad_operation_watchdog_us,
+            tx_operation_watchdog_us,
+            maximum_logical_packet_airtime_us,
+            maximum_tx_operation_required_us,
+        }
+    }
+
+    /// Deadline for a matching second physical RNode frame.
+    pub const fn fragment_timeout_us(self) -> NonZeroU64 {
+        self.fragment_timeout_us
+    }
+
+    /// Destructive whole-receive-operation watchdog.
+    pub const fn receive_operation_watchdog_us(self) -> NonZeroU64 {
+        self.receive_operation_watchdog_us
+    }
+
+    /// Software-only continuous-RX fairness yield.
+    pub const fn rx_scheduler_yield_us(self) -> u64 {
+        self.rx_scheduler_yield_us
+    }
+
+    /// Recoverable deadline after receive progress is first observed.
+    pub const fn rx_progress_timeout_us(self) -> u64 {
+        self.rx_progress_timeout_us
+    }
+
+    /// Destructive whole-CAD-operation watchdog.
+    pub const fn cad_operation_watchdog_us(self) -> u64 {
+        self.cad_operation_watchdog_us
+    }
+
+    /// Destructive whole-logical-packet TX watchdog.
+    pub const fn tx_operation_watchdog_us(self) -> u64 {
+        self.tx_operation_watchdog_us
+    }
+
+    /// Exact two-frame airtime ceiling for one 500-byte logical packet.
+    pub const fn maximum_logical_packet_airtime_us(self) -> u64 {
+        self.maximum_logical_packet_airtime_us
+    }
+
+    /// Named airtime, setup, turnaround, driver and scheduler TX coverage.
+    pub const fn maximum_tx_operation_required_us(self) -> u64 {
+        self.maximum_tx_operation_required_us
+    }
+}
+
+const fn nonzero_timing(value: u64) -> NonZeroU64 {
+    match NonZeroU64::new(value) {
+        Some(value) => value,
+        None => panic!("validated radio timing must be non-zero"),
+    }
+}
+
+/// Complete timing for the compatibility/default E290 configuration.
+pub const E290_NA915_DEV_RADIO_TASK_TIMING: RadioTaskTiming =
+    RadioTaskTiming::for_configuration(E290_NA915_DEV_CONFIGURATION);
+
+/// Recoverable progress deadline for the compatibility/default profile.
+pub const RX_PROGRESS_TIMEOUT_US: u64 = E290_NA915_DEV_RADIO_TASK_TIMING.rx_progress_timeout_us();
+/// Whole-CAD watchdog for the compatibility/default profile.
+pub const CAD_OPERATION_WATCHDOG_US: u64 =
+    E290_NA915_DEV_RADIO_TASK_TIMING.cad_operation_watchdog_us();
+/// Whole-packet TX watchdog for the compatibility/default profile.
+pub const TX_OPERATION_WATCHDOG_US: u64 =
+    E290_NA915_DEV_RADIO_TASK_TIMING.tx_operation_watchdog_us();
+/// Exact 500-byte logical-packet airtime for the compatibility/default profile.
+pub const MAXIMUM_LOGICAL_PACKET_AIRTIME_US: u64 =
+    E290_NA915_DEV_RADIO_TASK_TIMING.maximum_logical_packet_airtime_us();
 /// Minimum justified whole-operation TX watchdog coverage.
-pub const MAXIMUM_TX_OPERATION_REQUIRED_US: u64 = MAXIMUM_LOGICAL_PACKET_AIRTIME_US
-    .saturating_add(TX_PRE_FIRST_RF_SETUP_US)
-    .saturating_add(TX_INTER_FRAME_TURNAROUND_US)
-    .saturating_add(TX_DRIVER_AND_SCHEDULER_MARGIN_US);
+pub const MAXIMUM_TX_OPERATION_REQUIRED_US: u64 =
+    E290_NA915_DEV_RADIO_TASK_TIMING.maximum_tx_operation_required_us();
 
 const _: () = assert!(TX_OPERATION_WATCHDOG_US >= MAXIMUM_TX_OPERATION_REQUIRED_US);
 
@@ -247,8 +385,8 @@ pub const NODE_POLL_INTERVAL_MS: u64 = 1;
 /// Fair synchronous lane passes before the node task yields.
 pub const NODE_MAX_IMMEDIATE_PASSES: usize = 16;
 /// Fair node-task lanes: ingress, supervisor, maintenance, announce,
-/// authenticated local API, outbound Nomad, and storage.
-pub const NODE_FAIR_LANES: u8 = 7;
+/// authenticated local API, outbound Nomad, volatile proof probe, and storage.
+pub const NODE_FAIR_LANES: u8 = 8;
 
 /// Apply one already-armed reservation for an admitted Nomad fetch.
 ///
@@ -346,6 +484,16 @@ pub const ORDINARY_OWNER_LEASE_MS: u64 = 30_000;
 pub const SUBMISSION_OWNER_LEASE_MS: u64 = 30_000;
 /// Delay before retrying an ambiguous or temporarily busy journal operation.
 pub const STORAGE_RETRY_BACKOFF_MS: u64 = 1_000;
+/// First periodic retry for an LXMF event awaiting an admission dependency.
+pub const LXMF_ADMISSION_RETRY_INITIAL_MS: u64 = 5_000;
+/// Hard upper bound for one admission-deferred retry interval, including jitter.
+pub const LXMF_ADMISSION_RETRY_MAX_MS: u64 = 5 * 60 * 1_000;
+const _: () = assert!(LXMF_ADMISSION_RETRY_INITIAL_MS > STORAGE_RETRY_BACKOFF_MS);
+const _: () = assert!(LXMF_ADMISSION_RETRY_MAX_MS >= LXMF_ADMISSION_RETRY_INITIAL_MS);
+const _: () = assert!(
+    LXMF_ADMISSION_RETRY_MAX_MS - LXMF_ADMISSION_RETRY_MAX_MS / 5
+        >= LXMF_ADMISSION_RETRY_INITIAL_MS
+);
 /// Product-selected maximum normalized opportunistic LXMF wire length.
 pub const LXMF_MAX_WIRE_BYTES: usize = 4_096;
 /// Product-selected maximum bytes in one LXMF MessagePack scalar value.
@@ -373,6 +521,30 @@ pub enum RejectedActionDisposition {
     RefreshDeadline,
     /// A semantic packet/profile error is not retryable in this milestone.
     FailStop,
+}
+
+/// Whether an ordinary input-envelope transition can own the pending
+/// path-discovery protocol correlation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingPathProtocolDisposition {
+    /// The path packet has not staged yet, so the current input envelope owns
+    /// its still-undispatched protocol correlation.
+    TransferAwaitingStage,
+    /// The exact path packet has staged and remains independently in flight;
+    /// a later input-envelope transition belongs to other ordinary work.
+    RetainInFlight,
+}
+
+/// Preserve a staged exact path owner across rejected or terminal unrelated
+/// ordinary input-envelope transitions.
+pub fn pending_path_protocol_disposition<T>(
+    staged_token: Option<T>,
+) -> PendingPathProtocolDisposition {
+    if staged_token.is_some() {
+        PendingPathProtocolDisposition::RetainInFlight
+    } else {
+        PendingPathProtocolDisposition::TransferAwaitingStage
+    }
 }
 
 /// Product handling for a terminal ingress action or correlation result
@@ -471,6 +643,56 @@ pub enum ProtocolDispatchConfirmationDisposition {
     TerminalFailClosedDrain,
 }
 
+/// Relationship between one observed ordinary packet generation and the exact
+/// packet generation retained by a product protocol operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactPacketCorrelation {
+    /// No exact generation has been observed yet; capture this first token.
+    Capture,
+    /// The observation belongs to the retained exact packet generation.
+    Exact,
+    /// The observation belongs to independent ordinary work in another slot or
+    /// reuse generation.
+    Unrelated,
+}
+
+/// Correlate an ordinary-router observation without treating legal concurrent
+/// packet generations as corruption of the retained protocol operation.
+pub fn exact_packet_correlation<T: Eq>(expected: Option<T>, observed: T) -> ExactPacketCorrelation {
+    match expected {
+        None => ExactPacketCorrelation::Capture,
+        Some(expected) if expected == observed => ExactPacketCorrelation::Exact,
+        Some(_) => ExactPacketCorrelation::Unrelated,
+    }
+}
+
+/// Relationship between a routed or completed ordinary packet and an exact
+/// protocol packet whose staging token may not have been observed yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetainedPacketCorrelation {
+    /// The observation belongs to the retained exact packet generation.
+    Exact,
+    /// The observation predates exact-token capture or belongs to another live
+    /// ordinary packet generation.
+    Unrelated,
+}
+
+/// Correlate a routed or completed packet with an already captured exact token.
+///
+/// Before the exact packet's `PacketStaged` transition, every routed or
+/// completed generation is necessarily unrelated: the exact packet cannot
+/// reach either transition before the coordinator reports staging it.
+pub fn retained_packet_correlation<T: Eq>(
+    expected: Option<T>,
+    observed: T,
+) -> RetainedPacketCorrelation {
+    if expected.is_some_and(|expected| expected == observed) {
+        RetainedPacketCorrelation::Exact
+    } else {
+        RetainedPacketCorrelation::Unrelated
+    }
+}
+
 /// Distinguish expected fan-out idempotence from a rejected first dispatch.
 pub const fn protocol_dispatch_confirmation_disposition(
     first_dispatch: bool,
@@ -527,17 +749,65 @@ pub const fn rejected_action_disposition(
     }
 }
 
+/// Calculate the nominal coded LoRa bitrate for one validated profile.
+///
+/// The integer result is `BW * SF * 4 / CR / 2^SF`, rounded down to match the
+/// previous SF7/BW125 value. The one-bit floor preserves the registry's
+/// nonzero contract for any future extremely slow validated profile.
+pub const fn lora_advertised_bitrate(profile: LabRxProfile) -> AdvertisedBitrate {
+    let spreading_factor = profile.spreading_factor().factor();
+    let symbols_per_chirp = match 1_u64.checked_shl(spreading_factor) {
+        Some(symbols) => symbols,
+        None => u64::MAX,
+    };
+    let denominator = symbols_per_chirp.saturating_mul(profile.coding_rate().denom() as u64);
+    let numerator = (profile.bandwidth().hz() as u64)
+        .saturating_mul(spreading_factor as u64)
+        .saturating_mul(4);
+    let calculated = match numerator.checked_div(denominator) {
+        Some(calculated) => calculated,
+        None => 0,
+    };
+    let nonzero = if calculated == 0 { 1 } else { calculated };
+    let bounded = if nonzero > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        nonzero as u32
+    };
+    match AdvertisedBitrate::try_new(bounded) {
+        Ok(bitrate) => bitrate,
+        Err(_) => panic!("the profile-derived LoRa bitrate must be non-zero"),
+    }
+}
+
 /// Construct the immutable registry properties for LoRa slot zero.
-pub const fn interface_properties() -> InterfaceProperties {
+pub const fn interface_properties(profile: LabRxProfile) -> InterfaceProperties {
     InterfaceProperties::new(
         match LogicalMtu::try_new(500) {
             Ok(mtu) => mtu,
             Err(_) => panic!("the base Reticulum MTU must be non-zero"),
         },
         LORA_INTERFACE_CONFIG_ID,
-        Some(LORA_ADVERTISED_BITRATE),
+        Some(lora_advertised_bitrate(profile)),
         LORA_INTERFACE_COST,
     )
+    .with_announce_mode(AnnouncePropagationMode::Internal)
+}
+
+/// Construct immutable registry properties for outbound TCP slot one.
+#[cfg(feature = "wifi-tcp-proof")]
+pub const fn tcp_interface_properties() -> InterfaceProperties {
+    InterfaceProperties::new(
+        match LogicalMtu::try_new(500) {
+            Ok(mtu) => mtu,
+            Err(_) => panic!("the base Reticulum MTU must be non-zero"),
+        },
+        TCP_INTERFACE_CONFIG_ID,
+        None,
+        TCP_INTERFACE_COST,
+    )
+    .with_topology(InterfaceTopology::PointToPoint)
+    .with_announce_mode(AnnouncePropagationMode::Boundary)
 }
 
 /// Product diagnostic completion codes for the DATA coordinator.
@@ -589,16 +859,22 @@ pub const fn submission_storage_step_admitted(
         && (!ordinary_control_step_pending || (ordinary_owners_quiescent && !fail_closed_draining))
 }
 
-/// Validated RNode-compatible randomized backoff and CAD policy.
+/// Validated profile-aware RNode-compatible randomized backoff and CAD policy.
 ///
 /// The continuous random interval preserves the reference 24 ms minimum slot
-/// and complete 15-slot contention envelope. Busy exhaustion rejects without
-/// a permit; it never forces a transmission.
-pub const fn logical_packet_access() -> LogicalPacketAccessConfig {
-    match LogicalPacketAccessConfig::try_new(
+/// and complete 15-slot contention envelope before initial CAD. After a busy
+/// observation, one maximum physical-frame interval is added before that same
+/// randomized envelope. A contender therefore cannot consume all of its CAD
+/// retries while the frame that made the channel busy is still on air. Busy
+/// exhaustion still rejects without a permit; it never forces transmission.
+pub const fn logical_packet_access(
+    configuration: E290RadioConfiguration,
+) -> LogicalPacketAccessConfig {
+    match LogicalPacketAccessConfig::try_new_with_busy_retry_holdoff(
         3,       // initial CAD plus two bounded busy retries
         24_000,  // one reference RNode contention slot
         360_000, // full 15-slot contention envelope, including the first slot
+        configuration.profile().maximum_frame_time_on_air_us(),
         250_000, // clear CAD must remain fresh through permit and setup
         TX_PRE_FIRST_RF_SETUP_US,
         TX_INTER_FRAME_TURNAROUND_US,
@@ -610,10 +886,10 @@ pub const fn logical_packet_access() -> LogicalPacketAccessConfig {
 }
 
 /// Complete immutable sole-radio dispatcher policy.
-pub const fn dispatcher_config() -> RadioTxDispatcherConfig {
+pub const fn dispatcher_config(configuration: E290RadioConfiguration) -> RadioTxDispatcherConfig {
     RadioTxDispatcherConfig::new(
         LORA_INTERFACE_CONFIG_ID,
-        logical_packet_access(),
+        logical_packet_access(configuration),
         1_000_000,
         0,
         RadioTxCompletionCodes::new(
@@ -635,11 +911,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn psram_product_retains_border_mesh_scale_routing_state() {
+        assert_eq!(PATHS, 64);
+        assert_eq!(DEDUPLICATION, 128);
+        assert!(DEDUPLICATION >= PATHS * 2);
+    }
+
+    #[test]
     #[cfg(feature = "ble-api-proof")]
     fn internal_heap_uses_the_bounded_esp32s3_reclaimed_dram2_capacity() {
         assert_eq!(INTERNAL_HEAP_BYTES, 72 * 1024);
         assert!(INTERNAL_HEAP_BYTES <= 73_744);
         assert_eq!(73_744 - INTERNAL_HEAP_BYTES, 16);
+    }
+
+    #[test]
+    #[cfg(feature = "wifi-station-proof")]
+    fn coexistence_profile_adds_ordinary_internal_heap_for_wifi_rx() {
+        assert_eq!(WIFI_INTERNAL_HEAP_BYTES, 48 * 1024);
+        assert_eq!(INTERNAL_HEAP_BYTES + WIFI_INTERNAL_HEAP_BYTES, 120 * 1024);
     }
 
     #[test]
@@ -654,21 +944,81 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wifi-tcp-proof")]
+    fn border_interfaces_distinguish_shared_lora_from_point_to_point_tcp() {
+        assert_eq!(
+            interface_properties(E290_NA915_DEV_PROFILE).topology(),
+            InterfaceTopology::SharedMedium
+        );
+        assert_eq!(
+            tcp_interface_properties().topology(),
+            InterfaceTopology::PointToPoint
+        );
+        assert_eq!(
+            interface_properties(E290_NA915_DEV_PROFILE).announce_mode(),
+            AnnouncePropagationMode::Internal
+        );
+        assert_eq!(
+            tcp_interface_properties().announce_mode(),
+            AnnouncePropagationMode::Boundary
+        );
+    }
+
+    #[test]
+    fn advertised_lora_bitrate_tracks_the_selected_modulation() {
+        use reticulum_board_heltec_vision_master_e290_radio::{
+            E290Na915TxPower, E290RadioConfiguration,
+        };
+
+        assert_eq!(LORA_ADVERTISED_BITRATE.get(), 5_468);
+        assert_eq!(
+            interface_properties(E290_NA915_DEV_PROFILE)
+                .advertised_bitrate()
+                .map(AdvertisedBitrate::get),
+            Some(5_468)
+        );
+
+        let slow = E290RadioConfiguration::try_from_profile(
+            915_000_000,
+            125_000,
+            12,
+            8,
+            E290Na915TxPower::Dbm14,
+        )
+        .unwrap();
+        assert_eq!(lora_advertised_bitrate(slow.profile()).get(), 183);
+        assert_eq!(
+            interface_properties(slow.profile())
+                .advertised_bitrate()
+                .map(AdvertisedBitrate::get),
+            Some(183)
+        );
+    }
+
+    #[test]
     fn usb_usable_profile_owns_128_bounded_submissions_in_psram() {
         assert_eq!(DURABLE_SUBMISSIONS, 128);
         assert_eq!(DURABLE_PROJECTED_SUBMISSIONS, 128);
         assert_eq!(DURABLE_ACCEPTED_SUBMISSION_LIMIT, 128);
-        assert_eq!(DURABLE_RUNTIME_BYTES, 389_392);
+        assert_eq!(DURABLE_RUNTIME_BYTES, 396_592);
         assert_eq!(MAXIMUM_DURABLE_RUNTIME_BYTES, 512 * 1024);
         const { assert!(DURABLE_ACCEPTED_SUBMISSION_LIMIT <= DURABLE_SUBMISSIONS) };
     }
 
     #[test]
     fn channel_access_preserves_the_reference_rnode_contention_envelope() {
-        let access = logical_packet_access();
+        let access = logical_packet_access(E290_NA915_DEV_CONFIGURATION);
         assert_eq!(access.maximum_cad_attempts(), 3);
         assert_eq!(access.minimum_backoff_us(), 24_000);
         assert_eq!(access.maximum_backoff_us(), 360_000);
+        assert_eq!(
+            access.busy_retry_holdoff_us(),
+            E290_NA915_DEV_PROFILE.maximum_frame_time_on_air_us()
+        );
+        assert!(
+            access.minimum_busy_retry_interval_us()
+                > E290_NA915_DEV_PROFILE.maximum_frame_time_on_air_us()
+        );
         assert_eq!(access.maximum_pre_first_rf_setup_us(), 50_000);
         assert_eq!(access.maximum_inter_frame_turnaround_us(), 25_000);
     }
@@ -693,6 +1043,104 @@ mod tests {
     fn tx_watchdog_covers_exact_maximum_airtime_and_named_margins() {
         assert_eq!(MAXIMUM_LOGICAL_PACKET_AIRTIME_US, 821_760);
         assert_eq!(MAXIMUM_TX_OPERATION_REQUIRED_US, 1_396_760);
+    }
+
+    #[test]
+    fn slow_profile_scales_every_airtime_sensitive_actor_deadline() {
+        use reticulum_board_heltec_vision_master_e290_radio::{
+            E290Na915TxPower, E290RadioConfiguration,
+        };
+
+        let slow_configuration = E290RadioConfiguration::try_from_profile(
+            915_000_000,
+            125_000,
+            12,
+            8,
+            E290Na915TxPower::Dbm22,
+        )
+        .unwrap();
+        let slow = RadioTaskTiming::for_configuration(slow_configuration);
+        assert!(
+            slow.fragment_timeout_us() > E290_NA915_DEV_RADIO_TASK_TIMING.fragment_timeout_us()
+        );
+        assert!(
+            slow.receive_operation_watchdog_us()
+                > E290_NA915_DEV_RADIO_TASK_TIMING.receive_operation_watchdog_us()
+        );
+        assert!(slow.rx_progress_timeout_us() > RX_PROGRESS_TIMEOUT_US);
+        assert!(slow.cad_operation_watchdog_us() > CAD_OPERATION_WATCHDOG_US);
+        assert!(slow.tx_operation_watchdog_us() > TX_OPERATION_WATCHDOG_US);
+        assert!(slow.maximum_logical_packet_airtime_us() > MAXIMUM_LOGICAL_PACKET_AIRTIME_US);
+    }
+
+    #[test]
+    fn every_board_admitted_modulation_receives_conservative_runtime_timing() {
+        use reticulum_board_heltec_vision_master_e290_radio::{
+            E290Na915TxPower, E290RadioConfiguration,
+        };
+
+        let mut admitted = 0_u32;
+        for bandwidth_hz in [
+            7_810, 10_420, 15_630, 20_830, 31_250, 41_670, 62_500, 125_000, 250_000, 500_000,
+        ] {
+            for spreading_factor in 7..=12 {
+                for coding_rate_denominator in 5..=8 {
+                    let Ok(configuration) = E290RadioConfiguration::try_from_profile(
+                        915_000_000,
+                        bandwidth_hz,
+                        spreading_factor,
+                        coding_rate_denominator,
+                        E290Na915TxPower::Dbm14,
+                    ) else {
+                        continue;
+                    };
+                    admitted += 1;
+                    let profile = configuration.profile();
+                    let timing = RadioTaskTiming::for_configuration(configuration);
+                    let access = logical_packet_access(configuration);
+
+                    assert_eq!(
+                        timing.fragment_timeout_us().get(),
+                        profile.fragment_timeout_us()
+                    );
+                    assert!(
+                        timing.receive_operation_watchdog_us().get()
+                            >= profile
+                                .symbol_time_us_ceil()
+                                .saturating_mul(u64::from(configuration.rx_symbol_timeout()))
+                                .saturating_add(profile.maximum_frame_time_on_air_us())
+                                .saturating_add(
+                                    reticulum_board_heltec_vision_master_e290_radio::E290_RX_WATCHDOG_MINIMUM_MARGIN_US,
+                                )
+                    );
+                    assert!(
+                        timing.rx_progress_timeout_us() >= profile.maximum_frame_time_on_air_us()
+                    );
+                    assert!(
+                        timing.cad_operation_watchdog_us()
+                            >= profile
+                                .symbol_time_us_ceil()
+                                .saturating_mul(CAD_SYMBOLS)
+                                .saturating_add(CAD_DRIVER_AND_SCHEDULER_MARGIN_US)
+                    );
+                    assert!(
+                        timing.tx_operation_watchdog_us()
+                            >= timing
+                                .maximum_tx_operation_required_us()
+                                .saturating_add(TX_OPERATION_WATCHDOG_HEADROOM_US)
+                    );
+                    assert_eq!(
+                        access.busy_retry_holdoff_us(),
+                        profile.maximum_frame_time_on_air_us()
+                    );
+                    assert!(
+                        access.minimum_busy_retry_interval_us()
+                            > profile.maximum_frame_time_on_air_us()
+                    );
+                }
+            }
+        }
+        assert!(admitted > 0);
     }
 
     #[test]
@@ -917,6 +1365,89 @@ mod tests {
         assert_eq!(
             protocol_dispatch_confirmation_disposition(true, false),
             ProtocolDispatchConfirmationDisposition::TerminalFailClosedDrain
+        );
+    }
+
+    #[test]
+    fn exact_path_packet_ignores_other_generations_before_and_after_token_capture() {
+        let path = (0_u16, 6_u64);
+        let interleaved = (1_u16, 7_u64);
+        let mut expected = None;
+
+        assert_eq!(
+            retained_packet_correlation(expected, interleaved),
+            RetainedPacketCorrelation::Unrelated,
+            "a routed or completed packet before path staging cannot be the path packet",
+        );
+        assert_eq!(
+            exact_packet_correlation(expected, path),
+            ExactPacketCorrelation::Capture,
+        );
+        expected = Some(path);
+        assert_eq!(
+            retained_packet_correlation(expected, path),
+            RetainedPacketCorrelation::Exact,
+        );
+
+        assert_eq!(
+            exact_packet_correlation(expected, interleaved),
+            ExactPacketCorrelation::Unrelated,
+            "another packet may stage while the exact path packet is in an actor",
+        );
+        assert_eq!(
+            retained_packet_correlation(expected, interleaved),
+            RetainedPacketCorrelation::Unrelated,
+            "another packet may route and complete while the path completion remains pending",
+        );
+        assert_eq!(
+            retained_packet_correlation(expected, path),
+            RetainedPacketCorrelation::Exact,
+        );
+        assert_eq!(
+            exact_packet_correlation(expected, path),
+            ExactPacketCorrelation::Exact,
+            "only a duplicate stage of the exact captured generation is an invariant violation",
+        );
+    }
+
+    #[test]
+    fn rejected_unrelated_envelope_cannot_steal_a_staged_exact_path_owner() {
+        let path_token = (0_u16, 6_u64);
+
+        assert_eq!(
+            pending_path_protocol_disposition::<(u16, u64)>(None),
+            PendingPathProtocolDisposition::TransferAwaitingStage,
+            "a rejected path envelope still owns its correlation before staging",
+        );
+        assert_eq!(
+            pending_path_protocol_disposition(Some(path_token)),
+            PendingPathProtocolDisposition::RetainInFlight,
+            "after staging, a rejected envelope is unrelated to the exact path generation",
+        );
+        assert_eq!(
+            retained_packet_correlation(Some(path_token), path_token),
+            RetainedPacketCorrelation::Exact,
+            "retaining the correlation keeps the later exact path completion actionable",
+        );
+    }
+
+    #[test]
+    fn unrelated_terminal_input_fault_cannot_detach_a_staged_exact_path_owner() {
+        let path_token = (0_u16, 6_u64);
+
+        assert_eq!(
+            pending_path_protocol_disposition(Some(path_token)),
+            PendingPathProtocolDisposition::RetainInFlight,
+        );
+        assert_eq!(
+            pending_path_protocol_disposition::<(u16, u64)>(None),
+            PendingPathProtocolDisposition::TransferAwaitingStage,
+            "only the unstaged path input itself can own terminal input residue",
+        );
+        assert_eq!(
+            retained_packet_correlation(Some(path_token), path_token),
+            RetainedPacketCorrelation::Exact,
+            "retaining T leaves exact completion reconciliation live during fault drain",
         );
     }
 }

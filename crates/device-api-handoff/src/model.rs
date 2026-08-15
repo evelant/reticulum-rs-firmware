@@ -1,5 +1,9 @@
 //! Exact, fixed-capacity device-API owners and their correlation metadata.
 
+use core::mem;
+
+use zeroize::Zeroize;
+
 /// Maximum encoded request or reply size carried by the local API handoff.
 ///
 /// This is the logical API's authoritative message limit, rather than an
@@ -130,9 +134,26 @@ impl OwnedMessage {
         &self.buffer
     }
 
+    /// Erase the complete allocation, including retained framing scratch.
+    ///
+    /// This is normally invoked automatically by [`Drop`], but is public so a
+    /// fail-stop owner can erase sensitive request bytes before retaining its
+    /// routing and authorization metadata for diagnostics.
+    pub fn zeroize_contents(&mut self) {
+        self.buffer.zeroize();
+    }
+
     /// Recover the complete fixed buffer and validated encoded length.
-    pub fn into_parts(self) -> (MessageLength, [u8; MESSAGE_CAPACITY]) {
-        (self.length, self.buffer)
+    pub fn into_parts(mut self) -> (MessageLength, [u8; MESSAGE_CAPACITY]) {
+        let length = self.length;
+        let buffer = mem::replace(&mut self.buffer, [0; MESSAGE_CAPACITY]);
+        (length, buffer)
+    }
+}
+
+impl Drop for OwnedMessage {
+    fn drop(&mut self) {
+        self.zeroize_contents();
     }
 }
 

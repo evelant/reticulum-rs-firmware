@@ -16,12 +16,12 @@
 //! is a claim that the entire node is allocation free.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 extern crate alloc;
 
-use core::num::NonZeroU64;
+use core::{mem::MaybeUninit, num::NonZeroU64, ptr::addr_of_mut};
 
 use rand_core::{CryptoRng, RngCore};
 use reticulum_rns_rete::{
@@ -31,7 +31,9 @@ use reticulum_rns_rete::{
     DestinationType as RnsDestinationType, Direction as RnsDirection, EmbeddedNode as RnsNode,
     EmbeddedNodeConfig as RnsNodeConfig, Identity as RnsIdentity,
     InboundProofPolicy as RnsInboundProofPolicy,
-    InboundProofPolicyError as RnsInboundProofPolicyError, InterfaceId as RnsInterfaceId,
+    InboundProofPolicyError as RnsInboundProofPolicyError,
+    IngressObservation as RnsIngressObservation, IngressOrigin as RnsIngressOrigin,
+    IngressSignalObservation as RnsIngressSignalObservation, InterfaceId as RnsInterfaceId,
     LinkAdmissionError as RnsLinkAdmissionError, LinkId as RnsLinkId, LinkState as RnsLinkState,
     NodeRole as RnsNodeRole, PathRequestBuildError as RnsPathRequestBuildError,
     PrepareBasicLxmfError as RnsPrepareBasicLxmfError, PrepareDataError as RnsPrepareDataError,
@@ -41,12 +43,13 @@ use reticulum_rns_rete::{
     PrepareResponseError as RnsPrepareResponseError,
     PreparedBasicDirectLxmf as RnsPreparedBasicDirectLxmf,
     PreparedBasicLxmf as RnsPreparedBasicLxmf, PreparedData as RnsPreparedData,
-    PreparedLinkData as RnsPreparedLinkData, RNS_MTU, ReceiptCandidate, ReceiptKind,
-    ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
+    PreparedLinkData as RnsPreparedLinkData,
+    ProofProbeIdentityAliasError as RnsProofProbeIdentityAliasError, RNS_MTU, ReceiptCandidate,
+    ReceiptKind, ReceiptReservationUnavailable, ReceiptTerminal, ReceiptTerminalReservation,
     ReceiptTerminalSink, RequestDispatchConfirmation as RnsRequestDispatchConfirmation,
     RequestDispatchError as RnsRequestDispatchError,
     RequestDispatchReconciliation as RnsRequestDispatchReconciliation,
-    RequestHandle as RnsRequestHandle, TxTarget as RnsTxTarget,
+    RequestHandle as RnsRequestHandle, RouteSnapshot as RnsRouteSnapshot, TxTarget as RnsTxTarget,
 };
 pub use reticulum_rns_rete::{
     ApplicationEvent, ApplicationEventAcknowledgeFailure, ApplicationEventCapacitySnapshot,
@@ -60,9 +63,10 @@ pub use reticulum_rns_rete::{
     DelayedProofId, DelayedProofLease, DelayedProofOwner, DelayedProofOwnerCounters,
     DelayedProofReservationError, DelayedProofSequence, DelayedProofSlot, DelayedProofSlotId,
     DelayedProofTransaction, DelayedProofTransactionError, DelayedProofTransactionFailure,
-    InboundData, InboundDataProjection, IngressDisposition, IngressMetadata, IngressReport,
-    MonotonicInstant, NodeActions, OutboundDispatchInterval, OutboundProtocolToken, PacketType,
-    RetainedProofCommitSuccess, project_inbound_data,
+    EmbeddedNodeMetrics, InboundData, InboundDataProjection, IngressAnnounceEgress,
+    IngressBroadcastPolicy, IngressBroadcastScope, IngressDisposition, IngressMetadata,
+    IngressReport, LxmfMessageLocation, MonotonicInstant, NodeActions, OutboundDispatchInterval,
+    OutboundProtocolToken, PacketType, RetainedProofCommitSuccess, project_inbound_data,
 };
 use sha2::{Digest, Sha256};
 
@@ -73,15 +77,22 @@ pub use ordinary_actions::{
     OrdinaryActionOwnerClaimError, OrdinaryAuthorizationErrorKind, OrdinaryAuthorizationFailure,
     OrdinaryAuthorizedTx, OrdinaryAvailableBufferError, OrdinaryBufferPool,
     OrdinaryBufferPoolError, OrdinaryBufferRegistrationError, OrdinaryCompletionDisposition,
-    OrdinaryCompletionError, OrdinaryCompletionFailure, OrdinaryExpiredAuthorizedTx,
-    OrdinaryFrameError, OrdinaryPacketBuffer, OrdinaryPacketGeneration, OrdinaryPacketReturn,
-    OrdinaryPacketReturnParkFailure, OrdinaryPacketReturnReason, OrdinaryPacketSlotId,
-    OrdinaryPermitCancelMismatch, OrdinaryPermitPendingTx, OrdinaryPermitReplyMismatch,
-    OrdinaryPermitResolution, OrdinaryPreparedPacket, OrdinaryQuarantineReason,
-    OrdinaryRegisterAndParkError, OrdinaryRegisterAndParkFailure, OrdinaryTxCompletion,
+    OrdinaryCompletionError, OrdinaryCompletionFailure, OrdinaryDispatchToken,
+    OrdinaryExpiredAuthorizedTx, OrdinaryFrameError, OrdinaryPacketBuffer,
+    OrdinaryPacketGeneration, OrdinaryPacketReturn, OrdinaryPacketReturnParkFailure,
+    OrdinaryPacketReturnReason, OrdinaryPacketSlotId, OrdinaryPermitCancelMismatch,
+    OrdinaryPermitPendingTx, OrdinaryPermitReplyMismatch, OrdinaryPermitResolution,
+    OrdinaryPreparedPacket, OrdinaryQuarantineReason, OrdinaryRegisterAndParkError,
+    OrdinaryRegisterAndParkFailure, OrdinaryTransmissionOutcome, OrdinaryTxCompletion,
     OrdinaryTxFrame, OrdinaryTxJob, OrdinaryTxPermitDenial, OrdinaryTxPermitDenialReason,
     OrdinaryTxPermitGrant, OrdinaryTxPermitReply, OrdinaryTxPermitRequest, OrdinaryTxQuarantine,
     OrdinaryUnpermittedTx,
+};
+
+mod proof_probe;
+pub use proof_probe::{
+    ActiveProofProbe, ProofProbeCorrelation, ProofProbeEvictionError, ProofProbeFirstDispatch,
+    ProofProbeObservation, ProofProbeStartError, TerminalProofProbe, VolatileProofProbe,
 };
 
 /// Complete packet storage reserved for one base-MTU Reticulum transmission.
@@ -112,6 +123,28 @@ pub const RNS_ANNOUNCE_RETRANSMIT_SECONDS: u64 = reticulum_rns_rete::ANNOUNCE_RE
 /// Link DATA context that carries ordinary application bytes rather than an
 /// RNS control or service message.
 pub const APPLICATION_LINK_CONTEXT_NONE: u8 = reticulum_rns_rete::LINK_DATA_CONTEXT_NONE;
+
+/// Canonical Reticulum proof-probe application name.
+pub const PROOF_PROBE_APPLICATION_NAME: &str =
+    reticulum_rns_rete::RNSTRANSPORT_PROBE_APPLICATION_NAME;
+
+/// Canonical Reticulum proof-probe destination aspect.
+pub const PROOF_PROBE_ASPECT: &str = reticulum_rns_rete::RNSTRANSPORT_PROBE_ASPECT;
+
+/// Canonical expanded Reticulum proof-probe destination name.
+pub const PROOF_PROBE_EXPANDED_NAME: &str = reticulum_rns_rete::RNSTRANSPORT_PROBE_EXPANDED_NAME;
+
+/// Compute Reticulum's full hop-invariant hash for one encoded RNS packet.
+///
+/// The hash excludes mutable hop-count and transport-header fields, so a DATA
+/// packet received after forwarding retains the same bytes used by the
+/// originating attempt's delivery-proof correlation token. Invalid encoded
+/// packets return `None` instead of fabricating correlation evidence.
+pub fn rns_packet_hash(raw: &[u8]) -> Option<[u8; 32]> {
+    reticulum_rns_rete::parse_packet(raw)
+        .ok()
+        .map(|packet| packet.compute_hash())
+}
 
 /// Extract the compact correlation tag from one explicit RNS delivery proof.
 ///
@@ -816,8 +849,219 @@ impl PacketInterfaceId {
         self.0
     }
 
-    fn into_rns(self) -> RnsInterfaceId {
+    const fn into_rns(self) -> RnsInterfaceId {
         RnsInterfaceId(self.0)
+    }
+}
+
+/// Optional physical-link values observed for one complete ingress packet.
+///
+/// Radio interfaces supply whole-dB RSSI and SNR. Stream and other
+/// interfaces leave this observation absent instead of fabricating values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketSignalObservation {
+    rssi_dbm: i16,
+    snr_db: i16,
+}
+
+impl PacketSignalObservation {
+    /// Construct one complete physical-link observation.
+    pub const fn new(rssi_dbm: i16, snr_db: i16) -> Self {
+        Self { rssi_dbm, snr_db }
+    }
+
+    /// Received signal strength in whole dBm.
+    pub const fn rssi_dbm(self) -> i16 {
+        self.rssi_dbm
+    }
+
+    /// Signal-to-noise ratio in whole dB.
+    pub const fn snr_db(self) -> i16 {
+        self.snr_db
+    }
+
+    const fn into_rns(self) -> RnsIngressSignalObservation {
+        RnsIngressSignalObservation::new(self.rssi_dbm, self.snr_db)
+    }
+
+    const fn from_rns(signal: RnsIngressSignalObservation) -> Self {
+        Self::new(signal.rssi_dbm(), signal.snr_db())
+    }
+}
+
+/// Trust boundary for one packet entering RNS processing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PacketIngressOrigin {
+    /// Packet supplied by a trusted local client for routing by this node.
+    LocalOrigin,
+    /// Packet received from another Reticulum peer through an interface.
+    RemoteInterface,
+}
+
+impl PacketIngressOrigin {
+    const fn into_rns(self) -> RnsIngressOrigin {
+        match self {
+            Self::LocalOrigin => RnsIngressOrigin::LocalOrigin,
+            Self::RemoteInterface => RnsIngressOrigin::RemoteInterface,
+        }
+    }
+
+    const fn from_rns(origin: RnsIngressOrigin) -> Self {
+        match origin {
+            RnsIngressOrigin::LocalOrigin => Self::LocalOrigin,
+            RnsIngressOrigin::RemoteInterface => Self::RemoteInterface,
+        }
+    }
+}
+
+/// Exact interface provenance and optional signal values for one ingress packet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketIngressObservation {
+    interface: PacketInterfaceId,
+    signal: Option<PacketSignalObservation>,
+    origin: PacketIngressOrigin,
+}
+
+impl PacketIngressObservation {
+    /// Construct one remote-interface packet-ingress observation.
+    ///
+    /// This compatibility constructor is equivalent to [`Self::remote`].
+    pub const fn new(
+        interface: PacketInterfaceId,
+        signal: Option<PacketSignalObservation>,
+    ) -> Self {
+        Self::remote(interface, signal)
+    }
+
+    /// Construct explicit remote-interface packet provenance.
+    pub const fn remote(
+        interface: PacketInterfaceId,
+        signal: Option<PacketSignalObservation>,
+    ) -> Self {
+        Self {
+            interface,
+            signal,
+            origin: PacketIngressOrigin::RemoteInterface,
+        }
+    }
+
+    /// Construct one trusted local-origin injection.
+    pub const fn local_origin(interface: PacketInterfaceId) -> Self {
+        Self {
+            interface,
+            signal: None,
+            origin: PacketIngressOrigin::LocalOrigin,
+        }
+    }
+
+    /// Interface that supplied the packet.
+    pub const fn interface(self) -> PacketInterfaceId {
+        self.interface
+    }
+
+    /// Physical-link values, when supplied by the interface.
+    pub const fn signal(self) -> Option<PacketSignalObservation> {
+        self.signal
+    }
+
+    /// Whether the packet came from a local injector or a remote peer.
+    pub const fn origin(self) -> PacketIngressOrigin {
+        self.origin
+    }
+
+    const fn into_rns(self) -> RnsIngressObservation {
+        let interface = self.interface.into_rns();
+        match self.origin.into_rns() {
+            RnsIngressOrigin::LocalOrigin => RnsIngressObservation::local_origin(interface),
+            RnsIngressOrigin::RemoteInterface => RnsIngressObservation::remote(
+                interface,
+                match self.signal {
+                    Some(signal) => Some(signal.into_rns()),
+                    None => None,
+                },
+            ),
+        }
+    }
+
+    const fn from_rns(observation: RnsIngressObservation) -> Self {
+        Self {
+            interface: PacketInterfaceId::new(observation.interface().0),
+            signal: match observation.signal() {
+                Some(signal) => Some(PacketSignalObservation::from_rns(signal)),
+                None => None,
+            },
+            origin: PacketIngressOrigin::from_rns(observation.origin()),
+        }
+    }
+}
+
+/// Copy-only projection of one route currently retained by the RNS path table.
+///
+/// This record is routing state, not a reachability or peer-liveness claim.
+/// The interface is the ingress identifier retained with the accepted path;
+/// callers must resolve it against their current authoritative interface
+/// registry before describing the route as usable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetainedRouteSnapshot {
+    destination: DestinationHash,
+    via: Option<[u8; 16]>,
+    hops: u8,
+    received_on: Option<PacketInterfaceId>,
+    learned_at: MonotonicSeconds,
+    last_accessed_at: MonotonicSeconds,
+    expires_after_seconds: u64,
+}
+
+impl RetainedRouteSnapshot {
+    fn from_rns(route: RnsRouteSnapshot) -> Self {
+        Self {
+            destination: DestinationHash::new(*route.destination.as_bytes()),
+            via: route.via.map(|identity| *identity.as_bytes()),
+            hops: route.hops,
+            received_on: route
+                .received_on
+                .map(|interface| PacketInterfaceId::new(interface.0)),
+            learned_at: MonotonicSeconds::new(route.learned_at_seconds),
+            last_accessed_at: MonotonicSeconds::new(route.last_accessed_at_seconds),
+            expires_after_seconds: route.expires_after_seconds,
+        }
+    }
+
+    /// Destination addressed by this retained route.
+    pub const fn destination(self) -> DestinationHash {
+        self.destination
+    }
+
+    /// Next-hop transport identity, or `None` for a direct route.
+    pub const fn via(self) -> Option<[u8; 16]> {
+        self.via
+    }
+
+    /// Reticulum hop count. A direct route has one hop.
+    pub const fn hops(self) -> u8 {
+        self.hops
+    }
+
+    /// Exact retained interface, or `None` for broadcast fallback.
+    pub const fn received_on(self) -> Option<PacketInterfaceId> {
+        self.received_on
+    }
+
+    /// Monotonic whole-second sample when this route candidate was installed.
+    pub const fn learned_at(self) -> MonotonicSeconds {
+        self.learned_at
+    }
+
+    /// Rete's monotonic LRU timestamp for local route access.
+    ///
+    /// This is not a last-heard or peer-activity timestamp.
+    pub const fn last_accessed_at(self) -> MonotonicSeconds {
+        self.last_accessed_at
+    }
+
+    /// Duration after learning before periodic RNS maintenance expires the route.
+    pub const fn expires_after_seconds(self) -> u64 {
+        self.expires_after_seconds
     }
 }
 
@@ -866,7 +1110,10 @@ impl InterfaceSet {
         }
     }
 
-    const fn without(self, interface: PacketInterfaceId) -> Option<Self> {
+    /// Remove an interface when its identifier fits the compact set.
+    ///
+    /// `None` reports an identifier above 63 without altering the set.
+    pub const fn without(self, interface: PacketInterfaceId) -> Option<Self> {
         let index = interface.get();
         if index < 64 {
             Some(Self(self.0 & !(1u64 << index)))
@@ -875,7 +1122,8 @@ impl InterfaceSet {
         }
     }
 
-    const fn intersect(self, other: Self) -> Self {
+    /// Retain only interfaces present in both compact sets.
+    pub const fn intersect(self, other: Self) -> Self {
         Self(self.0 & other.0)
     }
 
@@ -898,6 +1146,8 @@ pub enum TxTarget {
     Only(PacketInterfaceId),
     /// Send on every eligible interface except one packet interface.
     AllExcept(PacketInterfaceId),
+    /// Send only on one explicit compact set of packet interfaces.
+    Selected(InterfaceSet),
 }
 
 impl TxTarget {
@@ -907,6 +1157,9 @@ impl TxTarget {
             RnsTxTarget::Only(interface) => Self::Only(PacketInterfaceId::new(interface.0)),
             RnsTxTarget::AllExcept(interface) => {
                 Self::AllExcept(PacketInterfaceId::new(interface.0))
+            }
+            RnsTxTarget::Selected(interfaces) => {
+                Self::Selected(InterfaceSet::from_bits(interfaces.bits()))
             }
         }
     }
@@ -947,6 +1200,7 @@ impl TxRoutePlan {
             TxTarget::AllExcept(interface) => enabled
                 .without(interface)
                 .ok_or(TxRouteError::InterfaceOutsideProfile { interface })?,
+            TxTarget::Selected(interfaces) => enabled.intersect(interfaces),
         };
         if remaining.is_empty() {
             Err(TxRouteError::NoEligibleInterface { target })
@@ -1086,6 +1340,36 @@ impl From<RnsDestinationRegistrationError> for LocalDestinationRegistrationError
         match error {
             RnsDestinationRegistrationError::LimitReached { limit } => Self::LimitReached { limit },
             RnsDestinationRegistrationError::Rete(_) => Self::InvalidRnsConfiguration,
+        }
+    }
+}
+
+/// Failure to alias an authenticated peer identity under its canonical
+/// `rnstransport.probe` destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProofProbeIdentityAliasError {
+    /// No authenticated identity is retained for the supplied announced
+    /// destination.
+    SourceIdentityUnknown,
+    /// The derived probe destination already retains different key material.
+    DestinationIdentityConflict,
+    /// The bounded native identity table could not retain the alias.
+    IdentityCapacityUnavailable,
+    /// Temporary identity-only snapshot storage could not be reserved.
+    AllocationFailed,
+}
+
+impl From<RnsProofProbeIdentityAliasError> for ProofProbeIdentityAliasError {
+    fn from(error: RnsProofProbeIdentityAliasError) -> Self {
+        match error {
+            RnsProofProbeIdentityAliasError::SourceIdentityUnknown => Self::SourceIdentityUnknown,
+            RnsProofProbeIdentityAliasError::DestinationIdentityConflict => {
+                Self::DestinationIdentityConflict
+            }
+            RnsProofProbeIdentityAliasError::IdentityCapacityUnavailable => {
+                Self::IdentityCapacityUnavailable
+            }
+            RnsProofProbeIdentityAliasError::AllocationFailed => Self::AllocationFailed,
         }
     }
 }
@@ -1304,6 +1588,7 @@ pub struct TerminalAttempt {
     kind: DataReceiptKind,
     link: Option<LinkHandle>,
     outcome: AttemptOutcome,
+    ingress: Option<PacketIngressObservation>,
 }
 
 impl TerminalAttempt {
@@ -1334,6 +1619,16 @@ impl TerminalAttempt {
     /// Delivery outcome retained by the tombstone.
     pub const fn outcome(self) -> AttemptOutcome {
         self.outcome
+    }
+
+    /// Ingress packet that proved delivery, including optional final-hop
+    /// physical-link values.
+    ///
+    /// Delivered attempts carry the proof packet's observation when ingress
+    /// used the signal-aware API. Timeout and definitely-unsent outcomes have
+    /// no ingress observation.
+    pub const fn ingress(self) -> Option<PacketIngressObservation> {
+        self.ingress
     }
 }
 
@@ -2331,11 +2626,32 @@ impl<'a> AuthorizedTx<'a> {
         })
     }
 
-    /// Complete this authorized hop as transmitted or possibly transmitted.
+    /// Complete this authorized hop as possibly transmitted without a
+    /// definitive physical `TxDone` observation.
     pub fn complete(self, code: TxCompletionCode) -> TxCompletion<'a> {
         TxCompletion {
             owner: self.owner,
             kind: CompletionKind::Authorized(code),
+        }
+    }
+
+    /// Complete this authorized hop after the concrete interface observed
+    /// physical `TxDone` for every frame of the logical packet.
+    ///
+    /// This distinct edge lets the node owner start a destination-DATA proof
+    /// window after interface queueing and channel access have completed. The
+    /// exact packet and attempt evidence remain carried by the unique owner.
+    pub fn complete_transmitted(
+        self,
+        code: TxCompletionCode,
+        transmitted_at: MonotonicMillis,
+    ) -> TxCompletion<'a> {
+        TxCompletion {
+            owner: self.owner,
+            kind: CompletionKind::Transmitted {
+                code,
+                transmitted_at,
+            },
         }
     }
 
@@ -2439,6 +2755,10 @@ enum CompletionKind {
         denial: Option<TxPermitDenialReason>,
     },
     Authorized(TxCompletionCode),
+    Transmitted {
+        code: TxCompletionCode,
+        transmitted_at: MonotonicMillis,
+    },
     RecoveryFault(TxCompletionCode),
 }
 
@@ -2847,6 +3167,8 @@ struct DispatchRecord {
     attempt: AttemptRef,
     generation: u64,
     deadline: TxLeaseDeadline,
+    receipt_registered_at: MonotonicSeconds,
+    receipt_registered_owner_at: MonotonicMillis,
     selected: Option<HopBinding>,
     remaining: InterfaceSet,
     may_have_transmitted: bool,
@@ -2854,6 +3176,10 @@ struct DispatchRecord {
 }
 
 #[derive(Clone, Copy)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the fixed no-alloc dispatch ledger retains each unique scalar record in place; boxing or another indirect owner would violate the embedded ownership model"
+)]
 enum DispatchState {
     Unregistered,
     Free,
@@ -2931,6 +3257,7 @@ enum AttemptState {
         kind: DataReceiptKind,
         link: Option<LinkHandle>,
         outcome: AttemptOutcome,
+        ingress: Option<PacketIngressObservation>,
     },
 }
 
@@ -2968,6 +3295,7 @@ impl Iterator for TerminalAttempts<'_> {
                 kind,
                 link,
                 outcome,
+                ingress,
             } = attempt.state
             {
                 return Some(TerminalAttempt {
@@ -2981,6 +3309,7 @@ impl Iterator for TerminalAttempts<'_> {
                     kind,
                     link,
                     outcome,
+                    ingress,
                 });
             }
         }
@@ -3025,6 +3354,11 @@ impl<
 > NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, PACKET_BUFFERS>
 {
     /// Construct the concrete RNS owner and empty external-buffer metadata.
+    ///
+    /// Keep this one-shot constructor as an explicit frame boundary. Embedded
+    /// products audit its emitted stack independently from their async
+    /// composition task; inlining it would hide that cumulative startup path.
+    #[inline(never)]
     pub fn new(
         identity: NodeIdentity,
         app_name: &str,
@@ -3085,6 +3419,109 @@ impl<
         })
     }
 
+    /// Construct the bounded node owner directly in caller-provided storage.
+    ///
+    /// The nested RNS owner and both capacity-sized metadata arrays are
+    /// initialized at their final addresses. This avoids complete
+    /// `NodeCore`, dispatch-table, and attempt-ledger temporaries on the boot
+    /// stack. On error, `destination` remains uninitialized and may be reused
+    /// for another construction attempt.
+    #[allow(
+        unsafe_code,
+        reason = "audited field projections initialize one MaybeUninit NodeCore in place"
+    )]
+    #[inline(never)]
+    pub fn new_in<'a>(
+        destination: &'a mut MaybeUninit<Self>,
+        identity: NodeIdentity,
+        app_name: &str,
+        aspects: &[&str],
+        instance: NodeInstanceId,
+        config: NodeConfig,
+    ) -> Result<&'a mut Self, NodeConstructionError> {
+        const {
+            assert!(
+                PATHS > 1 && PATHS.is_power_of_two(),
+                "node-core PATHS must be a power of two greater than one"
+            );
+            assert!(
+                ANNOUNCES > 0,
+                "node-core ANNOUNCES must be greater than zero"
+            );
+            assert!(
+                DEDUPLICATION > 0,
+                "node-core DEDUPLICATION must be greater than zero"
+            );
+            assert!(
+                LINKS > 1 && LINKS.is_power_of_two(),
+                "node-core LINKS must be a power of two greater than one"
+            );
+            assert!(
+                PACKET_BUFFERS <= (u16::MAX as usize) + 1,
+                "node-core PACKET_BUFFERS must fit the 16-bit packet-slot namespace"
+            );
+        }
+        let role = match config.role {
+            NodeRole::Endpoint => RnsNodeRole::Endpoint,
+            NodeRole::Transport => RnsNodeRole::Transport,
+        };
+        let destination_ptr = destination.as_mut_ptr();
+
+        // SAFETY: `destination_ptr` is derived from the sole mutable borrow of
+        // the complete uninitialized destination. `addr_of_mut!` projects a
+        // raw field pointer without creating a reference to uninitialized
+        // `RnsNode` bytes, and `MaybeUninit<T>` preserves `T`'s layout. No
+        // other field is touched before recursive construction succeeds.
+        let rns_destination = unsafe {
+            &mut *addr_of_mut!((*destination_ptr).rns)
+                .cast::<MaybeUninit<RnsNode<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>>>()
+        };
+        let owner_identity = {
+            let rns = RnsNode::new_in(
+                rns_destination,
+                identity.0,
+                app_name,
+                aspects,
+                RnsNodeConfig {
+                    role,
+                    max_additional_destinations: config.max_additional_destinations,
+                },
+            )
+            .map_err(|_| NodeConstructionError::InvalidRnsConfiguration)?;
+            *rns.identity_hash().as_bytes()
+        };
+
+        // Recursive construction is the sole fallible operation. Initialize
+        // the capacity arrays element-wise at their final addresses to avoid
+        // materializing `[EMPTY; N]` values on the boot stack.
+        // SAFETY: `rns` is initialized and every other field is written once
+        // through the exclusive destination pointer before the complete value
+        // is exposed by `assume_init_mut`.
+        unsafe {
+            addr_of_mut!((*destination_ptr).owner_identity).write(owner_identity);
+            addr_of_mut!((*destination_ptr).instance).write(instance);
+
+            let dispatches = addr_of_mut!((*destination_ptr).dispatches).cast::<DispatchSlot>();
+            for index in 0..PACKET_BUFFERS {
+                dispatches.add(index).write(DispatchSlot::EMPTY);
+            }
+
+            let attempts = addr_of_mut!((*destination_ptr).attempts).cast::<AttemptSlot>();
+            for index in 0..PATHS {
+                attempts.add(index).write(AttemptSlot::EMPTY);
+            }
+
+            addr_of_mut!((*destination_ptr).next_registration).write(0);
+            addr_of_mut!((*destination_ptr).next_attempt).write(0);
+            addr_of_mut!((*destination_ptr).dispatch_generation).write(0);
+            addr_of_mut!((*destination_ptr).hop_generation).write(0);
+            addr_of_mut!((*destination_ptr).attempt_generation).write(0);
+            addr_of_mut!((*destination_ptr).ordinary_action_owner_claimed).write(false);
+
+            Ok(destination.assume_init_mut())
+        }
+    }
+
     /// Primary local destination hash.
     pub fn destination_hash(&self) -> DestinationHash {
         DestinationHash::new(*self.rns.destination_hash().as_bytes())
@@ -3112,6 +3549,20 @@ impl<
             .map_err(LocalDestinationRegistrationError::from)
     }
 
+    /// Register the canonical inbound `rnstransport.probe` responder.
+    ///
+    /// This additional Single destination rejects Link admission and uses
+    /// Reticulum's `PROVE_ALL` behavior, making it compatible with the Python
+    /// `rnprobe` utility and other standard proof-probe clients.
+    pub fn register_proof_probe_destination(
+        &mut self,
+    ) -> Result<DestinationHash, LocalDestinationRegistrationError> {
+        self.rns
+            .register_probe_destination()
+            .map(|destination| DestinationHash::new(*destination.as_bytes()))
+            .map_err(LocalDestinationRegistrationError::from)
+    }
+
     /// Compose and sign one basic opportunistic LXMF carrier with this node's
     /// registered inbound Single `lxmf.delivery` source.
     ///
@@ -3133,6 +3584,30 @@ impl<
                 timestamp_unix_ms,
                 title,
                 content,
+                output,
+            )
+            .map(PreparedBasicLxmf)
+            .map_err(PrepareBasicLxmfError::from)
+    }
+
+    /// Compose and sign one opportunistic LXMF carrier with an authenticated
+    /// Sideband-compatible location field.
+    pub fn prepare_basic_lxmf_with_location_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        location: LxmfMessageLocation,
+        output: &mut [u8],
+    ) -> Result<PreparedBasicLxmf, PrepareBasicLxmfError> {
+        self.rns
+            .prepare_basic_lxmf_with_location_into(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                timestamp_unix_ms,
+                title,
+                content,
+                location,
                 output,
             )
             .map(PreparedBasicLxmf)
@@ -3165,6 +3640,30 @@ impl<
             .map_err(PrepareBasicLxmfError::from)
     }
 
+    /// Compose and sign one complete direct-LXMF message with an authenticated
+    /// Sideband-compatible location field.
+    pub fn prepare_basic_direct_lxmf_with_location_into(
+        &self,
+        destination: &DestinationHash,
+        timestamp_unix_ms: u64,
+        title: &[u8],
+        content: &[u8],
+        location: LxmfMessageLocation,
+        output: &mut [u8],
+    ) -> Result<PreparedBasicDirectLxmf, PrepareBasicLxmfError> {
+        self.rns
+            .prepare_basic_direct_lxmf_with_location_into(
+                &RnsDestinationHash::from(*destination.as_bytes()),
+                timestamp_unix_ms,
+                title,
+                content,
+                location,
+                output,
+            )
+            .map(PreparedBasicDirectLxmf)
+            .map_err(PrepareBasicLxmfError::from)
+    }
+
     /// Configure the default application data used for ordinary announces and
     /// path responses from one registered local destination.
     pub fn set_destination_announce_app_data(
@@ -3189,6 +3688,37 @@ impl<
         self.rns.recall_identity(&destination)
     }
 
+    /// Derive the canonical remote `rnstransport.probe` destination from any
+    /// announce-known destination owned by that retained identity.
+    ///
+    /// This read-only helper centralizes Reticulum identity and destination
+    /// hashing in the protocol owner. It returns `None` when no authenticated
+    /// identity is retained for the supplied destination.
+    pub fn proof_probe_destination_for(
+        &self,
+        announced_destination: &DestinationHash,
+    ) -> Option<DestinationHash> {
+        self.rns
+            .proof_probe_destination_for(&announced_destination.into_rns())
+            .map(|destination| DestinationHash::new(*destination.as_bytes()))
+    }
+
+    /// Alias an authenticated retained peer identity under its canonical
+    /// `rnstransport.probe` destination without creating a path.
+    ///
+    /// This enables destination-DATA encryption for the derived probe hash
+    /// while preserving Reticulum's need to discover or broadcast a real
+    /// route independently.
+    pub fn prepare_proof_probe_destination_for(
+        &mut self,
+        announced_destination: &DestinationHash,
+    ) -> Result<DestinationHash, ProofProbeIdentityAliasError> {
+        self.rns
+            .prepare_proof_probe_destination_for(&announced_destination.into_rns())
+            .map(|destination| DestinationHash::new(*destination.as_bytes()))
+            .map_err(ProofProbeIdentityAliasError::from)
+    }
+
     /// Recall an announce-learned identity only when it derives the supplied
     /// exact `lxmf.delivery` destination.
     ///
@@ -3202,6 +3732,30 @@ impl<
     /// Whether an exact destination currently has a retained RNS path.
     pub fn has_path(&self, destination: &DestinationHash) -> bool {
         self.rns.has_path(&destination.into_rns())
+    }
+
+    /// Remove one exact retained RNS path.
+    ///
+    /// Product delivery policy calls this after a non-Link receipt timeout so
+    /// a later attempt cannot reuse the route that just failed. Identity and
+    /// Link state are independent and remain retained.
+    pub fn remove_retained_path(&mut self, destination: &DestinationHash) -> bool {
+        self.rns.remove_path(&destination.into_rns())
+    }
+
+    /// Visit copy-only snapshots of all routes currently retained by RNS.
+    ///
+    /// Native map iteration order is unspecified. Callers presenting a full
+    /// table must copy and sort by [`RetainedRouteSnapshot::destination`].
+    /// The returned count cannot exceed this node's `PATHS` const generic.
+    pub fn visit_retained_routes(&self, mut visitor: impl FnMut(RetainedRouteSnapshot)) -> usize {
+        self.rns
+            .visit_routes(|route| visitor(RetainedRouteSnapshot::from_rns(route)))
+    }
+
+    /// Number of routes currently retained by the native RNS path table.
+    pub fn retained_route_count(&self) -> usize {
+        self.rns.route_count()
     }
 
     /// Native routing target retained with one known destination path.
@@ -3224,6 +3778,16 @@ impl<
         self.rns
             .route(&destination.into_rns())
             .map(|route| route.hops)
+    }
+
+    /// Next-hop transport identity retained for one known destination path.
+    ///
+    /// Direct routes and missing routes both return `None`; callers that need
+    /// to distinguish those cases must pair this with [`Self::has_path`].
+    pub fn retained_path_next_hop(&self, destination: &DestinationHash) -> Option<[u8; 16]> {
+        self.rns
+            .route(&destination.into_rns())
+            .and_then(|route| route.via.map(|identity| *identity.as_bytes()))
     }
 
     /// Whether the shared native owned-Link table can currently retain one
@@ -3857,6 +4421,19 @@ impl<
             }
         };
 
+        if let PreparedReceiptPacket::DestinationData(destination_data) = prepared
+            && !self
+                .rns
+                .park_data_receipt(destination_data, request.rns_now.get())
+        {
+            self.dispatches[slot.index()].state = DispatchState::Free;
+            self.attempts[attempt.slot].state = AttemptState::Free;
+            return Err(PrepareFailure {
+                reason: SubmitError::Invariant,
+                owner: PrepareFailureOwner::Available(buffer),
+            });
+        }
+
         let token = AttemptToken(*prepared.receipt().as_bytes());
         let encoded_packet_sha256 = EncodedPacketSha256::new(
             Sha256::digest(&buffer.bytes[..usize::from(prepared.packet_len())]).into(),
@@ -3902,6 +4479,8 @@ impl<
                     attempt,
                     generation: dispatch_generation,
                     deadline: request.deadline,
+                    receipt_registered_at: request.rns_now,
+                    receipt_registered_owner_at: request.owner_now,
                     selected: None,
                     remaining: InterfaceSet::empty(),
                     may_have_transmitted: false,
@@ -3943,6 +4522,8 @@ impl<
             attempt,
             generation: dispatch_generation,
             deadline: request.deadline,
+            receipt_registered_at: request.rns_now,
+            receipt_registered_owner_at: request.owner_now,
             selected: Some(hop),
             remaining: route.remaining(),
             may_have_transmitted: false,
@@ -4035,6 +4616,7 @@ impl<
                     kind: prepared.receipt_kind(),
                     link,
                     outcome: AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback),
+                    ingress: None,
                 };
             }
         }
@@ -4227,40 +4809,74 @@ impl<
             ));
         }
 
-        let (completion_authorized, completion_unsent_reason) = match completion.kind {
-            CompletionKind::Unpermitted { code, denial } => {
-                let _ = code.get();
-                let reason = match denial {
-                    Some(TxPermitDenialReason::Policy(reason)) => {
-                        AttemptUnsentReason::PolicyDenied(reason)
+        let (completion_authorized, receipt_boundary, completion_unsent_reason) =
+            match completion.kind {
+                CompletionKind::Unpermitted { code, denial } => {
+                    let _ = code.get();
+                    let reason = match denial {
+                        Some(TxPermitDenialReason::Policy(reason)) => {
+                            AttemptUnsentReason::PolicyDenied(reason)
+                        }
+                        Some(TxPermitDenialReason::DeadlineExpired) => {
+                            AttemptUnsentReason::PermitDeadlineExpired
+                        }
+                        Some(TxPermitDenialReason::RecoveryRequired) => {
+                            AttemptUnsentReason::RecoveryRequired
+                        }
+                        Some(TxPermitDenialReason::AttemptTerminal(_)) | None => {
+                            AttemptUnsentReason::Unpermitted(code)
+                        }
+                    };
+                    (false, None, Some(reason))
+                }
+                CompletionKind::Authorized(code) => {
+                    let _ = code.get();
+                    (true, Some(now), None)
+                }
+                CompletionKind::Transmitted {
+                    code,
+                    transmitted_at,
+                } => {
+                    let _ = code.get();
+                    if transmitted_at < record.receipt_registered_owner_at
+                        || transmitted_at.get() > now.get().saturating_add(1)
+                    {
+                        return Ok(TxCompletionDisposition::Quarantined(
+                            self.quarantine_completion(
+                                completion,
+                                record,
+                                now,
+                                TxRecoveryReason::Invariant,
+                            ),
+                        ));
                     }
-                    Some(TxPermitDenialReason::DeadlineExpired) => {
-                        AttemptUnsentReason::PermitDeadlineExpired
+                    (true, Some(transmitted_at), None)
+                }
+                CompletionKind::RecoveryFault(code) => {
+                    if record.may_have_transmitted
+                        && self.terminal_for(record.attempt).is_none()
+                        && matches!(record.prepared, PreparedReceiptPacket::DestinationData(_))
+                        && !self.arm_destination_receipt(record, now)
+                    {
+                        return Ok(TxCompletionDisposition::Quarantined(
+                            self.quarantine_completion(
+                                completion,
+                                record,
+                                now,
+                                TxRecoveryReason::Invariant,
+                            ),
+                        ));
                     }
-                    Some(TxPermitDenialReason::RecoveryRequired) => {
-                        AttemptUnsentReason::RecoveryRequired
-                    }
-                    Some(TxPermitDenialReason::AttemptTerminal(_)) | None => {
-                        AttemptUnsentReason::Unpermitted(code)
-                    }
-                };
-                (false, Some(reason))
-            }
-            CompletionKind::Authorized(code) => {
-                let _ = code.get();
-                (true, None)
-            }
-            CompletionKind::RecoveryFault(code) => {
-                return Ok(TxCompletionDisposition::Quarantined(
-                    self.quarantine_completion(
-                        completion,
-                        record,
-                        now,
-                        TxRecoveryReason::CompletionFault(code),
-                    ),
-                ));
-            }
-        };
+                    return Ok(TxCompletionDisposition::Quarantined(
+                        self.quarantine_completion(
+                            completion,
+                            record,
+                            now,
+                            TxRecoveryReason::CompletionFault(code),
+                        ),
+                    ));
+                }
+            };
         if now >= record.deadline.instant()
             && !matches!(record.phase, DispatchPhase::RecoveryRequired(_))
         {
@@ -4297,6 +4913,35 @@ impl<
             ));
         }
         let stop_fanout = recovered.is_some() || terminal.is_some();
+        if terminal.is_none()
+            && matches!(record.prepared, PreparedReceiptPacket::DestinationData(_))
+        {
+            let receipt_updated = if !stop_fanout && !record.remaining.is_empty() {
+                match receipt_boundary {
+                    Some(receipt_boundary) => {
+                        self.park_destination_receipt(record, receipt_boundary)
+                    }
+                    None => true,
+                }
+            } else {
+                match receipt_boundary.or_else(|| record.may_have_transmitted.then_some(now)) {
+                    Some(receipt_boundary) => {
+                        self.arm_destination_receipt(record, receipt_boundary)
+                    }
+                    None => true,
+                }
+            };
+            if !receipt_updated {
+                return Ok(TxCompletionDisposition::Quarantined(
+                    self.quarantine_completion(
+                        completion,
+                        record,
+                        now,
+                        TxRecoveryReason::Invariant,
+                    ),
+                ));
+            }
+        }
 
         if !stop_fanout && !record.remaining.is_empty() {
             let Some(next_generation) = self.hop_generation.checked_add(1) else {
@@ -4361,6 +5006,7 @@ impl<
                 kind: record.prepared.receipt_kind(),
                 link,
                 outcome: AttemptOutcome::Unsent(reason),
+                ingress: None,
             };
         } else if terminal.is_none() && !self.attempt_is_active(record.attempt, record.prepared) {
             return Ok(TxCompletionDisposition::Quarantined(
@@ -4451,11 +5097,28 @@ impl<
         interface: PacketInterfaceId,
         rng: &mut R,
     ) -> Result<IngressReport, ReceiptCorrelationError> {
-        self.ingest_at(
+        self.ingest_observed(
+            raw,
+            now,
+            PacketIngressObservation::remote(interface, None),
+            rng,
+        )
+    }
+
+    /// Process one inbound packet with exact interface provenance and optional
+    /// physical-link signal values.
+    pub fn ingest_observed<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: MonotonicSeconds,
+        ingress: PacketIngressObservation,
+        rng: &mut R,
+    ) -> Result<IngressReport, ReceiptCorrelationError> {
+        self.ingest_at_observed(
             raw,
             now,
             MonotonicInstant::from_secs(now.get()),
-            interface,
+            ingress,
             rng,
         )
     }
@@ -4469,14 +5132,103 @@ impl<
         interface: PacketInterfaceId,
         rng: &mut R,
     ) -> Result<IngressReport, ReceiptCorrelationError> {
+        self.ingest_at_observed(
+            raw,
+            now,
+            link_now,
+            PacketIngressObservation::remote(interface, None),
+            rng,
+        )
+    }
+
+    /// Precise Link-clock variant of [`Self::ingest_observed`].
+    pub fn ingest_at_observed<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        ingress: PacketIngressObservation,
+        rng: &mut R,
+    ) -> Result<IngressReport, ReceiptCorrelationError> {
+        self.ingest_at_with_broadcast_scope_observed(
+            raw,
+            now,
+            link_now,
+            ingress,
+            IngressBroadcastScope::SharedMedium,
+            rng,
+        )
+    }
+
+    /// Precise Link-clock ingress with media-aware derived-broadcast policy.
+    pub fn ingest_at_with_broadcast_scope<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        interface: PacketInterfaceId,
+        broadcast_scope: IngressBroadcastScope,
+        rng: &mut R,
+    ) -> Result<IngressReport, ReceiptCorrelationError> {
+        self.ingest_at_with_broadcast_scope_observed(
+            raw,
+            now,
+            link_now,
+            PacketIngressObservation::remote(interface, None),
+            broadcast_scope,
+            rng,
+        )
+    }
+
+    /// Precise Link-clock ingress with exact provenance and media-aware
+    /// derived-broadcast policy.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "receipt-atomic ingress keeps both clocks, packet provenance, media policy and entropy owner explicit"
+    )]
+    pub fn ingest_at_with_broadcast_scope_observed<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        ingress: PacketIngressObservation,
+        broadcast_scope: IngressBroadcastScope,
+        rng: &mut R,
+    ) -> Result<IngressReport, ReceiptCorrelationError> {
+        self.ingest_at_with_broadcast_policy_observed(
+            raw,
+            now,
+            link_now,
+            ingress,
+            IngressBroadcastPolicy::new(broadcast_scope),
+            rng,
+        )
+    }
+
+    /// Precise Link-clock ingress with exact provenance, media topology and an
+    /// optional exact announce-egress restriction.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "receipt-atomic ingress keeps both clocks, packet provenance, routing policy and entropy owner explicit"
+    )]
+    pub fn ingest_at_with_broadcast_policy_observed<R: RngCore + CryptoRng>(
+        &mut self,
+        raw: &[u8],
+        now: MonotonicSeconds,
+        link_now: MonotonicInstant,
+        ingress: PacketIngressObservation,
+        policy: IngressBroadcastPolicy,
+        rng: &mut R,
+    ) -> Result<IngressReport, ReceiptCorrelationError> {
         let (result, fault) = {
             let (rns, attempts) = (&mut self.rns, &mut self.attempts);
             let mut sink = AttemptReceiptSink::new(attempts);
-            let result = rns.ingest_with_receipt_sink_at(
+            let result = rns.ingest_observed_with_receipt_sink_at_with_broadcast_policy(
                 raw,
                 now.get(),
                 link_now,
-                interface.into_rns(),
+                ingress.into_rns(),
+                policy,
                 rng,
                 &mut sink,
             );
@@ -4578,6 +5330,7 @@ impl<
             kind,
             link,
             outcome,
+            ingress,
         } = state
         else {
             return match state {
@@ -4612,13 +5365,18 @@ impl<
             kind,
             link,
             outcome,
+            ingress,
         };
         self.attempts[attempt_ref.slot].state = AttemptState::Free;
         Ok(terminal)
     }
 
-    /// Read scalar dispatch and receipt occupancy without exposing RNS
-    /// internals.
+    /// Copy the complete allocation-free RNS telemetry and capacity snapshot.
+    pub fn metrics(&self) -> EmbeddedNodeMetrics {
+        self.rns.metrics()
+    }
+
+    /// Read scalar dispatch and receipt occupancy without exposing RNS internals.
     pub fn capacities(&self) -> CapacitySnapshot {
         let mut registered = 0;
         let mut queued = 0;
@@ -4941,6 +5699,7 @@ impl<
             kind,
             link,
             outcome,
+            ingress,
         } = self.attempts.get(attempt.slot)?.state
         else {
             return None;
@@ -4951,6 +5710,7 @@ impl<
             kind,
             link,
             outcome,
+            ingress,
         })
     }
 
@@ -4963,6 +5723,42 @@ impl<
                 self.rns.cancel_link_data_receipt(prepared.receipt())
             }
         }
+    }
+
+    fn arm_destination_receipt(
+        &mut self,
+        record: DispatchRecord,
+        observed_at: MonotonicMillis,
+    ) -> bool {
+        let PreparedReceiptPacket::DestinationData(prepared) = record.prepared else {
+            return false;
+        };
+        self.rns
+            .rearm_data_receipt(prepared, Self::receipt_time_at(record, observed_at))
+    }
+
+    fn park_destination_receipt(
+        &mut self,
+        record: DispatchRecord,
+        observed_at: MonotonicMillis,
+    ) -> bool {
+        let PreparedReceiptPacket::DestinationData(prepared) = record.prepared else {
+            return false;
+        };
+        self.rns
+            .park_data_receipt(prepared, Self::receipt_time_at(record, observed_at))
+    }
+
+    fn receipt_time_at(record: DispatchRecord, observed_at: MonotonicMillis) -> u64 {
+        let elapsed_millis = observed_at
+            .get()
+            .saturating_sub(record.receipt_registered_owner_at.get());
+        let elapsed_seconds =
+            elapsed_millis / 1_000 + u64::from(!elapsed_millis.is_multiple_of(1_000));
+        record
+            .receipt_registered_at
+            .get()
+            .saturating_add(elapsed_seconds)
     }
 
     fn handle_for(&self, attempt: AttemptRef) -> AttemptHandle {
@@ -5138,6 +5934,7 @@ impl ReceiptTerminalReservation for AttemptTerminalReservation<'_> {
             kind: self.kind,
             link: self.link,
             outcome,
+            ingress: candidate.ingress().map(PacketIngressObservation::from_rns),
         };
     }
 }
@@ -5209,6 +6006,115 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        unsafe_code,
+        reason = "the successful in-place test value is explicitly dropped after its borrow ends"
+    )]
+    fn in_place_construction_matches_value_construction() {
+        type Node = TestNode<4, 2>;
+        let instance = NodeInstanceId::new([0xa1; 16]);
+        let by_value = Node::new(
+            identity(51),
+            "reticulum",
+            &["embedded"],
+            instance,
+            NodeConfig::transport(),
+        )
+        .unwrap();
+        let mut destination = MaybeUninit::<Node>::uninit();
+        {
+            let in_place = Node::new_in(
+                &mut destination,
+                identity(51),
+                "reticulum",
+                &["embedded"],
+                instance,
+                NodeConfig::transport(),
+            )
+            .unwrap();
+
+            assert_eq!(in_place.destination_hash(), by_value.destination_hash());
+            assert_eq!(in_place.metrics(), by_value.metrics());
+            assert_eq!(in_place.capacities(), by_value.capacities());
+        }
+
+        // SAFETY: `new_in` returned success above and the resulting reference
+        // no longer exists, so the slot contains exactly one initialized node.
+        unsafe { destination.assume_init_drop() };
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "the successful retry value is explicitly dropped after its borrow ends"
+    )]
+    fn failed_in_place_construction_leaves_destination_reusable() {
+        type Node = TestNode<4, 2>;
+        let mut destination = MaybeUninit::<Node>::uninit();
+        let oversized_name = "x".repeat(130);
+        let failure = Node::new_in(
+            &mut destination,
+            identity(52),
+            &oversized_name,
+            &[],
+            NodeInstanceId::new([0xa2; 16]),
+            NodeConfig::endpoint(),
+        );
+        assert_eq!(
+            failure.err(),
+            Some(NodeConstructionError::InvalidRnsConfiguration)
+        );
+
+        let instance = NodeInstanceId::new([0xa3; 16]);
+        let expected = Node::new(
+            identity(52),
+            "reticulum",
+            &["retry"],
+            instance,
+            NodeConfig::endpoint(),
+        )
+        .unwrap();
+        {
+            let retried = Node::new_in(
+                &mut destination,
+                identity(52),
+                "reticulum",
+                &["retry"],
+                instance,
+                NodeConfig::endpoint(),
+            )
+            .unwrap();
+            assert_eq!(retried.destination_hash(), expected.destination_hash());
+            assert_eq!(retried.metrics(), expected.metrics());
+            assert_eq!(retried.capacities(), expected.capacities());
+        }
+
+        // SAFETY: the failed attempt left the slot uninitialized and the
+        // retry returned success; its resulting reference no longer exists.
+        unsafe { destination.assume_init_drop() };
+    }
+
+    #[test]
+    fn packet_ingress_origin_survives_the_node_to_rns_boundary() {
+        let interface = PacketInterfaceId::new(7);
+        let signal = PacketSignalObservation::new(-91, 4);
+        let remote = PacketIngressObservation::remote(interface, Some(signal));
+        let local = PacketIngressObservation::local_origin(interface);
+
+        assert_eq!(remote.origin(), PacketIngressOrigin::RemoteInterface);
+        assert_eq!(local.origin(), PacketIngressOrigin::LocalOrigin);
+        assert_eq!(
+            PacketIngressObservation::new(interface, Some(signal)),
+            remote
+        );
+        assert_eq!(
+            PacketIngressObservation::from_rns(remote.into_rns()),
+            remote
+        );
+        assert_eq!(PacketIngressObservation::from_rns(local.into_rns()), local);
+    }
+
+    #[test]
     fn additional_inbound_destination_and_identity_lookup_remain_narrow_and_bounded() {
         let mut owner = node_with_instance::<8, 0>(50, "embedded", 0x90);
         let primary = owner.destination_hash();
@@ -5235,7 +6141,7 @@ mod tests {
             Err(LocalDestinationRegistrationError::LimitReached { limit: 4 })
         );
 
-        let peer = NodeCore::<8, 2, 8, 2, 0>::new(
+        let mut peer = NodeCore::<8, 2, 8, 2, 0>::new(
             identity(51),
             "lxmf",
             &["delivery"],
@@ -5244,9 +6150,11 @@ mod tests {
         )
         .unwrap();
         let peer_destination = peer.destination_hash();
+        let peer_probe_destination = peer.register_proof_probe_destination().unwrap();
         let peer_public_key = identity(51).public_key();
         assert!(!owner.has_path(&peer_destination));
         assert_eq!(owner.retained_path_hops(&peer_destination), None);
+        assert_eq!(owner.retained_path_next_hop(&peer_destination), None);
         owner
             .register_peer(
                 &identity(51),
@@ -5257,14 +6165,112 @@ mod tests {
             .unwrap();
         assert!(owner.has_path(&peer_destination));
         assert_eq!(owner.retained_path_hops(&peer_destination), Some(1));
+        assert_eq!(owner.retained_path_next_hop(&peer_destination), None);
         assert_eq!(
             owner.recall_identity(&peer_destination),
             Some(peer_public_key)
         );
         assert_eq!(
+            owner.proof_probe_destination_for(&peer_destination),
+            Some(peer_probe_destination)
+        );
+        assert_eq!(
             owner.recall_identity(&DestinationHash::new([0xee; 16])),
             None
         );
+        assert_eq!(
+            owner.proof_probe_destination_for(&DestinationHash::new([0xee; 16])),
+            None
+        );
+    }
+
+    #[test]
+    fn proof_probe_identity_promotion_enables_data_without_fabricating_a_route() {
+        let mut owner = node_with_instance::<8, 1>(52, "embedded", 0x93);
+        let peer_identity = identity(53);
+        let peer = NodeCore::<8, 2, 8, 2, 0>::new(
+            identity(53),
+            "lxmf",
+            &["delivery"],
+            NodeInstanceId::new([0x94; 16]),
+            NodeConfig::endpoint(),
+        )
+        .unwrap();
+        let announced_destination = peer.destination_hash();
+        owner
+            .register_peer(
+                &peer_identity,
+                "lxmf",
+                &["delivery"],
+                MonotonicSeconds::new(1),
+            )
+            .unwrap();
+        let probe_destination = owner
+            .proof_probe_destination_for(&announced_destination)
+            .expect("the authenticated announce identity derives a probe destination");
+        assert!(!owner.has_path(&probe_destination));
+
+        let mut buffer = registered_buffer(&mut owner);
+        let mut rng = CounterRng::default();
+        let failure = match owner.prepare_data_into_slot(
+            &mut buffer,
+            prepare_request(
+                probe_destination,
+                b"probe",
+                2,
+                2_000,
+                3_000,
+                default_interfaces(),
+            ),
+            &mut rng,
+        ) {
+            Ok(_) => panic!("probe DATA prepared before identity promotion"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.reason(), SubmitError::UnknownDestination);
+        let buffer = available(failure);
+
+        assert_eq!(
+            owner.prepare_proof_probe_destination_for(&announced_destination),
+            Ok(probe_destination)
+        );
+        assert!(
+            !owner.has_path(&probe_destination),
+            "identity promotion must not invent a direct path"
+        );
+        let job = owner
+            .prepare_data_into_slot(
+                buffer,
+                prepare_request(
+                    probe_destination,
+                    b"probe",
+                    3,
+                    3_000,
+                    4_000,
+                    default_interfaces(),
+                ),
+                &mut rng,
+            )
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "promoted probe identity failed DATA preparation: {:?}",
+                    failure.reason()
+                )
+            });
+        assert_eq!(job.target(), TxTarget::All);
+        let disposition = owner
+            .complete_tx(
+                job.return_unpermitted().complete(TxCompletionCode::new(0)),
+                owner_time(3_100),
+            )
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "unpermitted cleanup lost owner validity: {:?}",
+                    failure.reason()
+                )
+            });
+        assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+        assert!(!owner.has_path(&probe_destination));
     }
 
     #[test]
@@ -5851,6 +6857,16 @@ mod tests {
     }
 
     #[test]
+    fn full_rns_packet_hash_is_hop_invariant_and_rejects_invalid_wire() {
+        let proof = proof_for(78, AttemptToken([0x5a; 32]));
+        let direct = rns_packet_hash(&proof).expect("valid proof packet");
+        let mut forwarded = proof;
+        forwarded[1] = 7;
+        assert_eq!(rns_packet_hash(&forwarded), Some(direct));
+        assert_eq!(rns_packet_hash(&[]), None);
+    }
+
+    #[test]
     fn delivery_proof_tag_accepts_only_exact_responder_link_wire_shape() {
         let mut bytes = [0_u8; 32];
         for (index, byte) in bytes.iter_mut().enumerate() {
@@ -5993,6 +7009,45 @@ mod tests {
     }
 
     #[test]
+    fn scoped_point_to_point_announce_is_one_shot_through_node_core() {
+        let mut relay = TestNode::<8, 0>::new(
+            identity(83),
+            "reticulum",
+            &["relay"],
+            NodeInstanceId::new([0xd3; 16]),
+            NodeConfig::transport(),
+        )
+        .unwrap();
+        let mut peer = node::<8, 0>(84, "peer");
+        let mut rng = CounterRng::default();
+        peer.queue_announce(None, announce_time(100), &mut rng)
+            .unwrap();
+        let announce = peer.flush_announces(time(100), &mut rng);
+
+        let report = relay
+            .ingest_at_with_broadcast_scope(
+                announce.packets[0].bytes(),
+                time(100),
+                MonotonicInstant::from_secs(100),
+                PacketInterfaceId::new(6),
+                IngressBroadcastScope::PointToPoint,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(report.actions.packets.len(), 1);
+        assert_eq!(
+            report.actions.packets[0].target(),
+            RnsTxTarget::AllExcept(RnsInterfaceId(6))
+        );
+
+        let delayed = relay.tick(time(106), &mut rng);
+        assert!(
+            delayed.actions.packets.is_empty(),
+            "point-to-point received announces are temporarily one-shot"
+        );
+    }
+
+    #[test]
     fn inbound_proof_policy_is_explicit_and_controls_proof_actions() {
         let mut sender = node::<4, 1>(81, "sender");
         let mut receiver = node::<4, 1>(82, "receiver");
@@ -6128,6 +7183,7 @@ mod tests {
             [ApplicationEvent::DataReceived {
                 destination,
                 payload,
+                ..
             }] if *destination == *delivery.as_bytes()
                 && payload == b"DATA while Links are disabled"
         ));
@@ -6177,6 +7233,7 @@ mod tests {
             [ApplicationEvent::DataReceived {
                 destination,
                 payload,
+                ..
             }] if *destination == *delivery.as_bytes()
                 && payload == b"DATA while Links are enabled"
         ));
@@ -6269,6 +7326,7 @@ mod tests {
             [ApplicationEvent::DataReceived {
                 destination,
                 payload,
+                ..
             }] if *destination == *delivery.as_bytes() && payload == b"durable before proof"
         ));
 
@@ -7138,6 +8196,7 @@ mod tests {
             kind: DataReceiptKind::LinkData,
             link: Some(target),
             outcome: AttemptOutcome::Delivered,
+            ingress: None,
         };
         assert!(owner.link_has_unacknowledged_attempt(target));
 
@@ -7180,6 +8239,7 @@ mod tests {
             kind: DataReceiptKind::DestinationData,
             link: None,
             outcome: AttemptOutcome::Delivered,
+            ingress: None,
         };
 
         let failure = match sender.rollback_queued(job, owner_time(1_100)) {
@@ -7210,13 +8270,18 @@ mod tests {
         );
         let scalar = job.prepared();
         let proof = proof_for(22, job.attempt());
+        let ingress = PacketIngressObservation::new(
+            PacketInterfaceId::new(2),
+            Some(PacketSignalObservation::new(-89, 5)),
+        );
 
         sender
-            .ingest(&proof, time(2), PacketInterfaceId::new(2), &mut rng)
+            .ingest_observed(&proof, time(2), ingress, &mut rng)
             .unwrap();
         let terminal = sender.terminal_attempts().next().unwrap();
         assert_eq!(terminal.handle(), scalar.handle());
         assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
+        assert_eq!(terminal.ingress(), Some(ingress));
         assert_eq!(sender.capacities().receipts_used, 0);
         assert_eq!(sender.capacities().dispatches_queued, 1);
         assert_eq!(
@@ -7237,7 +8302,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_commits_terminal_while_job_ownership_remains_bound() {
+    fn parked_receipt_cannot_timeout_while_job_ownership_remains_bound() {
         let mut sender = node::<2, 1>(23, "sender");
         let receiver = node::<2, 1>(24, "receiver");
         register_receiver(&mut sender, 24, "receiver");
@@ -7254,21 +8319,14 @@ mod tests {
         let scalar = job.prepared();
 
         let report = sender.tick(time(132), &mut rng);
-        assert_eq!(report.timed_out_attempts, 1);
-        assert_eq!(
-            report.timed_out_attempt_tag,
-            Some(u64::from_le_bytes(
-                job.attempt().as_bytes()[..8].try_into().unwrap()
-            ))
-        );
+        assert_eq!(report.timed_out_attempts, 0);
+        assert_eq!(report.timed_out_attempt_tag, None);
         assert!(report.timed_out_attempt_tags_consistent);
         assert_eq!(report.correlation_fault, None);
-        let terminal = sender.terminal_attempts().next().unwrap();
-        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
-        assert_eq!(
-            sender.acknowledge_terminal(scalar.handle()),
-            Err(AcknowledgeError::PacketStillBound)
-        );
+        assert!(sender.terminal_attempts().next().is_none());
+        assert_eq!(sender.capacities().receipts_used, 1);
+        assert_eq!(sender.capacities().dispatches_queued, 1);
+
         let returned = reusable(
             sender
                 .rollback_queued(job, owner_time(100_100))
@@ -7277,6 +8335,13 @@ mod tests {
                 }),
         );
         assert_eq!(returned.slot_id().unwrap(), scalar.slot_id());
+        assert_eq!(sender.capacities().receipts_used, 0);
+        let terminal = sender.terminal_attempts().next().unwrap();
+        assert_eq!(
+            terminal.outcome(),
+            AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback)
+        );
+        assert_eq!(terminal.ingress(), None);
         assert_eq!(sender.acknowledge_terminal(scalar.handle()), Ok(terminal));
     }
 
@@ -7545,6 +8610,7 @@ mod tests {
             kind: DataReceiptKind::DestinationData,
             link: None,
             outcome: AttemptOutcome::Delivered,
+            ingress: None,
         };
         assert_eq!(
             terminal
@@ -7610,6 +8676,16 @@ mod tests {
             100,
             &mut rng,
         );
+        let destination_data = match sender.dispatches[job.slot_id().index()].state {
+            DispatchState::Active(record) => match record.prepared {
+                PreparedReceiptPacket::DestinationData(prepared) => prepared,
+                PreparedReceiptPacket::LinkData(_) => {
+                    panic!("generic DATA preparation registered a Link receipt")
+                }
+            },
+            _ => panic!("prepared DATA dispatch was not active"),
+        };
+        assert!(sender.rns.rearm_data_receipt(destination_data, 100));
         sender.attempts[job.attempt_handle().slot].state = AttemptState::Free;
 
         let report = sender.tick(time(132), &mut rng);
@@ -8364,6 +9440,13 @@ mod tests {
         assert_eq!(except.take_next(), Some(PacketInterfaceId::new(63)));
         assert_eq!(except.take_next(), None);
 
+        let selected_interfaces = interfaces(&[5, 7, 63]);
+        let mut selected =
+            TxRoutePlan::resolve(TxTarget::Selected(selected_interfaces), enabled).unwrap();
+        assert_eq!(selected.take_next(), Some(PacketInterfaceId::new(5)));
+        assert_eq!(selected.take_next(), Some(PacketInterfaceId::new(63)));
+        assert_eq!(selected.take_next(), None);
+
         assert_eq!(
             TxRoutePlan::resolve(TxTarget::Only(PacketInterfaceId::new(7)), enabled),
             Err(TxRouteError::NoEligibleInterface {
@@ -8374,6 +9457,12 @@ mod tests {
             TxRoutePlan::resolve(TxTarget::All, InterfaceSet::empty()),
             Err(TxRouteError::NoEligibleInterface {
                 target: TxTarget::All,
+            })
+        );
+        assert_eq!(
+            TxRoutePlan::resolve(TxTarget::Selected(interfaces(&[7])), enabled),
+            Err(TxRouteError::NoEligibleInterface {
+                target: TxTarget::Selected(interfaces(&[7])),
             })
         );
         assert_eq!(
@@ -8566,6 +9655,138 @@ mod tests {
         assert_eq!(sender.capacities().dispatches_used, 0);
         assert_eq!(sender.capacities().receipts_used, 1);
         assert_eq!(sender.capacities().attempts_active, 1);
+    }
+
+    #[test]
+    fn parked_receipt_survives_queue_delay_then_uses_actual_transmit_time() {
+        let mut sender = node::<2, 1>(108, "sender");
+        let receiver = node::<2, 1>(109, "receiver");
+        register_receiver(&mut sender, 109, "receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let job = prepare_with_interfaces(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"full proof budget after physical transmit",
+            100,
+            100_000,
+            160_000,
+            default_interfaces(),
+            &mut rng,
+        );
+        let handle = job.attempt_handle();
+
+        let beyond_preparation_deadline = sender.tick(time(131), &mut rng);
+        assert_eq!(beyond_preparation_deadline.timed_out_attempts, 0);
+        assert!(sender.terminal_attempts().next().is_none());
+
+        let (pending, request) = job.begin_permit(test_permit_requirements());
+        let reply = sender
+            .authorize_tx(request, owner_time(135_000), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+        let mut authorized = match pending.resolve(reply, owner_time(135_000)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            Ok(PermitResolution::Unpermitted(_)) => panic!("delayed permit was denied"),
+            Ok(PermitResolution::Expired(_)) => panic!("delayed permit expired"),
+            Err(_) => panic!("matching delayed permit did not resolve"),
+        };
+        let _frame = authorized.frame(owner_time(135_000)).unwrap();
+        let disposition = sender
+            .complete_tx(
+                authorized.complete_transmitted(TxCompletionCode::new(0x44), owner_time(135_000)),
+                owner_time(145_000),
+            )
+            .unwrap_or_else(|failure| {
+                panic!("transmitted completion failed: {:?}", failure.reason())
+            });
+        assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+
+        let exact_post_transmit_deadline = sender.tick(time(165), &mut rng);
+        assert_eq!(exact_post_transmit_deadline.timed_out_attempts, 0);
+        assert!(sender.terminal_attempts().next().is_none());
+
+        let expired = sender.tick(time(166), &mut rng);
+        assert_eq!(expired.timed_out_attempts, 1);
+        let terminal = sender
+            .terminal_attempts()
+            .next()
+            .expect("receipt must expire only after its restarted proof window");
+        assert_eq!(terminal.handle(), handle);
+        assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+    }
+
+    #[test]
+    fn each_possibly_transmitted_fanout_hop_refreshes_the_receipt_window() {
+        let mut sender = node::<2, 1>(110, "fanout-sender");
+        let receiver = node::<2, 1>(111, "fanout-receiver");
+        register_receiver(&mut sender, 111, "fanout-receiver");
+        let mut buffer = registered_buffer(&mut sender);
+        let mut rng = CounterRng::default();
+        let first = prepare_with_interfaces(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"each physical fanout gets a proof window",
+            100,
+            100_000,
+            180_000,
+            interfaces(&[1, 2]),
+            &mut rng,
+        );
+        let handle = first.attempt_handle();
+        let (pending, request) = first.begin_permit(test_permit_requirements());
+        let reply = sender
+            .authorize_tx(request, owner_time(105_000), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| panic!("first authorization failed: {:?}", failure.reason()));
+        let mut first = match pending.resolve(reply, owner_time(105_000)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            _ => panic!("first fanout permit was not authorized"),
+        };
+        let _ = first.frame(owner_time(105_000)).unwrap();
+        let second = match sender
+            .complete_tx(
+                first.complete_transmitted(TxCompletionCode::new(0x45), owner_time(110_000)),
+                owner_time(110_000),
+            )
+            .unwrap_or_else(|failure| panic!("first completion failed: {:?}", failure.reason()))
+        {
+            TxCompletionDisposition::Next(next) => next,
+            _ => panic!("first physical fanout did not advance"),
+        };
+
+        let stalled_between_hops = sender.tick(time(141), &mut rng);
+        assert_eq!(stalled_between_hops.timed_out_attempts, 0);
+        assert!(sender.terminal_attempts().next().is_none());
+
+        let (pending, request) = second.begin_permit(test_permit_requirements());
+        let reply = sender
+            .authorize_tx(request, owner_time(145_000), &mut TestPolicy::allowing())
+            .unwrap_or_else(|failure| {
+                panic!("second authorization failed: {:?}", failure.reason())
+            });
+        let mut second = match pending.resolve(reply, owner_time(145_000)) {
+            Ok(PermitResolution::Authorized(authorized)) => authorized,
+            _ => panic!("second fanout permit was not authorized"),
+        };
+        let _ = second.frame(owner_time(145_000)).unwrap();
+        assert!(matches!(
+            sender
+                .complete_tx(
+                    second.complete_transmitted(TxCompletionCode::new(0x46), owner_time(150_000),),
+                    owner_time(150_000),
+                )
+                .unwrap_or_else(|failure| {
+                    panic!("second completion failed: {:?}", failure.reason())
+                }),
+            TxCompletionDisposition::Available(_)
+        ));
+
+        let exact_second_hop_deadline = sender.tick(time(180), &mut rng);
+        assert_eq!(exact_second_hop_deadline.timed_out_attempts, 0);
+        let expired = sender.tick(time(181), &mut rng);
+        assert_eq!(expired.timed_out_attempts, 1);
+        assert_eq!(sender.terminal_attempts().next().unwrap().handle(), handle);
     }
 
     #[test]

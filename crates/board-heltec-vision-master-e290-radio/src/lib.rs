@@ -1,9 +1,10 @@
 //! Bidirectional HT-RA62/SX1262 owner for the Vision Master E290.
 //!
-//! This board layer admits one opaque NA915 development configuration. The
-//! shared `reticulum-radio-lora-phy` state machine owns bounded RX, CAD, and
-//! atomic one-or-two-frame RNode TX. This crate retains the E290-specific
-//! module topology, reset containment, frequency and power policy.
+//! This board layer admits an opaque board-validated frequency/modulation
+//! profile with one boot-selected Semtech-optimal TX-power setting. The shared
+//! `reticulum-radio-lora-phy` state machine owns bounded RX, CAD, and atomic
+//! one-or-two-frame RNode TX. This crate retains the E290-specific module
+//! topology, reset containment, frequency and power policy.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -20,9 +21,9 @@ use lora_phy::{
 };
 use reticulum_board_heltec_vision_master_e290::validate_lab_rx_profile;
 use reticulum_radio_interface::{
-    BoundedRxOutcome, CadObservation, LabRxProfile, LabRxProfileConfig, PacketTxFault,
-    PacketTxObservation, RadioConfigurationFingerprint, RnodeTxFrames, SX1262_FRAME_MTU,
-    SoleRadioFaultSummary, SoleRnodeRadio,
+    BoundedRxOutcome, CadObservation, LabRxProfile, LabRxProfileConfig, LabRxProfileError,
+    PacketTxFault, PacketTxObservation, RadioConfigurationFingerprint, RnodeTxFrames,
+    SX1262_FRAME_MTU, SoleRadioFaultSummary, SoleRnodeRadio,
 };
 use reticulum_radio_lora_phy::{
     IrqTimestampCapture, NoopTxHooks, Sx126xRadioError, Sx126xRadioOperation, Sx126xReceivedFrame,
@@ -38,7 +39,7 @@ pub const E290_TCXO_CONTROL_VOLTAGE: TcxoCtrlVoltage = TcxoCtrlVoltage::Ctrl1V8;
 /// TCXO wake time pinned by the reviewed `lora-phy` SX126x driver.
 pub const E290_TCXO_WAKEUP_MS: u32 = 10;
 
-/// Requested SX1262 output of the fixed development configuration.
+/// Requested SX1262 output of the compatibility/default development configuration.
 ///
 /// The pinned driver realizes this target with the Semtech Rev. 2.2
 /// Table 13-21 optimal +14 dBm PA row: `SetPaConfig(0x02, 0x02, 0x00,
@@ -49,8 +50,91 @@ pub const E290_NA915_DEV_REQUESTED_POWER_DBM: i32 = 14;
 /// Raw `SetTxParams` power selected by the current Semtech optimal +14 dBm row.
 pub const E290_NA915_DEV_RAW_SET_TX_PARAMS_DBM: i8 = 22;
 
-/// Maximum preamble-search symbol timeout of the fixed configuration.
+/// Boot-selected SX1262 output admitted by the E290 high-frequency board policy.
+///
+/// These are the four optimal SX1262 high-power PA operating points in Semtech
+/// Rev. 2.2 Table 13-21. Arbitrary intermediate numeric powers are deliberately
+/// rejected instead of relying on an unqualified interpolated PA command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum E290Na915TxPower {
+    /// Requested +14 dBm SX1262 output.
+    Dbm14,
+    /// Requested +17 dBm SX1262 output.
+    Dbm17,
+    /// Requested +20 dBm SX1262 output.
+    Dbm20,
+    /// Requested +22 dBm SX1262 output.
+    Dbm22,
+}
+
+impl E290Na915TxPower {
+    /// Validate a persisted or otherwise numeric boot-time power selection.
+    pub const fn try_from_dbm(requested_dbm: i32) -> Result<Self, E290Na915TxPowerError> {
+        match requested_dbm {
+            14 => Ok(Self::Dbm14),
+            17 => Ok(Self::Dbm17),
+            20 => Ok(Self::Dbm20),
+            22 => Ok(Self::Dbm22),
+            _ => Err(E290Na915TxPowerError { requested_dbm }),
+        }
+    }
+
+    /// Requested SX1262 output power in dBm.
+    pub const fn requested_dbm(self) -> i32 {
+        match self {
+            Self::Dbm14 => 14,
+            Self::Dbm17 => 17,
+            Self::Dbm20 => 20,
+            Self::Dbm22 => 22,
+        }
+    }
+
+    const fn configuration_id(self) -> E290RadioConfigurationId {
+        match self {
+            Self::Dbm14 => E290RadioConfigurationId::Na915DevRequested14Dbm,
+            Self::Dbm17 => E290RadioConfigurationId::Na915DevRequested17Dbm,
+            Self::Dbm20 => E290RadioConfigurationId::Na915DevRequested20Dbm,
+            Self::Dbm22 => E290RadioConfigurationId::Na915DevRequested22Dbm,
+        }
+    }
+
+    const fn fingerprint(self) -> RadioConfigurationFingerprint {
+        match self {
+            Self::Dbm14 => E290_NA915_DEV_CONFIGURATION_FINGERPRINT,
+            Self::Dbm17 => E290_NA915_DEV_17_DBM_CONFIGURATION_FINGERPRINT,
+            Self::Dbm20 => E290_NA915_DEV_20_DBM_CONFIGURATION_FINGERPRINT,
+            Self::Dbm22 => E290_NA915_DEV_22_DBM_CONFIGURATION_FINGERPRINT,
+        }
+    }
+}
+
+impl TryFrom<i32> for E290Na915TxPower {
+    type Error = E290Na915TxPowerError;
+
+    fn try_from(requested_dbm: i32) -> Result<Self, Self::Error> {
+        Self::try_from_dbm(requested_dbm)
+    }
+}
+
+/// Rejected numeric E290 TX-power selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct E290Na915TxPowerError {
+    requested_dbm: i32,
+}
+
+impl E290Na915TxPowerError {
+    /// Numeric value rejected by the board policy.
+    pub const fn requested_dbm(self) -> i32 {
+        self.requested_dbm
+    }
+}
+
+/// Maximum preamble-search symbol timeout used by every E290 configuration.
 pub const E290_RX_SYMBOL_TIMEOUT: u16 = 248;
+
+/// RNode-compatible preamble length used by every configurable E290 profile.
+pub const E290_RNODE_PREAMBLE_SYMBOLS: u16 = 24;
 
 /// Minimum non-airtime allowance inside the whole-operation RX watchdog.
 ///
@@ -75,6 +159,14 @@ pub const E290_MAXIMUM_RECEIVE_OPERATION_US: NonZeroU64 = match NonZeroU64::new(
 pub enum E290RadioConfigurationId {
     /// NA915 at 915 MHz, SF7/BW125/CR4/5 and requested 14 dBm output.
     Na915DevRequested14Dbm,
+    /// NA915 at 915 MHz, SF7/BW125/CR4/5 and requested 17 dBm output.
+    Na915DevRequested17Dbm,
+    /// NA915 at 915 MHz, SF7/BW125/CR4/5 and requested 20 dBm output.
+    Na915DevRequested20Dbm,
+    /// NA915 at 915 MHz, SF7/BW125/CR4/5 and requested 22 dBm output.
+    Na915DevRequested22Dbm,
+    /// A board-validated frequency/modulation/power profile.
+    ConfiguredProfile,
 }
 
 /// Full configuration identity for the first E290 NA915 profile.
@@ -84,13 +176,34 @@ pub const E290_NA915_DEV_CONFIGURATION_FINGERPRINT: RadioConfigurationFingerprin
         0x31,
     ]);
 
+/// Full configuration identity for the E290 NA915 +17 dBm profile.
+pub const E290_NA915_DEV_17_DBM_CONFIGURATION_FINGERPRINT: RadioConfigurationFingerprint =
+    RadioConfigurationFingerprint::new([
+        0x45, 0x32, 0x39, 0x30, 0x4e, 0x41, 0x39, 0x31, 0x35, 0x44, 0x45, 0x56, 0x30, 0x30, 0x30,
+        0x32,
+    ]);
+
+/// Full configuration identity for the E290 NA915 +20 dBm profile.
+pub const E290_NA915_DEV_20_DBM_CONFIGURATION_FINGERPRINT: RadioConfigurationFingerprint =
+    RadioConfigurationFingerprint::new([
+        0x45, 0x32, 0x39, 0x30, 0x4e, 0x41, 0x39, 0x31, 0x35, 0x44, 0x45, 0x56, 0x30, 0x30, 0x30,
+        0x33,
+    ]);
+
+/// Full configuration identity for the E290 NA915 +22 dBm profile.
+pub const E290_NA915_DEV_22_DBM_CONFIGURATION_FINGERPRINT: RadioConfigurationFingerprint =
+    RadioConfigurationFingerprint::new([
+        0x45, 0x32, 0x39, 0x30, 0x4e, 0x41, 0x39, 0x31, 0x35, 0x44, 0x45, 0x56, 0x30, 0x30, 0x30,
+        0x34,
+    ]);
+
 /// Fixed RNode-compatible NA915 LoRa profile admitted by this board owner.
 pub const E290_NA915_DEV_PROFILE: LabRxProfile = match validate_lab_rx_profile(LabRxProfileConfig {
     frequency_hz: Some(915_000_000),
     spreading_factor: 7,
     bandwidth_hz: 125_000,
     coding_rate_denominator: 5,
-    preamble_symbols: 24,
+    preamble_symbols: E290_RNODE_PREAMBLE_SYMBOLS,
     explicit_header: true,
     crc: true,
     iq_inverted: false,
@@ -99,13 +212,30 @@ pub const E290_NA915_DEV_PROFILE: LabRxProfile = match validate_lab_rx_profile(L
     Err(_) => panic!("invalid fixed E290 NA915 development profile"),
 };
 
+/// Rejected configurable E290 radio profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum E290RadioConfigurationError {
+    /// Frequency or modulation was rejected by the fitted HT-RA62-HF path or
+    /// the project's RNode interoperability policy.
+    InvalidProfile(LabRxProfileError),
+}
+
+impl E290RadioConfigurationError {
+    /// Underlying board/profile validation error.
+    pub const fn profile_error(self) -> LabRxProfileError {
+        match self {
+            Self::InvalidProfile(error) => error,
+        }
+    }
+}
+
 /// Opaque board-validated modem, module and power configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct E290RadioConfiguration {
     id: E290RadioConfigurationId,
     profile: LabRxProfile,
     fingerprint: RadioConfigurationFingerprint,
-    requested_power_dbm: i32,
+    tx_power: E290Na915TxPower,
     rx_symbol_timeout: u16,
     maximum_receive_operation_us: NonZeroU64,
     public_network: bool,
@@ -114,18 +244,67 @@ pub struct E290RadioConfiguration {
 }
 
 impl E290RadioConfiguration {
-    const fn na915_dev() -> Self {
+    /// Construct the immutable NA915 configuration for a validated boot selection.
+    pub const fn na915_dev(tx_power: E290Na915TxPower) -> Self {
         Self {
-            id: E290RadioConfigurationId::Na915DevRequested14Dbm,
+            id: tx_power.configuration_id(),
             profile: E290_NA915_DEV_PROFILE,
-            fingerprint: E290_NA915_DEV_CONFIGURATION_FINGERPRINT,
-            requested_power_dbm: E290_NA915_DEV_REQUESTED_POWER_DBM,
+            fingerprint: tx_power.fingerprint(),
+            tx_power,
             rx_symbol_timeout: E290_RX_SYMBOL_TIMEOUT,
             maximum_receive_operation_us: E290_MAXIMUM_RECEIVE_OPERATION_US,
             public_network: false,
             use_dcdc: true,
             rx_boost: false,
         }
+    }
+
+    /// Validate and construct one configurable HT-RA62-HF profile.
+    ///
+    /// Packet mode, preamble, private sync word, TCXO, regulator and RF-path
+    /// policy remain fixed by this board owner. The complete variable tuple is
+    /// bound into the configuration fingerprint used by TX authorization.
+    pub const fn try_from_profile(
+        frequency_hz: u32,
+        bandwidth_hz: u32,
+        spreading_factor: u8,
+        coding_rate_denominator: u8,
+        tx_power: E290Na915TxPower,
+    ) -> Result<Self, E290RadioConfigurationError> {
+        let profile = match validate_lab_rx_profile(LabRxProfileConfig {
+            frequency_hz: Some(frequency_hz),
+            spreading_factor,
+            bandwidth_hz,
+            coding_rate_denominator,
+            preamble_symbols: E290_RNODE_PREAMBLE_SYMBOLS,
+            explicit_header: true,
+            crc: true,
+            iq_inverted: false,
+        }) {
+            Ok(profile) => profile,
+            Err(error) => return Err(E290RadioConfigurationError::InvalidProfile(error)),
+        };
+
+        if profile.frequency_hz() == E290_NA915_DEV_PROFILE.frequency_hz()
+            && profile.bandwidth().hz() == E290_NA915_DEV_PROFILE.bandwidth().hz()
+            && profile.spreading_factor().factor()
+                == E290_NA915_DEV_PROFILE.spreading_factor().factor()
+            && profile.coding_rate().denom() == E290_NA915_DEV_PROFILE.coding_rate().denom()
+        {
+            return Ok(Self::na915_dev(tx_power));
+        }
+
+        Ok(Self {
+            id: E290RadioConfigurationId::ConfiguredProfile,
+            profile,
+            fingerprint: configured_profile_fingerprint(profile, tx_power),
+            tx_power,
+            rx_symbol_timeout: E290_RX_SYMBOL_TIMEOUT,
+            maximum_receive_operation_us: maximum_receive_operation_us(profile),
+            public_network: false,
+            use_dcdc: true,
+            rx_boost: false,
+        })
     }
 
     /// Stable identity for the complete configuration.
@@ -143,9 +322,14 @@ impl E290RadioConfiguration {
         self.fingerprint
     }
 
+    /// Validated boot-selected SX1262 output.
+    pub const fn tx_power(self) -> E290Na915TxPower {
+        self.tx_power
+    }
+
     /// Requested SX1262 output power, without an antenna-path claim.
     pub const fn requested_power_dbm(self) -> i32 {
-        self.requested_power_dbm
+        self.tx_power.requested_dbm()
     }
 
     /// Maximum preamble-search duration in symbols.
@@ -177,7 +361,7 @@ impl E290RadioConfiguration {
         Sx126xRnodeSettings::new(
             self.profile,
             self.fingerprint,
-            self.requested_power_dbm,
+            self.tx_power.requested_dbm(),
             self.rx_symbol_timeout,
             self.public_network,
             self.use_dcdc,
@@ -187,9 +371,72 @@ impl E290RadioConfiguration {
     }
 }
 
+/// Create an injective fingerprint for the configurable fields owned by this
+/// version of the E290 board policy.
+///
+/// Bytes `E290` plus version `1` bind the fixed preamble, packet mode, private
+/// sync word, TCXO, regulator, RF switch and PA-table semantics. The remaining
+/// eleven bytes encode canonical frequency, bandwidth, SF, CR and power
+/// without hashing or truncation.
+const fn configured_profile_fingerprint(
+    profile: LabRxProfile,
+    tx_power: E290Na915TxPower,
+) -> RadioConfigurationFingerprint {
+    let frequency = profile.frequency_hz().to_be_bytes();
+    let bandwidth = profile.bandwidth().hz().to_be_bytes();
+    RadioConfigurationFingerprint::new([
+        b'E',
+        b'2',
+        b'9',
+        b'0',
+        1,
+        frequency[0],
+        frequency[1],
+        frequency[2],
+        frequency[3],
+        bandwidth[0],
+        bandwidth[1],
+        bandwidth[2],
+        bandwidth[3],
+        profile.spreading_factor().factor() as u8,
+        profile.coding_rate().denom() as u8,
+        tx_power.requested_dbm() as u8,
+    ])
+}
+
+const fn maximum_receive_operation_us(profile: LabRxProfile) -> NonZeroU64 {
+    let profile_bound = profile
+        .symbol_time_us_ceil()
+        .saturating_mul(E290_RX_SYMBOL_TIMEOUT as u64)
+        .saturating_add(profile.maximum_frame_time_on_air_us())
+        .saturating_add(E290_RX_WATCHDOG_MINIMUM_MARGIN_US);
+    let compatibility_minimum = E290_MAXIMUM_RECEIVE_OPERATION_US.get();
+    let selected = if profile_bound > compatibility_minimum {
+        profile_bound
+    } else {
+        compatibility_minimum
+    };
+    match NonZeroU64::new(selected) {
+        Some(bound) => bound,
+        None => panic!("E290 receive watchdog must be non-zero"),
+    }
+}
+
 /// Immutable first E290 NA915 development configuration.
 pub const E290_NA915_DEV_CONFIGURATION: E290RadioConfiguration =
-    E290RadioConfiguration::na915_dev();
+    E290RadioConfiguration::na915_dev(E290Na915TxPower::Dbm14);
+
+/// Immutable E290 NA915 development configuration at requested +17 dBm.
+pub const E290_NA915_DEV_17_DBM_CONFIGURATION: E290RadioConfiguration =
+    E290RadioConfiguration::na915_dev(E290Na915TxPower::Dbm17);
+
+/// Immutable E290 NA915 development configuration at requested +20 dBm.
+pub const E290_NA915_DEV_20_DBM_CONFIGURATION: E290RadioConfiguration =
+    E290RadioConfiguration::na915_dev(E290Na915TxPower::Dbm20);
+
+/// Immutable E290 NA915 development configuration at requested +22 dBm.
+pub const E290_NA915_DEV_22_DBM_CONFIGURATION: E290RadioConfiguration =
+    E290RadioConfiguration::na915_dev(E290Na915TxPower::Dbm22);
 
 /// Operation in which the E290 owner failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -433,7 +680,7 @@ where
         self.configuration
     }
 
-    /// Transmit exactly one physical frame using the requested 14 dBm profile.
+    /// Transmit exactly one physical frame using the boot-selected power.
     pub async fn transmit_frame(&mut self, frame: &[u8]) -> Result<(), E290RadioError> {
         self.core
             .transmit_frame(frame)
@@ -920,7 +1167,7 @@ mod tests {
         dio_ready_budget: Rc<Cell<Option<u8>>>,
     }
 
-    fn build_radio() -> TestRig {
+    fn build_radio_with_configuration(configuration: E290RadioConfiguration) -> TestRig {
         let (spi, controls) = MockSpi::new();
         let (reset, reset_probe, reset_events, _) = MockOutput::new(PinState::High);
         let (dio1, dio_controls) = MockWait::new(true);
@@ -933,7 +1180,7 @@ mod tests {
             busy,
             NoopDelay,
             timestamps,
-            E290_NA915_DEV_CONFIGURATION,
+            configuration,
         ))
         .unwrap();
         TestRig {
@@ -946,11 +1193,220 @@ mod tests {
         }
     }
 
+    fn build_radio() -> TestRig {
+        build_radio_with_configuration(E290_NA915_DEV_CONFIGURATION)
+    }
+
     fn command_index(commands: &[Vec<u8>], command: &[u8]) -> usize {
         commands
             .iter()
             .position(|actual| actual.as_slice() == command)
             .unwrap_or_else(|| panic!("missing command {command:02x?}"))
+    }
+
+    fn contiguous_command_count(commands: &[Vec<u8>], expected: &[&[u8]]) -> usize {
+        commands
+            .windows(expected.len())
+            .filter(|window| {
+                window
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| actual.as_slice() == *expected)
+            })
+            .count()
+    }
+
+    fn assert_contiguous_commands(commands: &[Vec<u8>], expected: &[&[u8]]) {
+        assert_eq!(
+            contiguous_command_count(commands, expected),
+            1,
+            "expected one ordered command sequence {expected:02x?} in {commands:02x?}"
+        );
+    }
+
+    #[test]
+    fn boot_power_validation_accepts_only_semtech_optimal_setpoints() {
+        for (requested_dbm, expected) in [
+            (14, E290Na915TxPower::Dbm14),
+            (17, E290Na915TxPower::Dbm17),
+            (20, E290Na915TxPower::Dbm20),
+            (22, E290Na915TxPower::Dbm22),
+        ] {
+            assert_eq!(E290Na915TxPower::try_from_dbm(requested_dbm), Ok(expected));
+            assert_eq!(E290Na915TxPower::try_from(requested_dbm), Ok(expected));
+            assert_eq!(expected.requested_dbm(), requested_dbm);
+        }
+
+        for rejected in [i32::MIN, -9, 0, 13, 15, 16, 18, 19, 21, 23, i32::MAX] {
+            let error = E290Na915TxPower::try_from_dbm(rejected).unwrap_err();
+            assert_eq!(error.requested_dbm(), rejected);
+        }
+    }
+
+    #[test]
+    fn every_boot_power_builds_a_distinct_immutable_configuration() {
+        let cases = [
+            (
+                E290Na915TxPower::Dbm14,
+                E290RadioConfigurationId::Na915DevRequested14Dbm,
+                E290_NA915_DEV_CONFIGURATION_FINGERPRINT,
+                E290_NA915_DEV_CONFIGURATION,
+            ),
+            (
+                E290Na915TxPower::Dbm17,
+                E290RadioConfigurationId::Na915DevRequested17Dbm,
+                E290_NA915_DEV_17_DBM_CONFIGURATION_FINGERPRINT,
+                E290_NA915_DEV_17_DBM_CONFIGURATION,
+            ),
+            (
+                E290Na915TxPower::Dbm20,
+                E290RadioConfigurationId::Na915DevRequested20Dbm,
+                E290_NA915_DEV_20_DBM_CONFIGURATION_FINGERPRINT,
+                E290_NA915_DEV_20_DBM_CONFIGURATION,
+            ),
+            (
+                E290Na915TxPower::Dbm22,
+                E290RadioConfigurationId::Na915DevRequested22Dbm,
+                E290_NA915_DEV_22_DBM_CONFIGURATION_FINGERPRINT,
+                E290_NA915_DEV_22_DBM_CONFIGURATION,
+            ),
+        ];
+
+        for (power, id, fingerprint, constant_configuration) in cases {
+            let constructed = E290RadioConfiguration::na915_dev(power);
+            assert_eq!(constructed, constant_configuration);
+            assert_eq!(constructed.id(), id);
+            assert_eq!(constructed.tx_power(), power);
+            assert_eq!(constructed.requested_power_dbm(), power.requested_dbm());
+            assert_eq!(constructed.fingerprint(), fingerprint);
+        }
+
+        for (index, (_, _, fingerprint, _)) in cases.iter().enumerate() {
+            assert!(
+                cases
+                    .iter()
+                    .skip(index + 1)
+                    .all(|(_, _, other, _)| other != fingerprint),
+                "each TX-power selection must have a unique permit fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn configurable_constructor_preserves_the_compatibility_profile() {
+        for power in [
+            E290Na915TxPower::Dbm14,
+            E290Na915TxPower::Dbm17,
+            E290Na915TxPower::Dbm20,
+            E290Na915TxPower::Dbm22,
+        ] {
+            assert_eq!(
+                E290RadioConfiguration::try_from_profile(915_000_000, 125_000, 7, 5, power),
+                Ok(E290RadioConfiguration::na915_dev(power))
+            );
+        }
+    }
+
+    #[test]
+    fn configurable_constructor_validates_the_fitted_path_and_modulation() {
+        let configured = E290RadioConfiguration::try_from_profile(
+            869_200_000,
+            125_000,
+            8,
+            5,
+            E290Na915TxPower::Dbm17,
+        )
+        .unwrap();
+        assert_eq!(configured.id(), E290RadioConfigurationId::ConfiguredProfile);
+        assert_eq!(configured.profile().frequency_hz(), 869_200_000);
+        assert_eq!(configured.profile().bandwidth().hz(), 125_000);
+        assert_eq!(configured.profile().spreading_factor().factor(), 8);
+        assert_eq!(configured.profile().coding_rate().denom(), 5);
+        assert_eq!(configured.tx_power(), E290Na915TxPower::Dbm17);
+
+        let outside = E290RadioConfiguration::try_from_profile(
+            862_999_999,
+            125_000,
+            8,
+            5,
+            E290Na915TxPower::Dbm14,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            outside.profile_error(),
+            LabRxProfileError::ChannelOutsideSupportedRange { .. }
+        ));
+
+        let incompatible_ldro = E290RadioConfiguration::try_from_profile(
+            915_000_000,
+            125_000,
+            11,
+            5,
+            E290Na915TxPower::Dbm14,
+        )
+        .unwrap_err();
+        assert_eq!(
+            incompatible_ldro.profile_error(),
+            LabRxProfileError::UnverifiedRnodeLdroCombination {
+                spreading_factor: 11,
+                bandwidth_hz: 125_000,
+            }
+        );
+    }
+
+    #[test]
+    fn configured_fingerprint_binds_every_variable_field_without_alias_drift() {
+        let configuration =
+            |frequency_hz, bandwidth_hz, spreading_factor, coding_rate_denominator, tx_power| {
+                E290RadioConfiguration::try_from_profile(
+                    frequency_hz,
+                    bandwidth_hz,
+                    spreading_factor,
+                    coding_rate_denominator,
+                    tx_power,
+                )
+                .unwrap()
+                .fingerprint()
+            };
+        let base = configuration(914_000_000, 125_000, 7, 5, E290Na915TxPower::Dbm14);
+        for changed in [
+            configuration(914_000_001, 125_000, 7, 5, E290Na915TxPower::Dbm14),
+            configuration(914_000_000, 250_000, 7, 5, E290Na915TxPower::Dbm14),
+            configuration(914_000_000, 125_000, 8, 5, E290Na915TxPower::Dbm14),
+            configuration(914_000_000, 125_000, 7, 6, E290Na915TxPower::Dbm14),
+            configuration(914_000_000, 125_000, 7, 5, E290Na915TxPower::Dbm17),
+        ] {
+            assert_ne!(base, changed);
+        }
+
+        assert_eq!(
+            configuration(914_000_000, 10_400, 7, 5, E290Na915TxPower::Dbm14),
+            configuration(914_000_000, 10_420, 7, 5, E290Na915TxPower::Dbm14),
+            "equivalent SX1262 bandwidth aliases must canonicalize"
+        );
+    }
+
+    #[test]
+    fn receive_watchdog_scales_with_the_configured_symbol_and_frame_times() {
+        let slow = E290RadioConfiguration::try_from_profile(
+            915_000_000,
+            125_000,
+            12,
+            8,
+            E290Na915TxPower::Dbm22,
+        )
+        .unwrap();
+        let profile = slow.profile();
+        let required_us = profile
+            .symbol_time_us_ceil()
+            .saturating_mul(u64::from(slow.rx_symbol_timeout()))
+            .saturating_add(profile.maximum_frame_time_on_air_us())
+            .saturating_add(E290_RX_WATCHDOG_MINIMUM_MARGIN_US);
+        assert_eq!(slow.maximum_receive_operation_us().get(), required_us);
+        assert!(
+            slow.maximum_receive_operation_us()
+                > E290_NA915_DEV_CONFIGURATION.maximum_receive_operation_us()
+        );
     }
 
     #[test]
@@ -974,6 +1430,7 @@ mod tests {
         assert!(profile.crc());
         assert!(!profile.iq_inverted());
         assert_eq!(configuration.requested_power_dbm(), 14);
+        assert_eq!(configuration.tx_power(), E290Na915TxPower::Dbm14);
         assert_eq!(E290_NA915_DEV_RAW_SET_TX_PARAMS_DBM, 22);
         assert_eq!(configuration.rx_symbol_timeout(), 248);
         assert!(!configuration.public_network());
@@ -982,10 +1439,8 @@ mod tests {
         assert_eq!(E290_PRIVATE_SYNC_WORD, 0x1424);
         assert_eq!(E290_TCXO_WAKEUP_MS, 10);
 
-        let symbol_duration_us = (1_u64 << profile.spreading_factor().factor())
-            .saturating_mul(1_000_000)
-            .div_ceil(u64::from(profile.bandwidth().hz()));
-        let required_us = symbol_duration_us
+        let required_us = profile
+            .symbol_time_us_ceil()
             .saturating_mul(u64::from(configuration.rx_symbol_timeout()))
             .saturating_add(profile.maximum_frame_time_on_air_us())
             .saturating_add(E290_RX_WATCHDOG_MINIMUM_MARGIN_US);
@@ -1015,10 +1470,14 @@ mod tests {
         let tcxo = command_index(&commands, &[0x97, 0x02, 0x00, 0x02, 0x80]);
         assert!(regulator < dio2_switch && dio2_switch < tcxo);
         command_index(&commands, &[0x0d, 0x07, 0x40, 0x14, 0x24]);
-        assert!(
-            commands
-                .iter()
-                .any(|command| command == &[0x95, 0x02, 0x02, 0x00, 0x01])
+        assert_contiguous_commands(
+            &commands,
+            &[
+                &[0x1d, 0x08, 0xd8, 0x00],
+                &[0x0d, 0x08, 0xd8, 0x1e],
+                &[0x95, 0x02, 0x02, 0x00, 0x01],
+                &[0x8e, 0x08, 0x04],
+            ],
         );
         assert!(
             !commands
@@ -1030,6 +1489,82 @@ mod tests {
                 .iter()
                 .any(|command| matches!(command.first(), Some(0x82 | 0x83 | 0xc5)))
         );
+    }
+
+    #[test]
+    fn every_boot_power_repeats_its_exact_pa_sequence_for_both_physical_frames() {
+        for (power, pa_command) in [
+            (E290Na915TxPower::Dbm14, [0x95, 0x02, 0x02, 0x00, 0x01]),
+            (E290Na915TxPower::Dbm17, [0x95, 0x02, 0x03, 0x00, 0x01]),
+            (E290Na915TxPower::Dbm20, [0x95, 0x03, 0x05, 0x00, 0x01]),
+            (E290Na915TxPower::Dbm22, [0x95, 0x04, 0x07, 0x00, 0x01]),
+        ] {
+            let configuration = E290RadioConfiguration::na915_dev(power);
+            let TestRig {
+                mut radio,
+                controls,
+                reset,
+                ..
+            } = build_radio_with_configuration(configuration);
+            assert_eq!(radio.configuration(), configuration);
+            controls.commands.borrow_mut().clear();
+
+            let packet = [0x5a; 255];
+            let mut first_output = [0_u8; SX1262_FRAME_MTU];
+            let mut second_output = [0_u8; SX1262_FRAME_MTU];
+            let frames = reticulum_radio_interface::frame_rns_packet(
+                &packet,
+                power.requested_dbm() as u8,
+                &mut first_output,
+                &mut second_output,
+            )
+            .unwrap();
+            assert_eq!(frames.frame_count(), 2);
+
+            let observation = block_on(SoleRnodeRadio::transmit(&mut radio, frames)).unwrap();
+            assert_eq!(observation.progress().completed_frame_count(), 2);
+
+            let commands = controls.commands.borrow();
+            let expected_power_sequence: [&[u8]; 4] = [
+                &[0x1d, 0x08, 0xd8, 0x00],
+                &[0x0d, 0x08, 0xd8, 0x1e],
+                &pa_command,
+                &[0x8e, 0x16, 0x02],
+            ];
+            assert_eq!(
+                contiguous_command_count(&commands, &expected_power_sequence),
+                2,
+                "each physical frame must reapply the exact {power:?} PA sequence: {commands:02x?}"
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| command.as_slice() == pa_command)
+                    .count(),
+                2
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| command.as_slice() == [0x8e, 0x16, 0x02])
+                    .count(),
+                2
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|command| command.as_slice() == [0x83, 0, 0, 0])
+                    .count(),
+                2
+            );
+            assert!(
+                !commands
+                    .iter()
+                    .any(|command| command.starts_with(&[0x0d, 0x08, 0xe7]))
+            );
+            assert!(radio.is_active());
+            assert!(reset.is_high());
+        }
     }
 
     #[test]
@@ -1056,8 +1591,15 @@ mod tests {
         assert_eq!(observation.progress().completed_frame_count(), 1);
         assert_eq!(observation.progress().frame_completed_at_us(0), Some(101));
         let commands = controls.commands.borrow();
-        command_index(&commands, &[0x95, 0x02, 0x02, 0x00, 0x01]);
-        command_index(&commands, &[0x8e, 0x16, 0x02]);
+        assert_contiguous_commands(
+            &commands,
+            &[
+                &[0x1d, 0x08, 0xd8, 0x00],
+                &[0x0d, 0x08, 0xd8, 0x1e],
+                &[0x95, 0x02, 0x02, 0x00, 0x01],
+                &[0x8e, 0x16, 0x02],
+            ],
+        );
         assert_eq!(
             commands
                 .iter()

@@ -18,6 +18,13 @@ export interface BleGattProfile {
 
 export interface BleConnectOptions {
   /**
+   * Additional exact names that identify the same selected appliance.
+   * CoreBluetooth can report a cached name from before firmware changed
+   * advertising modes, so bond recovery accepts both the normal and recovery
+   * names without relaxing the device-specific suffix.
+   */
+  readonly peripheralNameAliases?: readonly string[];
+  /**
    * Bounds only the platform connection attempt. CoreBluetooth has no native
    * connection timeout and can take longer than an ordinary GATT operation
    * while a freshly rebooted peripheral becomes connectable.
@@ -35,6 +42,13 @@ export interface BleConnectOptions {
    * emitted again. The first matching advertisement is used when omitted.
    */
   readonly peripheralId?: string;
+  /**
+   * Before scanning, reclaim an already-connected service peripheral whose
+   * exact name matches `peripheralName` or one of its aliases. This is reserved
+   * for explicit recovery: connected peripherals no longer advertise, and an
+   * orphaned CoreBluetooth link would otherwise be invisible to the app.
+   */
+  readonly reclaimConnectedPeripheral?: boolean;
   /**
    * Bounds each native BLE setup or teardown operation independently.
    */

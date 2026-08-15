@@ -1,5 +1,6 @@
 import {
   type BridgeProfile,
+  MAXIMUM_PROFILE_FRAGMENT_BYTES,
   PreReadyIndicationBuffer,
   boundedError,
   parseBridgeProfile,
@@ -372,7 +373,7 @@ async function connectGatt(): Promise<void> {
       indications.push(
         binarySender(),
         characteristicValue(event),
-        profile.maximumFragmentBytes,
+        MAXIMUM_PROFILE_FRAGMENT_BYTES,
       );
     } catch (error) {
       void fail(error);

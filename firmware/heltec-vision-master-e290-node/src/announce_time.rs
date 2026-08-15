@@ -16,6 +16,87 @@ pub enum ScheduledAnnounce {
     NomadNode,
 }
 
+/// Coalescing result for one authenticated manual announce request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManualAnnounceRequestDisposition {
+    /// A fresh three-destination cycle was queued.
+    Queued,
+    /// A manual cycle was already pending and remains the sole queued cycle.
+    AlreadyPending,
+}
+
+/// Volatile, spacing-aware manual service announce cycle.
+///
+/// A button press queues Primary, optional LXMF Delivery, and NomadNet as
+/// independent events. Repeated presses coalesce until the complete cycle is
+/// consumed. This keeps the manual path inside the same fair announce lane as
+/// periodic traffic and avoids back-to-back LoRa service announcements.
+pub struct ManualAnnounceSchedule {
+    next: Option<ScheduledAnnounce>,
+    next_seconds: u64,
+    lxmf_enabled: bool,
+}
+
+impl ManualAnnounceSchedule {
+    /// Construct an idle manual schedule.
+    pub const fn new(lxmf_enabled: bool) -> Self {
+        Self {
+            next: None,
+            next_seconds: 0,
+            lxmf_enabled,
+        }
+    }
+
+    /// Coalesce or queue one complete manual service-announce cycle.
+    pub fn request(&mut self, now_seconds: u64) -> ManualAnnounceRequestDisposition {
+        if self.next.is_some() {
+            return ManualAnnounceRequestDisposition::AlreadyPending;
+        }
+        self.next = Some(ScheduledAnnounce::Primary);
+        self.next_seconds = now_seconds;
+        ManualAnnounceRequestDisposition::Queued
+    }
+
+    /// Next manual destination once its quiet interval has elapsed.
+    pub const fn due(&self, now_seconds: u64) -> Option<ScheduledAnnounce> {
+        if now_seconds >= self.next_seconds {
+            self.next
+        } else {
+            None
+        }
+    }
+
+    /// Retain the selected destination after protocol admission pressure.
+    pub fn defer_attempt(&mut self, now_seconds: u64) {
+        if self.next.is_some() {
+            self.next_seconds =
+                now_seconds.saturating_add(config::ANNOUNCE_ADMISSION_RETRY_SECONDS);
+        }
+    }
+
+    /// Advance after the selected destination is admitted or disabled.
+    pub fn mark_attempted(&mut self, now_seconds: u64) {
+        self.next = match self.next {
+            Some(ScheduledAnnounce::Primary) if self.lxmf_enabled => {
+                Some(ScheduledAnnounce::LxmfDelivery)
+            }
+            Some(ScheduledAnnounce::Primary | ScheduledAnnounce::LxmfDelivery) => {
+                Some(ScheduledAnnounce::NomadNode)
+            }
+            Some(ScheduledAnnounce::NomadNode) | None => None,
+        };
+        if self.next.is_some() {
+            self.next_seconds =
+                now_seconds.saturating_add(config::ANNOUNCE_DESTINATION_SPACING_SECONDS);
+        }
+    }
+
+    /// Whether one manual cycle is waiting or in progress.
+    pub const fn is_pending(&self) -> bool {
+        self.next.is_some()
+    }
+}
+
 /// Boot-burst and steady-state scheduling for local destinations.
 ///
 /// A transport node immediately rebroadcasts a newly received announce. LoRa
@@ -178,6 +259,46 @@ mod tests {
 
     fn epoch(value: u32) -> BootEpoch {
         BootEpoch::new(value).expect("test epoch must fit")
+    }
+
+    #[test]
+    fn manual_cycle_coalesces_and_preserves_destination_spacing() {
+        let mut schedule = ManualAnnounceSchedule::new(true);
+        assert_eq!(
+            schedule.request(100),
+            ManualAnnounceRequestDisposition::Queued
+        );
+        assert_eq!(
+            schedule.request(101),
+            ManualAnnounceRequestDisposition::AlreadyPending
+        );
+        assert_eq!(schedule.due(100), Some(ScheduledAnnounce::Primary));
+
+        schedule.mark_attempted(100);
+        assert_eq!(schedule.due(100), None);
+        assert_eq!(
+            schedule.due(100 + config::ANNOUNCE_DESTINATION_SPACING_SECONDS),
+            Some(ScheduledAnnounce::LxmfDelivery)
+        );
+        schedule.mark_attempted(200);
+        assert_eq!(
+            schedule.due(200 + config::ANNOUNCE_DESTINATION_SPACING_SECONDS),
+            Some(ScheduledAnnounce::NomadNode)
+        );
+        schedule.mark_attempted(300);
+        assert!(!schedule.is_pending());
+    }
+
+    #[test]
+    fn manual_cycle_skips_disabled_lxmf_but_not_nomad() {
+        let mut schedule = ManualAnnounceSchedule::new(false);
+        schedule.request(1);
+        assert_eq!(schedule.due(1), Some(ScheduledAnnounce::Primary));
+        schedule.mark_attempted(1);
+        assert_eq!(
+            schedule.due(1 + config::ANNOUNCE_DESTINATION_SPACING_SECONDS),
+            Some(ScheduledAnnounce::NomadNode)
+        );
     }
 
     #[test]

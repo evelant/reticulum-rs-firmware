@@ -1,5 +1,12 @@
 # Permanent Vision Master E290 node image
 
+> This is the detailed implementation and powered-evidence dossier. It
+> preserves historical profiles, hashes, migrations, and HIL procedures. Use
+> [Build and flash the E290 appliance firmware](getting-started/firmware-e290.md)
+> for the current app-usable image, [current architecture](architecture/overview.md)
+> for the concise design, and [current status](status.md) for user-visible
+> capabilities and limits.
+
 **Status:** the first permanent, LoRa-first image is implemented. Its release
 record below captures the host-library, host-client, portable-target, ESP32-S3,
 strict review, graph, image-size, and same-image readback gates. Its third task
@@ -101,12 +108,26 @@ protocol retries, close records, encryption, rate limiting/attempt policy, and
 concurrent requests are deferred. Credential selection, admission handoff, and
 node dispatch are bearer-neutral. The opt-in BLE profile now reuses that
 ownership boundary under suite 3 while keeping the application connection limit
-at one; Wi-Fi remains to be powered-qualified. Powered evidence now qualifies
-authenticated capabilities and identity reads, sequential request/response
-flights in one session, durable submission, LoRa DATA delivery, peer decrypt/
-proof, terminal projection, API 1.2 durable raw-RNS status/peek before and after
-a hard reset, one drop-newest observation, four bounded cold-mount quarantine
-cases, and one same-boot missing-commit quarantine. The current continuous-RX
+at one. The selectable `wifi-tcp-proof` successor now passes its ESP32-S3
+release build with the BLE appliance, Wi-Fi station/DHCP, and one outbound
+HDLC-framed Reticulum TCP actor registered as interface 2. Its distinct
+`target/e290-wifi-tcp` build and `e290-node-wifi-tcp.bin` package names prevent
+it from being confused with the powered `ble-api-proof` artifact. Current
+source marks shared-medium LoRa interface 1 `Internal` and point-to-point TCP
+interface 2 `Boundary`. The registry supplies an exact allowed-egress set only
+for the matching ingress-derived announce, blocking public TCP announces from
+LoRa while preserving local/LoRa announces toward TCP and all ordinary packet
+routing. Host tests cover the source contract; powered boundary-policy and
+role-aware protection of the 64-entry Rete route/identity cache remain open.
+Wi-Fi
+association, BLE coexistence, TCP interoperability, LoRa continuity, and
+border forwarding remain to be powered-qualified. Powered evidence now
+qualifies authenticated capabilities and identity reads, sequential
+request/response flights in one session, durable submission, LoRa DATA
+delivery, peer decrypt/proof, terminal projection, API 1.2 durable raw-RNS
+status/peek before and after a hard reset, one drop-newest observation, four
+bounded cold-mount quarantine cases, and one same-boot missing-commit
+quarantine. The current continuous-RX
 HIL additionally qualifies one exact 307-byte A-to-B opportunistic LXMF DATA
 packet, a new durable receiver-store commit before retained-proof release,
 first-attempt `Delivered`, and exact store readback. The earlier fault fixtures
@@ -319,12 +340,17 @@ internal-RAM fallback. These slot counts bound this E290 profile's volatile
 concurrency;
 they are not a protocol, store-capacity, or full-feature ceiling and may be
 raised after measured E290 qualification.
-The first profile deliberately has no age or attempt expiry for
-`AdmissionDeferred`: an unknown source identity retains its exact slot while an
-announce may make verification possible. This keeps memory bounded but means
-sixteen never-resolved sources can occupy all application-event slots until
-reboot. A path-request/identity-retention strategy plus an explicit expiry or
-attempt policy is required before hostile or sustained deployment.
+`AdmissionDeferred` deliberately retains the exact event without an age or
+attempt expiry so a later source announce can make signature verification
+possible. It no longer reacquires that event every second: the first periodic
+retry uses a five-second base plus at most 20 percent deterministic jitter,
+successive bases increase exponentially, the complete interval stays below
+five minutes, and an authenticated announce for the exact source wakes its
+matching retained entries immediately. This removes the live
+generation/log storm while preserving eventual admission. Memory remains
+bounded, but sixteen never-resolved sources can still occupy every application-
+event slot until reboot; hostile deployment still needs an explicit retention
+or expiry policy.
 When the event pool is actually full and a ready proof cannot enter the ordinary
 path, pressure relief discards only the oldest non-pending LXMF retry; exact
 store-reconciliation and store-fault owners are never selected. Clean collision
@@ -607,9 +633,9 @@ The initial fixed capacities are:
 
 | Resource | Capacity |
 | --- | ---: |
-| Rete paths | 16 |
+| Rete paths | 64 (PSRAM-resident production supervisor) |
 | Pending local announces | 4 |
-| Deduplication entries | 32 |
+| Deduplication entries | 128 |
 | Rete links | 4 |
 | DATA buffers | 4 |
 | Ordinary-action buffers | 8 |
@@ -697,20 +723,34 @@ IRQ/DMA/cache-off or synchronization-visible state remain in internal static
 RAM. The permanent `ProductSupervisor`, including its sole `NodeCore`, is now
 deliberately placed in PSRAM before the radio-initialization await; its task
 retains only the resulting stable reference. This also places the node's
-private Reticulum identity in PSRAM. The ordinary and Wi-Fi profiles retain
-their measured 64 KiB reclaimed heap. The opt-in BLE profile receives 72 KiB
-followed by the detected PSRAM. That is the largest whole-KiB allocation that
-fits the ESP32-S3 linker's separate 73,744-byte DRAM2 segment; it leaves 16
-bytes rather than reducing the product executor stack in ordinary DRAM. The
-BLE-only additional 8 KiB is available to esp-radio's 8,192-byte
-strict-internal controller-task stack and other controller allocations. This
-remains below the pinned esp-radio 0.18 documentation's conservative 100 KiB
-total recommendation (64 KiB reclaimed plus 36 KiB ordinary). The corrected
-powered BLE startup diagnostic nevertheless completed controller
-initialization, Trouble host/GATT construction, runner startup, and advertising
-under exactly 72 KiB, with 40,996 internal-heap bytes free after advertising.
-No further heap increase is required for this startup path; sustained
-authenticated load and high-water qualification remain open. Because
+private Reticulum identity in PSRAM. The ordinary profile retains its measured
+64 KiB reclaimed heap. BLE-only profiles receive 72 KiB followed by the
+detected PSRAM. That is the largest whole-KiB allocation that fits the
+ESP32-S3 linker's separate 73,744-byte DRAM2 segment; it leaves 16 bytes rather
+than reducing the product executor stack in ordinary DRAM. The additional
+8 KiB is available to esp-radio's 8,192-byte strict-internal controller-task
+stack and other controller allocations. The corrected powered BLE startup
+diagnostic completed controller initialization, Trouble host/GATT construction,
+runner startup, and advertising under exactly 72 KiB, with 40,996
+internal-heap bytes free after advertising.
+
+Wi-Fi station profiles also include BLE and coexistence. They register a
+second 48 KiB ordinary-DRAM allocator region, for 120 KiB total internal heap,
+before registering PSRAM. This follows the current upstream
+[`embassy_coex` example's 128 KiB internal-heap shape](https://github.com/esp-rs/esp-hal/blob/b50efcb0dcd94b58ec337e511891057aa1f2e8fb/examples/wifi/embassy_coex/src/main.rs#L92-L102)
+while retaining the product's exact
+linked stack margin. The earlier 72 KiB station image left only about 3--4 KiB
+free after association and DHCP, then stopped receiving Ethernet frames while
+association, DHCP, and transmit-token availability remained healthy. Wi-Fi
+driver allocations and dynamic RX buffers require internal memory; PSRAM cannot
+substitute for this region. The 2026-08-14 powered A/B booted with 53,244 bytes
+free after Wi-Fi controller construction, 52,440 bytes after DHCP, and 51,368
+bytes at authenticated BLE application-session readiness. It remained online
+for more than ten minutes of active BLE while repeatedly receiving public
+Reticulum announces through TCP interface 2, with no DNS, TCP, RX, BLE, or
+station failure. That closes the observed short-run starvation regression; AP
+loss/recovery, reconnect churn, longer pressure, and exact flash-readback
+qualification remain open. Because
 `esp-alloc` searches registered regions in order, ordinary global allocations
 currently consume internal heap first and spill into PSRAM only when no
 internal hole fits. That is a measured baseline, not the intended long-term
@@ -747,14 +787,15 @@ The target requires a 16 MiB flash image/header and uses
 | Announce clock | `0x612000` | 8 KiB | Wired, mirrored boot-epoch append logs |
 | API credentials | `0x614000` | 8 KiB | Wired boot mount/recovery; exact eFuse-derived binding; retained plaintext two-sector store; no automatic provisioning |
 | BLE bond | `0x616000` | 8 KiB | Wired read-only boot mount and pairing-time exact commit/readback/remount; one authenticated bond |
-| Device config | `0x618000` | 96 KiB | Reserved, not wired |
+| Device config | `0x618000` | 96 KiB | Raw-NOR configuration arena; first 8 KiB assigned to the alternating network-configuration store |
 | Node journal | `0x630000` | 1 MiB | Schema-3/physical-2 operation-scoped submission runtime; current 128-entry non-reclaiming cap in PSRAM below the 154-acceptance journal lifetime; authenticated submission and post-re-enumeration terminal status powered-qualified, but not a powered 128-entry fill |
 | Message store | `0x730000` | 2 MiB | Wired ADR 0011 format-1 raw-RNS inbox; one 576-byte commit-last item; 383-byte maximum; not LXMF |
-| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry and per-Link single-flight policy; fresh-Link/new-commit delivery, exact timeout retirement followed by later fresh-Link recovery, and a bounded same-message two-packet/one-row replay outcome are powered-qualified; exact `LinkHandle` reuse and the receiver `Replay` enum remain source-qualified because the frozen client API exposes neither |
+| LXMF store | `0x930000` | 2 MiB | Wired ADR 0014 append-only store; physical format 2 records immutable first-arrival interface and optional paired RSSI/SNR, while legacy format-1 records remain readable without ingress evidence; 512-slot PSRAM index; mount-gated opportunistic plus responder-side direct-packet `lxmf.delivery` admission with required retained proofs; four-entry outbound-initiator direct-Link registry and per-Link single-flight policy; fresh-Link/new-commit delivery, exact timeout retirement followed by later fresh-Link recovery, and a bounded same-message two-packet/one-row replay outcome are powered-qualified; exact `LinkHandle` reuse and the receiver `Replay` enum remain source-qualified because the frozen client API exposes neither |
 | Unallocated | `0xb30000` | 4.8125 MiB | OTA/layout decision |
 
-The workspace runner in `.cargo/config.toml` hardcodes an 8 MiB flash size and
-must not be used for this target.
+The shared Xtensa target configuration deliberately defines no flash runner,
+because supported boards have different geometry and partition maps. Package
+and flash this target only through its explicit board procedure.
 
 ### Opt-in runtime-measurement HIL
 
@@ -947,8 +988,8 @@ contains 946 default and 962 HIL records with 53,680-byte maxima; the earlier
 powered release ELFs contain 816/832 records with 52,752-byte maxima. CI runs
 Clippy and then
 relinks both current profiles with
-`-C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated target directories
-immediately before this inspection.
+`-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes` in isolated
+target directories immediately before this inspection.
 
 The retained Stage 5 post-offload default/HIL artifact usable stacks are
 175,056/174,256 bytes and both guard offsets are 60 bytes. The preceding
@@ -1544,7 +1585,7 @@ preceding direction:
    `flash-merged` deliberately invokes espflash with `--after no-reset`; USB
    re-enumeration alone does not reset the CPU or start the application. After
    every loader-mode operation in this step is complete, use step 8 of the
-   [connected-board flash procedure](#connected-board-identity-and-future-flash-procedure)
+   [connected-board flash procedure](#detailed-connected-board-identity-backup-and-flash-procedure)
    to clear only the retained force-download bit and request the RTC-watchdog
    full-chip reset. Pressing the board's physical EN reset button is the
    accepted recovery alternative. Then rediscover the application port; do not
@@ -1685,16 +1726,22 @@ the sole flash owner commits, reads back, and remounts the exact successor. The
 alpha retains exactly one durable bond per board: the last successfully
 authenticated GPIO21-bound physical-presence pairing replaces it. A restored
 bond reconnects without repeating SMP and can use a fresh GPIO21 hold to open
-the separate 60-second application-pairing window for credential initialization
-or live pairing.
-`device_config` retains the standard NVS subtype while it is unwired; the
-application-owned journal and wired raw-RNS inbox retain `data,undefined`.
+the separate five-minute application-pairing window for credential
+initialization or live pairing.
+`device_config` is an application-owned `data,undefined` raw-NOR arena. Its
+first 8 KiB is assigned to the alternating network-configuration store and the
+next 8 KiB to the durable LXMF collection watermark, while the remaining
+80 KiB stays reserved. The application-owned journal and wired raw-RNS inbox
+also retain `data,undefined`.
 The append-only LXMF store also retains `data,undefined`; all labels and ranges
 remain distinct. The complete `message_store` range is
 bound to the physical device ID, absolute offset, length, and inbox physical
 format version 1. The separate `lxmf_store` is bound to the same device ID and
-its own exact range/format version. Numeric custom subtypes are only valid with
-custom partition types in the image tooling and are not used here.
+its own exact range and current physical format version 2. It still reads
+format-1 records, which have no ingress observation, while every new append is
+format 2. Once a format-2 record has been appended, format-1 firmware cannot
+safely roll back onto that mixed store. Numeric custom subtypes are only valid
+with custom partition types in the image tooling and are not used here.
 
 ### Durable identity, journal and announce ordering
 
@@ -1914,6 +1961,11 @@ responder-side bound direct Link DATA admission, required-proof durable ingress,
 per-destination `Retain`, the sixteen-slot delayed-proof owner, and the
 ordinary-supervisor ready-proof drain. The primary destination still rejects
 local Link termination, and native Resource ingress remains disabled. The
+new-commit path stores the receiving interface and optional paired RSSI/SNR
+from the first accepted arrival before releasing the proof. This is
+receiver-local final-hop evidence and can describe a relay; replay never
+replaces an existing observation, and legacy format-1 records expose no
+fabricated value. The
 earlier A-to-B confirmation powers only the opportunistic new-commit-before-
 proof path. The later
 [forced-direct record](e290-direct-link-powered-proof.md) powers one physical
@@ -2012,11 +2064,21 @@ All four physical-store bindings name the device with the domain-separated
 16-byte value `"e290-flash" || eFuse base MAC`. The credential view additionally fixes
 absolute offset `0x614000`, length `0x2000`, and credential physical layout
 version 1. The journal view fixes offset `0x630000`, length `0x100000`, and
-journal physical layout version 1. The inbox view fixes offset `0x730000`, length
+journal physical layout version 2. The inbox view fixes offset `0x730000`, length
 `0x200000`, and inbox physical format version 1. The LXMF view fixes offset
-`0x930000`, length `0x200000`, and LXMF physical format version 1. Each store
+`0x930000`, length `0x200000`, and LXMF physical format version 2. Each store
 validates its exact values and view capacity/alignment before I/O; every later
 borrowed operation must match its retained binding exactly.
+
+Current source also composes the unreleased API 1.14 ingress-summary extension
+and one-shot Reticulum proof probe. The probe uses the ordinary router and
+proof path to an enabled `rnstransport.probe` responder and keeps one volatile
+principal/idempotency result slot; it bypasses the durable submission journal
+and LXMF store. It establishes Reticulum reachability only, not LXMF
+availability or throughput. Its returned signal is measured locally on the
+proof's final hop and may describe a relay, not the remote request receiver;
+public nodes may omit or disable the responder. These API 1.14 additions are
+source-qualified together and do not yet have a powered E290 field record.
 
 ## Software composition and build gates
 
@@ -2051,64 +2113,80 @@ cargo +stable run --locked -p xtask -- graph-policy
 
 source ~/export-esp.sh
 CARGO_TARGET_DIR=target/e290-default \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --target xtensa-esp32s3-none-elf -- -D warnings
 CARGO_TARGET_DIR=target/e290-default \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --target xtensa-esp32s3-none-elf
 CARGO_TARGET_DIR=target/e290-display \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features --features display \
   --target xtensa-esp32s3-none-elf -- -D warnings
 CARGO_TARGET_DIR=target/e290-display \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features --features display \
   --target xtensa-esp32s3-none-elf
 CARGO_TARGET_DIR=target/e290-ble \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features --features ble-api-proof \
   --target xtensa-esp32s3-none-elf -- -D warnings
 CARGO_TARGET_DIR=target/e290-ble \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features --features ble-api-proof \
+  --target xtensa-esp32s3-none-elf
+CARGO_TARGET_DIR=target/e290-wifi-tcp \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp clippy --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features wifi-tcp-proof \
+  --target xtensa-esp32s3-none-elf -- -D warnings
+CARGO_TARGET_DIR=target/e290-wifi-tcp \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
+cargo +esp build --locked --release \
+  -p reticulum-heltec-vision-master-e290-node \
+  --bin reticulum-heltec-vision-master-e290-node \
+  --no-default-features --features wifi-tcp-proof \
   --target xtensa-esp32s3-none-elf
 CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --no-default-features --features rns-inbox-commit-fault-hil \
   --target xtensa-esp32s3-none-elf
 CARGO_TARGET_DIR=target/e290-inbox-commit-fault-hil \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features --features rns-inbox-commit-fault-hil \
   --target xtensa-esp32s3-none-elf -- -D warnings
 CARGO_TARGET_DIR=target/e290-runtime-measurement-hil \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp clippy --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --bin reticulum-heltec-vision-master-e290-node \
   --no-default-features --features runtime-measurement-hil \
   --target xtensa-esp32s3-none-elf -- -D warnings
 CARGO_TARGET_DIR=target/e290-runtime-measurement-hil \
-RUSTFLAGS='-C link-arg=-nostartfiles -Z emit-stack-sizes' \
+RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
 cargo +esp build --locked --release \
   -p reticulum-heltec-vision-master-e290-node \
   --no-default-features --features runtime-measurement-hil \
@@ -2121,8 +2199,39 @@ cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-startup-
 cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-startup-elf \
   --elf target/e290-ble/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
 cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-startup-elf \
+  --elf target/e290-wifi-tcp/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+cargo +stable run --locked -p xtask -- e290-runtime-measurement inspect-startup-elf \
   --elf target/e290-runtime-measurement-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
 ```
+
+The full alpha appliance has crossed Xtensa `l32r` literal reach. The
+Espressif LLVM large code model intersperses text-section literal pools and is
+therefore required for a linked, flashable ELF, not an optional optimization.
+Because explicit `RUSTFLAGS` replace the target configuration, every command
+above repeats `-nostartfiles`; the startup gates also require the emitted stack
+sizes.
+
+Package the two app profiles with the explicit 16 MiB procedure in the
+[canonical firmware guide](getting-started/firmware-e290.md):
+`target/e290-ble/e290-node-ble.bin` is the powered BLE/LoRa artifact, while
+`target/e290-wifi-tcp/e290-node-wifi-tcp.bin` is the build-qualified border
+candidate. A successful Wi-Fi/TCP build or package is not powered evidence.
+
+Both application graphs use coherent upstream esp-rs revision
+`b50efcb0dcd94b58ec337e511891057aa1f2e8fb` for `esp-hal`, `esp-radio`,
+`esp-rtos`, and patched support crates. This includes
+[esp-hal #5776](https://github.com/esp-rs/esp-hal/pull/5776), which pairs
+ESP32-S3 combo-PHY initialization with Wi-Fi RX enable/disable, and the
+corrected upstream RTOS stack-slice element counts. The station profile sets
+its Wi-Fi maximum TX power explicitly to 60 quarter-dBm (15 dBm).
+
+That upstream revision still has a separate Wi-Fi TX-credit lifecycle risk. A
+send/disconnect race can increment the global in-flight count without receiving
+the completion callback that returns the credit. RX and TX both depend on that
+count staying below this product's three-credit queue, so enough races can
+wedge traffic while association and DHCP remain apparently healthy. The #5776
+combo-PHY fix does not close that path; reconnect, recovery, and soak remain
+required hardware gates.
 
 The HIL ELF is isolated at
 `target/e290-inbox-commit-fault-hil/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node`.
@@ -2133,8 +2242,11 @@ The runtime-measurement ELF is separately isolated under
 `target/e290-runtime-measurement-hil`; it is likewise never the source for the
 ordinary product image.
 
-The build script rejects an unreviewed `esp-rtos` main-stack implementation and
-links `linkall.x`. Debug Xtensa builds are compile-time rejected.
+`graph-policy` rejects any `esp-rtos` source other than the exact reviewed
+upstream esp-rs revision. The build script embeds the corresponding
+`esp-rtos-upstream-b50efcb-stack-words-v1` runtime-source identity and links
+`linkall.x`; it does not inspect or require a local esp-rtos tree. Debug Xtensa
+builds are compile-time rejected.
 The three exceptional development/HIL features are pairwise mutually exclusive,
 so an E290 `--all-features` build is invalid. `graph-policy` separately inspects
 the ordinary and exceptional roots. The commit-fault dependency tail must be
@@ -2234,14 +2346,16 @@ enumeration reset names a clean epoch. Runtime bus reset applies the same
 block/detach/scrub/reattach gate. The ROM and bootloader interval before the
 earliest Rust entry remains a boot-chain residual, not a claimed erasure point.
 
-The permanent image selects only `esp-println` features
-`esp32s3,log-04,no-op` and does not initialize the logger. Application,
-framework, and panic log text therefore cannot write the USB Serial/JTAG FIFO;
-the shared framed initialization, live-pairing, and authenticated-session records
-have the sole application-owned byte stream.
+The legacy no-wireless image does not initialize the logger. Its shared framed
+initialization, live-pairing, and authenticated-session records therefore have
+the sole application-owned USB Serial/JTAG byte stream. BLE/Wi-Fi production
+profiles do not compose that USB RDA1 owner; they initialize USB Serial/JTAG
+logging at `Info` so routine alpha builds retain startup and runtime evidence.
+Raw log text is never multiplexed into framed records.
 This deliberately removes the earlier native-USB boot log as a validation
-surface. Powered work must use the typed control responses, RF evidence, and
-exact flash readback, or a separately designed diagnostic sink.
+surface from the legacy framed profile. Its powered work must use typed control
+responses, RF evidence, and exact flash readback. Wireless-profile logs are a
+useful diagnostic surface but do not replace independent durability evidence.
 
 Separate ESP release builds made before the authenticated-node-foundation slice
 with `-Z emit-stack-sizes` produced 1,025 fully symbolized records and identical
@@ -2403,7 +2517,7 @@ cargo +stable run --locked -p xtask -- e290-pairing-control \
 
 For erased eligible media, leave GPIO21 released after the connection is
 established, then hold it continuously for at least two seconds when prompted.
-The 60-second policy window begins at the hold threshold. A standalone `status`
+The five-minute policy window begins at the hold threshold. A standalone `status`
 prints `next_sequence`; another command in the same USB epoch must use that
 value. Closing and reopening the TTY does not start a new epoch, and DTR does not
 delimit one; only a USB bus reset followed by a new SOF permits sequence
@@ -3224,9 +3338,11 @@ ownership rather than performing a disposable warm-up.
 This is an ESP32-S3 peripheral-startup ownership/order invariant, not a reason
 to reduce the product feature set or require more RAM. Do not move first
 esp-radio/PHY initialization below display SPI construction. The bounded proof
-qualifies one integrated startup on Board A; it does not yet qualify repeated
-reset/sleep/wake cycles, live display-mediated pairing, concurrent load,
-pressure, or soak.
+qualified one integrated startup on Board A. The later fileless-onboarding
+proof exercised live GPIO21 admission, passkey rendering, credential
+activation, bonded reboot reconnect, fresh pairing on both boards, and
+two-profile switching. Repeated display reset/sleep/wake cycles,
+fault/timeout rendering, concurrent pressure, and soak remain open.
 
 The subsequent
 [physical Expo iOS BLE-to-LoRa proof](e290-expo-ios-ble-lora-proof.md)
@@ -3302,7 +3418,12 @@ native nearby, or NFC adapters must carry the same signed public contact-card
 envelope from ADR 0017 and must never accept an appliance credential as a
 contact.
 
-## Connected-board identity and future flash procedure
+## Detailed connected-board identity, backup, and flash procedure
+
+The normal app-usable build and flash path is the shorter
+[E290 firmware guide](getting-started/firmware-e290.md). This section retains
+the full identity-bound backup, migration, before/after comparison, and
+automated-reset procedure for audited or unusual operations.
 
 ROM download mode uses the dedicated `BOOT_KEY` on ESP32-S3 GPIO0: hold the
 board button silk-screened `BOOT`, tap `RST`, wait one second, then release
@@ -3310,10 +3431,11 @@ board button silk-screened `BOOT`, tap `RST`, wait one second, then release
 the ROM loader. Current alpha profiles keep native USB Serial/JTAG available:
 the default profile owns it as the framed device API, while BLE/Wi-Fi profiles
 retain the peripheral electrically and at runtime as a diagnostics-only sink.
-Every ordinary production profile keeps `esp-println` on its no-op backend and
-emits no log text there. Only the separately named BLE startup-diagnostic image
-enables USB Serial/JTAG diagnostic output. An ordinary `RST` reboots the
-application; use the GPIO0 sequence only when ROM download mode is needed.
+The default profile leaves its logger uninitialized so raw text cannot corrupt
+RDA1 framing. BLE/Wi-Fi production profiles initialize USB Serial/JTAG logging
+at `Info`; no separate diagnostic image is required for ordinary alpha
+observation. An ordinary `RST` reboots the application; use the GPIO0 sequence
+only when ROM download mode is needed.
 
 The read-only 2026-07-17 discovery snapshot was:
 
@@ -3359,11 +3481,11 @@ from the current callout-device name.
    and durable sync. Keep the board in the serial loader after this backup. Any
    later copy or archive of the dump must retain equivalent access control and
    encryption.
-4. Create the explicit 16 MiB merged image rather than invoking the 8 MiB
-   workspace runner:
+4. Create the explicit 16 MiB merged image rather than using `cargo run` or
+   implicit `espflash` geometry:
 
    ```sh
-   ELF=target/e290-default/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
+   ELF=target/e290-ble/xtensa-esp32s3-none-elf/release/reticulum-heltec-vision-master-e290-node
    espflash save-image --skip-update-check \
      --chip esp32s3 --merge --skip-padding \
      --flash-mode dio --flash-freq 80mhz --flash-size 16mb \
@@ -3532,6 +3654,7 @@ unrelated flash range.
 2. Build and package a one-shot image with the non-default migration feature:
 
    ```sh
+   RUSTFLAGS='-C code-model=large -C link-arg=-nostartfiles -Z emit-stack-sizes' \
    cargo +esp build --locked --release \
      -p reticulum-heltec-vision-master-e290-node \
      --features journal-schema3-dev-reprovision \
@@ -3553,15 +3676,14 @@ unrelated flash range.
    ```
 
 4. Flash the one-shot feature image and boot it once. The default USB-API
-   profile uses no-op logging because it owns USB Serial/JTAG for framed
-   control, so the old serial-log proof (`journal-reprovision-policy`,
+   profile leaves logging uninitialized because it owns USB Serial/JTAG for
+   framed control, so the old serial-log proof (`journal-reprovision-policy`,
    `node-journal-provision`, and schema-2 mount lines) is unavailable in that
-   profile. Ordinary BLE/Wi-Fi production profiles also retain the no-op
-   logger even though native USB remains electrically/runtime available.
-   Only a separately named diagnostic image enables USB Serial/JTAG output, and
-   its log stream is not authoritative migration evidence. Do not count this
+   profile. Ordinary BLE/Wi-Fi production profiles instead emit USB
+   Serial/JTAG logs at `Info`, but their log stream is not authoritative
+   migration evidence. Do not count this
    migration as verified without an independent exact raw-journal
-   readback/parser or a separately reviewed diagnostic build/sink. The firmware
+   readback/parser. The firmware
    still scans the complete partition before provisioning and rejects any schema-1,
    schema-2/physical-1, corrupt, torn, or otherwise programmed byte without a
    write or erase. If this one-
@@ -3573,9 +3695,8 @@ unrelated flash range.
    separately reviewed diagnostic sink that it strictly mounts the existing
    schema-3/physical-2 journal with migration disabled and zero provisioning mutation;
    the default USB-API image emits no native USB log for this proof. The
-   ordinary BLE/Wi-Fi profiles likewise use the no-op logger, so their retained
-   native USB diagnostic sink is not a substitute for the independent
-   readback.
+   ordinary BLE/Wi-Fi profiles emit `Info` logs, but those observations are not
+   a substitute for the independent readback.
 
 No firmware path erases the journal automatically, and the feature never
 authorizes writes outside `node_journal`.
@@ -3681,8 +3802,9 @@ first smoke.
   fresh-Link, stale-Link recovery, and same-Link/direct-replay powered records,
   then qualify responder/backchannel reuse, generic
   capacity-driven active-Link close/LRU eviction, and multiple simultaneous
-  establishment transactions. Extend send to nonempty fields, stamps/tickets,
-  Resource, and propagation delivery. Move the temporary
+  establishment transactions. Extend send beyond the implemented typed
+  Sideband location to arbitrary fields, stamps/tickets, Resource, and
+  propagation delivery. Move the temporary
   one-interface
   local path-response
   wrapper into an owned Rete implementation with per-interface forwarding state
@@ -3690,10 +3812,11 @@ first smoke.
   LXMF conversation services; extend the bounded Nomad API client with
   client-facing announce discovery, Resource responses, and the external
   cross-platform browse UI.
-- Bound `AdmissionDeferred` lifetime/attempts together with source-identity
-  discovery and retention; the first profile can otherwise let sixteen
-  never-resolved source identities occupy every application-event slot until
-  reboot.
+- Select a hostile-input retention or expiry policy for `AdmissionDeferred`.
+  Current source wakes an exact source on authenticated announce and otherwise
+  retries it with capped exponential cadence, but intentionally retains its
+  structural event authority indefinitely; sixteen never-resolved identities
+  can still occupy every application-event slot until reboot.
 - Preserve the composed independently vector-tested ADR 0006 authentication
   model, ADR 0009 pairing, and first USB bearer. Replace the POC's
   integrity-only session with an appropriately confidential, rate-limited
@@ -3719,5 +3842,6 @@ first smoke.
   multi-hop/Resource coverage, concurrent-store pressure, composer allocation
   failure/high-water checks, and full production-image memory/timing
   qualification.
-- Keep display and GNSS/location integration stubbed until the network,
-  persistence and client ownership paths are stable.
+- Keep onboard GNSS parsing and time-source integration stubbed until the
+  network, persistence and client ownership paths are stable; phone-sourced
+  LXMF message location is independent of that board capability.
