@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate independent device-API wired-pairing known-answer vectors.
+"""Generate independent device-API BLE GATT pairing known-answer vectors.
 
 This implementation uses only Python's standard-library SHA-256 and HMAC and
 an independent RDA1/COBS encoder. It does not call Rust or import project code.
@@ -21,7 +21,7 @@ DEFAULT_OUTPUT = ROOT / "interop" / "vectors" / "device-api-pairing-v1.json"
 PAIRING_MAJOR = 1
 PAIRING_MINOR = 0
 PAIRING_SUITE = 2
-BEARER_USB_SERIAL_JTAG = 1
+BEARER_BLE_GATT = 2
 FRAMING_VERSION = 1
 
 KIND_BEGIN_REQUEST = 0x24
@@ -70,7 +70,7 @@ def begin_offer_payload() -> bytes:
             u16(PAIRING_MAJOR),
             u16(PAIRING_MINOR),
             u16(PAIRING_SUITE),
-            bytes((BEARER_USB_SERIAL_JTAG, 0)),
+            bytes((BEARER_BLE_GATT, 0)),
             DEVICE_ID,
             CREDENTIAL_ID,
             u64(CREDENTIAL_GENERATION),
@@ -87,7 +87,7 @@ def proof_request_payload() -> bytes:
             u16(PAIRING_MAJOR),
             u16(PAIRING_MINOR),
             u16(PAIRING_SUITE),
-            bytes((BEARER_USB_SERIAL_JTAG, 0)),
+            bytes((BEARER_BLE_GATT, 0)),
             CREDENTIAL_ID,
             u64(CREDENTIAL_GENERATION),
             CLIENT_NONCE,
@@ -105,7 +105,7 @@ def proof_challenge_payload() -> bytes:
             u16(PAIRING_MAJOR),
             u16(PAIRING_MINOR),
             u16(PAIRING_SUITE),
-            bytes((BEARER_USB_SERIAL_JTAG, 0)),
+            bytes((BEARER_BLE_GATT, 0)),
             DEVICE_ID,
             u64(CONNECTION_ID),
             u64(WINDOW_ID),
@@ -242,7 +242,7 @@ def build_vectors() -> dict[str, object]:
     )
 
     return {
-        "profile": "reticulum-rs-firmware device API wired pairing v1",
+        "profile": "reticulum-rs-firmware device API BLE GATT pairing v1",
         "generator": "interop/python/generate_device_api_pairing_vectors.py",
         "command": "python3 interop/python/generate_device_api_pairing_vectors.py",
         "inputs": {

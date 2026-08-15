@@ -178,10 +178,7 @@ function timelineStatus(activity: MessageActivityEventView | null): {
       return { label: "Accepted by appliance", status: "accepted", tone: "info" };
     case "outbound_requeued":
       return {
-        label:
-          activity.activity.trigger === "automatic"
-            ? "Legacy automatic app rearm queued"
-            : "Replacement submission queued",
+        label: "Replacement submission queued",
         status: "queued",
         tone: "warning",
       };

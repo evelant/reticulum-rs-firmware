@@ -1,8 +1,9 @@
 //! Allocation-free RNode LoRa transmit framing.
 
-use reticulum_rns_conformance::{LengthError, validate_rns_packet_len};
-
-use crate::{RNODE_LORA_DATA_PER_FRAME, RnodeFrameHeader, SX1262_FRAME_MTU, plan_frames};
+use crate::{
+    LengthError, RNODE_LORA_DATA_PER_FRAME, RnodeFrameHeader, SX1262_FRAME_MTU, plan_frames,
+    validate_rns_packet_len,
+};
 
 /// Caller-owned storage for one maximum-size SX1262 frame.
 pub type RnodeTxFrameBuffer = [u8; SX1262_FRAME_MTU];

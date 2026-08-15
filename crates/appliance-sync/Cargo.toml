@@ -1,0 +1,17 @@
+[package]
+name = "reticulum-appliance-sync"
+description = "Device synchronization and messaging services for appliance clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["lxmf", "nomad", "network-config"] }
+reticulum-device-client = { path = "../device-client", features = ["network-config"] }
+reticulum-appliance-store = { path = "../appliance-store" }
+reticulum-lxmf-wire = { path = "../lxmf-wire", default-features = false }
+
+[lib]
+path = "src/lib.rs"

@@ -5,21 +5,18 @@ import type { NativeApplianceError } from "@reticulum/appliance-native";
 import { nativeApplianceErrorMessage, normalizeNativeError } from "./native-error.ts";
 
 describe("native appliance errors", () => {
-  test("preserves the structured transport reason", () => {
+  test("preserves a structured error reason", () => {
     const bridgeError = {
-      tag: "TransportUnavailable",
-      inner: {
-        transport: 2,
-        reason: "Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link",
-      },
+      tag: "InvalidArgument",
+      inner: { reason: "profile key is invalid" },
     } as unknown as NativeApplianceError;
     const isBridgeError = (value: unknown): value is NativeApplianceError => value === bridgeError;
 
     expect(nativeApplianceErrorMessage(bridgeError)).toBe(
-      "Native appliance transport unavailable: Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link",
+      "Native appliance invalid argument: profile key is invalid",
     );
     const normalized = normalizeNativeError(bridgeError, isBridgeError);
-    expect(normalized.message).toContain("platform GATT link");
+    expect(normalized.message).toContain("profile key is invalid");
     expect(normalized.cause).toBe(bridgeError);
   });
 

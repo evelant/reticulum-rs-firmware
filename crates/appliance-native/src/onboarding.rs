@@ -602,8 +602,6 @@ struct NativeProgressObserver {
 impl ProgressObserver for NativeProgressObserver {
     fn observe(&mut self, progress: PairingProgress) {
         let phase = match progress {
-            PairingProgress::OpeningPort => NativeBleOnboardingPhase::Preparing,
-            PairingProgress::PortReady => NativeBleOnboardingPhase::LinkReady,
             PairingProgress::CheckingInitialization => {
                 NativeBleOnboardingPhase::CheckingInitialization
             }
@@ -673,7 +671,7 @@ mod tests {
     }
 
     fn store(root: &TestDirectory) -> Arc<NativeProfileStore> {
-        NativeProfileStore::open(root.0.to_string_lossy().into_owned(), None, None)
+        NativeProfileStore::open(root.0.to_string_lossy().into_owned())
             .expect("test profile store opens")
     }
 

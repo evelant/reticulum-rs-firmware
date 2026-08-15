@@ -3,8 +3,8 @@
 //! The immutable bridge contract establishes that an installed application and
 //! its generated TypeScript declarations agree with the Rust device API. The
 //! [`NativeAppliance`] facade additionally owns durable offline chat state. The
-//! opt-in Wi-Fi and BLE constructors connect that state to the authenticated
-//! device API without moving protocol parsing into the platform application.
+//! BLE constructors connect that state to the authenticated device API without
+//! moving protocol parsing into the platform application.
 
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -24,9 +24,8 @@ mod ble;
 mod credential;
 mod onboarding;
 mod profile;
-mod wifi;
 
-pub use appliance::{NativeAppliance, NativeApplianceError, NativeTransport};
+pub use appliance::{NativeAppliance, NativeApplianceError};
 pub use ble::{NativeBleError, NativeBlePlatformCommand};
 pub use credential::{NativeCredentialStatus, NativeCredentialSummary};
 pub use onboarding::{
@@ -39,9 +38,9 @@ pub use profile::{
 };
 
 /// Incompatible generation of the callable native bridge.
-pub const BRIDGE_API_MAJOR: u16 = 1;
+pub const BRIDGE_API_MAJOR: u16 = 2;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 23;
+pub const BRIDGE_API_MINOR: u16 = 0;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -78,7 +77,7 @@ pub struct NativeBridgeContract {
 pub struct NativeBleGattProfile {
     /// Incompatible GATT profile generation.
     pub major: u16,
-    /// Backward-compatible GATT profile revision.
+    /// Compatible revision within this GATT profile generation.
     pub minor: u16,
     /// Project-owned primary service UUID.
     pub service_uuid: String,
@@ -149,10 +148,10 @@ mod tests {
         assert_eq!(
             native_bridge_contract(),
             NativeBridgeContract {
-                bridge_api_major: 1,
-                bridge_api_minor: 23,
-                device_api_major: 1,
-                device_api_minor: 18,
+                bridge_api_major: 2,
+                bridge_api_minor: 0,
+                device_api_major: 2,
+                device_api_minor: 0,
                 max_message_bytes: 512,
                 max_lxmf_read_chunk_bytes: 416,
                 max_lxmf_basic_title_bytes: 295,

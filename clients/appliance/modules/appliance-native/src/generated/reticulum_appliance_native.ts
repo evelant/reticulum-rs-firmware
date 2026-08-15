@@ -122,7 +122,7 @@ export type NativeBleGattProfile = {
      */
     major: number,
     /**
-     * Backward-compatible GATT profile revision.
+     * Compatible revision within this GATT profile generation.
      */
     minor: number,
     /**
@@ -899,68 +899,12 @@ const FfiConverterTypeNativeProfileStoreSnapshot = (() => {
     return new FFIConverter();
 })();
 
-/**
- * Bearer selected for the native appliance session.
- *
- * These variants are an intentional stable vocabulary. The generic
- * [`NativeAppliance::open`] constructor retains explicit unavailable stubs;
- * [`NativeAppliance::open_wifi`] and [`NativeAppliance::open_ble`] select the
- * implemented proof connectors without changing that vocabulary.
- */
-export enum NativeTransport {
-    /**
-     * USB serial/JTAG provided to a mobile application by a future adapter.
-     */
-    UsbSerial,
-    /**
-     * Direct USB OTG provided by a future iOS/Android adapter.
-     */
-    UsbOtg,
-    /**
-     * Bluetooth Low Energy provided by a platform-owned GATT bearer.
-     */
-    BluetoothLowEnergy,
-    /**
-     * Wi-Fi provided by the native raw local-network proof bearer.
-     */
-    Wifi
-}
-
-const FfiConverterTypeNativeTransport = (() => {
-    const ordinalConverter = FfiConverterInt32;
-    type TypeName = NativeTransport;
-    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-        read(from: RustBuffer): TypeName {
-            switch (ordinalConverter.read(from)) {
-                case 1: return NativeTransport.UsbSerial;
-                case 2: return NativeTransport.UsbOtg;
-                case 3: return NativeTransport.BluetoothLowEnergy;
-                case 4: return NativeTransport.Wifi;
-                default: throw new UniffiInternalError.UnexpectedEnumCase();
-            }
-        }
-        write(value: TypeName, into: RustBuffer): void {
-            switch (value) {
-                case NativeTransport.UsbSerial: return ordinalConverter.write(1, into);
-                case NativeTransport.UsbOtg: return ordinalConverter.write(2, into);
-                case NativeTransport.BluetoothLowEnergy: return ordinalConverter.write(3, into);
-                case NativeTransport.Wifi: return ordinalConverter.write(4, into);
-            }
-        }
-        allocationSize(value: TypeName): number {
-            return ordinalConverter.allocationSize(0);
-        }
-    }
-    return new FFIConverter();
-})();
-
 
 // Error type: NativeApplianceError
 export enum NativeApplianceError_Tags {
     InvalidArgument = "InvalidArgument",
     Busy = "Busy",
     Stopped = "Stopped",
-    TransportUnavailable = "TransportUnavailable",
     Storage = "Storage",
     CredentialPublicationUncertain = "CredentialPublicationUncertain",
     Serialization = "Serialization",
@@ -1060,45 +1004,6 @@ Readonly<{reason: string}> {
         }
         static hasInner(obj: any): obj is Stopped_ {
             return false;
-        }
-
-    }
-
-    type TransportUnavailable__interface = {
-        tag: NativeApplianceError_Tags.TransportUnavailable;
-        inner:
-Readonly<{transport: NativeTransport; reason: string}>
-    };
-    class TransportUnavailable_ extends UniffiError implements TransportUnavailable__interface {
-        /**
-         * @private
-         * This field is private and should not be used, use `tag` instead.
-         */
-        readonly [uniffiTypeNameSymbol] = "NativeApplianceError";
-        readonly tag = NativeApplianceError_Tags.TransportUnavailable;
-        readonly inner:
-Readonly<{transport: NativeTransport; reason: string}>;
-        constructor(
-inner: {transport: NativeTransport; reason: string }) {
-            super("NativeApplianceError", "TransportUnavailable");
-
-            this.inner = Object.freeze(inner);
-        }
-        static new(
-inner: {transport: NativeTransport; reason: string }): TransportUnavailable_ {
-            return new TransportUnavailable_(inner);
-        }
-
-        static instanceOf(obj: any): obj is TransportUnavailable_ {
-            return obj.tag === NativeApplianceError_Tags.TransportUnavailable;
-        }
-        static hasInner(obj: any): obj is TransportUnavailable_ {
-            return TransportUnavailable_.instanceOf(obj);
-        }
-
-        static getInner(obj: TransportUnavailable_):
-Readonly<{transport: NativeTransport; reason: string}> {
-            return obj.inner;
         }
 
     }
@@ -1268,7 +1173,6 @@ Readonly<{reason: string}> {
   InvalidArgument: InvalidArgument_,
   Busy: Busy_,
   Stopped: Stopped_,
-  TransportUnavailable: TransportUnavailable_,
   Storage: Storage_,
   CredentialPublicationUncertain: CredentialPublicationUncertain_,
   Serialization: Serialization_,
@@ -1280,7 +1184,7 @@ Readonly<{reason: string}> {
  * Failure returned through the native bridge.
  */
 export type NativeApplianceError = InstanceType<
-    typeof NativeApplianceError['InvalidArgument' | 'Busy' | 'Stopped' | 'TransportUnavailable' | 'Storage' | 'CredentialPublicationUncertain' | 'Serialization' | 'Internal']
+    typeof NativeApplianceError['InvalidArgument' | 'Busy' | 'Stopped' | 'Storage' | 'CredentialPublicationUncertain' | 'Serialization' | 'Internal']
 >;
 
 // FfiConverter for enum NativeApplianceError
@@ -1293,11 +1197,10 @@ const FfiConverterTypeNativeApplianceError = (() => {
                 case 1: return new NativeApplianceError.InvalidArgument({reason: FfiConverterString.read(from) });
                 case 2: return new NativeApplianceError.Busy();
                 case 3: return new NativeApplianceError.Stopped();
-                case 4: return new NativeApplianceError.TransportUnavailable({transport: FfiConverterTypeNativeTransport.read(from), reason: FfiConverterString.read(from) });
-                case 5: return new NativeApplianceError.Storage({reason: FfiConverterString.read(from) });
-                case 6: return new NativeApplianceError.CredentialPublicationUncertain({reason: FfiConverterString.read(from) });
-                case 7: return new NativeApplianceError.Serialization({reason: FfiConverterString.read(from) });
-                case 8: return new NativeApplianceError.Internal({reason: FfiConverterString.read(from) });
+                case 4: return new NativeApplianceError.Storage({reason: FfiConverterString.read(from) });
+                case 5: return new NativeApplianceError.CredentialPublicationUncertain({reason: FfiConverterString.read(from) });
+                case 6: return new NativeApplianceError.Serialization({reason: FfiConverterString.read(from) });
+                case 7: return new NativeApplianceError.Internal({reason: FfiConverterString.read(from) });
                 default: throw new UniffiInternalError.UnexpectedEnumCase();
             }
         }
@@ -1317,33 +1220,26 @@ const FfiConverterTypeNativeApplianceError = (() => {
                     ordinalConverter.write(3, into);
                     return;
                 }
-                case NativeApplianceError_Tags.TransportUnavailable: {
-                    ordinalConverter.write(4, into);
-                    const inner = value.inner;
-                    FfiConverterTypeNativeTransport.write(inner.transport, into);
-                    FfiConverterString.write(inner.reason, into);
-                    return;
-                }
                 case NativeApplianceError_Tags.Storage: {
-                    ordinalConverter.write(5, into);
+                    ordinalConverter.write(4, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
                 }
                 case NativeApplianceError_Tags.CredentialPublicationUncertain: {
-                    ordinalConverter.write(6, into);
+                    ordinalConverter.write(5, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
                 }
                 case NativeApplianceError_Tags.Serialization: {
-                    ordinalConverter.write(7, into);
+                    ordinalConverter.write(6, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
                 }
                 case NativeApplianceError_Tags.Internal: {
-                    ordinalConverter.write(8, into);
+                    ordinalConverter.write(7, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
@@ -1367,34 +1263,27 @@ const FfiConverterTypeNativeApplianceError = (() => {
                 case NativeApplianceError_Tags.Stopped: {
                     return ordinalConverter.allocationSize(3);
                 }
-                case NativeApplianceError_Tags.TransportUnavailable: {
-                    const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(4);
-                    size += FfiConverterTypeNativeTransport.allocationSize(inner.transport);
-                    size += FfiConverterString.allocationSize(inner.reason);
-                    return size;
-                }
                 case NativeApplianceError_Tags.Storage: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(5);
+                    let size = ordinalConverter.allocationSize(4);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
                 case NativeApplianceError_Tags.CredentialPublicationUncertain: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(6);
+                    let size = ordinalConverter.allocationSize(5);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
                 case NativeApplianceError_Tags.Serialization: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(7);
+                    let size = ordinalConverter.allocationSize(6);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
                 case NativeApplianceError_Tags.Internal: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(8);
+                    let size = ordinalConverter.allocationSize(7);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
@@ -1408,7 +1297,6 @@ const FfiConverterTypeNativeApplianceError = (() => {
 
 // Error type: NativeBleError
 export enum NativeBleError_Tags {
-    Unavailable = "Unavailable",
     InvalidArgument = "InvalidArgument",
     StaleGeneration = "StaleGeneration",
     LinkAlreadyActive = "LinkAlreadyActive",
@@ -1421,33 +1309,6 @@ export enum NativeBleError_Tags {
  * Failure at the platform-to-Rust BLE byte bridge.
  */
 export const NativeBleError = (() => {
-
-    type Unavailable__interface = {
-        tag: NativeBleError_Tags.Unavailable
-    };
-    class Unavailable_ extends UniffiError implements Unavailable__interface {
-        /**
-         * @private
-         * This field is private and should not be used, use `tag` instead.
-         */
-        readonly [uniffiTypeNameSymbol] = "NativeBleError";
-        readonly tag = NativeBleError_Tags.Unavailable;
-        constructor() {
-            super("NativeBleError", "Unavailable");
-        }
-
-        static new(): Unavailable_ {
-            return new Unavailable_();
-        }
-
-        static instanceOf(obj: any): obj is Unavailable_ {
-            return obj.tag === NativeBleError_Tags.Unavailable;
-        }
-        static hasInner(obj: any): obj is Unavailable_ {
-            return false;
-        }
-
-    }
 
     type InvalidArgument__interface = {
         tag: NativeBleError_Tags.InvalidArgument;
@@ -1728,7 +1589,6 @@ Readonly<{reason: string}> {
 
     return Object.freeze({
         instanceOf,
-  Unavailable: Unavailable_,
   InvalidArgument: InvalidArgument_,
   StaleGeneration: StaleGeneration_,
   LinkAlreadyActive: LinkAlreadyActive_,
@@ -1743,7 +1603,7 @@ Readonly<{reason: string}> {
  * Failure at the platform-to-Rust BLE byte bridge.
  */
 export type NativeBleError = InstanceType<
-    typeof NativeBleError['Unavailable' | 'InvalidArgument' | 'StaleGeneration' | 'LinkAlreadyActive' | 'LinkClosed' | 'QueueOverflow' | 'UnexpectedWriteToken' | 'Internal']
+    typeof NativeBleError['InvalidArgument' | 'StaleGeneration' | 'LinkAlreadyActive' | 'LinkClosed' | 'QueueOverflow' | 'UnexpectedWriteToken' | 'Internal']
 >;
 
 // FfiConverter for enum NativeBleError
@@ -1753,65 +1613,60 @@ const FfiConverterTypeNativeBleError = (() => {
     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
         read(from: RustBuffer): TypeName {
             switch (ordinalConverter.read(from)) {
-                case 1: return new NativeBleError.Unavailable();
-                case 2: return new NativeBleError.InvalidArgument({reason: FfiConverterString.read(from) });
-                case 3: return new NativeBleError.StaleGeneration({requested: FfiConverterUInt64.read(from), activeGeneration: FfiConverterOptionalUInt64.read(from) });
-                case 4: return new NativeBleError.LinkAlreadyActive({generation: FfiConverterUInt64.read(from) });
-                case 5: return new NativeBleError.LinkClosed({generation: FfiConverterUInt64.read(from), reason: FfiConverterString.read(from) });
-                case 6: return new NativeBleError.QueueOverflow({generation: FfiConverterUInt64.read(from), capacity: FfiConverterUInt32.read(from) });
-                case 7: return new NativeBleError.UnexpectedWriteToken({generation: FfiConverterUInt64.read(from), token: FfiConverterUInt64.read(from) });
-                case 8: return new NativeBleError.Internal({reason: FfiConverterString.read(from) });
+                case 1: return new NativeBleError.InvalidArgument({reason: FfiConverterString.read(from) });
+                case 2: return new NativeBleError.StaleGeneration({requested: FfiConverterUInt64.read(from), activeGeneration: FfiConverterOptionalUInt64.read(from) });
+                case 3: return new NativeBleError.LinkAlreadyActive({generation: FfiConverterUInt64.read(from) });
+                case 4: return new NativeBleError.LinkClosed({generation: FfiConverterUInt64.read(from), reason: FfiConverterString.read(from) });
+                case 5: return new NativeBleError.QueueOverflow({generation: FfiConverterUInt64.read(from), capacity: FfiConverterUInt32.read(from) });
+                case 6: return new NativeBleError.UnexpectedWriteToken({generation: FfiConverterUInt64.read(from), token: FfiConverterUInt64.read(from) });
+                case 7: return new NativeBleError.Internal({reason: FfiConverterString.read(from) });
                 default: throw new UniffiInternalError.UnexpectedEnumCase();
             }
         }
         write(value: TypeName, into: RustBuffer): void {
             switch (value.tag) {
-                case NativeBleError_Tags.Unavailable: {
-                    ordinalConverter.write(1, into);
-                    return;
-                }
                 case NativeBleError_Tags.InvalidArgument: {
-                    ordinalConverter.write(2, into);
+                    ordinalConverter.write(1, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
                 }
                 case NativeBleError_Tags.StaleGeneration: {
-                    ordinalConverter.write(3, into);
+                    ordinalConverter.write(2, into);
                     const inner = value.inner;
                     FfiConverterUInt64.write(inner.requested, into);
                     FfiConverterOptionalUInt64.write(inner.activeGeneration, into);
                     return;
                 }
                 case NativeBleError_Tags.LinkAlreadyActive: {
-                    ordinalConverter.write(4, into);
+                    ordinalConverter.write(3, into);
                     const inner = value.inner;
                     FfiConverterUInt64.write(inner.generation, into);
                     return;
                 }
                 case NativeBleError_Tags.LinkClosed: {
-                    ordinalConverter.write(5, into);
+                    ordinalConverter.write(4, into);
                     const inner = value.inner;
                     FfiConverterUInt64.write(inner.generation, into);
                     FfiConverterString.write(inner.reason, into);
                     return;
                 }
                 case NativeBleError_Tags.QueueOverflow: {
-                    ordinalConverter.write(6, into);
+                    ordinalConverter.write(5, into);
                     const inner = value.inner;
                     FfiConverterUInt64.write(inner.generation, into);
                     FfiConverterUInt32.write(inner.capacity, into);
                     return;
                 }
                 case NativeBleError_Tags.UnexpectedWriteToken: {
-                    ordinalConverter.write(7, into);
+                    ordinalConverter.write(6, into);
                     const inner = value.inner;
                     FfiConverterUInt64.write(inner.generation, into);
                     FfiConverterUInt64.write(inner.token, into);
                     return;
                 }
                 case NativeBleError_Tags.Internal: {
-                    ordinalConverter.write(8, into);
+                    ordinalConverter.write(7, into);
                     const inner = value.inner;
                     FfiConverterString.write(inner.reason, into);
                     return;
@@ -1823,52 +1678,49 @@ const FfiConverterTypeNativeBleError = (() => {
         }
         allocationSize(value: TypeName): number {
             switch (value.tag) {
-                case NativeBleError_Tags.Unavailable: {
-                    return ordinalConverter.allocationSize(1);
-                }
                 case NativeBleError_Tags.InvalidArgument: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(2);
+                    let size = ordinalConverter.allocationSize(1);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
                 case NativeBleError_Tags.StaleGeneration: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(3);
+                    let size = ordinalConverter.allocationSize(2);
                     size += FfiConverterUInt64.allocationSize(inner.requested);
                     size += FfiConverterOptionalUInt64.allocationSize(inner.activeGeneration);
                     return size;
                 }
                 case NativeBleError_Tags.LinkAlreadyActive: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(4);
+                    let size = ordinalConverter.allocationSize(3);
                     size += FfiConverterUInt64.allocationSize(inner.generation);
                     return size;
                 }
                 case NativeBleError_Tags.LinkClosed: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(5);
+                    let size = ordinalConverter.allocationSize(4);
                     size += FfiConverterUInt64.allocationSize(inner.generation);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
                 case NativeBleError_Tags.QueueOverflow: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(6);
+                    let size = ordinalConverter.allocationSize(5);
                     size += FfiConverterUInt64.allocationSize(inner.generation);
                     size += FfiConverterUInt32.allocationSize(inner.capacity);
                     return size;
                 }
                 case NativeBleError_Tags.UnexpectedWriteToken: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(7);
+                    let size = ordinalConverter.allocationSize(6);
                     size += FfiConverterUInt64.allocationSize(inner.generation);
                     size += FfiConverterUInt64.allocationSize(inner.token);
                     return size;
                 }
                 case NativeBleError_Tags.Internal: {
                     const inner = value.inner;
-                    let size = ordinalConverter.allocationSize(8);
+                    let size = ordinalConverter.allocationSize(7);
                     size += FfiConverterString.allocationSize(inner.reason);
                     return size;
                 }
@@ -2679,10 +2531,10 @@ const FfiConverterTypeNativeCredentialStatus = (() => {
 })();
 
 /**
- * Native owner for one durable LXMF chat database and future device bearer.
+ * Native owner for one device-keyed profile and its BLE appliance session.
  *
  * App-facing semantic DTOs remain defined by
- * `reticulum-lxmf-chat-runtime`. Methods exchange canonical JSON so the Expo
+ * `reticulum-appliance-runtime`. Methods exchange canonical JSON so the Expo
  * adapter parses the same generated types used by the HTTP client.
  */
 export interface NativeApplianceLike {
@@ -2762,8 +2614,7 @@ export interface NativeApplianceLike {
  *
  * This alpha import is create-only: it never replaces an existing path.
  * The current BLE connector accepts only an E290 credential from which it
- * can derive the exact advertising name before publication; Wi-Fi retains
- * generic canonical credential support.
+ * can derive the exact advertising name before publication.
  * The caller remains responsible for deleting its staging copy after this
  * method returns.
  * A later BLE pairing owner will populate the same storage boundary
@@ -2840,9 +2691,7 @@ export interface NativeApplianceLike {
 /**
  * Request a fresh device connection.
  *
- * Configured Wi-Fi and BLE owners schedule a fresh connection attempt.
- * Reserved connector stubs return typed `TransportUnavailable` instead of
- * silently falling back to another bearer.
+ * The BLE owner schedules a fresh connection attempt.
  */
     reconnect(asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<void>;
 /**
@@ -2875,10 +2724,6 @@ export interface NativeApplianceLike {
  */
     timelineJson(destination: string, asyncOpts_?: { signal: AbortSignal }) /*throws*/: Promise<string>;
 /**
- * Selected bearer, including future transports that are not available yet.
- */
-    transport(): NativeTransport;
-/**
  * Replace the app-owned phone-location state used by future outbound
  * attempts. Existing durable attempt records remain immutable.
  */
@@ -2895,10 +2740,10 @@ export type NativeApplianceInterface = NativeApplianceLike;
 
 
 /**
- * Native owner for one durable LXMF chat database and future device bearer.
+ * Native owner for one device-keyed profile and its BLE appliance session.
  *
  * App-facing semantic DTOs remain defined by
- * `reticulum-lxmf-chat-runtime`. Methods exchange canonical JSON so the Expo
+ * `reticulum-appliance-runtime`. Methods exchange canonical JSON so the Expo
  * adapter parses the same generated types used by the HTTP client.
  */
 export class NativeAppliance extends UniffiAbstractObject implements NativeApplianceLike {
@@ -2915,54 +2760,6 @@ private constructor(pointer: UniffiHandle) {
 
 
 /**
- * Open one SQLite chat database and start its single-owner actor.
- *
- * The selected connector is an explicit unavailable stub. This does not
- * prevent local contacts, conversations, or durable outbox writes. Use
- * [`Self::open_wifi`] or [`Self::open_ble`] to configure an implemented
- * authenticated connector.
- */
-    static open(databasePath: string, transport: NativeTransport): NativeApplianceLike /*throws*/ {
-    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open(
-        FfiConverterString.lower(databasePath, nativeModule().rustbuffer_alloc),
-        FfiConverterTypeNativeTransport.lower(transport, nativeModule().rustbuffer_alloc),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
-    }
-
-/**
- * Open one SQLite chat database with the platform-owned BLE GATT
- * connector.
- *
- * The credential path must be an absolute path to the activated
- * credential in the app sandbox. For an initial link, the caller
- * establishes the shared GATT service, enables TX indications, calls
- * [`Self::ble_link_connected`], then [`Self::ensure_connected`]. To
- * replace a link, it first closes and reports the old generation, calls
- * [`Self::reconnect`] while no replacement is claimable, registers the
- * replacement, then calls [`Self::ensure_connected`]. TypeScript, Swift,
- * or Kotlin only move opaque bytes and report write-with-response
- * completion; Rust retains all authenticated session and LXMF parsing.
- */
-    static openBle(databasePath: string, credentialPath: string): NativeApplianceLike /*throws*/ {
-    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble(
-        FfiConverterString.lower(databasePath, nativeModule().rustbuffer_alloc),
-        FfiConverterString.lower(credentialPath, nativeModule().rustbuffer_alloc),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
-    }
-
-/**
  * Open the active device-keyed profile with the platform-owned BLE GATT
  * connector.
  *
@@ -2975,51 +2772,6 @@ private constructor(pointer: UniffiHandle) {
             /*caller:*/ (callStatus) => {
                 return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble_profile(
         FfiConverterTypeNativeProfileStore.lower(profileStore, nativeModule().rustbuffer_alloc),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
-    }
-
-/**
- * Open one SQLite chat database with the Wi-Fi raw-TCP proof connector.
- *
- * The endpoint must be a literal IP socket address. The current E290 proof
- * profile listens at `192.168.4.1:29716`. The credential path must be an
- * absolute path to the 96-byte activated credential imported or paired
- * into the app sandbox.
- * This suite authenticates and integrity-protects the device API but does
- * not add application-layer confidentiality.
- */
-    static openWifi(databasePath: string, endpoint: string, credentialPath: string): NativeApplianceLike /*throws*/ {
-    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(
-        FfiConverterString.lower(databasePath, nativeModule().rustbuffer_alloc),
-        FfiConverterString.lower(endpoint, nativeModule().rustbuffer_alloc),
-        FfiConverterString.lower(credentialPath, nativeModule().rustbuffer_alloc),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
-    }
-
-/**
- * Open the active device-keyed profile with the Wi-Fi raw-TCP connector.
- *
- * Rust resolves the active profile's SQLite and credential paths. When no
- * profile is active, an isolated unconfigured database remains available
- * for the single-board onboarding UI while the connector reports a
- * missing credential.
- */
-    static openWifiProfile(profileStore: NativeProfileStoreLike, endpoint: string): NativeApplianceLike /*throws*/ {
-    return FfiConverterTypeNativeAppliance.lift(uniffiCaller.rustCallWithError(
-            /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
-            /*caller:*/ (callStatus) => {
-                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi_profile(
-        FfiConverterTypeNativeProfileStore.lower(profileStore, nativeModule().rustbuffer_alloc),
-        FfiConverterString.lower(endpoint, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
@@ -3323,8 +3075,7 @@ private constructor(pointer: UniffiHandle) {
  *
  * This alpha import is create-only: it never replaces an existing path.
  * The current BLE connector accepts only an E290 credential from which it
- * can derive the exact advertising name before publication; Wi-Fi retains
- * generic canonical credential support.
+ * can derive the exact advertising name before publication.
  * The caller remains responsible for deleting its staging copy after this
  * method returns.
  * A later BLE pairing owner will populate the same storage boundary
@@ -3760,9 +3511,7 @@ private constructor(pointer: UniffiHandle) {
 /**
  * Request a fresh device connection.
  *
- * Configured Wi-Fi and BLE owners schedule a fresh connection attempt.
- * Reserved connector stubs return typed `TransportUnavailable` instead of
- * silently falling back to another bearer.
+ * The BLE owner schedules a fresh connection attempt.
  */
     async reconnect(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
     const __stack = uniffiIsDebug ? new Error().stack : undefined;
@@ -4016,26 +3765,6 @@ private constructor(pointer: UniffiHandle) {
         }
         throw __error;
     }
-    }
-
-/**
- * Selected bearer, including future transports that are not available yet.
- */
-    transport(): NativeTransport {
-    return ((__rb: Uint8Array) => {
-        try {
-            return FfiConverterTypeNativeTransport.lift(__rb);
-        } finally {
-            nativeModule().rustbuffer_free(__rb);
-        }
-    })(uniffiCaller.rustCall(
-            /*caller:*/ (callStatus) => {
-                return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_transport(
-                uniffiTypeNativeApplianceObjectFactory.clonePointer(this),
-                callStatus);
-            },
-            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
-    ));
     }
 
 /**
@@ -4627,9 +4356,8 @@ export interface NativeProfileStoreLike {
 /**
  * Inspect the active profile's credential without returning secret bytes.
  *
- * An empty store is `Missing`. A malformed legacy artifact or active
- * profile is `Invalid` so the existing onboarding recovery boundary is
- * preserved.
+ * An empty store is `Missing`. A malformed active profile is `Invalid` so
+ * the onboarding recovery boundary remains explicit.
  */
     credentialStatus() /*throws*/: NativeCredentialStatus;
 /**
@@ -4688,22 +4416,14 @@ private constructor(pointer: UniffiHandle) {
 
 
 /**
- * Open or create an app-private profile root.
- *
- * The optional legacy paths identify the previous single-database and
- * single-credential layout. When the legacy credential is canonical,
- * both artifacts are migrated to its validated device-ID profile before
- * the store is returned. An invalid legacy credential remains untouched
- * and is reported through [`Self::credential_status`].
+ * Open or create an app-private device-keyed profile root.
  */
-    static open(rootDirectory: string, legacyDatabasePath: string | undefined, legacyCredentialPath: string | undefined): NativeProfileStoreLike /*throws*/ {
+    static open(rootDirectory: string): NativeProfileStoreLike /*throws*/ {
     return FfiConverterTypeNativeProfileStore.lift(uniffiCaller.rustCallWithError(
             /*liftError:*/ FfiConverterTypeNativeApplianceError.lift.bind(FfiConverterTypeNativeApplianceError),
             /*caller:*/ (callStatus) => {
                 return nativeModule().ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeprofilestore_open(
         FfiConverterString.lower(rootDirectory, nativeModule().rustbuffer_alloc),
-        FfiConverterOptionalString.lower(legacyDatabasePath, nativeModule().rustbuffer_alloc),
-        FfiConverterOptionalString.lower(legacyCredentialPath, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
@@ -4741,9 +4461,8 @@ private constructor(pointer: UniffiHandle) {
 /**
  * Inspect the active profile's credential without returning secret bytes.
  *
- * An empty store is `Missing`. A malformed legacy artifact or active
- * profile is `Invalid` so the existing onboarding recovery boundary is
- * preserved.
+ * An empty store is `Missing`. A malformed active profile is `Invalid` so
+ * the onboarding recovery boundary remains explicit.
  */
     credentialStatus(): NativeCredentialStatus /*throws*/ {
     return ((__rb: Uint8Array) => {
@@ -4960,20 +4679,8 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract() !== 30012) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open() !== 47682) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open");
-    }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble() !== 41354) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble");
-    }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble_profile() !== 27425) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble_profile");
-    }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi() !== 50108) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi");
-    }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi_profile() !== 3729) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi_profile");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected() !== 37336) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected");
@@ -5008,7 +4715,7 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected() !== 36490) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential() !== 61608) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential() !== 26843) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_manual_service_announce_json() !== 65318) {
@@ -5044,7 +4751,7 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_radio_trace_json() !== 41595) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_radio_trace_json");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect() !== 15037) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect() !== 60296) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reconnect");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_reticulum_probe_poll_json() !== 8262) {
@@ -5067,9 +4774,6 @@ function uniffiEnsureInitialized() {
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_timeline_json() !== 17063) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_timeline_json");
-    }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport() !== 8308) {
-        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_update_phone_location_observation_json() !== 32490) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeappliance_update_phone_location_observation_json");
@@ -5110,13 +4814,13 @@ function uniffiEnsureInitialized() {
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_snapshot() !== 22941) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_snapshot");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open() !== 47732) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open() !== 48097) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_constructor_nativeprofilestore_open");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile() !== 43056) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_activate_profile");
     }
-    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status() !== 48667) {
+    if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status() !== 32220) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status");
     }
     if (nativeModule().ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_delete_inactive_profile() !== 31763) {
@@ -5152,6 +4856,5 @@ export default Object.freeze({
     FfiConverterTypeNativeProfileStore,
     FfiConverterTypeNativeProfileStoreSnapshot,
     FfiConverterTypeNativeProfileSummary,
-    FfiConverterTypeNativeTransport,
   }
 });

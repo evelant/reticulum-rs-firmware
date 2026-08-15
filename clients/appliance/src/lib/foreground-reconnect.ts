@@ -5,23 +5,14 @@ export type ForegroundReconnectProgress =
   | { readonly reason: string; readonly state: "waiting_retry" };
 
 export interface ForegroundConnectionClient {
-  ensureConnected?(): Promise<unknown>;
-  reconnect(): Promise<unknown>;
+  ensureConnected(): Promise<unknown>;
 }
 
-/**
- * Prefer a transport's non-destructive connection wake for automatic
- * foreground recovery. Legacy clients without that capability retain their
- * existing reconnect behavior.
- */
+/** Wake the selected bearer without replacing an already usable link. */
 export async function ensureForegroundConnection(
   client: ForegroundConnectionClient,
 ): Promise<void> {
-  if (client.ensureConnected !== undefined) {
-    await client.ensureConnected();
-    return;
-  }
-  await client.reconnect();
+  await client.ensureConnected();
 }
 
 export function foregroundReconnectMessage(progress: ForegroundReconnectProgress): string {

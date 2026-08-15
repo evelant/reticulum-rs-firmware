@@ -95,7 +95,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",
@@ -112,10 +111,8 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
- "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -156,18 +153,6 @@ name = "base64"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
-
-[[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
-name = "base64ct"
-version = "1.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bitfield"
@@ -451,22 +436,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core-foundation"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
-dependencies = [
- "core-foundation-sys",
- "libc",
-]
-
-[[package]]
-name = "core-foundation-sys"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -685,12 +654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data-encoding"
-version = "2.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
-
-[[package]]
 name = "dbl"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -709,7 +672,7 @@ dependencies = [
  "futures-util",
  "libc",
  "libdbus-sys",
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -840,7 +803,6 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
- "pkcs8",
  "signature",
 ]
 
@@ -852,54 +814,10 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "serde",
  "sha2 0.10.9",
  "subtle",
  "zeroize",
 ]
-
-[[package]]
-name = "edge-dhcp"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7a6f957c944e22c2c1904618863702e8af302953454ac738e6df0c7038c4d88"
-dependencies = [
- "edge-nal",
- "edge-raw",
- "embassy-futures",
- "embassy-time",
- "heapless 0.9.3",
- "num_enum",
- "rand_core 0.10.1",
-]
-
-[[package]]
-name = "edge-nal"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "590182a48668fa4988cd97b9b500bcc9a213e9b122b4e0008e934b3916c64031"
-dependencies = [
- "embassy-time",
- "embedded-io-async 0.7.0",
-]
-
-[[package]]
-name = "edge-nal-embassy"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79ad23a63d41bdda528a3b725ae9119ce58abeea265b41fc7f8b254c8d07b2a2"
-dependencies = [
- "edge-nal",
- "embassy-futures",
- "embassy-net",
- "embedded-io-async 0.7.0",
-]
-
-[[package]]
-name = "edge-raw"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c87c23c2a56d22076013bbf039425369d05bdb9ac833e3249c48008a46e1f95c"
 
 [[package]]
 name = "either"
@@ -1280,7 +1198,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -1699,16 +1617,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
-name = "filetime"
-version = "0.2.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
-dependencies = [
- "cfg-if",
- "libc",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2108,16 +2016,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "io-kit-sys"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617ee6cf8e3f66f3b4ea67a4058564628cde41901316e19f559e14c7c72c5e7b"
-dependencies = [
- "core-foundation-sys",
- "mach2",
-]
-
-[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2232,30 +2130,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "leviculum-core"
-version = "0.7.1"
-source = "git+https://codeberg.org/Lew_Palm/leviculum.git?rev=5fb1db0e5e5a490291ee5f6b81312cf0c9de622a#5fb1db0e5e5a490291ee5f6b81312cf0c9de622a"
-dependencies = [
- "aes",
- "cbc",
- "ed25519-dalek",
- "heapless 0.8.0",
- "hkdf",
- "hmac",
- "libbz2-rs-sys",
- "rand_core 0.6.4",
- "sha2 0.10.9",
- "tracing",
- "x25519-dalek",
-]
-
-[[package]]
-name = "libbz2-rs-sys"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2345,15 +2219,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mach2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2373,16 +2238,6 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
-
-[[package]]
-name = "md-5"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
-dependencies = [
- "cfg-if",
- "digest 0.10.7",
-]
 
 [[package]]
 name = "memchr"
@@ -2416,7 +2271,7 @@ checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
 dependencies = [
  "libc",
  "wasi",
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -2435,23 +2290,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 
 [[package]]
-name = "nix"
-version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
-dependencies = [
- "bitflags 1.3.2",
- "cfg-if",
- "libc",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -2472,27 +2316,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "num_enum"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
-dependencies = [
- "num_enum_derive",
- "rustversion",
-]
-
-[[package]]
-name = "num_enum_derive"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]
@@ -2603,16 +2426,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pkcs8"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
-dependencies = [
- "der",
- "spki",
-]
-
-[[package]]
 name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2715,16 +2528,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
-dependencies = [
- "rand_chacha 0.9.0",
- "rand_core 0.9.5",
-]
-
-[[package]]
 name = "rand_chacha"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2732,16 +2535,6 @@ checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2755,9 +2548,6 @@ name = "rand_core"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-dependencies = [
- "getrandom",
-]
 
 [[package]]
 name = "rand_core"
@@ -2863,6 +2653,9 @@ dependencies = [
  "getrandom",
  "hex",
  "rand_core 0.6.4",
+ "reticulum-appliance-runtime",
+ "reticulum-appliance-store",
+ "reticulum-appliance-sync",
  "reticulum-device-api",
  "reticulum-device-api-ble",
  "reticulum-device-api-framing",
@@ -2870,15 +2663,72 @@ dependencies = [
  "reticulum-device-api-session",
  "reticulum-device-client",
  "reticulum-device-pairing-client",
- "reticulum-lxmf-chat-app",
- "reticulum-lxmf-chat-core",
- "reticulum-lxmf-chat-runtime",
  "rustix",
  "serde",
  "serde_json",
  "tokio",
  "uniffi",
  "zeroize",
+]
+
+[[package]]
+name = "reticulum-appliance-runtime"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rete-core",
+ "reticulum-appliance-store",
+ "reticulum-appliance-sync",
+ "reticulum-device-api",
+ "reticulum-device-client",
+ "reticulum-lxmf-wire",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ts-rs",
+ "zeroize",
+]
+
+[[package]]
+name = "reticulum-appliance-service"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "getrandom",
+ "hex",
+ "rand_core 0.6.4",
+ "reticulum-appliance-runtime",
+ "reticulum-appliance-sync",
+ "reticulum-device-api",
+ "reticulum-device-api-ble",
+ "reticulum-device-api-session",
+ "reticulum-device-client",
+ "reticulum-host-ble",
+ "rustix",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tokio",
+ "tower",
+ "ts-rs",
+]
+
+[[package]]
+name = "reticulum-appliance-store"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
+name = "reticulum-appliance-sync"
+version = "0.1.0"
+dependencies = [
+ "reticulum-appliance-store",
+ "reticulum-device-api",
+ "reticulum-device-client",
+ "reticulum-lxmf-wire",
 ]
 
 [[package]]
@@ -2891,69 +2741,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "reticulum-board-heltec-tracker-v2"
+name = "reticulum-board-e290"
 version = "0.1.0"
 dependencies = [
- "critical-section",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "lora-phy",
- "reticulum-lab-rx-returned-fault-hil",
  "reticulum-radio-interface",
 ]
 
 [[package]]
-name = "reticulum-board-heltec-tracker-v2-radio"
+name = "reticulum-board-e290-radio"
 version = "0.1.0"
 dependencies = [
  "critical-section",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
  "lora-phy",
- "reticulum-board-heltec-tracker-v2",
+ "reticulum-board-e290",
  "reticulum-radio-interface",
  "reticulum-radio-lora-phy",
-]
-
-[[package]]
-name = "reticulum-board-heltec-tracker-v2-tx-hil"
-version = "0.1.0"
-dependencies = [
- "reticulum-board-heltec-tracker-v2-radio",
-]
-
-[[package]]
-name = "reticulum-board-heltec-vision-master-e290"
-version = "0.1.0"
-dependencies = [
- "reticulum-radio-interface",
-]
-
-[[package]]
-name = "reticulum-board-heltec-vision-master-e290-radio"
-version = "0.1.0"
-dependencies = [
- "critical-section",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "lora-phy",
- "reticulum-board-heltec-vision-master-e290",
- "reticulum-radio-interface",
- "reticulum-radio-lora-phy",
-]
-
-[[package]]
-name = "reticulum-conformance-rete"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rand_core 0.6.4",
- "reticulum-radio-interface",
- "reticulum-rns-conformance",
- "reticulum-rns-rete",
- "serde",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3091,28 +2895,82 @@ dependencies = [
  "reticulum-device-api-pairing",
  "reticulum-device-api-pairing-control",
  "rustix",
- "serialport",
  "zeroize",
 ]
 
 [[package]]
-name = "reticulum-e290-ble-api"
+name = "reticulum-e290-firmware"
 version = "0.1.0"
 dependencies = [
- "axum",
- "btleplug",
- "futures-util",
- "getrandom",
- "hex",
+ "allocator-api2",
+ "critical-section",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "embedded-graphics",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-storage",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-println",
+ "esp-radio",
+ "esp-rtos",
+ "esp-storage",
+ "log",
  "rand_core 0.6.4",
+ "rete-core",
+ "reticulum-announce-clock",
+ "reticulum-appliance-display-model",
+ "reticulum-ble-bond-store",
+ "reticulum-board-e290",
+ "reticulum-board-e290-radio",
+ "reticulum-device-api",
+ "reticulum-device-api-adapter",
  "reticulum-device-api-ble",
- "reticulum-device-client",
- "rustix",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "uuid",
+ "reticulum-device-api-credential-store",
+ "reticulum-device-api-credentials",
+ "reticulum-device-api-framing",
+ "reticulum-device-api-handoff",
+ "reticulum-device-api-pairing",
+ "reticulum-device-api-pairing-control",
+ "reticulum-device-api-pairing-policy",
+ "reticulum-device-api-session",
+ "reticulum-device-identity-store",
+ "reticulum-eink-ssd1680",
+ "reticulum-interface-router",
+ "reticulum-lxmf-durable-ingress",
+ "reticulum-lxmf-ingress",
+ "reticulum-lxmf-mailbox-store",
+ "reticulum-lxmf-model",
+ "reticulum-lxmf-store",
+ "reticulum-lxmf-wire",
+ "reticulum-network-config-store",
+ "reticulum-node-core",
+ "reticulum-nomad-protocol",
+ "reticulum-nor-flash-region",
+ "reticulum-peer-discovery",
+ "reticulum-radio-interface",
+ "reticulum-radio-lora-phy",
+ "reticulum-radio-tx-dispatch",
+ "reticulum-rns-interface-discovery",
+ "reticulum-storage-actor",
+ "reticulum-storage-journal",
+ "reticulum-storage-model",
+ "reticulum-submission-runtime",
+ "reticulum-tx-handoff",
+ "reticulum-tx-supervisor",
+ "sha2 0.10.9",
+ "smoltcp",
+ "static_cell",
+ "subtle",
+ "trouble-host",
+ "zeroize",
 ]
 
 [[package]]
@@ -3125,289 +2983,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "reticulum-heltec-tracker-v2"
+name = "reticulum-host-ble"
 version = "0.1.0"
 dependencies = [
- "embassy-executor",
- "embassy-futures",
- "embassy-sync 0.8.0",
- "embassy-time",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-rtos",
- "log",
- "reticulum-board-heltec-tracker-v2",
- "reticulum-lab-rx-returned-fault-hil",
- "reticulum-radio-interface",
- "reticulum-rns-rete-rx",
- "static_cell",
- "zeroize",
-]
-
-[[package]]
-name = "reticulum-heltec-tracker-v2-storage-hil"
-version = "0.1.0"
-dependencies = [
- "embedded-storage",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-storage",
- "log",
- "reticulum-nor-flash-region",
- "reticulum-storage-journal",
- "reticulum-storage-model",
-]
-
-[[package]]
-name = "reticulum-heltec-tracker-v2-tx-hil"
-version = "0.1.0"
-dependencies = [
- "embassy-executor",
- "embassy-time",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-rtos",
- "log",
- "reticulum-board-heltec-tracker-v2-tx-hil",
- "reticulum-radio-interface",
- "reticulum-rns-rete",
- "reticulum-semantic-roundtrip-hil",
- "static_cell",
-]
-
-[[package]]
-name = "reticulum-heltec-vision-master-e290-ble-startup-diagnostic"
-version = "0.1.0"
-dependencies = [
- "allocator-api2",
- "critical-section",
- "edge-dhcp",
- "edge-nal",
- "edge-nal-embassy",
- "embassy-executor",
- "embassy-futures",
- "embassy-net",
- "embassy-sync 0.7.2",
- "embassy-sync 0.8.0",
- "embassy-time",
- "embedded-graphics",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-storage",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-radio",
- "esp-rtos",
- "esp-storage",
- "log",
- "rand_core 0.6.4",
- "rete-core",
- "reticulum-announce-clock",
- "reticulum-appliance-display-model",
- "reticulum-ble-bond-store",
- "reticulum-board-heltec-vision-master-e290",
- "reticulum-board-heltec-vision-master-e290-radio",
- "reticulum-device-api",
- "reticulum-device-api-adapter",
+ "btleplug",
+ "futures-util",
  "reticulum-device-api-ble",
- "reticulum-device-api-credential-store",
- "reticulum-device-api-credentials",
- "reticulum-device-api-framing",
- "reticulum-device-api-handoff",
- "reticulum-device-api-pairing",
- "reticulum-device-api-pairing-control",
- "reticulum-device-api-pairing-policy",
- "reticulum-device-api-session",
- "reticulum-device-identity-store",
- "reticulum-eink-ssd1680",
- "reticulum-interface-router",
- "reticulum-lxmf-durable-ingress",
- "reticulum-lxmf-ingress",
- "reticulum-lxmf-mailbox-store",
- "reticulum-lxmf-model",
- "reticulum-lxmf-store",
- "reticulum-lxmf-wire",
- "reticulum-network-config-store",
- "reticulum-node-core",
- "reticulum-nomad-protocol",
- "reticulum-nor-flash-region",
- "reticulum-peer-discovery",
- "reticulum-radio-interface",
- "reticulum-radio-lora-phy",
- "reticulum-radio-tx-dispatch",
- "reticulum-rns-inbox-store",
- "reticulum-rns-interface-discovery",
- "reticulum-storage-actor",
- "reticulum-storage-journal",
- "reticulum-storage-model",
- "reticulum-submission-runtime",
- "reticulum-tx-handoff",
- "reticulum-tx-supervisor",
- "sha2 0.10.9",
- "smoltcp",
- "static_cell",
- "subtle",
- "trouble-host",
- "zeroize",
-]
-
-[[package]]
-name = "reticulum-heltec-vision-master-e290-display-hil"
-version = "0.1.0"
-dependencies = [
- "embassy-executor",
- "embassy-time",
- "embedded-graphics",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-rtos",
- "log",
- "reticulum-board-heltec-vision-master-e290",
- "reticulum-eink-ssd1680",
-]
-
-[[package]]
-name = "reticulum-heltec-vision-master-e290-node"
-version = "0.1.0"
-dependencies = [
- "allocator-api2",
- "critical-section",
- "edge-dhcp",
- "edge-nal",
- "edge-nal-embassy",
- "embassy-executor",
- "embassy-futures",
- "embassy-net",
- "embassy-sync 0.7.2",
- "embassy-sync 0.8.0",
- "embassy-time",
- "embedded-graphics",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-storage",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-radio",
- "esp-rtos",
- "esp-storage",
- "log",
- "rand_core 0.6.4",
- "rete-core",
- "reticulum-announce-clock",
- "reticulum-appliance-display-model",
- "reticulum-ble-bond-store",
- "reticulum-board-heltec-vision-master-e290",
- "reticulum-board-heltec-vision-master-e290-radio",
- "reticulum-device-api",
- "reticulum-device-api-adapter",
- "reticulum-device-api-ble",
- "reticulum-device-api-credential-store",
- "reticulum-device-api-credentials",
- "reticulum-device-api-framing",
- "reticulum-device-api-handoff",
- "reticulum-device-api-pairing",
- "reticulum-device-api-pairing-control",
- "reticulum-device-api-pairing-policy",
- "reticulum-device-api-session",
- "reticulum-device-identity-store",
- "reticulum-eink-ssd1680",
- "reticulum-interface-router",
- "reticulum-lxmf-durable-ingress",
- "reticulum-lxmf-ingress",
- "reticulum-lxmf-mailbox-store",
- "reticulum-lxmf-model",
- "reticulum-lxmf-store",
- "reticulum-lxmf-wire",
- "reticulum-network-config-store",
- "reticulum-node-core",
- "reticulum-nomad-protocol",
- "reticulum-nor-flash-region",
- "reticulum-peer-discovery",
- "reticulum-radio-interface",
- "reticulum-radio-lora-phy",
- "reticulum-radio-tx-dispatch",
- "reticulum-rns-inbox-store",
- "reticulum-rns-interface-discovery",
- "reticulum-storage-actor",
- "reticulum-storage-journal",
- "reticulum-storage-model",
- "reticulum-submission-runtime",
- "reticulum-tx-handoff",
- "reticulum-tx-supervisor",
- "sha2 0.10.9",
- "smoltcp",
- "static_cell",
- "subtle",
- "trouble-host",
- "zeroize",
-]
-
-[[package]]
-name = "reticulum-heltec-vision-master-e290-qualification"
-version = "0.1.0"
-dependencies = [
- "allocator-api2",
- "embedded-storage",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-storage",
- "log",
-]
-
-[[package]]
-name = "reticulum-heltec-vision-master-e290-semantic-hil"
-version = "0.1.0"
-dependencies = [
- "embassy-executor",
- "embassy-time",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-println",
- "esp-rtos",
- "log",
- "rand_core 0.6.4",
- "reticulum-board-heltec-vision-master-e290-radio",
- "reticulum-radio-interface",
- "reticulum-radio-lora-phy",
- "reticulum-rns-rete",
- "reticulum-semantic-roundtrip-hil",
- "static_cell",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3418,90 +3001,6 @@ dependencies = [
  "rand_core 0.6.4",
  "reticulum-node-core",
  "reticulum-rns-rete",
-]
-
-[[package]]
-name = "reticulum-lab-rx-returned-fault-hil"
-version = "0.1.0"
-dependencies = [
- "embedded-hal 1.0.0",
- "embedded-hal-async",
-]
-
-[[package]]
-name = "reticulum-lxmf-chat"
-version = "0.1.0"
-dependencies = [
- "getrandom",
- "hex",
- "rand_core 0.6.4",
- "reticulum-device-api",
- "reticulum-device-client",
- "reticulum-lxmf-chat-core",
- "serialport",
-]
-
-[[package]]
-name = "reticulum-lxmf-chat-app"
-version = "0.1.0"
-dependencies = [
- "reticulum-device-api",
- "reticulum-device-client",
- "reticulum-lxmf-chat-core",
- "reticulum-lxmf-wire",
-]
-
-[[package]]
-name = "reticulum-lxmf-chat-core"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
-]
-
-[[package]]
-name = "reticulum-lxmf-chat-runtime"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rete-core",
- "reticulum-device-api",
- "reticulum-device-client",
- "reticulum-lxmf-chat-app",
- "reticulum-lxmf-chat-core",
- "reticulum-lxmf-wire",
- "serde",
- "serde_json",
- "tokio",
- "ts-rs",
- "zeroize",
-]
-
-[[package]]
-name = "reticulum-lxmf-chat-service"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures-util",
- "getrandom",
- "hex",
- "rand_core 0.6.4",
- "reticulum-device-api",
- "reticulum-device-api-ble",
- "reticulum-device-api-session",
- "reticulum-device-client",
- "reticulum-device-pairing-client",
- "reticulum-e290-ble-api",
- "reticulum-lxmf-chat-app",
- "reticulum-lxmf-chat-core",
- "reticulum-lxmf-chat-runtime",
- "rustix",
- "serde",
- "serde_json",
- "serialport",
- "subtle",
- "tokio",
- "tower",
- "ts-rs",
 ]
 
 [[package]]
@@ -3528,7 +3027,6 @@ dependencies = [
  "rand_core 0.6.4",
  "reticulum-lxmf-wire",
  "reticulum-node-core",
- "reticulum-rns-inbox-store",
  "reticulum-rns-rete",
  "serde",
  "serde_json",
@@ -3607,23 +3105,11 @@ name = "reticulum-peer-discovery"
 version = "0.1.0"
 
 [[package]]
-name = "reticulum-phase1-rx-local-data"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rand_core 0.6.4",
- "reticulum-rns-rete",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
 name = "reticulum-radio-interface"
 version = "0.1.0"
 dependencies = [
  "embassy-sync 0.8.0",
  "lora-modulation",
- "reticulum-rns-conformance",
 ]
 
 [[package]]
@@ -3653,32 +3139,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "reticulum-rns-conformance"
-version = "0.1.0"
-
-[[package]]
-name = "reticulum-rns-inbox-store"
-version = "0.1.0"
-dependencies = [
- "embedded-storage",
- "sha2 0.10.9",
-]
-
-[[package]]
 name = "reticulum-rns-interface-discovery"
 version = "0.1.0"
 dependencies = [
  "hex",
  "hkdf",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "reticulum-rns-leviculum"
-version = "0.1.0"
-dependencies = [
- "leviculum-core",
- "reticulum-rns-conformance",
 ]
 
 [[package]]
@@ -3692,32 +3158,10 @@ dependencies = [
  "rete-stack",
  "rete-transport",
  "reticulum-lxmf-wire",
- "reticulum-rns-conformance",
+ "reticulum-radio-interface",
  "serde",
  "serde_json",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "reticulum-rns-rete-rx"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rand_core 0.6.4",
- "reticulum-radio-interface",
- "reticulum-rns-rete",
- "serde",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "reticulum-semantic-roundtrip-hil"
-version = "0.1.0"
-dependencies = [
- "rand_core 0.6.4",
- "reticulum-radio-interface",
- "reticulum-rns-rete",
 ]
 
 [[package]]
@@ -3731,15 +3175,6 @@ dependencies = [
  "reticulum-storage-journal",
  "reticulum-storage-model",
  "reticulum-submission-projector",
-]
-
-[[package]]
-name = "reticulum-storage-hil-verify"
-version = "0.1.0"
-dependencies = [
- "embedded-storage",
- "reticulum-storage-journal",
- "reticulum-storage-model",
 ]
 
 [[package]]
@@ -3785,28 +3220,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "reticulum-tx-dispatch"
-version = "0.1.0"
-dependencies = [
- "embassy-futures",
- "embassy-sync 0.8.0",
- "rand_core 0.6.4",
- "reticulum-node-core",
- "reticulum-rns-rete",
- "reticulum-tx-handoff",
- "sha2 0.10.9",
- "static_cell",
-]
-
-[[package]]
 name = "reticulum-tx-handoff"
 version = "0.1.0"
 dependencies = [
- "embassy-futures",
  "embassy-sync 0.8.0",
  "rand_core 0.6.4",
  "reticulum-node-core",
- "reticulum-rns-rete",
  "static_cell",
 ]
 
@@ -3814,16 +3233,12 @@ dependencies = [
 name = "reticulum-tx-supervisor"
 version = "0.1.0"
 dependencies = [
- "embassy-futures",
  "embassy-sync 0.8.0",
- "embassy-time",
  "rand_core 0.6.4",
  "reticulum-interface-router",
  "reticulum-node-core",
  "reticulum-rns-rete",
- "reticulum-tx-dispatch",
  "reticulum-tx-handoff",
- "static_cell",
 ]
 
 [[package]]
@@ -3960,7 +3375,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4122,35 +3537,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serialport"
-version = "4.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4d91116f97173694f1642263b2ff837f80d933aa837e2314969f6728f661df3"
-dependencies = [
- "bitflags 2.13.0",
- "cfg-if",
- "core-foundation",
- "core-foundation-sys",
- "io-kit-sys",
- "mach2",
- "nix",
- "scopeguard",
- "unescaper",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4241,7 +3627,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4268,16 +3654,6 @@ checksum = "f39bb07107650fb128f05f033a97212e946a3c0625cc729c97ed586bf7f226a3"
 dependencies = [
  "somni-expr",
  "somni-parser",
-]
-
-[[package]]
-name = "spki"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
-dependencies = [
- "base64ct",
- "der",
 ]
 
 [[package]]
@@ -4361,7 +3737,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2c04b93fc15d79b39c63218f15e3fdffaa4c227830686e3b7c5f41244eb3e50"
 dependencies = [
- "base64 0.13.1",
+ "base64",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
@@ -4408,17 +3784,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
-name = "tar"
-version = "0.4.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
-dependencies = [
- "filetime",
- "libc",
- "xattr",
-]
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4428,7 +3793,7 @@ dependencies = [
  "getrandom",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4495,14 +3860,13 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
- "bytes",
  "libc",
  "mio",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4526,18 +3890,6 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite",
 ]
 
 [[package]]
@@ -4716,8 +4068,8 @@ dependencies = [
  "futures",
  "heapless 0.9.3",
  "p256",
- "rand 0.8.7",
- "rand_chacha 0.3.1",
+ "rand",
+ "rand_chacha",
  "rand_core 0.6.4",
  "static_cell",
  "trouble-host-macros",
@@ -4760,22 +4112,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "sha1",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4786,15 +4122,6 @@ name = "ufmt-write"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e87a2ed6b42ec5e28cc3b94c09982969e9227600b2e3dcbc1db927a84c06bd69"
-
-[[package]]
-name = "unescaper"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7285e83a80ce76f5e7bce79fa41f68d78ba62d1003cf27bf748ab24413808cf4"
-dependencies = [
- "thiserror 2.0.18",
-]
 
 [[package]]
 name = "unicode-ident"
@@ -5016,7 +4343,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -5138,36 +4465,11 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
-version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "windows-targets"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
-dependencies = [
- "windows_aarch64_gnullvm",
- "windows_aarch64_msvc",
- "windows_i686_gnu",
- "windows_i686_gnullvm",
- "windows_i686_msvc",
- "windows_x86_64_gnu",
- "windows_x86_64_gnullvm",
- "windows_x86_64_msvc",
 ]
 
 [[package]]
@@ -5178,54 +4480,6 @@ checksum = "b66463ad2e0ea3bbf808b7f1d371311c80e115c0b71d60efc142cafbcfb057a6"
 dependencies = [
  "windows-link 0.1.3",
 ]
-
-[[package]]
-name = "windows_aarch64_gnullvm"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
-
-[[package]]
-name = "windows_aarch64_msvc"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
-
-[[package]]
-name = "windows_i686_gnu"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
-
-[[package]]
-name = "windows_i686_gnullvm"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
-
-[[package]]
-name = "windows_i686_msvc"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
-
-[[package]]
-name = "windows_x86_64_gnu"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
-
-[[package]]
-name = "windows_x86_64_gnullvm"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
-
-[[package]]
-name = "windows_x86_64_msvc"
-version = "0.52.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "winnow"
@@ -5260,16 +4514,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xattr"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
-dependencies = [
- "libc",
- "rustix",
-]
-
-[[package]]
 name = "xml"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5279,31 +4523,7 @@ checksum = "636f85e5ca6488e96401b61eb7de54f4e44755c988af0f52cf90230c312a1a89"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "embedded-storage",
- "getrandom",
- "md-5",
  "object",
- "quote",
- "rand_core 0.6.4",
- "reticulum-device-api",
- "reticulum-device-api-framing",
- "reticulum-device-api-handoff",
- "reticulum-device-api-session",
- "reticulum-device-pairing-client",
- "reticulum-heltec-vision-master-e290-node",
- "reticulum-lxmf-model",
- "reticulum-lxmf-store",
- "reticulum-lxmf-wire",
- "reticulum-phase1-rx-local-data",
- "reticulum-rns-inbox-store",
- "reticulum-rns-rete",
- "serde",
- "serde_json",
- "serialport",
- "sha2 0.10.9",
- "syn 2.0.118",
- "tar",
- "zeroize",
 ]
 
 [[package]]

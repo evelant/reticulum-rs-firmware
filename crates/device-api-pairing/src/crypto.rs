@@ -378,7 +378,7 @@ pub(crate) fn transcript_hash_for_test(
         ),
         // This test-only constructor intentionally hashes arbitrary mutated
         // profile bytes, including unsupported bearer codes.
-        bearer: BearerBinding::UsbSerialJtag,
+        bearer: BearerBinding::BleGatt,
         credential_id: CredentialId::new(credential_id),
         generation: CredentialGeneration::new(generation),
     }

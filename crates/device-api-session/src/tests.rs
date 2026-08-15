@@ -107,7 +107,7 @@ impl RngCore for FixedRng {
 impl CryptoRng for FixedRng {}
 
 fn client_hello() -> ClientHello {
-    ClientHello::new(BearerBinding::UsbSerialJtag, CREDENTIAL_ID, CLIENT_NONCE)
+    ClientHello::new(BearerBinding::BleGatt, CREDENTIAL_ID, CLIENT_NONCE)
 }
 
 fn decode_one(bytes: &[u8]) -> Record {
@@ -159,7 +159,7 @@ fn begin_with_allocator(
     ServerHelloFlight::begin(
         client_hello(),
         ActiveCredential::new(CREDENTIAL_ID, generation, PSK),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        ServerParameters::new(DEVICE_ID, BearerBinding::BleGatt),
         epochs,
         &mut rng,
     )
@@ -233,7 +233,7 @@ fn credential_authority(
         CredentialAudit::new(
             revision,
             revision,
-            PairingOrigin::UsbPhysicalPresence,
+            PairingOrigin::LocalPhysicalPresence,
             AuthorizationPolicyVersion::new(1),
         ),
         PSK,
@@ -257,7 +257,7 @@ fn revoked_authority(generation: CredentialGeneration) -> CredentialAuthority<1>
         CredentialAudit::new(
             AuthorityRevision::new(GENERATION.get()),
             revision,
-            PairingOrigin::UsbPhysicalPresence,
+            PairingOrigin::LocalPhysicalPresence,
             AuthorizationPolicyVersion::new(1),
         ),
         RevocationReason::Explicit,
@@ -277,7 +277,7 @@ fn establish_from_authority(authority: &CredentialAuthority<1>) -> (ServerSessio
     let flight = ServerHelloFlight::begin(
         client_hello(),
         ActiveCredential::from_selected(selected),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        ServerParameters::new(DEVICE_ID, BearerBinding::BleGatt),
         &mut epochs,
         &mut rng,
     )
@@ -341,7 +341,7 @@ fn tagged_request(schedule: &KeySchedule, sequence: u64, payload: &[u8]) -> Reco
 }
 
 fn client_parameters() -> ClientParameters {
-    ClientParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag)
+    ClientParameters::new(DEVICE_ID, BearerBinding::BleGatt)
 }
 
 fn client_credential() -> ClientCredential {
@@ -385,7 +385,7 @@ fn server_hello_record_for(
     let flight = ServerHelloFlight::begin(
         client_hello,
         ActiveCredential::new(CREDENTIAL_ID, generation, PSK),
-        ServerParameters::new(device_id, BearerBinding::UsbSerialJtag),
+        ServerParameters::new(device_id, BearerBinding::BleGatt),
         &mut epochs,
         &mut rng,
     )
@@ -397,7 +397,7 @@ fn establish_client_server() -> (ClientSession, ServerSession, KeySchedule) {
     let mut epochs = SessionEpochAllocator::new();
     establish_client_server_for(
         client_parameters(),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        ServerParameters::new(DEVICE_ID, BearerBinding::BleGatt),
         &mut epochs,
         CLIENT_NONCE,
         SERVER_NONCE,
@@ -512,121 +512,25 @@ fn client_and_server_hello_round_trip_canonical_records() {
     let hello = client_hello();
     let parsed = ClientHello::from_record(hello.into_record()).unwrap();
     assert_eq!(parsed, hello);
-    assert_eq!(parsed.suite(), SessionSuite::UsbQualification);
+    assert_eq!(parsed.suite(), SessionSuite::BleGatt);
 
     let (_, _, server_hello, _) = establish();
-    assert_eq!(server_hello.suite(), SessionSuite::UsbQualification);
-    assert_eq!(server_hello.bearer(), BearerBinding::UsbSerialJtag);
+    assert_eq!(server_hello.suite(), SessionSuite::BleGatt);
+    assert_eq!(server_hello.bearer(), BearerBinding::BleGatt);
     assert_eq!(server_hello.device_id(), DEVICE_ID);
     assert_eq!(server_hello.nonce(), &SERVER_NONCE);
     assert_eq!(server_hello.credential_generation(), GENERATION);
 }
 
 #[test]
-fn wifi_suite_authenticates_round_trip_and_reconnect_resets_sequences() {
-    let client_parameters = ClientParameters::new_for_suite(
-        DEVICE_ID,
-        BearerBinding::Wifi,
-        SessionSuite::WifiQualification,
-    );
-    let server_parameters = ServerParameters::new_for_suite(
-        DEVICE_ID,
-        BearerBinding::Wifi,
-        SessionSuite::WifiQualification,
-    );
-    assert_eq!(
-        SessionSuite::WifiQualification.required_bearer(),
-        BearerBinding::Wifi
-    );
-    assert_eq!(client_parameters.suite(), SessionSuite::WifiQualification);
-    assert_eq!(client_parameters.bearer(), BearerBinding::Wifi);
-    assert_eq!(server_parameters.suite(), SessionSuite::WifiQualification);
-    assert_eq!(server_parameters.bearer(), BearerBinding::Wifi);
-
-    let mut epochs = SessionEpochAllocator::new();
-    let (client, server, first_schedule) = establish_client_server_for(
-        client_parameters,
-        server_parameters,
-        &mut epochs,
-        CLIENT_NONCE,
-        SERVER_NONCE,
-    );
-    assert_eq!(client.next_client_sequence(), 0);
-    assert_eq!(client.next_server_sequence(), 0);
-    assert_eq!(server.next_client_sequence(), 0);
-    assert_eq!(server.next_server_sequence(), 0);
-    assert_eq!(server.epoch(), SessionEpoch::new(1));
-
-    let mut request_flight = client
-        .frame_request(owned_message(b"wifi-request"))
-        .unwrap_or_else(|fault| panic!("Wi-Fi request framing failed: {:?}", fault.kind()));
-    let request_record = decode_one(request_flight.remaining());
-    let request_length = request_flight.remaining().len();
-    request_flight.advance(request_length).unwrap();
-    let awaiting_response = request_flight
-        .try_finish()
-        .unwrap_or_else(|_| panic!("complete Wi-Fi request did not advance typestate"));
-    let authenticated = server
-        .authenticate_request(request_record)
-        .unwrap_or_else(|fault| panic!("Wi-Fi request authentication failed: {fault:?}"));
-    let (request, waiting) = authenticated.into_parts();
-    assert_eq!(request.message().encoded(), b"wifi-request");
-    assert_eq!(request.grant().bearer(), BearerBinding::Wifi);
-    assert_eq!(request.grant().admission_sequence(), 0);
-    assert_eq!(request.grant().epoch(), SessionEpoch::new(1));
-
-    let mut response_flight = frame_server_response(waiting, b"wifi-response");
-    let response = awaiting_response
-        .authenticate(decode_one(response_flight.remaining()))
-        .unwrap_or_else(|fault| panic!("Wi-Fi response authentication failed: {fault:?}"));
-    let (client, response) = response.into_parts();
-    assert_eq!(response.encoded(), b"wifi-response");
-    let response_length = response_flight.remaining().len();
-    response_flight.advance(response_length).unwrap();
-    let server = response_flight
-        .try_finish()
-        .unwrap_or_else(|_| panic!("complete Wi-Fi response did not restore server session"));
-    assert_eq!(client.next_client_sequence(), 1);
-    assert_eq!(client.next_server_sequence(), 1);
-    assert_eq!(server.next_client_sequence(), 1);
-    assert_eq!(server.next_server_sequence(), 1);
-    drop(client);
-    drop(server);
-
-    let mut reconnect_client_nonce = CLIENT_NONCE;
-    reconnect_client_nonce[0] ^= 0x80;
-    let mut reconnect_server_nonce = SERVER_NONCE;
-    reconnect_server_nonce[0] ^= 0x80;
-    let (client, server, reconnect_schedule) = establish_client_server_for(
-        client_parameters,
-        server_parameters,
-        &mut epochs,
-        reconnect_client_nonce,
-        reconnect_server_nonce,
-    );
-    assert_ne!(reconnect_schedule.session_id, first_schedule.session_id);
-    assert_eq!(client.next_client_sequence(), 0);
-    assert_eq!(client.next_server_sequence(), 0);
-    assert_eq!(server.next_client_sequence(), 0);
-    assert_eq!(server.next_server_sequence(), 0);
-    assert_eq!(server.epoch(), SessionEpoch::new(2));
-}
-
-#[test]
 fn ble_gatt_suite_authenticates_request_response_round_trip() {
-    let client_parameters = ClientParameters::new_for_suite(
-        DEVICE_ID,
-        BearerBinding::BleGatt,
-        SessionSuite::BleGattQualification,
-    );
-    let server_parameters = ServerParameters::new_for_suite(
-        DEVICE_ID,
-        BearerBinding::BleGatt,
-        SessionSuite::BleGattQualification,
-    );
-    assert_eq!(crate::BLE_GATT_QUALIFICATION_SUITE, 3);
+    let client_parameters =
+        ClientParameters::new_for_suite(DEVICE_ID, BearerBinding::BleGatt, SessionSuite::BleGatt);
+    let server_parameters =
+        ServerParameters::new_for_suite(DEVICE_ID, BearerBinding::BleGatt, SessionSuite::BleGatt);
+    assert_eq!(crate::BLE_GATT_SESSION_SUITE, 3);
     assert_eq!(
-        SessionSuite::BleGattQualification.required_bearer(),
+        SessionSuite::BleGatt.required_bearer(),
         BearerBinding::BleGatt
     );
 
@@ -658,257 +562,6 @@ fn ble_gatt_suite_authenticates_request_response_round_trip() {
 }
 
 #[test]
-fn ble_gatt_suite_rejects_cross_bearer_use() {
-    let mut client_rng = FixedRng::new(CLIENT_NONCE);
-    let error = expect_error(
-        ClientHelloFlight::begin(
-            ClientParameters::new_for_suite(
-                DEVICE_ID,
-                BearerBinding::Wifi,
-                SessionSuite::BleGattQualification,
-            ),
-            client_credential(),
-            &mut client_rng,
-        ),
-        "BLE GATT suite started on Wi-Fi",
-    );
-    assert!(matches!(
-        error,
-        ClientHandshakeError::SuiteBearerMismatch {
-            suite: SessionSuite::BleGattQualification,
-            bearer: BearerBinding::Wifi,
-            required: BearerBinding::BleGatt,
-        }
-    ));
-
-    let mut epochs = SessionEpochAllocator::new();
-    let mut server_rng = FixedRng::new(SERVER_NONCE);
-    let ble_hello = ClientHello::new_for_suite(
-        SessionSuite::BleGattQualification,
-        BearerBinding::BleGatt,
-        CREDENTIAL_ID,
-        CLIENT_NONCE,
-    );
-    let error = expect_error(
-        ServerHelloFlight::begin(
-            ble_hello,
-            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-            ServerParameters::new_for_suite(
-                DEVICE_ID,
-                BearerBinding::Wifi,
-                SessionSuite::BleGattQualification,
-            ),
-            &mut epochs,
-            &mut server_rng,
-        ),
-        "BLE GATT suite server started on Wi-Fi",
-    );
-    assert!(matches!(
-        error,
-        HandshakeError::SuiteBearerMismatch {
-            suite: SessionSuite::BleGattQualification,
-            bearer: BearerBinding::Wifi,
-            required: BearerBinding::BleGatt,
-        }
-    ));
-
-    let forged_wifi_hello = ClientHello::new_for_suite(
-        SessionSuite::BleGattQualification,
-        BearerBinding::Wifi,
-        CREDENTIAL_ID,
-        CLIENT_NONCE,
-    );
-    let error = expect_error(
-        ServerHelloFlight::begin(
-            forged_wifi_hello,
-            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-            ServerParameters::new_for_suite(
-                DEVICE_ID,
-                BearerBinding::BleGatt,
-                SessionSuite::BleGattQualification,
-            ),
-            &mut epochs,
-            &mut server_rng,
-        ),
-        "BLE GATT suite accepted a client hello from Wi-Fi",
-    );
-    assert!(matches!(
-        error,
-        HandshakeError::BearerMismatch {
-            client: BearerBinding::Wifi,
-            server: BearerBinding::BleGatt,
-        }
-    ));
-}
-
-#[test]
-fn wifi_suite_rejects_wrong_bearer_and_supported_suite() {
-    let mut client_rng = FixedRng::new(CLIENT_NONCE);
-    let error = expect_error(
-        ClientHelloFlight::begin(
-            ClientParameters::new(DEVICE_ID, BearerBinding::Wifi),
-            client_credential(),
-            &mut client_rng,
-        ),
-        "legacy USB qualification suite started on Wi-Fi",
-    );
-    assert!(matches!(
-        error,
-        ClientHandshakeError::QualificationSuiteForbidden {
-            bearer: BearerBinding::Wifi,
-        }
-    ));
-
-    let mut server_rng = FixedRng::new(SERVER_NONCE);
-    let mut epochs = SessionEpochAllocator::new();
-    let error = expect_error(
-        ServerHelloFlight::begin(
-            client_hello(),
-            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-            ServerParameters::new(DEVICE_ID, BearerBinding::Wifi),
-            &mut epochs,
-            &mut server_rng,
-        ),
-        "legacy USB qualification server started on Wi-Fi",
-    );
-    assert!(matches!(
-        error,
-        HandshakeError::QualificationSuiteForbidden {
-            bearer: BearerBinding::Wifi,
-        }
-    ));
-
-    let mut client_rng = FixedRng::new(CLIENT_NONCE);
-    let error = expect_error(
-        ClientHelloFlight::begin(
-            ClientParameters::new_for_suite(
-                DEVICE_ID,
-                BearerBinding::UsbSerialJtag,
-                SessionSuite::WifiQualification,
-            ),
-            client_credential(),
-            &mut client_rng,
-        ),
-        "Wi-Fi suite started on USB",
-    );
-    assert!(matches!(
-        error,
-        ClientHandshakeError::SuiteBearerMismatch {
-            suite: SessionSuite::WifiQualification,
-            bearer: BearerBinding::UsbSerialJtag,
-            required: BearerBinding::Wifi,
-        }
-    ));
-
-    let wifi_hello = ClientHello::new_for_suite(
-        SessionSuite::WifiQualification,
-        BearerBinding::Wifi,
-        CREDENTIAL_ID,
-        CLIENT_NONCE,
-    );
-    let mut server_rng = FixedRng::new(SERVER_NONCE);
-    let error = expect_error(
-        ServerHelloFlight::begin(
-            wifi_hello,
-            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-            ServerParameters::new_for_suite(
-                DEVICE_ID,
-                BearerBinding::UsbSerialJtag,
-                SessionSuite::WifiQualification,
-            ),
-            &mut epochs,
-            &mut server_rng,
-        ),
-        "Wi-Fi suite server started on USB",
-    );
-    assert!(matches!(
-        error,
-        HandshakeError::SuiteBearerMismatch {
-            suite: SessionSuite::WifiQualification,
-            bearer: BearerBinding::UsbSerialJtag,
-            required: BearerBinding::Wifi,
-        }
-    ));
-
-    let mut server_rng = FixedRng::new(SERVER_NONCE);
-    let error = expect_error(
-        ServerHelloFlight::begin(
-            wifi_hello,
-            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-            ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
-            &mut epochs,
-            &mut server_rng,
-        ),
-        "Wi-Fi client hello was accepted by the USB suite",
-    );
-    assert!(matches!(
-        error,
-        HandshakeError::SuiteMismatch {
-            client: SessionSuite::WifiQualification,
-            server: SessionSuite::UsbQualification,
-        }
-    ));
-
-    let wifi_hello_on_ble = ClientHello::new_for_suite(
-        SessionSuite::WifiQualification,
-        BearerBinding::BleGatt,
-        CREDENTIAL_ID,
-        CLIENT_NONCE,
-    );
-    let mut server_rng = FixedRng::new(SERVER_NONCE);
-    let error = expect_error(
-        ServerHelloFlight::begin(
-            wifi_hello_on_ble,
-            ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-            ServerParameters::new_for_suite(
-                DEVICE_ID,
-                BearerBinding::Wifi,
-                SessionSuite::WifiQualification,
-            ),
-            &mut epochs,
-            &mut server_rng,
-        ),
-        "Wi-Fi suite accepted a client hello from BLE",
-    );
-    assert!(matches!(
-        error,
-        HandshakeError::BearerMismatch {
-            client: BearerBinding::BleGatt,
-            server: BearerBinding::Wifi,
-        }
-    ));
-
-    let mut client_rng = FixedRng::new(CLIENT_NONCE);
-    let mut client_flight = ClientHelloFlight::begin(
-        ClientParameters::new_for_suite(
-            DEVICE_ID,
-            BearerBinding::Wifi,
-            SessionSuite::WifiQualification,
-        ),
-        client_credential(),
-        &mut client_rng,
-    )
-    .unwrap();
-    let client_length = client_flight.remaining().len();
-    client_flight.advance(client_length).unwrap();
-    let awaiting_server_hello = client_flight
-        .try_finish()
-        .unwrap_or_else(|_| panic!("complete Wi-Fi client hello did not advance typestate"));
-    let usb_server_hello = decode_one(begin().remaining());
-    let error = expect_error(
-        awaiting_server_hello.accept(usb_server_hello),
-        "Wi-Fi client accepted a USB-suite server hello",
-    );
-    assert!(matches!(
-        error,
-        ClientHandshakeError::SuiteMismatch {
-            expected: SessionSuite::WifiQualification,
-            observed: SessionSuite::UsbQualification,
-        }
-    ));
-}
-
-#[test]
 fn complete_handshake_request_handoff_and_partial_reply_are_exact() {
     let (session, schedule, _, _) = establish();
     let request_payload = [0xa4, 0x00, 0x01, 0x01, 0x07];
@@ -924,7 +577,7 @@ fn complete_handshake_request_handoff_and_partial_reply_are_exact() {
     assert_eq!(request.message().encoded(), request_payload);
     assert_eq!(request.grant().credential_id(), CREDENTIAL_ID);
     assert_eq!(request.grant().credential_generation(), GENERATION);
-    assert_eq!(request.grant().bearer(), BearerBinding::UsbSerialJtag);
+    assert_eq!(request.grant().bearer(), BearerBinding::BleGatt);
     assert_eq!(request.grant().session_id(), schedule.session_id);
     assert_eq!(request.grant().epoch(), EPOCH);
     assert_eq!(request.grant().admission_sequence(), 0);
@@ -982,27 +635,13 @@ fn complete_handshake_request_handoff_and_partial_reply_are_exact() {
 }
 
 #[test]
-fn handshake_rejects_wrong_bearer_credential_and_client_proof() {
-    let mut rng = FixedRng::new(SERVER_NONCE);
-    let mut epochs = SessionEpochAllocator::new();
-    let error = match ServerHelloFlight::begin(
-        ClientHello::new(BearerBinding::BleGatt, CREDENTIAL_ID, CLIENT_NONCE),
-        ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
-        &mut epochs,
-        &mut rng,
-    ) {
-        Ok(_) => panic!("bearer mismatch was accepted"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, HandshakeError::BearerMismatch { .. }));
-
+fn handshake_rejects_wrong_credential_and_client_proof() {
     let mut rng = FixedRng::new(SERVER_NONCE);
     let mut epochs = SessionEpochAllocator::new();
     let error = match ServerHelloFlight::begin(
         client_hello(),
         ActiveCredential::new(CredentialId::new([0x99; 16]), GENERATION, PSK),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        ServerParameters::new(DEVICE_ID, BearerBinding::BleGatt),
         &mut epochs,
         &mut rng,
     ) {
@@ -1322,8 +961,7 @@ fn boot_lifetime_epoch_allocator_prevents_old_reply_alias_after_reconnect() {
 
 #[test]
 fn authority_grant_supplies_adapter_context_and_revoked_grant_does_not_revalidate() {
-    let permissions =
-        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS;
+    let permissions = Permissions::SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS;
     let authority = credential_authority(GENERATION, permissions);
     let (session, schedule) = establish_from_authority(&authority);
 
@@ -1442,17 +1080,17 @@ fn deterministic_material_matches_independent_python_vector() {
     let client_hello_record = client_hello().into_record();
     assert_record_vector(
         &client_hello_record,
-        "524441310101000000000000000000000000000000000000000000000000000038000100000001000100101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f00000000000000000000000000000000",
-        "0007524441310101010101010101010101010101010101010101010101010101010238020101010201020131101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100",
+        "524441310101000000000000000000000000000000000000000000000000000038000100000003000300101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f00000000000000000000000000000000",
+        "0007524441310101010101010101010101010101010101010101010101010101010238020101010203020331101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100",
     );
 
     let mut hello_flight = begin();
-    let server_hello_wire = "000752444131010201010101010101010101010101010101010101010101010101024c020101010201020139202122232425262728292a2b2c2d2e2f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f08070605040302010202030201010102070101010101010101010101010101010101010100";
+    let server_hello_wire = "000752444131010201010101010101010101010101010101010101010101010101024c020101010203020339202122232425262728292a2b2c2d2e2f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f08070605040302010202030201010102070101010101010101010101010101010101010100";
     assert_eq!(hex::encode(hello_flight.remaining()), server_hello_wire);
     let server_hello_record = decode_one(hello_flight.remaining());
     assert_record_vector(
         &server_hello_record,
-        "52444131010200000000000000000000000000000000000000000000000000004c000100000001000100202122232425262728292a2b2c2d2e2f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f080706050403020100020002010000000700000000000000000000000000000000000000",
+        "52444131010200000000000000000000000000000000000000000000000000004c000100000003000300202122232425262728292a2b2c2d2e2f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f080706050403020100020002010000000700000000000000000000000000000000000000",
         server_hello_wire,
     );
     let server_hello = ServerHello::from_record(server_hello_record).unwrap();
@@ -1462,12 +1100,12 @@ fn deterministic_material_matches_independent_python_vector() {
     let mut proof_flight = hello_flight
         .try_finish()
         .unwrap_or_else(|_| panic!("complete vector server hello did not advance typestate"));
-    let server_proof_wire = "0007524441310103011143500f898ee83026808be25bf16c114401010101010101022021f8dadb11a16a3ff23cb346843583ad980b5a4b22cc75c5a058b403089a8401e50101010101010101010101010101010100";
+    let server_proof_wire = "000752444131010301118ab0532b2da56a401b3847a26d7b06cd01010101010101022021e78f45ba3c2d5dc97adbce04ce69eaab2ee9715bb421d577de91309dbe9f83c50101010101010101010101010101010100";
     assert_eq!(hex::encode(proof_flight.remaining()), server_proof_wire);
     let server_proof_record = decode_one(proof_flight.remaining());
     assert_record_vector(
         &server_proof_record,
-        "524441310103000043500f898ee83026808be25bf16c114400000000000000002000f8dadb11a16a3ff23cb346843583ad980b5a4b22cc75c5a058b403089a8401e500000000000000000000000000000000",
+        "52444131010300008ab0532b2da56a401b3847a26d7b06cd00000000000000002000e78f45ba3c2d5dc97adbce04ce69eaab2ee9715bb421d577de91309dbe9f83c500000000000000000000000000000000",
         server_proof_wire,
     );
     let observed_server_proof = take_proof(
@@ -1489,52 +1127,52 @@ fn deterministic_material_matches_independent_python_vector() {
     );
     assert_record_vector(
         &client_proof_record,
-        "524441310104000043500f898ee83026808be25bf16c114400000000000000002000419b56f8245fb32647258ed4102531c606543b32cd125af94b5fff96fa21496d00000000000000000000000000000000",
-        "0007524441310104011143500f898ee83026808be25bf16c114401010101010101022021419b56f8245fb32647258ed4102531c606543b32cd125af94b5fff96fa21496d0101010101010101010101010101010100",
+        "52444131010400008ab0532b2da56a401b3847a26d7b06cd00000000000000002000e75a98367a87d0905ea1dc7d3112644d8a37db3dfa757ed43a655b7f0b4ad85800000000000000000000000000000000",
+        "000752444131010401118ab0532b2da56a401b3847a26d7b06cd01010101010101022021e75a98367a87d0905ea1dc7d3112644d8a37db3dfa757ed43a655b7f0b4ad8580101010101010101010101010101010100",
     );
     let session = pending.authenticate(client_proof_record).unwrap();
     let record = tagged_request(&schedule, 0, b"vector-request");
     assert_eq!(
         hex::encode(schedule.transcript_hash),
-        "f2c370c91c390b560e11f504bf1ccc858cf6f9b391be79652c79057cd30ef7e6"
+        "d5ba810802c893d9e0fb48c8c39ca93105739e2c3db7cad46391b36c09e0b994"
     );
     assert_eq!(
         hex::encode(schedule.server_proof_key.as_ref()),
-        "618fbaa38a75c76f9b6ee31988bdfedfea0f16124d06566f9e4162a893267a12"
+        "c7b59f0dd75d1c76071276c7591b0183fb95abe340a4a198f212d36c06fbe2cd"
     );
     assert_eq!(
         hex::encode(schedule.client_proof_key.as_ref()),
-        "2e3c56ab766b7f0bd8800040f13fcbaa7bd7ef48de1be15f89a9a17aaf4d754e"
+        "e2e655f0d83085736d7947ee07c7d10746b8c8e9656c896eab90c428d49b6419"
     );
     assert_eq!(
         hex::encode(schedule.client_record_key.as_ref()),
-        "e7e8f2b704b39db2f6303636b003d885421b84958c8db152d3f5673924f87ffb"
+        "7eb54da0ceb8e3ec3b9fc6e4162a802dcf9fed9dff65c5a7dc827f96447f2b20"
     );
     assert_eq!(
         hex::encode(schedule.server_record_key.as_ref()),
-        "8da612fe2c3324ecdce9bbd1049df50730000113a0cbeac9711e8bf6da573341"
+        "1b0b26ffd301590e8ce65de1f981fc3cda65bb8e5cedf4309ae89ab1ebdd9af0"
     );
     assert_eq!(
         hex::encode(schedule.session_id.0),
-        "43500f898ee83026808be25bf16c1144"
+        "8ab0532b2da56a401b3847a26d7b06cd"
     );
     assert_eq!(
         hex::encode(observed_server_proof),
-        "f8dadb11a16a3ff23cb346843583ad980b5a4b22cc75c5a058b403089a8401e5"
+        "e78f45ba3c2d5dc97adbce04ce69eaab2ee9715bb421d577de91309dbe9f83c5"
     );
     assert_eq!(
         hex::encode(observed_client_proof),
-        "419b56f8245fb32647258ed4102531c606543b32cd125af94b5fff96fa21496d"
+        "e75a98367a87d0905ea1dc7d3112644d8a37db3dfa757ed43a655b7f0b4ad858"
     );
     assert_eq!(
         hex::encode(record.authentication_tag()),
-        "fba3e2eedff43b16b35829413cee6bc2"
+        "f8020c2c9ee75f5706744264dd7eb560"
     );
     assert_eq!(record.payload(), b"vector-request");
     let request_wire = FramedRecord::encode(&record).unwrap();
     assert_eq!(
         hex::encode(request_wire.encoded()),
-        "0007524441310110011143500f898ee83026808be25bf16c114401010101010101020e1f766563746f722d72657175657374fba3e2eedff43b16b35829413cee6bc200"
+        "000752444131011001118ab0532b2da56a401b3847a26d7b06cd01010101010101020e1f766563746f722d72657175657374f8020c2c9ee75f5706744264dd7eb56000"
     );
 
     let authenticated = session.authenticate_request(record).unwrap();
@@ -1551,7 +1189,7 @@ fn deterministic_material_matches_independent_python_vector() {
     };
     assert_eq!(
         hex::encode(flight.remaining()),
-        "0007524441310111011143500f898ee83026808be25bf16c114401010101010101020f20766563746f722d726573706f6e7365b04abfae374dcb7592292ba4c22729bf00"
+        "000752444131011101118ab0532b2da56a401b3847a26d7b06cd01010101010101020f20766563746f722d726573706f6e73654ed05b454398da22c39b304891c3419e00"
     );
 }
 
@@ -1559,7 +1197,7 @@ fn deterministic_material_matches_independent_python_vector() {
 fn public_client_typestate_matches_vectors_and_server_end_to_end() {
     let parameters = client_parameters();
     assert_eq!(parameters.expected_device_id(), DEVICE_ID);
-    assert_eq!(parameters.bearer(), BearerBinding::UsbSerialJtag);
+    assert_eq!(parameters.bearer(), BearerBinding::BleGatt);
     let credential = client_credential();
     assert_eq!(credential.id(), CREDENTIAL_ID);
     assert_eq!(credential.generation(), GENERATION);
@@ -1567,7 +1205,7 @@ fn public_client_typestate_matches_vectors_and_server_end_to_end() {
     let mut client_rng = FixedRng::new(CLIENT_NONCE);
     let client_hello_flight = ClientHelloFlight::begin(parameters, credential, &mut client_rng)
         .unwrap_or_else(|error| panic!("client handshake begin failed: {error:?}"));
-    let client_hello_wire = "0007524441310101010101010101010101010101010101010101010101010101010238020101010201020131101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100";
+    let client_hello_wire = "0007524441310101010101010101010101010101010101010101010101010101010238020101010203020331101112131415161718191a1b1c1d1e1f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100";
     assert_eq!(
         hex::encode(client_hello_flight.remaining()),
         client_hello_wire
@@ -1599,12 +1237,12 @@ fn public_client_typestate_matches_vectors_and_server_end_to_end() {
     let mut server_hello_flight = ServerHelloFlight::begin(
         parsed_client_hello,
         ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        ServerParameters::new(DEVICE_ID, BearerBinding::BleGatt),
         &mut epochs,
         &mut server_rng,
     )
     .unwrap_or_else(|error| panic!("server handshake begin failed: {error:?}"));
-    let server_hello_wire = "000752444131010201010101010101010101010101010101010101010101010101024c020101010201020139202122232425262728292a2b2c2d2e2f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f08070605040302010202030201010102070101010101010101010101010101010101010100";
+    let server_hello_wire = "000752444131010201010101010101010101010101010101010101010101010101024c020101010203020339202122232425262728292a2b2c2d2e2f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f08070605040302010202030201010102070101010101010101010101010101010101010100";
     assert_eq!(
         hex::encode(server_hello_flight.remaining()),
         server_hello_wire
@@ -1621,7 +1259,7 @@ fn public_client_typestate_matches_vectors_and_server_end_to_end() {
         .try_finish()
         .unwrap_or_else(|_| panic!("complete server hello did not advance typestate"));
 
-    let server_proof_wire = "0007524441310103011143500f898ee83026808be25bf16c114401010101010101022021f8dadb11a16a3ff23cb346843583ad980b5a4b22cc75c5a058b403089a8401e50101010101010101010101010101010100";
+    let server_proof_wire = "000752444131010301118ab0532b2da56a401b3847a26d7b06cd01010101010101022021e78f45ba3c2d5dc97adbce04ce69eaab2ee9715bb421d577de91309dbe9f83c50101010101010101010101010101010100";
     assert_eq!(
         hex::encode(server_proof_flight.remaining()),
         server_proof_wire
@@ -1635,7 +1273,7 @@ fn public_client_typestate_matches_vectors_and_server_end_to_end() {
         .try_finish()
         .unwrap_or_else(|_| panic!("complete server proof did not advance typestate"));
 
-    let client_proof_wire = "0007524441310104011143500f898ee83026808be25bf16c114401010101010101022021419b56f8245fb32647258ed4102531c606543b32cd125af94b5fff96fa21496d0101010101010101010101010101010100";
+    let client_proof_wire = "000752444131010401118ab0532b2da56a401b3847a26d7b06cd01010101010101022021e75a98367a87d0905ea1dc7d3112644d8a37db3dfa757ed43a655b7f0b4ad8580101010101010101010101010101010100";
     assert_eq!(
         hex::encode(client_proof_flight.remaining()),
         client_proof_wire
@@ -1660,7 +1298,7 @@ fn public_client_typestate_matches_vectors_and_server_end_to_end() {
         Ok(flight) => flight,
         Err(fault) => panic!("client request framing failed: {:?}", fault.kind()),
     };
-    let request_wire = "0007524441310110011143500f898ee83026808be25bf16c114401010101010101020e1f766563746f722d72657175657374fba3e2eedff43b16b35829413cee6bc200";
+    let request_wire = "000752444131011001118ab0532b2da56a401b3847a26d7b06cd01010101010101020e1f766563746f722d72657175657374f8020c2c9ee75f5706744264dd7eb56000";
     assert_eq!(hex::encode(request_flight.remaining()), request_wire);
     let request_record = decode_one(request_flight.remaining());
     let mut request_flight = match request_flight.try_finish() {
@@ -1684,7 +1322,7 @@ fn public_client_typestate_matches_vectors_and_server_end_to_end() {
     assert_eq!(request.message().encoded(), b"vector-request");
 
     let mut response_flight = frame_server_response(waiting, b"vector-response");
-    let response_wire = "0007524441310111011143500f898ee83026808be25bf16c114401010101010101020f20766563746f722d726573706f6e7365b04abfae374dcb7592292ba4c22729bf00";
+    let response_wire = "000752444131011101118ab0532b2da56a401b3847a26d7b06cd01010101010101020f20766563746f722d726573706f6e73654ed05b454398da22c39b304891c3419e00";
     assert_eq!(hex::encode(response_flight.remaining()), response_wire);
     let response = awaiting_response
         .authenticate(decode_one(response_flight.remaining()))
@@ -1723,40 +1361,6 @@ fn public_client_typestate_matches_vectors_and_server_end_to_end() {
 
 #[test]
 fn client_handshake_rejects_unqualified_or_unauthenticated_servers() {
-    let mut rng = FixedRng::new(CLIENT_NONCE);
-    let forbidden = match ClientHelloFlight::begin(
-        ClientParameters::new(DEVICE_ID, BearerBinding::BleGatt),
-        client_credential(),
-        &mut rng,
-    ) {
-        Ok(_) => panic!("qualification suite started on BLE"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        forbidden,
-        ClientHandshakeError::QualificationSuiteForbidden {
-            bearer: BearerBinding::BleGatt
-        }
-    ));
-
-    let (awaiting, hello) = start_client_handshake();
-    let record = server_hello_record_for(hello, DEVICE_ID, GENERATION);
-    let (kind, session_id, sequence, length, mut payload, tag) = record.into_parts();
-    payload[6] = BearerBinding::BleGatt as u8;
-    let error = expect_error(
-        awaiting.accept(Record::new(
-            kind, session_id, sequence, length, payload, tag,
-        )),
-        "server hello on the wrong bearer was accepted",
-    );
-    assert!(matches!(
-        error,
-        ClientHandshakeError::BearerMismatch {
-            expected: BearerBinding::UsbSerialJtag,
-            observed: BearerBinding::BleGatt,
-        }
-    ));
-
     let other_device = DeviceId::new([0x99; 16]);
     let (awaiting, hello) = start_client_handshake();
     let error = expect_error(
@@ -1791,7 +1395,7 @@ fn client_handshake_rejects_unqualified_or_unauthenticated_servers() {
     let mut server_hello_flight = ServerHelloFlight::begin(
         hello,
         ActiveCredential::new(CREDENTIAL_ID, GENERATION, PSK),
-        ServerParameters::new(DEVICE_ID, BearerBinding::UsbSerialJtag),
+        ServerParameters::new(DEVICE_ID, BearerBinding::BleGatt),
         &mut epochs,
         &mut server_rng,
     )

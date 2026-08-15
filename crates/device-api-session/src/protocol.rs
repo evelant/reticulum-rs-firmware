@@ -1,18 +1,14 @@
-//! Canonical qualification-handshake messages and record validation.
+//! Canonical authenticated-session handshake messages and record validation.
 
 use reticulum_device_api_credentials::{CredentialGeneration, CredentialId};
 use reticulum_device_api_framing::{AUTH_TAG_LENGTH, PAYLOAD_CAPACITY, PayloadLength, Record};
 
-/// Qualification-session protocol major version.
+/// Session protocol major version.
 pub const PROTOCOL_MAJOR: u16 = 1;
-/// Qualification-session protocol minor version.
+/// Session protocol minor version.
 pub const PROTOCOL_MINOR: u16 = 0;
-/// HKDF-SHA256 plus HMAC-SHA256 authentication-only qualification suite.
-pub const QUALIFICATION_SUITE: u16 = 1;
-/// Wi-Fi-bound HKDF-SHA256 plus HMAC-SHA256 authentication-only qualification suite.
-pub const WIFI_QUALIFICATION_SUITE: u16 = 2;
-/// BLE GATT-bound HKDF-SHA256 plus HMAC-SHA256 authentication-only qualification suite.
-pub const BLE_GATT_QUALIFICATION_SUITE: u16 = 3;
+/// BLE GATT-bound HKDF-SHA256 plus HMAC-SHA256 authentication-only session suite.
+pub const BLE_GATT_SESSION_SUITE: u16 = 3;
 
 /// Client hello record kind.
 pub const RECORD_KIND_CLIENT_HELLO: u8 = 0x01;
@@ -29,14 +25,14 @@ pub const RECORD_KIND_RESPONSE: u8 = 0x11;
 /// Authenticated session-close record kind reserved for bearer integration.
 pub const RECORD_KIND_CLOSE: u8 = 0x12;
 
-/// Server-hello flag marking a lab qualification profile.
-pub const SERVER_FLAG_QUALIFICATION_ONLY: u32 = 1 << 0;
+/// Server-hello flag marking the local appliance API profile.
+pub const SERVER_FLAG_LOCAL_API: u32 = 1 << 0;
 /// Server-hello flag marking integrity/authentication without confidentiality.
 pub const SERVER_FLAG_INTEGRITY_ONLY: u32 = 1 << 1;
 /// Server-hello flag advertising the bounded local device API.
 pub const SERVER_FLAG_DEVICE_API: u32 = 1 << 2;
-pub(crate) const QUALIFICATION_SERVER_FLAGS: u32 =
-    SERVER_FLAG_QUALIFICATION_ONLY | SERVER_FLAG_INTEGRITY_ONLY | SERVER_FLAG_DEVICE_API;
+pub(crate) const SESSION_SERVER_FLAGS: u32 =
+    SERVER_FLAG_LOCAL_API | SERVER_FLAG_INTEGRITY_ONLY | SERVER_FLAG_DEVICE_API;
 
 pub(crate) const CLIENT_HELLO_LENGTH: usize = 56;
 pub(crate) const SERVER_HELLO_LENGTH: usize = 76;
@@ -49,23 +45,14 @@ const ZERO_TAG: [u8; AUTH_TAG_LENGTH] = [0; AUTH_TAG_LENGTH];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum BearerBinding {
-    /// ESP32-S3 fixed USB Serial/JTAG byte stream.
-    UsbSerialJtag = 1,
-    /// Programmable USB OTG device profile.
-    UsbOtg = 2,
     /// Bluetooth Low Energy GATT local API profile.
     BleGatt = 3,
-    /// Wi-Fi local API profile.
-    Wifi = 4,
 }
 
 impl BearerBinding {
     pub(crate) const fn from_wire(value: u8) -> Option<Self> {
         match value {
-            1 => Some(Self::UsbSerialJtag),
-            2 => Some(Self::UsbOtg),
             3 => Some(Self::BleGatt),
-            4 => Some(Self::Wifi),
             _ => None,
         }
     }
@@ -77,27 +64,19 @@ impl BearerBinding {
 
 /// Cryptographic handshake suite and its required local bearer binding.
 ///
-/// All current suites provide authentication and integrity only. Suite 1 is
-/// retained as the byte-for-byte USB qualification profile. Suites 2 and 3 use
-/// the same primitives under distinct transcripts and are bound exclusively to
-/// the Wi-Fi and BLE GATT local API profiles, respectively.
+/// The current BLE GATT suite provides authentication and integrity only.
+/// Its numeric identifier remains part of the transcript and is not renumbered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
 pub enum SessionSuite {
-    /// Original USB Serial/JTAG-only qualification suite.
-    UsbQualification = QUALIFICATION_SUITE,
-    /// Wi-Fi-only authentication and integrity qualification suite.
-    WifiQualification = WIFI_QUALIFICATION_SUITE,
-    /// BLE GATT-only authentication and integrity qualification suite.
-    BleGattQualification = BLE_GATT_QUALIFICATION_SUITE,
+    /// BLE GATT-only authentication and integrity session suite.
+    BleGatt = BLE_GATT_SESSION_SUITE,
 }
 
 impl SessionSuite {
     pub(crate) const fn from_wire(value: u16) -> Option<Self> {
         match value {
-            QUALIFICATION_SUITE => Some(Self::UsbQualification),
-            WIFI_QUALIFICATION_SUITE => Some(Self::WifiQualification),
-            BLE_GATT_QUALIFICATION_SUITE => Some(Self::BleGattQualification),
+            BLE_GATT_SESSION_SUITE => Some(Self::BleGatt),
             _ => None,
         }
     }
@@ -109,9 +88,7 @@ impl SessionSuite {
     /// The only bearer on which this suite may be negotiated.
     pub const fn required_bearer(self) -> BearerBinding {
         match self {
-            Self::UsbQualification => BearerBinding::UsbSerialJtag,
-            Self::WifiQualification => BearerBinding::Wifi,
-            Self::BleGattQualification => BearerBinding::BleGatt,
+            Self::BleGatt => BearerBinding::BleGatt,
         }
     }
 }
@@ -153,12 +130,9 @@ pub struct ClientHello {
 }
 
 impl ClientHello {
-    /// Construct the original USB qualification-suite client hello.
-    ///
-    /// This compatibility constructor preserves the suite-1 wire profile. Use
-    /// [`Self::new_for_suite`] to select another supported suite explicitly.
+    /// Construct a client hello for the supported BLE GATT session suite.
     pub const fn new(bearer: BearerBinding, credential_id: CredentialId, nonce: [u8; 32]) -> Self {
-        Self::new_for_suite(SessionSuite::UsbQualification, bearer, credential_id, nonce)
+        Self::new_for_suite(SessionSuite::BleGatt, bearer, credential_id, nonce)
     }
 
     /// Construct a client hello for one explicitly selected session suite.
@@ -249,7 +223,7 @@ impl ClientHello {
     }
 }
 
-/// Canonical server hello bound into the qualification transcript.
+/// Canonical server hello bound into the session transcript.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerHello {
     suite: SessionSuite,
@@ -274,7 +248,7 @@ impl ServerHello {
             device_id,
             nonce,
             credential_generation,
-            flags: QUALIFICATION_SERVER_FLAGS,
+            flags: SESSION_SERVER_FLAGS,
         }
     }
 
@@ -330,7 +304,7 @@ impl ServerHello {
                 observed: payload.len(),
             }
         })?);
-        if flags != QUALIFICATION_SERVER_FLAGS {
+        if flags != SESSION_SERVER_FLAGS {
             return Err(HandshakeRecordError::UnsupportedFlags { observed: flags });
         }
         Ok(Self {
@@ -368,7 +342,7 @@ impl ServerHello {
         self.credential_generation
     }
 
-    /// Exact qualification-profile capability flags.
+    /// Exact session-profile capability flags.
     pub const fn flags(&self) -> u32 {
         self.flags
     }
@@ -440,7 +414,7 @@ pub enum HandshakeRecordError {
     },
     /// A reserved byte was nonzero.
     ReservedBitsSet,
-    /// Server limits do not match this fixed qualification profile.
+    /// Server limits do not match this fixed product profile.
     UnsupportedLimits {
         /// Observed framing payload maximum.
         max_record_payload: u16,

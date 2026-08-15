@@ -1,25 +1,14 @@
 # Build and install the Expo app
 
-The Reticulum appliance client uses one TypeScript/React Native source tree for
-web, iOS, and Android. Project-owned package management, scripts, tests, and
-build orchestration use the exact Bun version pinned in
-`clients/appliance/package.json`. Expo's own CLI still invokes its required
-Node runtime internally.
+The client uses one TypeScript/React Native source tree for web, iOS, and
+Android. Project scripts and package management use the exact Bun release in
+`clients/appliance/package.json`; Expo invokes Node where its own toolchain
+requires it.
 
-Install a current Node.js LTS release, then install the repository's exact Bun
-release:
+## Install dependencies
 
-```sh
-curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.13"
-node --version
-bun --revision
-```
-
-`bun --revision` must report
-`1.3.13+bf2e2cecf27e800962b1e7f03d66278f9d5d2e79`. The scripts fail early on
-another Bun build so generated assets cannot silently drift.
-
-All commands in this guide start from:
+Install a current Node.js LTS release and the pinned Bun version, then run the
+portable checks:
 
 ```sh
 cd clients/appliance
@@ -27,53 +16,55 @@ bun install --frozen-lockfile
 bun run verify
 ```
 
-`verify` checks the Bun revision, exact Expo dependency set, formatting,
-strict TypeScript, tests, Rust-generated API types, and deterministic embedded
-web assets. It does not require Xcode or the Android SDK.
+`verify` checks the Bun revision, dependency alignment, formatting, TypeScript,
+tests, generated API bindings, release scripts, and deterministic web assets.
+
+Expo Go cannot run this project because the app contains a custom native Rust
+TurboModule.
 
 ## Web
 
-Start the development server:
+For UI-only development:
 
 ```sh
 bun run web
 ```
 
-This is a UI-only development server. The web app uses the appliance service's
-same-origin HTTP adapter, so appliance calls fail when the page is served
-directly by Expo. It does not use the native Rust bridge or connect directly
-to BLE.
-
-For a functional web client, rebuild the deterministic assets, then rebuild
-and run the Rust host service against a paired board:
+The browser does not connect directly to BLE. On macOS, a functional web
+client uses the supported Rust host gateway, which owns one authenticated BLE
+connection and serves the generated Expo web bundle:
 
 ```sh
 bun run build:web
 bun run assets:check
 cd ../..
-cargo build --locked -p reticulum-lxmf-chat-service
-target/debug/reticulum-lxmf-chat-service --discover
-target/debug/reticulum-lxmf-chat-service \
-  --usb-serial <12-hex-device-id> \
-  --profile-root "$HOME/.local/share/reticulum-lxmf-chat"
+cargo build --locked -p reticulum-appliance-service
 ```
 
-Open the complete capability URL printed by the service. `build:web` updates
-`crates/lxmf-chat-service/assets/{app.js,index.html,style.css,manifest.json}`;
-the following Cargo build embeds those files in the executable. This is not a
-generic `dist` deployment. See the
-[host-service guide](../../crates/lxmf-chat-service/README.md) for BLE mode,
-explicit credential paths, and onboarding details.
+The service requires an activated device credential; first-run pairing belongs
+to the native app. With the credential installed at
+`PROFILE_ROOT/devices/EUI48/credential.rdpkey`, start the service for that
+board and open the complete capability URL it prints:
+
+```sh
+target/debug/reticulum-appliance-service \
+  --eui48 <12-hex-board-eui48> \
+  --profile-root "$HOME/.local/share/reticulum-appliance"
+```
+
+The profile tree and credential must be owner-private. The app bundle is
+embedded in the host executable, so rebuild the web assets before rebuilding
+the service after TypeScript changes. See the
+[host service README](../../crates/appliance-service/README.md) for explicit
+credential/database paths and optional BLE peripheral selection.
 
 ## iOS
 
-### Prerequisites
+Requirements:
 
 - macOS on Apple Silicon;
-- Xcode with an available simulator or signing identity;
-- CocoaPods with `pod --version` working;
-- the repository's pinned Rust 1.97.0 toolchain; and
-- the iOS device and Apple-Silicon simulator Rust targets.
+- Xcode, CocoaPods, and a signing identity for physical devices; and
+- the arm64 iOS device and Apple-Silicon simulator Rust targets.
 
 ```sh
 rustup target add --toolchain 1.97.0 \
@@ -81,65 +72,29 @@ rustup target add --toolchain 1.97.0 \
   aarch64-apple-ios-sim
 ```
 
-The generated native bridge currently supports arm64 devices and
-Apple-Silicon arm64 simulators, with a minimum iOS version of 16.4. Intel iOS
-simulators are not supported.
-
-### Simulator Debug build
+Run a simulator or signed development build:
 
 ```sh
 bun run ios
-```
-
-This regenerates the Rust/UniFFI bindings, performs a clean Expo prebuild,
-compiles the app, installs it in the selected simulator, launches it, and
-starts Metro.
-
-### Physical-device Debug build
-
-```sh
 bun run ios -- --device <device-name-or-UDID>
 ```
 
-Select a signing team if Xcode requests one. Debug builds do not embed the
-application script and therefore require a reachable Metro server. After the
-development app is installed, TypeScript-only changes normally need only:
-
-```sh
-bun run start
-```
-
-### Self-contained physical-device Release
-
-The Release wrapper performs the same clean binding/prebuild sequence, builds
-the Rust bridge with Cargo's release profile, opens Expo's device picker,
-builds, installs, launches, and verifies the generated application:
+Debug builds use Metro. Install a self-contained Release build for field use
+with:
 
 ```sh
 bun run release:ios
-```
-
-Choose an attached physical phone, or bypass the picker:
-
-```sh
 bun run release:ios -- --device <device-name-or-UDID>
 ```
 
-The wrapper owns `--configuration Release`, `--no-bundler`, and the clean
-`.tmp/ios-release` output. It rejects overrides that could install an old
-binary or skip installation. A Release Xcode build still runs Metro once to
-embed `main.jsbundle`; the wrapper fails unless that bundle exists and is
-nonempty after installation. The wrapper targets physical phones; Intel
-simulator Release support is outside the current native bridge target set.
+The release wrapper regenerates native bindings, performs a clean Expo
+prebuild, embeds the JavaScript bundle, builds, installs, launches, and checks
+the resulting app. Intel/x86_64 Apple targets are not supported.
 
 ## Android
 
-### Prerequisites
-
-- Android SDK, NDK, platform tools, a compatible JDK, and a configured emulator
-  or USB-debuggable device;
-- `cargo-ndk`; and
-- all four Rust Android targets used by the generated Expo application.
+Install the Android SDK/NDK, platform tools, a compatible JDK, `cargo-ndk`, and
+the Rust Android targets used by the generated project:
 
 ```sh
 cargo install cargo-ndk --locked
@@ -150,70 +105,39 @@ rustup target add --toolchain 1.97.0 \
   x86_64-linux-android
 ```
 
-The binding script checks the SDK/NDK environment and reports missing targets.
-
-### Emulator or device Debug build
+Run a debug build or install a local development-signed Release build:
 
 ```sh
-# Default configured emulator
 bun run android
-
-# Select a physical device or emulator
 bun run android -- --device <device-name>
-```
 
-The wrapper regenerates bindings, performs a clean prebuild, compiles, installs,
-launches, and starts Metro.
-
-### Local Release build
-
-```sh
 bun run release:android
-```
-
-Choose the attached phone or emulator, or bypass the picker:
-
-```sh
 bun run release:android -- --device <device-name>
 ```
 
-The wrapper builds the Rust bridge with Cargo's release profile, owns
-`--variant release` and `--no-bundler`, performs the install and launch, and
-fails unless
-`android/app/build/outputs/apk/release/app-release.apk` is a nonempty fresh
-artifact. This is a local development-signed Release build, not an app-store
-artifact. Android native compilation is supported, but the physical BLE
-onboarding and messaging path has not yet completed the powered hardware
-qualification already performed on iOS.
+The release APK is a local test artifact, not an app-store package.
 
-## Two-phone test setup
+## Generated boundaries
 
-With an iPhone and Android phone attached and unlocked, run:
+Do not hand-maintain a second TypeScript device model or edit generated native
+bindings.
 
-```sh
-bun run release:ios -- --device <iPhone-name-or-UDID>
-bun run release:android -- --device <Android-device-name>
-```
+- After changing serialized Rust application DTOs, run `bun run api:generate`.
+- After changing the native Rust surface, run `bun run native:bindings`.
+- Native run and release scripts regenerate the required platform bindings.
+- Run `bun run native:bindings:check` to detect drift without regenerating.
+- Run `bun run native:verify` when both Apple and Android toolchains are
+  available.
 
-For two phones on the same platform, run that platform's command once per
-explicit device. Run native build commands sequentially because each
-regenerates shared Rust bindings and performs a clean Expo prebuild. After both
-installs complete, use the [pairing guide](pairing.md) to pair each phone with
-its own E290.
+Application-level `ios/` and `android/` directories are disposable generated
+projects. Continue with [appliance pairing](pairing.md) after installing a
+native build.
 
-## Native and generated-code workflow
+## Reset incompatible app data
 
-Expo Go cannot run this app because it contains a custom native TurboModule.
-The application-level `ios/` and `android/` directories are generated,
-disposable, and ignored.
-
-- After changing serialized Rust API DTOs, run `bun run api:generate`.
-- After changing the native Rust boundary, `bun run ios` or `bun run android`
-  regenerates the needed bindings automatically.
-- To generate without running, use `bun run native:bindings:ios` or
-  `bun run native:bindings:android`.
-- `bun run native:verify` checks both platforms and therefore requires both
-  Apple and Android toolchains.
-
-Once the native app is installed, continue with
-[fileless appliance pairing](pairing.md).
+The alpha client opens only the current per-appliance SQLite schema and leaves
+an unknown schema untouched. If a saved appliance reports an unsupported local
+database, switch to another profile and choose **Forget** for the incompatible
+one. When it is the only profile, clear the app's data or reinstall the app,
+then add the appliance again. This deletes phone-local messages, contacts, and
+outbox state; it does not erase messages or identity state held by the board.

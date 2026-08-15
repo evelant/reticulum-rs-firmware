@@ -10,7 +10,6 @@ import type {
   NativeProfileStoreLike,
   NativeProfileStoreSnapshot,
   NativeProfileSummary,
-  NativeTransport,
 } from "@reticulum/appliance-native";
 
 import {
@@ -243,9 +242,6 @@ function offlineBleAppliance(): NativeApplianceLike {
     async timelineJson(): Promise<string> {
       return "[]";
     },
-    transport(): NativeTransport {
-      return 2 as NativeTransport;
-    },
     async upsertContactJson(): Promise<string> {
       return JSON.stringify({ outcome: "unchanged" });
     },
@@ -347,8 +343,8 @@ describe("native appliance adapter loading", () => {
       finishDestroy = resolve;
     });
     const bridgeError = {
-      tag: "TransportUnavailable",
-      inner: { transport: 0, reason: "USB serial adapter is unavailable" },
+      tag: "Storage",
+      inner: { reason: "appliance database is unavailable" },
     } as unknown as NativeApplianceError;
     const appliance: NativeApplianceLike = {
       ...networkApiStubs(),
@@ -386,7 +382,6 @@ describe("native appliance adapter loading", () => {
               outbox_id: null,
               submission_id: null,
               current_attempt_number: null,
-              automatic_retry_count: null,
               packet_evidence: null,
               ingress_observation: {
                 interface_id: 7,
@@ -561,9 +556,6 @@ describe("native appliance adapter loading", () => {
       async timelineJson(): Promise<string> {
         return "[]";
       },
-      transport(): NativeTransport {
-        return 0 as NativeTransport;
-      },
       async upsertContactJson(_destination, requestJson): Promise<string> {
         requests.push(requestJson);
         return JSON.stringify({ outcome: "inserted" });
@@ -617,7 +609,6 @@ describe("native appliance adapter loading", () => {
           outbox_id: null,
           submission_id: null,
           current_attempt_number: null,
-          automatic_retry_count: null,
           packet_evidence: null,
           ingress_observation: {
             interface_id: 7,
@@ -866,7 +857,7 @@ describe("native appliance adapter loading", () => {
       },
     ]);
     await expect(client.reconnect()).rejects.toThrow(
-      "Native appliance transport unavailable: USB serial adapter is unavailable",
+      "Native appliance storage: appliance database is unavailable",
     );
 
     client.dispose();
@@ -961,9 +952,6 @@ describe("native appliance adapter loading", () => {
       async syncNow(): Promise<void> {},
       async timelineJson(): Promise<string> {
         return "[]";
-      },
-      transport(): NativeTransport {
-        return 2 as NativeTransport;
       },
       async upsertContactJson(): Promise<string> {
         return JSON.stringify({ outcome: "unchanged" });
@@ -1791,7 +1779,7 @@ describe("fileless native BLE onboarding", () => {
       method: "managed_pairing",
       snapshot: {
         lifecycle: { state: "working", stage: "waiting_for_ble_security" },
-        usb_serial: "board-b",
+        device_label: "board-b",
       },
     });
     expect(await client.onboarding()).toMatchObject({
@@ -2252,7 +2240,7 @@ describe("native credential import onboarding", () => {
       snapshot: {
         lifecycle: { state: "needs_pairing" },
         revision: 0,
-        usb_serial: "",
+        device_label: "",
       },
     });
     await client.startOnboarding();
@@ -2374,7 +2362,7 @@ describe("native credential import onboarding", () => {
     expect(await client.onboarding()).toMatchObject({
       available: true,
       method: "credential_import",
-      snapshot: { lifecycle: { state: "credential_ready" }, usb_serial: "" },
+      snapshot: { lifecycle: { state: "credential_ready" }, device_label: "" },
     });
     client.dispose();
   });
@@ -2603,67 +2591,6 @@ describe("native credential import onboarding", () => {
     await waitFor(() => connections.length === 1, "targeted BLE scan after cleanup failure");
 
     expect(connections[0]?.peripheralName).toBe(E290_CREDENTIAL.expectedBleLocalName);
-    client.dispose();
-  });
-
-  test("accepts a generic Wi-Fi credential and reopens its active device profile", async () => {
-    const genericCredential: NativeCredentialSummary = {
-      ...E290_CREDENTIAL,
-      deviceId: "ab".repeat(16),
-      expectedBleLocalName: undefined,
-    };
-    let state: NativeCredentialState = { state: "missing" };
-    let opens = 0;
-    let reconnects = 0;
-    let cleaned = 0;
-    const appliance: NativeApplianceLike = {
-      ...offlineBleAppliance(),
-      async reconnect(): Promise<void> {
-        reconnects += 1;
-      },
-    };
-    const runtime: NativeApplianceRuntime = {
-      bridge: {
-        contract: CONTRACT,
-        activateProfile(): NativeProfileSummary {
-          return E290_PROFILE;
-        },
-        credentialStatus: () => state,
-        destroy(): void {},
-        destroyProfileStore(): void {},
-        isNativeError: (_value): _value is NativeApplianceError => false,
-        importCredential(_appliance, stagingPath): NativeCredentialSummary {
-          expect(stagingPath).toBe("/app/cache/wifi.rdpkey");
-          state = { state: "active", summary: genericCredential };
-          return genericCredential;
-        },
-        open(): NativeApplianceLike {
-          opens += 1;
-          return appliance;
-        },
-        profileSnapshot: e290ProfileSnapshot,
-      },
-      pickCredential: async () => ({
-        stagingPath: "/app/cache/wifi.rdpkey",
-        cleanup(): void {
-          cleaned += 1;
-        },
-      }),
-      profileStore: PROFILE_STORE,
-    };
-    const client = new NativeApplianceClient(async () => runtime);
-
-    expect(client.supportsBleCandidateDiscovery()).toBeFalse();
-    await client.bootstrapSession();
-    expect(client.supportsBleCandidateDiscovery()).toBeFalse();
-    await client.startOnboarding();
-
-    expect(opens).toBe(2);
-    expect(reconnects).toBe(0);
-    expect(cleaned).toBe(1);
-    expect(await client.onboarding()).toMatchObject({
-      snapshot: { lifecycle: { state: "credential_ready" } },
-    });
     client.dispose();
   });
 });

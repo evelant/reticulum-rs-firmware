@@ -708,7 +708,7 @@ mod tests {
             tracker.observe_authorized(authorized),
             ProofProbeObservation::Duplicate
         );
-        let ingress = PacketIngressObservation::new(
+        let ingress = PacketIngressObservation::remote(
             PacketInterfaceId::new(7),
             Some(PacketSignalObservation::new(-91, 6)),
         );

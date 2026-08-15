@@ -22,7 +22,7 @@ use lora_phy::{
     sx126x::{Config, Sx126x, Sx126xVariant},
 };
 use reticulum_radio_interface::{
-    BoundedRxObservation, BoundedRxOutcome, CadObservation, FrameSignal, LabRxProfile,
+    BoundedRxObservation, BoundedRxOutcome, CadObservation, FrameSignal, LoRaProfile,
     PacketTxFault, PacketTxObservation, PacketTxProgress, RadioConfigurationFingerprint,
     RnodeTxFrames, SX1262_FRAME_MTU, SoleRadioFaultClass, SoleRadioFaultPhase,
     SoleRadioFaultSummary, SoleRnodeRadio,
@@ -35,7 +35,7 @@ use reticulum_radio_interface::{
 /// board-owned configuration which produces these settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sx126xRnodeSettings {
-    profile: LabRxProfile,
+    profile: LoRaProfile,
     fingerprint: RadioConfigurationFingerprint,
     tx_power_dbm: i32,
     rx_symbol_timeout: u16,
@@ -52,7 +52,7 @@ impl Sx126xRnodeSettings {
         reason = "the value binds one complete radio contract"
     )]
     pub const fn new(
-        profile: LabRxProfile,
+        profile: LoRaProfile,
         fingerprint: RadioConfigurationFingerprint,
         tx_power_dbm: i32,
         rx_symbol_timeout: u16,
@@ -74,7 +74,7 @@ impl Sx126xRnodeSettings {
     }
 
     /// Validated LoRa modulation and packet profile.
-    pub const fn profile(self) -> LabRxProfile {
+    pub const fn profile(self) -> LoRaProfile {
         self.profile
     }
 
@@ -143,40 +143,23 @@ impl Sx126xTxHooks for NoopTxHooks {
 /// consumes the sample only after the driver has established which terminal
 /// IRQ completed the operation.
 pub struct IrqTimestampCapture {
-    now_ticks: fn() -> u64,
-    unit: TimestampUnit,
+    now_us: fn() -> u64,
     latest: Mutex<RefCell<Option<u64>>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TimestampUnit {
-    LegacyTicks,
-    MonotonicMicroseconds,
-}
-
 impl IrqTimestampCapture {
-    /// Construct a legacy tick-domain capture for compatibility receive APIs.
-    pub const fn new(now_ticks: fn() -> u64) -> Self {
-        Self {
-            now_ticks,
-            unit: TimestampUnit::LegacyTicks,
-            latest: Mutex::new(RefCell::new(None)),
-        }
-    }
-
     /// Construct a capture in the channel-access monotonic microsecond domain.
-    pub const fn new_monotonic_us(now_us: fn() -> u64) -> Self {
+    pub const fn new(now_us: fn() -> u64) -> Self {
         Self {
-            now_ticks: now_us,
-            unit: TimestampUnit::MonotonicMicroseconds,
+            now_us,
             latest: Mutex::new(RefCell::new(None)),
         }
     }
 
     /// Record the time at which an interface's DIO wait resumed.
     pub fn record_irq_observation(&self) {
-        let ticks = (self.now_ticks)();
-        critical_section::with(|cs| self.latest.borrow(cs).replace(Some(ticks)));
+        let observed_at_us = (self.now_us)();
+        critical_section::with(|cs| self.latest.borrow(cs).replace(Some(observed_at_us)));
     }
 
     fn begin_operation(&self) {
@@ -185,10 +168,6 @@ impl IrqTimestampCapture {
 
     fn take_completed_operation(&self) -> Option<u64> {
         critical_section::with(|cs| self.latest.borrow(cs).take())
-    }
-
-    const fn supports_sole_radio_us(&self) -> bool {
-        matches!(self.unit, TimestampUnit::MonotonicMicroseconds)
     }
 }
 
@@ -201,20 +180,6 @@ pub enum Sx126xRadioOperation {
     ModulationConfiguration,
     /// Packet parameter construction.
     PacketConfiguration,
-    /// Caller supplied an invalid physical frame.
-    FrameValidation,
-    /// FIFO, packet, channel, and power preparation.
-    PrepareTransmit,
-    /// Physical transmission.
-    Transmit,
-    /// Post-transmit standby and RF-switch cleanup.
-    TransmitCleanup,
-    /// Modem and IRQ preparation for channel activity detection.
-    PrepareChannelActivityDetection,
-    /// Channel activity detection and its IRQ completion.
-    ChannelActivityDetection,
-    /// Post-CAD standby and RF-switch cleanup.
-    ChannelActivityCleanup,
     /// Receive preparation, including persistent continuous receive.
     PrepareReceive,
     /// Receive IRQ wait and processing.
@@ -235,13 +200,6 @@ pub struct Sx126xRadioError {
 }
 
 impl Sx126xRadioError {
-    const fn invalid_frame() -> Self {
-        Self {
-            operation: Sx126xRadioOperation::FrameValidation,
-            radio: None,
-        }
-    }
-
     const fn radio(operation: Sx126xRadioOperation, radio: RadioError) -> Self {
         Self {
             operation,
@@ -259,15 +217,15 @@ impl Sx126xRadioError {
 
 /// One physical frame copied into a caller-owned receive buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Sx126xReceivedFrame {
+struct Sx126xReceivedFrame {
     /// Number of valid bytes in the caller's buffer.
-    pub len: u8,
+    len: u8,
     /// Packet RSSI reported by the driver.
-    pub rssi_dbm: i16,
+    rssi_dbm: i16,
     /// Packet SNR reported by the driver.
-    pub snr_db: i16,
+    snr_db: i16,
     /// Monotonic sample taken when the final receive DIO wait resumed.
-    pub received_at_ticks: u64,
+    received_at_us: u64,
 }
 
 type Driver<Spi, Interface, Chip> = Sx126x<Spi, Interface, Chip>;
@@ -401,81 +359,8 @@ where
         self.settings
     }
 
-    /// Transmit exactly one physical frame.
-    pub async fn transmit_frame(&mut self, frame: &[u8]) -> Result<(), Sx126xRadioError> {
-        if frame.is_empty() || frame.len() > SX1262_FRAME_MTU {
-            return Err(Sx126xRadioError::invalid_frame());
-        }
-        self.continuous_rx_active = false;
-        let mut active = self.active.take().ok_or_else(|| {
-            Sx126xRadioError::radio(Sx126xRadioOperation::Transmit, RadioError::InvalidRadioMode)
-        })?;
-        self.tx_hooks.disarm();
-        self.tx_hooks.arm_for_prepare();
-        if let Err(radio) = active
-            .lora
-            .prepare_for_tx(
-                &active.modulation,
-                &mut active.tx_packet,
-                self.settings.tx_power_dbm(),
-                frame,
-            )
-            .await
-        {
-            return Err(Sx126xRadioError::radio(
-                Sx126xRadioOperation::PrepareTransmit,
-                radio,
-            ));
-        }
-        if let Err(radio) = active.lora.tx().await {
-            self.tx_hooks.disarm();
-            return Err(Sx126xRadioError::radio(
-                Sx126xRadioOperation::Transmit,
-                radio,
-            ));
-        }
-        self.tx_hooks.disarm();
-        if let Err(radio) = active.lora.enter_standby().await {
-            return Err(Sx126xRadioError::radio(
-                Sx126xRadioOperation::TransmitCleanup,
-                radio,
-            ));
-        }
-        self.active = Some(active);
-        Ok(())
-    }
-
-    /// Run one low-level LoRa channel activity detection operation.
-    pub async fn channel_activity_detected(&mut self) -> Result<bool, Sx126xRadioError> {
-        self.continuous_rx_active = false;
-        let mut active = self.active.take().ok_or_else(|| {
-            Sx126xRadioError::radio(
-                Sx126xRadioOperation::ChannelActivityDetection,
-                RadioError::InvalidRadioMode,
-            )
-        })?;
-        self.tx_hooks.disarm();
-        if let Err(radio) = active.lora.prepare_for_cad(&active.modulation).await {
-            return Err(Sx126xRadioError::radio(
-                Sx126xRadioOperation::PrepareChannelActivityDetection,
-                radio,
-            ));
-        }
-        let detected = active.lora.cad(&active.modulation).await.map_err(|radio| {
-            Sx126xRadioError::radio(Sx126xRadioOperation::ChannelActivityDetection, radio)
-        })?;
-        if let Err(radio) = active.lora.enter_standby().await {
-            return Err(Sx126xRadioError::radio(
-                Sx126xRadioOperation::ChannelActivityCleanup,
-                radio,
-            ));
-        }
-        self.active = Some(active);
-        Ok(detected)
-    }
-
     /// Run one receive operation with a bounded preamble-search window.
-    pub fn receive_frame<'a>(
+    fn receive_frame<'a>(
         &'a mut self,
         buffer: &'a mut [u8; SX1262_FRAME_MTU],
     ) -> impl core::future::Future<Output = Result<Option<Sx126xReceivedFrame>, Sx126xRadioError>> + 'a
@@ -507,7 +392,7 @@ where
             }
             match active.lora.rx(&active.rx_packet, buffer).await {
                 Ok((len, status)) => {
-                    let Some(received_at_ticks) = timestamps.take_completed_operation() else {
+                    let Some(received_at_us) = timestamps.take_completed_operation() else {
                         return Err(Sx126xRadioError::missing_receive_timestamp());
                     };
                     if let Err(radio) = active.lora.enter_standby().await {
@@ -521,7 +406,7 @@ where
                         len,
                         rssi_dbm: status.rssi,
                         snr_db: status.snr,
-                        received_at_ticks,
+                        received_at_us,
                     }))
                 }
                 Err(RadioError::ReceiveTimeout) => {
@@ -624,7 +509,7 @@ where
         self.settings.fingerprint()
     }
 
-    fn airtime_profile(&self) -> LabRxProfile {
+    fn airtime_profile(&self) -> LoRaProfile {
         self.settings.profile()
     }
 
@@ -636,21 +521,13 @@ where
         &'a mut self,
         buffer: &'a mut [u8; SX1262_FRAME_MTU],
     ) -> impl core::future::Future<Output = Result<BoundedRxOutcome, Self::Fault>> + 'a {
-        let monotonic_us = self.timestamps.supports_sole_radio_us();
         let receive = self.receive_frame(buffer);
         async move {
-            if !monotonic_us {
-                drop(receive);
-                return Err(SoleRadioFaultSummary::new(
-                    SoleRadioFaultPhase::ReceivePreparation,
-                    SoleRadioFaultClass::Configuration,
-                ));
-            }
             match receive.await.map_err(|error| sole_receive_fault(&error))? {
                 Some(frame) => Ok(BoundedRxOutcome::Frame(BoundedRxObservation::new(
                     usize::from(frame.len),
                     FrameSignal::new(frame.rssi_dbm, frame.snr_db),
-                    frame.received_at_ticks,
+                    frame.received_at_us,
                 ))),
                 None => Ok(BoundedRxOutcome::NoPreambleTimeout),
             }
@@ -674,13 +551,6 @@ where
         async move {
             let mut active =
                 active.ok_or_else(|| inactive_fault(SoleRadioFaultPhase::ReceivePreparation))?;
-            if !timestamps.supports_sole_radio_us() {
-                return Err(SoleRadioFaultSummary::new(
-                    SoleRadioFaultPhase::ReceivePreparation,
-                    SoleRadioFaultClass::Configuration,
-                ));
-            }
-
             if !self.continuous_rx_active {
                 if let Err(radio) = active
                     .lora
@@ -806,12 +676,6 @@ where
             let mut active = active
                 .ok_or_else(|| inactive_fault(SoleRadioFaultPhase::ChannelActivityDetection))?;
             tx_hooks.disarm();
-            if !timestamps.supports_sole_radio_us() {
-                return Err(SoleRadioFaultSummary::new(
-                    SoleRadioFaultPhase::ChannelActivityPreparation,
-                    SoleRadioFaultClass::Configuration,
-                ));
-            }
             timestamps.begin_operation();
             if let Err(radio) = active.lora.prepare_for_cad(&active.modulation).await {
                 return Err(sole_radio_fault(
@@ -868,16 +732,6 @@ where
                     PacketTxProgress::none(),
                 ));
             }
-            if !timestamps.supports_sole_radio_us() {
-                return Err(PacketTxFault::new(
-                    SoleRadioFaultSummary::new(
-                        SoleRadioFaultPhase::FramePreparation,
-                        SoleRadioFaultClass::Configuration,
-                    ),
-                    PacketTxProgress::none(),
-                ));
-            }
-
             let mut progress = PacketTxProgress::none();
             let mut first_completed_at_us = None;
             let mut second_completed_at_us = None;

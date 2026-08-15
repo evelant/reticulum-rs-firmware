@@ -17,45 +17,72 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use reticulum_rns_conformance::{
-    LengthError, validate_rnode_packet_len, validate_sx1262_frame_len,
-};
-pub use reticulum_rns_conformance::{
-    RNODE_HW_MTU, RNODE_LORA_DATA_PER_FRAME, RNODE_LORA_HEADER_LEN, RNS_MTU, SX1262_FRAME_MTU,
-};
+/// Maximum size of a base Reticulum packet in bytes.
+pub const RNS_MTU: usize = 500;
 
-mod lab_rx_backpressure;
-mod lab_rx_profile;
+/// Maximum packet accepted by an RNode physical interface in bytes.
+pub const RNODE_HW_MTU: usize = 508;
+
+/// Maximum SX1262 radio payload in bytes.
+pub const SX1262_FRAME_MTU: usize = 255;
+
+/// Bytes reserved by the RNode LoRa framing header in every radio frame.
+pub const RNODE_LORA_HEADER_LEN: usize = 1;
+
+/// RNode packet bytes available after the one-byte LoRa header.
+pub const RNODE_LORA_DATA_PER_FRAME: usize = SX1262_FRAME_MTU - RNODE_LORA_HEADER_LEN;
+
+/// Rejection from a physical or protocol boundary guard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LengthError {
+    /// Observed byte length.
+    pub actual: usize,
+    /// Maximum accepted byte length.
+    pub maximum: usize,
+}
+
+/// Validate a packet against the base Reticulum MTU.
+pub const fn validate_rns_packet_len(actual: usize) -> Result<(), LengthError> {
+    validate_len(actual, RNS_MTU)
+}
+
+/// Validate a packet against the RNode physical-interface MTU.
+pub const fn validate_rnode_packet_len(actual: usize) -> Result<(), LengthError> {
+    validate_len(actual, RNODE_HW_MTU)
+}
+
+/// Validate a raw SX1262 frame length.
+pub const fn validate_sx1262_frame_len(actual: usize) -> Result<(), LengthError> {
+    validate_len(actual, SX1262_FRAME_MTU)
+}
+
+const fn validate_len(actual: usize, maximum: usize) -> Result<(), LengthError> {
+    if actual <= maximum {
+        Ok(())
+    } else {
+        Err(LengthError { actual, maximum })
+    }
+}
+
 mod logical_packet_access;
+mod lora_profile;
 mod radio_diagnostics;
-mod reset_quarantine;
 mod rnode_tx;
 mod rx_pipeline;
 mod sole_radio;
-mod stack_watermark;
 
-pub use lab_rx_backpressure::{
-    LAB_RX_BACKPRESSURE_WATCHDOG_MARGIN_US, LabRxBackpressureHook, LabRxBackpressureHookState,
-    LabRxBackpressureStall, LabRxBackpressureTransitionError, LabRxBackpressureValidationError,
-};
-pub use lab_rx_profile::{
-    LabRxProfile, LabRxProfileConfig, LabRxProfileError, RNODE_FRAGMENT_TIMEOUT_GUARD_US,
-    RNODE_MIN_PREAMBLE_SYMBOLS, ReceiveFrequencyRange, ReceiveFrequencyRangeError,
-};
 pub use logical_packet_access::{
     LogicalPacketAccessAction, LogicalPacketAccessConfig, LogicalPacketAccessConfigError,
     LogicalPacketAccessInputError, LogicalPacketAccessPhase, LogicalPacketAccessRejection,
     LogicalPacketChannelAccess, RnodeAirtimeError, RnodePacketAirtime,
 };
+pub use lora_profile::{
+    LoRaFrequencyRange, LoRaFrequencyRangeError, LoRaProfile, LoRaProfileConfig, LoRaProfileError,
+    RNODE_FRAGMENT_TIMEOUT_GUARD_US, RNODE_MIN_PREAMBLE_SYMBOLS,
+};
 pub use radio_diagnostics::{
     RadioRxDiagnostics, RadioRxFaultClass, RadioRxFaultClassification, RadioRxFaultCounters,
     RadioRxFaultPhase,
-};
-pub use reset_quarantine::{
-    HealthyLeaseCommit, RESET_QUARANTINE_JOURNAL_WORDS, RESET_QUARANTINE_SLOT_WORDS,
-    RESET_STORM_QUARANTINE_THRESHOLD, ResetFaultHistory, ResetQuarantineDecision,
-    ResetQuarantineReason, ResetQuarantineStorage, ResetQuarantineWriteError, RetainedBootReason,
-    complete_healthy_radio_lease, prepare_reset_quarantine_boot, record_radio_fault_before_reset,
 };
 pub use rnode_tx::{RnodeTxFrameBuffer, RnodeTxFrames, frame_rns_packet};
 pub use rx_pipeline::{
@@ -67,10 +94,6 @@ pub use sole_radio::{
     BoundedRxObservation, BoundedRxOutcome, CadObservation, PacketTxFault, PacketTxObservation,
     PacketTxProgress, RadioConfigurationFingerprint, SoleRadioFault, SoleRadioFaultClass,
     SoleRadioFaultPhase, SoleRadioFaultSummary, SoleRnodeRadio,
-};
-pub use stack_watermark::{
-    STACK_WATERMARK_PATTERN_SEED, STACK_WATERMARK_WORD_BYTES, StackWatermarkLayout,
-    StackWatermarkLayoutError, StackWatermarkScan, scan_stack_watermark, stack_watermark_word,
 };
 
 /// Sequence-number bits in an RNode LoRa frame header.
@@ -537,5 +560,29 @@ mod tests {
             })
         );
         assert_eq!(&output[..6], &[9, 8, 7, 9, 8, 7]);
+    }
+
+    #[test]
+    fn protocol_boundaries_are_distinct() {
+        assert_eq!(RNS_MTU, 500);
+        assert_eq!(RNODE_HW_MTU, 508);
+        assert_eq!(SX1262_FRAME_MTU, 255);
+        assert_eq!(RNODE_LORA_DATA_PER_FRAME, 254);
+    }
+
+    #[test]
+    fn each_length_guard_accepts_its_boundary_and_rejects_one_more() {
+        assert_eq!(validate_rns_packet_len(RNS_MTU), Ok(()));
+        assert_eq!(
+            validate_rns_packet_len(RNS_MTU + 1),
+            Err(LengthError {
+                actual: RNS_MTU + 1,
+                maximum: RNS_MTU,
+            })
+        );
+        assert_eq!(validate_rnode_packet_len(RNODE_HW_MTU), Ok(()));
+        assert!(validate_rnode_packet_len(RNODE_HW_MTU + 1).is_err());
+        assert_eq!(validate_sx1262_frame_len(SX1262_FRAME_MTU), Ok(()));
+        assert!(validate_sx1262_frame_len(SX1262_FRAME_MTU + 1).is_err());
     }
 }

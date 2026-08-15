@@ -938,7 +938,6 @@ describe("native BLE transport orchestration", () => {
     );
     const foregroundClient = {
       ensureConnected: () => owner.ensureLink(),
-      reconnect: () => owner.reconnect(),
     };
     const runAutomaticAttempt = async (): Promise<void> => {
       expect(retries.begin(request)).toBeTrue();

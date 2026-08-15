@@ -24,23 +24,15 @@ function recordingScheduler(retries: ScheduledRetry[]): RetryScheduler {
 }
 
 describe("foreground reconnect gate", () => {
-  test("prefers non-destructive ensure for automatic recovery and preserves a legacy fallback", async () => {
+  test("uses the required non-destructive ensure for automatic recovery", async () => {
     const events: string[] = [];
     await ensureForegroundConnection({
       async ensureConnected(): Promise<void> {
         events.push("ensure");
       },
-      async reconnect(): Promise<void> {
-        events.push("reconnect");
-      },
-    });
-    await ensureForegroundConnection({
-      async reconnect(): Promise<void> {
-        events.push("legacy reconnect");
-      },
     });
 
-    expect(events).toEqual(["ensure", "legacy reconnect"]);
+    expect(events).toEqual(["ensure"]);
   });
 
   test("coalesces an active attempt and re-arms it after settlement", () => {

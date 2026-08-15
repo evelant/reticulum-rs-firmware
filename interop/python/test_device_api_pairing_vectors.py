@@ -1,4 +1,4 @@
-"""Independent wired-pairing vector checks."""
+"""Independent BLE GATT pairing vector checks."""
 
 from __future__ import annotations
 
@@ -37,15 +37,15 @@ class DeviceApiPairingVectorTests(unittest.TestCase):
         generated = vectors.build_vectors()["proof"]
         self.assertEqual(
             generated["transcript_hash_hex"],
-            "ea2e28d9e18696df5b3fb8de3416cc6b2e98ffae1e8fcda8c150990e605351cb",
+            "1c36f5f122842875502199f5297c2db25532240693c1b98702eef962cbddd7ec",
         )
         self.assertEqual(
             generated["client_proof_hex"],
-            "6a3855c27a2d61fcd00e39a85c419fb52a09043d51f3333c7989ec832b51eb5d",
+            "14f5adfaebf183840cd6a7d1227a560372d0ac8d63849a9d0d92708de1a05a1f",
         )
         self.assertEqual(
             generated["activation_confirmation_hex"],
-            "41a2f9c1ba3e8ab6d96d939ec1b6d6cd7f126ad9e9f3be275b3278a6031b8869",
+            "6b41eeccdbeac9e95a996668fb435aacb595f6b081a863fd550a6af1b0e8140c",
         )
 
     def test_every_proof_payload_byte_and_role_is_transcript_bound(self) -> None:

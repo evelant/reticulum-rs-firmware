@@ -1,6 +1,6 @@
 [package]
 name = "reticulum-rns-rete"
-description = "Provisional Rete protocol foundation and conformance integration"
+description = "Rete protocol foundation and Reticulum integration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,6 @@ default = []
 conformance = []
 
 [dependencies]
-reticulum-rns-conformance = { path = "../rns-conformance" }
 reticulum-lxmf-wire = { path = "../lxmf-wire", default-features = false }
 rete-core.workspace = true
 rete-lxmf-core.workspace = true
@@ -23,8 +22,14 @@ sha2.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+reticulum-radio-interface = { path = "../radio-interface" }
 serde.workspace = true
 serde_json.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[[test]]
+name = "rns_1_3_8"
+path = "tests/rns_1_3_8.rs"
+required-features = ["conformance"]

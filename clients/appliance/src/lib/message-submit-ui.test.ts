@@ -20,7 +20,6 @@ const response: SendResponse = { outbox_id: 41, outcome: "inserted" };
 
 function timeline(outboxId: number): TimelineView {
   return {
-    automatic_retry_count: 0,
     content: { encoding: "utf8", value: "message" },
     current_attempt_number: 1,
     direction: "outbound",

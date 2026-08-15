@@ -3,4 +3,4 @@ vendor/lora-phy-3.0.1/** -whitespace
 
 # Keep the universal app sources and reproducibly generated embedded assets stable.
 clients/appliance/** text eol=lf
-crates/lxmf-chat-service/assets/** text eol=lf
+crates/appliance-service/assets/** text eol=lf

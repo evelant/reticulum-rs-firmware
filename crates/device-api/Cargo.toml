@@ -10,11 +10,10 @@ readme = "README.md"
 
 [features]
 default = []
-experimental-rns-data = []
-experimental-rns-inbox = []
-experimental-lxmf = []
-experimental-nomad = []
-experimental-network-config = []
+rns-data = []
+lxmf = []
+nomad = []
+network-config = []
 
 [dependencies]
 minicbor.workspace = true

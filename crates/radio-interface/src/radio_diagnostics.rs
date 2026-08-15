@@ -1,4 +1,4 @@
-//! Allocation-free diagnostics shared by receive-only radio owners.
+//! Allocation-free diagnostics shared by LoRa radio owners.
 
 use crate::FrameSignal;
 
@@ -31,7 +31,7 @@ pub enum RadioRxFaultClass {
     Faulted,
 }
 
-/// Stable phase in which a receive-only radio fault was observed.
+/// Stable phase in which a radio receive fault was observed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RadioRxFaultPhase {
     /// Construction and initial receive-path configuration.

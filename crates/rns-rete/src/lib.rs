@@ -16,7 +16,6 @@ use rand_core::{CryptoRng, RngCore};
 use rete_stack::NodeCore;
 #[cfg(any(test, feature = "conformance"))]
 use rete_transport::{HeaplessStorage, Transport};
-use reticulum_rns_conformance::{CandidateMetadata, CandidateStatus};
 
 mod application_events;
 pub mod capacity;
@@ -74,10 +73,7 @@ pub use rete_stack::{DestinationType, Direction};
 pub use rete_transport::{AnnounceError, AnnounceInfo, LinkState};
 pub use reticulum_lxmf_wire::SidebandLocationTelemetry as LxmfMessageLocation;
 
-/// Reviewed Rete integration-fork source revision.
-pub const SOURCE_REVISION: &str = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08";
-
-/// Initial table capacities used only to obtain comparable Phase-0 numbers.
+/// Default table capacities for the embedded node and test fixtures.
 pub mod probe_capacity {
     pub const PATHS: usize = 64;
     pub const ANNOUNCES: usize = 16;
@@ -99,7 +95,7 @@ pub(crate) type ProbeStorage = HeaplessStorage<
 pub(crate) type ProbeNode = NodeCore<ProbeStorage>;
 
 /// Initial owning embedded profile used for integration and measurement.
-pub type InitialEmbeddedNode = EmbeddedNode<
+pub type ConformanceNode = EmbeddedNode<
     { probe_capacity::PATHS },
     { probe_capacity::ANNOUNCES },
     { probe_capacity::DEDUPLICATION_ENTRIES },
@@ -116,17 +112,6 @@ pub const MAX_ANNOUNCE_APP_DATA: usize =
 /// Product schedulers use this exported protocol fact instead of duplicating
 /// Rete's private `PATHFINDER_G` value.
 pub const ANNOUNCE_RETRANSMIT_SECONDS: u64 = rete_transport::transport::PATHFINDER_G;
-
-/// Metadata emitted with every Rete conformance result.
-pub const fn metadata() -> CandidateMetadata {
-    CandidateMetadata {
-        id: "rete",
-        source: "https://github.com/evelant/rete",
-        revision: SOURCE_REVISION,
-        license: "Apache-2.0",
-        status: CandidateStatus::ProvisionalFoundation,
-    }
-}
 
 /// Load an identity from Reticulum's 64-byte combined private-key format.
 ///
@@ -286,15 +271,15 @@ pub fn parse_announce_packet(raw: &[u8]) -> Result<ValidatedAnnounce<'_>, Announ
 
 /// Construct a deterministic owning endpoint for host/vector probes only.
 ///
-/// Production firmware must create or load an identity from qualified entropy;
+/// Production firmware must create or load an identity from secure entropy;
 /// it must never call this helper or ship a fixture seed.
 #[cfg(any(test, feature = "conformance"))]
-pub fn new_conformance_node(seed: &[u8; 32]) -> Result<InitialEmbeddedNode, rete_core::Error> {
+pub fn new_conformance_node(seed: &[u8; 32]) -> Result<ConformanceNode, rete_core::Error> {
     let identity = Identity::from_seed(seed)?;
-    InitialEmbeddedNode::new(
+    ConformanceNode::new(
         identity,
         "reticulum",
-        &["phase0"],
+        &["interop"],
         EmbeddedNodeConfig::endpoint(),
     )
 }
@@ -303,22 +288,15 @@ pub fn new_conformance_node(seed: &[u8; 32]) -> Result<InitialEmbeddedNode, rete
 #[cfg(any(test, feature = "conformance"))]
 pub fn new_conformance_transport_node(
     seed: &[u8; 32],
-) -> Result<InitialEmbeddedNode, rete_core::Error> {
+) -> Result<ConformanceNode, rete_core::Error> {
     let identity = Identity::from_seed(seed)?;
-    InitialEmbeddedNode::new(
+    ConformanceNode::new(
         identity,
         "reticulum",
-        &["phase0"],
+        &["interop"],
         EmbeddedNodeConfig::transport(),
     )
 }
-
-/// Known allocation findings that must be closed before acceptance.
-pub const KNOWN_ALLOCATION_GAPS: &[&str] = &[
-    "NodeCore and NodeEvent contain network-sized Vec allocations",
-    "Resource receive and completion retain whole payload buffers",
-    "some full-table insertion failures are not surfaced",
-];
 
 #[cfg(test)]
 mod tests {
@@ -356,22 +334,9 @@ mod tests {
     }
 
     #[test]
-    fn pinned_core_agrees_with_project_mtu() {
-        assert_eq!(rete_core::MTU, reticulum_rns_conformance::RNS_MTU);
-    }
-
-    #[test]
     fn deterministic_probe_node_constructs() {
         let node = new_conformance_node(&[0x52; 32]).unwrap();
         assert_ne!(node.destination_hash().as_ref(), &[0u8; 16]);
-    }
-
-    #[test]
-    fn candidate_is_explicitly_provisional() {
-        assert_eq!(metadata().status, CandidateStatus::ProvisionalFoundation);
-        assert_eq!(metadata().source, "https://github.com/evelant/rete");
-        assert_eq!(metadata().revision, SOURCE_REVISION);
-        assert!(!KNOWN_ALLOCATION_GAPS.is_empty());
     }
 
     #[test]
@@ -537,7 +502,7 @@ mod tests {
             build_announce_packet(
                 &identity,
                 "reticulum",
-                &["phase0"],
+                &["interop"],
                 Some(&oversized),
                 &mut ZeroRng,
                 0,
@@ -555,7 +520,7 @@ mod tests {
         let packet_len = build_announce_packet(
             &identity,
             "reticulum",
-            &["phase0"],
+            &["interop"],
             Some(&app_data),
             &mut ZeroRng,
             0,
@@ -575,7 +540,7 @@ mod tests {
         let packet_len = build_announce_packet(
             &identity,
             "reticulum",
-            &["phase0"],
+            &["interop"],
             None,
             &mut ZeroRng,
             42,

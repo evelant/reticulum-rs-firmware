@@ -142,19 +142,23 @@ export class HttpApplianceClient implements ApplianceClient {
   }
 
   startOnboarding(): Promise<NoContent> {
-    return this.#request("/api/v1/onboarding/start", { method: "POST", body: {} });
+    return Promise.reject(new Error("The BLE host service does not provide appliance pairing."));
   }
 
   refreshOnboarding(): Promise<NoContent> {
-    return this.#request("/api/v1/onboarding/refresh", { method: "POST", body: {} });
+    return Promise.reject(new Error("The BLE host service does not provide appliance pairing."));
   }
 
-  recoverOnboarding(request: RecoveryRequest): Promise<NoContent> {
-    return this.#request("/api/v1/onboarding/recover", { method: "POST", body: request });
+  recoverOnboarding(_request: RecoveryRequest): Promise<NoContent> {
+    return Promise.reject(new Error("The BLE host service does not provide appliance pairing."));
   }
 
   sync(): Promise<NoContent> {
     return this.#request("/api/v1/sync", { method: "POST", body: {} });
+  }
+
+  ensureConnected(): Promise<NoContent> {
+    return this.#request("/api/v1/ensure-connected", { method: "POST", body: {} });
   }
 
   reconnect(): Promise<NoContent> {
@@ -182,7 +186,7 @@ export class HttpApplianceClient implements ApplianceClient {
   ): Promise<ResponseBody> {
     if (Platform.OS !== "web" && this.#origin.length === 0) {
       throw new Error(
-        "No appliance endpoint is configured. Set EXPO_PUBLIC_APPLIANCE_URL for the current HTTP prototype.",
+        "No appliance endpoint is configured. Set EXPO_PUBLIC_APPLIANCE_URL for the host gateway.",
       );
     }
     const headers = new Headers();

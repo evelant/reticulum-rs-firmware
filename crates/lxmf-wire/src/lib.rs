@@ -228,7 +228,7 @@ pub enum WireError {
     /// A MessagePack string did not contain valid UTF-8.
     InvalidUtf8 { offset: usize },
     /// MessagePack extension type `-1` requires Python datetime normalization
-    /// not modeled by this first tranche.
+    /// outside this wire model.
     UnsupportedTimestampExtension { offset: usize },
     /// A caller-owned resource ceiling was exceeded.
     LimitExceeded {

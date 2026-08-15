@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use reticulum_device_api_ble::{MAXIMUM_ATT_VALUE_BYTES, MINIMUM_ATT_VALUE_BYTES};
-use reticulum_device_client::{ClientConfig, ClientError, ClientSessionProfile, DeviceClient};
-use reticulum_lxmf_chat_app::DeviceClientSession;
-use reticulum_lxmf_chat_runtime::{
+use reticulum_appliance_runtime::{
     ConnectFailure, ConnectedSession, ConnectionMetadata, ConnectionTransport, Connector,
 };
+use reticulum_appliance_sync::DeviceClientSession;
+use reticulum_device_api_ble::{MAXIMUM_ATT_VALUE_BYTES, MINIMUM_ATT_VALUE_BYTES};
+use reticulum_device_client::{ClientConfig, ClientError, ClientSessionProfile, DeviceClient};
 
 use crate::credential::{HostRng, read_credential};
 
@@ -52,7 +52,6 @@ pub enum NativeBlePlatformCommand {
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Error)]
 #[allow(missing_docs)]
 pub enum NativeBleError {
-    Unavailable,
     InvalidArgument {
         reason: String,
     },
@@ -83,7 +82,6 @@ pub enum NativeBleError {
 impl fmt::Display for NativeBleError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unavailable => formatter.write_str("this native appliance has no BLE connector"),
             Self::InvalidArgument { reason } => write!(formatter, "invalid argument: {reason}"),
             Self::StaleGeneration {
                 requested,
@@ -794,7 +792,7 @@ impl Connector for BleConnector {
                 512,
                 16 * 1024 * 1024,
             ),
-            ClientSessionProfile::BleGattQualification,
+            ClientSessionProfile::BleGatt,
         )
         .map_err(classify_client_failure)?;
         let device_label = hex::encode(client.device_id().as_bytes());
@@ -1271,7 +1269,7 @@ mod tests {
     fn serve_ble_handshake(hub: &BleHub, generation: u64) {
         let hello = ClientHello::from_record(read_client_record(hub, generation))
             .expect("client sends a canonical hello");
-        assert_eq!(hello.suite(), SessionSuite::BleGattQualification);
+        assert_eq!(hello.suite(), SessionSuite::BleGatt);
         assert_eq!(hello.bearer(), BearerBinding::BleGatt);
 
         let mut epochs = SessionEpochAllocator::new();
@@ -1286,7 +1284,7 @@ mod tests {
             ServerParameters::new_for_suite(
                 DeviceId::new(DEVICE_BYTES),
                 BearerBinding::BleGatt,
-                SessionSuite::BleGattQualification,
+                SessionSuite::BleGatt,
             ),
             &mut epochs,
             &mut rng,

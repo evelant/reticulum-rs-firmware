@@ -94,7 +94,7 @@ describe("message activity presentation", () => {
   test("shows the app-submission location reused by board retries", () => {
     const event = activityEvent({
       observed_at_unix_ms: 1_700_000_030_000,
-      activity: { kind: "outbound_requeued", trigger: "automatic" },
+      activity: { kind: "outbound_requeued" },
       attempt_location: {
         state: "available",
         latitude_e6: 42_357_111,
@@ -118,7 +118,7 @@ describe("message activity presentation", () => {
       "Phone position when app submission queued; board retries reuse it",
     );
     expect(messageActivityPresentation(event, new Map()).title).toBe(
-      "Legacy automatic rearm queued",
+      "Replacement submission queued",
     );
   });
 
@@ -150,7 +150,7 @@ describe("message activity presentation", () => {
     const retried = activityEvent({
       event_id: 13,
       attempt_number: 3,
-      activity: { kind: "outbound_requeued", trigger: "automatic" },
+      activity: { kind: "outbound_requeued" },
     });
     const aliases = new Map([[inbound.peer, "Hill relay"]]);
     const events = [failed, inbound, retried];

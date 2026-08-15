@@ -5,7 +5,7 @@ use reticulum_device_api_session::{
 };
 use zeroize::Zeroizing;
 
-/// Exact byte length of the existing host activated-credential state image.
+/// Exact byte length of the current host activated-credential state image.
 pub const ACTIVATED_CREDENTIAL_STATE_BYTES: usize = 96;
 
 const STATE_MAGIC: [u8; 8] = *b"RDPKEY1\0";

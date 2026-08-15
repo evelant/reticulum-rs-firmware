@@ -63,8 +63,6 @@ const PROFILE_LENGTH: usize = 8;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum BearerBinding {
-    /// ESP32-S3 fixed USB Serial/JTAG byte stream.
-    UsbSerialJtag = 1,
     /// Authenticated Bluetooth Low Energy GATT appliance connection.
     BleGatt = 2,
 }
@@ -78,7 +76,6 @@ impl BearerBinding {
     /// Decode one stable bearer assigned by pairing protocol version 1.
     pub const fn from_code(code: u8) -> Option<Self> {
         match code {
-            1 => Some(Self::UsbSerialJtag),
             2 => Some(Self::BleGatt),
             _ => None,
         }

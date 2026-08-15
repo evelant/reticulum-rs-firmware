@@ -1,22 +1,17 @@
 [package]
 name = "reticulum-device-pairing-client"
-description = "Blocking host client and durable credential state for Reticulum device pairing"
+description = "Transport-neutral pairing session and durable credential state for Reticulum devices"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-default = ["serial"]
-serial = ["dep:serialport"]
-
 [dependencies]
 getrandom.workspace = true
 reticulum-device-api-framing = { path = "../device-api-framing", default-features = false }
 reticulum-device-api-pairing = { path = "../device-api-pairing", default-features = false }
 reticulum-device-api-pairing-control = { path = "../device-api-pairing-control", default-features = false }
-serialport = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]

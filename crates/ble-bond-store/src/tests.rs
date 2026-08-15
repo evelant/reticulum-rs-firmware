@@ -166,6 +166,11 @@ impl ReadNorFlash for BadReadGeometry {
 
 fn bond(tag: u8, with_irk: bool) -> BleBond {
     BleBond::new(
+        if tag.is_multiple_of(2) {
+            BleAddressKind::Public
+        } else {
+            BleAddressKind::Random
+        },
         [tag, tag + 1, tag + 2, tag + 3, tag + 4, tag + 5],
         with_irk.then_some([tag.wrapping_add(0x40); 16]),
         [tag.wrapping_add(0x80); 16],
@@ -173,6 +178,14 @@ fn bond(tag: u8, with_irk: bool) -> BleBond {
 }
 
 fn assert_bond(stored: &BleBond, tag: u8, with_irk: bool) {
+    assert_eq!(
+        stored.address_kind(),
+        if tag.is_multiple_of(2) {
+            BleAddressKind::Public
+        } else {
+            BleAddressKind::Random
+        }
+    );
     assert_eq!(
         stored.address(),
         &[tag, tag + 1, tag + 2, tag + 3, tag + 4, tag + 5]
@@ -223,6 +236,70 @@ fn geometry_and_marker_are_exact_and_irregular() {
     assert_eq!(COMMIT_OFFSET + COMMIT_SIZE, RECORD_SIZE);
     assert!(COMMIT_MARKER.iter().all(|byte| *byte != 0 && *byte != 0xff));
     assert!(COMMIT_MARKER.windows(2).any(|pair| pair[0] != pair[1]));
+}
+
+#[test]
+fn non_current_semantic_version_is_not_restored() {
+    let source = bond(7, true);
+    let mut encoded = encode_record(
+        BondStoreSector::A,
+        NonZeroU64::new(1).unwrap(),
+        Some(&source),
+    );
+    put_u16(&mut encoded[..], 10, SEMANTIC_FORMAT_VERSION - 1);
+    let digest = record_digest(&encoded[..PROTECTED_SIZE]);
+    encoded[DIGEST_OFFSET..DIGEST_OFFSET + DIGEST_SIZE].copy_from_slice(&digest);
+
+    let mut flash = FakeNor::erased();
+    flash.bytes[..RECORD_SIZE].copy_from_slice(&encoded[..]);
+    assert_fault(
+        mount(&mut flash),
+        BondStoreFault::UnsupportedSemanticVersion(SEMANTIC_FORMAT_VERSION - 1),
+    );
+}
+
+#[test]
+fn non_current_physical_version_is_not_restored() {
+    let source = bond(7, true);
+    let mut encoded = encode_record(
+        BondStoreSector::A,
+        NonZeroU64::new(1).unwrap(),
+        Some(&source),
+    );
+    put_u16(&mut encoded[..], 8, PHYSICAL_FORMAT_VERSION + 1);
+    let digest = record_digest(&encoded[..PROTECTED_SIZE]);
+    encoded[DIGEST_OFFSET..DIGEST_OFFSET + DIGEST_SIZE].copy_from_slice(&digest);
+
+    let mut flash = FakeNor::erased();
+    flash.bytes[..RECORD_SIZE].copy_from_slice(&encoded[..]);
+    assert_fault(
+        mount(&mut flash),
+        BondStoreFault::UnsupportedPhysicalVersion(PHYSICAL_FORMAT_VERSION + 1),
+    );
+}
+
+#[test]
+fn non_current_committed_record_does_not_fall_back_to_a_current_record() {
+    let current = bond(2, true);
+    let stale = bond(3, true);
+    let mut flash = FakeNor::erased();
+    install_record(&mut flash, BondStoreSector::A, 1, Some(&current));
+
+    let mut encoded = encode_record(
+        BondStoreSector::B,
+        NonZeroU64::new(2).unwrap(),
+        Some(&stale),
+    );
+    put_u16(&mut encoded[..], 10, SEMANTIC_FORMAT_VERSION - 1);
+    let digest = record_digest(&encoded[..PROTECTED_SIZE]);
+    encoded[DIGEST_OFFSET..DIGEST_OFFSET + DIGEST_SIZE].copy_from_slice(&digest);
+    let offset = BondStoreSector::B.offset();
+    flash.bytes[offset..offset + RECORD_SIZE].copy_from_slice(&encoded[..]);
+
+    assert_fault(
+        mount(&mut flash),
+        BondStoreFault::UnsupportedSemanticVersion(SEMANTIC_FORMAT_VERSION - 1),
+    );
 }
 
 #[test]
@@ -355,8 +432,10 @@ fn backend_errors_during_clear_remount_as_predecessor_or_tombstone() {
 #[test]
 fn ble_bond_explicit_zeroize_clears_only_secret_fields() {
     let mut owner = bond(9, true);
+    let address_kind = owner.address_kind();
     let address = *owner.address();
     owner.zeroize();
+    assert_eq!(owner.address_kind(), address_kind);
     assert_eq!(owner.address(), &address);
     assert_eq!(owner.irk(), None);
     assert_eq!(owner.ltk(), &[0; 16]);

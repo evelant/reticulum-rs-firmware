@@ -12,8 +12,6 @@ const config: ExpoConfig = {
     infoPlist: {
       NSBluetoothAlwaysUsageDescription:
         "Connect to your Reticulum appliance over Bluetooth Low Energy.",
-      NSLocalNetworkUsageDescription:
-        "Connect to your Reticulum appliance over its local Wi-Fi network.",
     },
     supportsTablet: true,
   },

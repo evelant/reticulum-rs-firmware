@@ -75,11 +75,7 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_fn_free_nativeprofilestore(ptr: bigint, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_profile(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_func_native_bridge_contract(uniffi_out_err: UniffiRustCallStatus): Uint8Array;
-    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open(databasePath: Uint8Array, transport: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
-    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble(databasePath: Uint8Array, credentialPath: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble_profile(profileStore: bigint, uniffi_out_err: UniffiRustCallStatus): bigint;
-    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi(databasePath: Uint8Array, endpoint: Uint8Array, credentialPath: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
-    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_wifi_profile(profileStore: bigint, endpoint: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_disconnected(uniffiSelf: bigint, generation: bigint, reason: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_ingest_indication(uniffiSelf: bigint, generation: bigint, bytes: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_link_connected(uniffiSelf: bigint, peripheralId: Uint8Array, maxWriteBytes: number, uniffi_out_err: UniffiRustCallStatus): bigint;
@@ -111,7 +107,6 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_snapshot_json(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_sync_now(uniffiSelf: bigint): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_timeline_json(uniffiSelf: bigint, destination: Uint8Array): bigint;
-    ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_transport(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_update_phone_location_observation_json(uniffiSelf: bigint, observationJson: Uint8Array): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeappliance_upsert_contact_json(uniffiSelf: bigint, destination: Uint8Array, requestJson: Uint8Array): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativebleonboarding_open(profileStore: bigint, uniffi_out_err: UniffiRustCallStatus): bigint;
@@ -125,7 +120,7 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_pair(uniffiSelf: bigint): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_resume(uniffiSelf: bigint): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_snapshot(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
-    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeprofilestore_open(rootDirectory: Uint8Array, legacyDatabasePath: Uint8Array, legacyCredentialPath: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
+    ubrn_uniffi_reticulum_appliance_native_fn_constructor_nativeprofilestore_open(rootDirectory: Uint8Array, uniffi_out_err: UniffiRustCallStatus): bigint;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_activate_profile(uniffiSelf: bigint, deviceId: Uint8Array, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_credential_status(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
     ubrn_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_delete_inactive_profile(uniffiSelf: bigint, deviceId: Uint8Array, uniffi_out_err: UniffiRustCallStatus): Uint8Array;
@@ -134,11 +129,7 @@ interface NativeModuleInterface {
     ubrn_ffi_reticulum_appliance_native_uniffi_contract_version(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_profile(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract(): number;
-    ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open(): number;
-    ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble_profile(): number;
-    ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi(): number;
-    ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_wifi_profile(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected(): number;
@@ -170,7 +161,6 @@ interface NativeModuleInterface {
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_snapshot_json(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_sync_now(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_timeline_json(): number;
-    ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_transport(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_update_phone_location_observation_json(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_upsert_contact_json(): number;
     ubrn_uniffi_reticulum_appliance_native_checksum_constructor_nativebleonboarding_open(): number;

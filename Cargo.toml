@@ -1,78 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
-    "comparisons/rns-leviculum",
-    "crates/announce-clock",
-    "crates/appliance-display-model",
-    "crates/appliance-native",
-    "crates/ble-bond-store",
-    "crates/board-heltec-tracker-v2",
-    "crates/board-heltec-tracker-v2-radio",
-    "crates/board-heltec-tracker-v2-tx-hil",
-    "crates/board-heltec-vision-master-e290",
-    "crates/board-heltec-vision-master-e290-radio",
-    "crates/device-api",
-    "crates/device-api-adapter",
-    "crates/device-api-ble",
-    "crates/device-api-credential-store",
-    "crates/device-api-credentials",
-    "crates/device-api-pairing",
-    "crates/device-api-pairing-control",
-    "crates/device-api-pairing-policy",
-    "crates/device-api-framing",
-    "crates/device-api-handoff",
-    "crates/device-api-session",
-    "crates/device-client",
-    "crates/device-pairing-client",
-    "crates/device-identity-store",
-    "crates/eink-ssd1680",
-    "crates/interface-router",
-    "crates/lab-rx-returned-fault-hil",
-    "crates/lxmf-chat-cli",
-    "crates/lxmf-chat-app",
-    "crates/lxmf-chat-core",
-    "crates/lxmf-chat-runtime",
-    "crates/lxmf-chat-service",
-    "crates/lxmf-durable-ingress",
-    "crates/lxmf-ingress",
-    "crates/lxmf-mailbox-store",
-    "crates/lxmf-model",
-    "crates/lxmf-store",
-    "crates/lxmf-wire",
-    "crates/node-core",
-    "crates/network-config-store",
-    "crates/nomad-protocol",
-    "crates/nor-flash-region",
-    "crates/peer-discovery",
-    "crates/radio-lora-phy",
-    "crates/radio-tx-dispatch",
-    "crates/radio-interface",
-    "crates/rns-conformance",
-    "crates/rns-interface-discovery",
-    "crates/rns-inbox-store",
-    "crates/rns-rete",
-    "crates/rns-rete-rx",
-    "crates/semantic-roundtrip-hil",
-    "crates/storage-actor",
-    "crates/storage-journal",
-    "crates/storage-model",
-    "crates/submission-runtime",
-    "crates/submission-projector",
-    "crates/tx-dispatch",
-    "crates/tx-handoff",
-    "crates/tx-supervisor",
-    "firmware/heltec-tracker-v2",
-    "firmware/heltec-tracker-v2-storage-hil",
-    "firmware/heltec-tracker-v2-tx-hil",
-    "firmware/heltec-vision-master-e290-qualification",
-    "firmware/heltec-vision-master-e290-ble-startup-diagnostic",
-    "firmware/heltec-vision-master-e290-display-hil",
-    "firmware/heltec-vision-master-e290-node",
-    "firmware/heltec-vision-master-e290-semantic-hil",
-    "tools/conformance-rete",
-    "tools/e290-ble-api",
-    "tools/phase1-rx-local-data",
-    "tools/storage-hil-verify",
+    "crates/*",
+    "firmware/e290",
     "xtask",
 ]
 exclude = [
@@ -80,69 +10,7 @@ exclude = [
     "vendor/rete-dfcaa36",
 ]
 default-members = [
-    "crates/announce-clock",
-    "crates/appliance-display-model",
-    "crates/appliance-native",
-    "crates/ble-bond-store",
-    "crates/board-heltec-tracker-v2",
-    "crates/board-heltec-tracker-v2-radio",
-    "crates/board-heltec-tracker-v2-tx-hil",
-    "crates/board-heltec-vision-master-e290",
-    "crates/board-heltec-vision-master-e290-radio",
-    "crates/device-api",
-    "crates/device-api-adapter",
-    "crates/device-api-ble",
-    "crates/device-api-credential-store",
-    "crates/device-api-credentials",
-    "crates/device-api-pairing",
-    "crates/device-api-pairing-control",
-    "crates/device-api-pairing-policy",
-    "crates/device-api-framing",
-    "crates/device-api-handoff",
-    "crates/device-api-session",
-    "crates/device-client",
-    "crates/device-pairing-client",
-    "crates/device-identity-store",
-    "crates/eink-ssd1680",
-    "crates/interface-router",
-    "crates/lab-rx-returned-fault-hil",
-    "crates/lxmf-chat-cli",
-    "crates/lxmf-chat-app",
-    "crates/lxmf-chat-core",
-    "crates/lxmf-chat-runtime",
-    "crates/lxmf-chat-service",
-    "crates/lxmf-durable-ingress",
-    "crates/lxmf-ingress",
-    "crates/lxmf-mailbox-store",
-    "crates/lxmf-model",
-    "crates/lxmf-store",
-    "crates/lxmf-wire",
-    "crates/node-core",
-    "crates/network-config-store",
-    "crates/nomad-protocol",
-    "crates/nor-flash-region",
-    "crates/peer-discovery",
-    "crates/radio-lora-phy",
-    "crates/radio-tx-dispatch",
-    "crates/radio-interface",
-    "crates/rns-conformance",
-    "crates/rns-interface-discovery",
-    "crates/rns-inbox-store",
-    "crates/rns-rete",
-    "crates/rns-rete-rx",
-    "crates/semantic-roundtrip-hil",
-    "crates/storage-actor",
-    "crates/storage-journal",
-    "crates/storage-model",
-    "crates/submission-runtime",
-    "crates/submission-projector",
-    "crates/tx-dispatch",
-    "crates/tx-handoff",
-    "crates/tx-supervisor",
-    "tools/conformance-rete",
-    "tools/e290-ble-api",
-    "tools/phase1-rx-local-data",
-    "tools/storage-hil-verify",
+    "crates/*",
     "xtask",
 ]
 
@@ -178,20 +46,13 @@ esp-hal = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b
 esp-radio = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=1.0.0-beta.0", default-features = false }
 esp-println = { version = "=0.17.0", default-features = false }
 esp-storage = { version = "=0.9.0", default-features = false }
-# Current upstream includes the corrected CPU0 and CPU1 stack-slice element
-# counts formerly carried in the local 0.3.0 overlay.
+# This upstream revision provides the corrected CPU0 and CPU1 stack-slice
+# element counts required by the E290 image.
 esp-rtos = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=0.3.0", default-features = false }
 log = "=0.4.27"
-# Local source patch over crates.io 3.0.1. The SX126x driver otherwise derives
-# every high-power PA command from requested output power, while the Tracker V2
-# HIL needs one atomic RNode-compatible PA/OCP override at its fixed 0 dBm
-# modem setting plus an opt-in early external-FEM TX preparation hook and
-# post-initialization RF-path hook, plus synchronized public-standby state and
-# terminal SX126x invalid-frame/timeout receive IRQ handling. The patch also
-# adds arm-once continuous-RX IRQ draining and an explicit standby/IRQ quiesce
-# before CAD or TX so back-to-back physical frames do not cross a rearm gap.
-# Existing variants and interfaces retain upstream behavior; see the checked
-# vendor inventory in vendor/lora-phy-3.0.1/PATCHES.md.
+# The reviewed local overlay adds the SX126x PA/OCP controls, RF-path hooks, and
+# continuous-RX IRQ handling needed by the E290 radio owner. See PATCHES.md in
+# the vendor directory for the exact delta.
 lora-phy = { version = "=3.0.1", default-features = false }
 lora-modulation = { version = "=0.1.5", default-features = false }
 minicbor = { version = "=2.2.2", default-features = false }
@@ -205,44 +66,18 @@ hkdf = { version = "=0.12.4", default-features = false }
 hmac = { version = "=0.12.1", default-features = false }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
-serialport = { version = "=4.9.0", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }
 static_cell = "=2.1.1"
 subtle = { version = "=2.6.1", default-features = false }
 tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt", "signal", "sync", "time"] }
-# Axum's optional WebSocket feature uses this graph edge. Keep the browser
-# qualifier on one exact reviewed protocol implementation.
-tokio-tungstenite = { version = "=0.29.0", default-features = false }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 ts-rs = { version = "=12.0.1", default-features = false, features = ["no-serde-warnings", "serde-compat"] }
 uniffi = { version = "=0.31.0", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false }
 
-# Rete is not published as a coherent crates.io release. Keep every declared
-# crate on the same reviewed fork revision. The tracked vendor patch below is
-# an exact dfcaa36 snapshot with the audited in-place construction API required
-# to initialize the full E290 node directly in PSRAM; never use the ignored
-# reference/ checkout as a dependency. The integration history is based on
-# upstream 9bcb7d3e and composes the
-# earlier focused validation, transactional owned-Link and endpoint announce
-# policy changes with caller-owned DATA preparation, allocation-atomic receipt
-# terminals, exact DATA/channel terminal candidates, exact-interface
-# forwarding, owned HEADER_2 typed dispatch, and transactional bounded relay
-# Link/reverse admission with typed failures, authenticated Link-interface
-# binding, Python-compatible Link keepalive/liveness and pending-proof hop
-# behavior, and receipt-atomic Channel retries. The current exact revision is
-# on fork branch codex/responder-handshake-reclaim and descends from the tagged
-# firmware-pin-90570ca predecessor. It additionally adds ordinary Link-DATA
-# receipts, respects the receiving destination's proof policy, and reclaims
-# responder Handshakes that time out before authenticated LRRTT. The direct
-# request lineage is 338251b (bounded canonical MessagePack values, including
-# the `nil` value used by anonymous NomadNet page requests), 354b875
-# (prepared/confirmed dispatch authority and timeout only after first real
-# dispatch), ba73ee4 (lossless inbound encoded values with their original
-# request timestamp), and the current dfcaa36 (phase-agnostic exact
-# request-dispatch reclaim keyed by request and Link IDs, reporting whether
-# native residue was prepared or confirmed).
-# The predecessor tag does not name the current revision.
+# Rete is not published as one coherent crates.io release. Keep all linked
+# crates at the same reviewed revision; the local overlay only adds in-place
+# construction needed to initialize the full node directly in PSRAM.
 rete-core = { git = "https://github.com/evelant/rete.git", rev = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08", default-features = false }
 rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08", default-features = false }
 rete-stack = { git = "https://github.com/evelant/rete.git", rev = "dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08", default-features = false }
@@ -282,8 +117,7 @@ rete-transport = { path = "vendor/rete-dfcaa36/crates/rete-transport" }
 [profile.dev]
 opt-level = "s"
 
-# Leviculum applies these in its own workspace, but dependency workspaces do
-# not inherit profile settings. Keep Phase-0 debug/HIL crypto usable.
+# Keep cryptographic host tests usable in the size-optimized development graph.
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
 

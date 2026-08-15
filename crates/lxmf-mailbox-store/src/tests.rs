@@ -97,26 +97,50 @@ fn cursor(handle: u64, identity: u8) -> MailboxStoreCursor {
 }
 
 #[test]
-fn erased_media_provisions_a_migration_baseline_and_remounts() {
+fn erased_media_provisions_an_empty_watermark_and_remounts() {
     let mut flash = FakeFlash::erased();
-    let baseline = cursor(17, 0x41);
     {
         let mut access = flash.bound();
         assert_eq!(
             mount(&mut access).unwrap(),
             MailboxStoreMount::Unprovisioned
         );
-        let mounted = provision(&mut access, Some(baseline)).unwrap();
+        let mounted = provision(&mut access).unwrap();
         assert_eq!(mounted.generation(), NonZeroU64::MIN);
-        assert_eq!(mounted.acknowledged_through(), 17);
-        assert_eq!(mounted.acknowledged_cursor(), Some(baseline));
+        assert_eq!(mounted.acknowledged_through(), 0);
+        assert_eq!(mounted.acknowledged_cursor(), None);
     }
     let mut access = flash.bound();
     let MailboxStoreMount::Mounted(remounted) = mount(&mut access).unwrap() else {
         panic!("provisioned watermark must remount");
     };
-    assert_eq!(remounted.acknowledged_through(), 17);
-    assert_eq!(remounted.acknowledged_cursor(), Some(baseline));
+    assert_eq!(remounted.acknowledged_through(), 0);
+    assert_eq!(remounted.acknowledged_cursor(), None);
+}
+
+#[test]
+fn non_current_physical_version_is_not_mounted() {
+    let mut prefix = encode_protected_prefix(binding(), 1, None);
+    put_u16(&mut prefix, VERSION_OFFSET, PHYSICAL_FORMAT_VERSION - 1);
+    let mut digest = Sha256::new();
+    digest.update(DIGEST_DOMAIN);
+    digest.update(prefix);
+    let digest: [u8; DIGEST_SIZE] = digest.finalize().into();
+
+    let mut flash = FakeFlash::erased();
+    flash.bytes[..PROTECTED_SIZE].copy_from_slice(&prefix);
+    flash.bytes[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
+    flash.bytes[COMMIT_OFFSET..RECORD_SIZE].copy_from_slice(&COMMIT_MARKER);
+    let mut access = flash.bound();
+    assert_eq!(
+        mount(&mut access),
+        Err(MailboxStoreError::Fault(
+            MailboxStoreFault::UnsupportedPhysicalVersion {
+                sector: MailboxStoreSector::A,
+                actual: PHYSICAL_FORMAT_VERSION - 1,
+            },
+        ))
+    );
 }
 
 #[test]
@@ -124,7 +148,7 @@ fn acknowledgements_advance_monotonically_and_regressions_are_io_free() {
     let mut flash = FakeFlash::erased();
     let first = {
         let mut access = flash.bound();
-        provision(&mut access, None).unwrap()
+        provision(&mut access).unwrap()
     };
     let advanced = cursor(3, 0x51);
     let second = {
@@ -152,9 +176,13 @@ fn acknowledgements_advance_monotonically_and_regressions_are_io_free() {
 #[test]
 fn interrupted_successor_preserves_the_prior_committed_watermark() {
     let mut flash = FakeFlash::erased();
+    let empty = {
+        let mut access = flash.bound();
+        provision(&mut access).unwrap()
+    };
     let first = {
         let mut access = flash.bound();
-        provision(&mut access, Some(cursor(4, 0x71))).unwrap()
+        acknowledge_through(empty, &mut access, cursor(4, 0x71)).unwrap()
     };
     flash.fail_write_after = Some(flash.writes + 1);
     {
@@ -174,38 +202,15 @@ fn interrupted_successor_preserves_the_prior_committed_watermark() {
 }
 
 #[test]
-fn erase_and_handle_reuse_can_rebaseline_to_a_new_receipt_identity() {
-    let mut flash = FakeFlash::erased();
-    let old_incarnation = cursor(7, 0x81);
-    let first = {
-        let mut access = flash.bound();
-        provision(&mut access, Some(old_incarnation)).unwrap()
-    };
-
-    // A reformatted LXMF store can reuse handle 7 for a different receipt.
-    // The product detects that mismatch and durably rebinds this store before
-    // admitting future ingress.
-    let new_incarnation = cursor(7, 0x91);
-    let rebound = {
-        let mut access = flash.bound();
-        rebaseline(first, &mut access, Some(new_incarnation)).unwrap()
-    };
-    assert_eq!(rebound.generation().get(), 2);
-    assert_eq!(rebound.acknowledged_cursor(), Some(new_incarnation));
-
-    let mut access = flash.bound();
-    let MailboxStoreMount::Mounted(remounted) = mount(&mut access).unwrap() else {
-        panic!("rebaselined incarnation must remount");
-    };
-    assert_eq!(remounted.acknowledged_cursor(), Some(new_incarnation));
-}
-
-#[test]
 fn equal_handle_with_conflicting_identity_is_not_an_idempotent_acknowledgement() {
     let mut flash = FakeFlash::erased();
+    let empty = {
+        let mut access = flash.bound();
+        provision(&mut access).unwrap()
+    };
     let first = {
         let mut access = flash.bound();
-        provision(&mut access, Some(cursor(5, 0xa1))).unwrap()
+        acknowledge_through(empty, &mut access, cursor(5, 0xa1)).unwrap()
     };
     let writes = flash.writes;
     {

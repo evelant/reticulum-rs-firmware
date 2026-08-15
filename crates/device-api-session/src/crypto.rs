@@ -1,4 +1,4 @@
-//! Qualification-suite transcript, key schedule, proofs, and record tags.
+//! Session transcript, key schedule, proofs, and record tags.
 
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -148,13 +148,13 @@ fn expand<const N: usize>(hkdf: &Hkdf<Sha256>, purpose: u8, transcript_hash: &[u
     info[domain_end + 1..].copy_from_slice(transcript_hash);
     let mut output = [0_u8; N];
     hkdf.expand(&info, &mut output)
-        .expect("fixed qualification key expansion is within HKDF limits");
+        .expect("fixed session key expansion is within HKDF limits");
     output
 }
 
 fn full_mac(key: &[u8; 32], domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts the fixed qualification key length");
+    let mut mac =
+        HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts the fixed session key length");
     mac.update(domain);
     for part in parts {
         mac.update(part);
@@ -163,8 +163,8 @@ fn full_mac(key: &[u8; 32], domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 }
 
 fn verify_full_mac(key: &[u8; 32], domain: &[u8], parts: &[&[u8]], observed: &[u8; 32]) -> bool {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts the fixed qualification key length");
+    let mut mac =
+        HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts the fixed session key length");
     mac.update(domain);
     for part in parts {
         mac.update(part);
@@ -184,8 +184,8 @@ fn record_tag(key: &[u8; 32], domain: &[u8], record: &Record) -> [u8; AUTH_TAG_L
 fn verify_record_tag(key: &[u8; 32], domain: &[u8], record: &Record) -> bool {
     let mut authenticated = [0_u8; AUTHENTICATED_DATA_CAPACITY];
     let length = record.write_authenticated_data(&mut authenticated);
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts the fixed qualification key length");
+    let mut mac =
+        HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts the fixed session key length");
     mac.update(domain);
     mac.update(&authenticated[..length]);
     mac.verify_truncated_left(record.authentication_tag())

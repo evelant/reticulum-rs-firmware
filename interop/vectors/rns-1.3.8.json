@@ -22,7 +22,7 @@
     "requirements": "interop/python/requirements-rns-1.3.8.txt",
     "requirements_sha256": "41f5f67517d580539e65a324cb3bbe5bbec24659f3eabe1f06701e3305ff3258",
     "script": "interop/python/generate_rns_vectors.py",
-    "source_sha256": "5b221b3aaac045db527a379d02d0f08942deacbb30dce04e0b80f3c5a469300f"
+    "source_sha256": "721c1075343d4d1a07d43dcee714ecdcb2aaa25f1f4a8e02c94ef3e84a7a0b0a"
   },
   "identity": {
     "identity_hash_hex": "fd9f121e293bf4a415dd74366ff75f69",
@@ -896,14 +896,14 @@
   "plain_data": {
     "app_name": "reticulum_rs_firmware",
     "aspects": [
-      "phase0"
+      "interop"
     ],
-    "destination_hash_hex": "58be8093acad86b38ed5ead2c791af53",
+    "destination_hash_hex": "4c468f7b8695c5a87b0976c675c7a013",
     "normalization": "lowercase hexadecimal; no wire-byte normalization",
     "origin": "created and packed by Python RNS 1.3.8",
-    "packet_hash_hex": "b655d37573e8238f6feb3d55c0d72163368ed65d85a7cd4a31aa3c9a293fb059",
+    "packet_hash_hex": "a83fcc1213a61f19f65198efa2192b0d9817481c95591638ce3decf2f5f92542",
     "payload_hex": "7265746520666f756e646174696f6e20636f6e666f726d616e6365",
-    "raw_hex": "080058be8093acad86b38ed5ead2c791af53007265746520666f756e646174696f6e20636f6e666f726d616e6365"
+    "raw_hex": "08004c468f7b8695c5a87b0976c675c7a013007265746520666f756e646174696f6e20636f6e666f726d616e6365"
   },
   "protocol": "Reticulum",
   "schema": 2

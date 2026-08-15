@@ -233,16 +233,12 @@ fn encode_record(record: &CredentialRecord, slot: &mut [u8]) {
         CredentialStatus::Revoked => 3,
     };
     slot[ORIGIN_OFFSET] = match record.audit.pairing_origin {
-        PairingOrigin::UsbPhysicalPresence => 1,
-        PairingOrigin::ConfirmedOutOfBand => 2,
-        PairingOrigin::RecoveryImport => 3,
+        PairingOrigin::LocalPhysicalPresence => 1,
     };
     slot[REVOCATION_OFFSET] = match record.revocation_reason {
         None => 0,
         Some(RevocationReason::Explicit) => 1,
-        Some(RevocationReason::Rotated) => 2,
-        Some(RevocationReason::FactoryReset) => 3,
-        Some(RevocationReason::PairingAborted) => 4,
+        Some(RevocationReason::PairingAborted) => 2,
     };
     if let Some(psk) = record.psk() {
         slot[SECRET_FLAG_OFFSET] = 1;
@@ -279,17 +275,13 @@ fn decode_record(slot: &[u8]) -> Result<CredentialRecord, CredentialSnapshotDeco
         _ => return Err(CredentialSnapshotDecodeFaultKind::InvalidStatus),
     };
     let origin = match slot[ORIGIN_OFFSET] {
-        1 => PairingOrigin::UsbPhysicalPresence,
-        2 => PairingOrigin::ConfirmedOutOfBand,
-        3 => PairingOrigin::RecoveryImport,
+        1 => PairingOrigin::LocalPhysicalPresence,
         _ => return Err(CredentialSnapshotDecodeFaultKind::InvalidPairingOrigin),
     };
     let revocation_reason = match slot[REVOCATION_OFFSET] {
         0 => None,
         1 => Some(RevocationReason::Explicit),
-        2 => Some(RevocationReason::Rotated),
-        3 => Some(RevocationReason::FactoryReset),
-        4 => Some(RevocationReason::PairingAborted),
+        2 => Some(RevocationReason::PairingAborted),
         _ => return Err(CredentialSnapshotDecodeFaultKind::InvalidRevocationReason),
     };
     let secret_present = match slot[SECRET_FLAG_OFFSET] {
@@ -370,7 +362,7 @@ mod tests {
     use super::*;
 
     fn active_permissions() -> Permissions {
-        Permissions::READ_SUBMISSION_STATUS | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA
+        Permissions::READ_SUBMISSION_STATUS | Permissions::SUBMIT_RNS_DATA
     }
 
     fn audit(created: u64, modified: u64, origin: PairingOrigin, policy: u32) -> CredentialAudit {
@@ -411,8 +403,8 @@ mod tests {
                 CredentialId::new([3; 16]),
                 CredentialGeneration::new(3),
                 PrincipalId([0x33; 16]),
-                audit(3, 3, PairingOrigin::RecoveryImport, 7),
-                RevocationReason::FactoryReset,
+                audit(3, 3, PairingOrigin::LocalPhysicalPresence, 7),
+                RevocationReason::Explicit,
             ))
             .unwrap_or_else(|fault| panic!("valid tombstone rejected: {:?}", fault.kind()));
         let builder = builder
@@ -421,7 +413,7 @@ mod tests {
                 0x11,
                 active_permissions(),
                 CredentialStatus::Active,
-                PairingOrigin::UsbPhysicalPresence,
+                PairingOrigin::LocalPhysicalPresence,
                 9,
                 0xa1,
             ))
@@ -432,7 +424,7 @@ mod tests {
                 0x22,
                 Permissions::READ_SUBMISSION_STATUS,
                 CredentialStatus::Pending,
-                PairingOrigin::ConfirmedOutOfBand,
+                PairingOrigin::LocalPhysicalPresence,
                 8,
                 0xb2,
             ))
@@ -454,7 +446,7 @@ mod tests {
                     0x40_u8.wrapping_add(value),
                     Permissions::READ_SUBMISSION_STATUS,
                     CredentialStatus::Active,
-                    PairingOrigin::UsbPhysicalPresence,
+                    PairingOrigin::LocalPhysicalPresence,
                     1,
                     0x60_u8.wrapping_add(value),
                 ))
@@ -498,7 +490,7 @@ mod tests {
         expected[pending + 40..pending + 44]
             .copy_from_slice(&Permissions::READ_SUBMISSION_STATUS.bits().to_le_bytes());
         expected[pending + 44] = 1;
-        expected[pending + 45] = 2;
+        expected[pending + 45] = 1;
         expected[pending + 46] = 0;
         expected[pending + 47] = 1;
         expected[pending + 48..pending + 56].copy_from_slice(&2_u64.to_le_bytes());
@@ -511,8 +503,8 @@ mod tests {
         expected[revoked + 16..revoked + 24].copy_from_slice(&3_u64.to_le_bytes());
         expected[revoked + 24..revoked + 40].fill(0x33);
         expected[revoked + 44] = 3;
-        expected[revoked + 45] = 3;
-        expected[revoked + 46] = 3;
+        expected[revoked + 45] = 1;
+        expected[revoked + 46] = 1;
         expected[revoked + 47] = 0;
         expected[revoked + 48..revoked + 56].copy_from_slice(&3_u64.to_le_bytes());
         expected[revoked + 56..revoked + 64].copy_from_slice(&3_u64.to_le_bytes());

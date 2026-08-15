@@ -6,7 +6,7 @@
 //! observations back to [`NomadClient`]. No Rete state, packet allocation,
 //! executor, transport, or device API type crosses this boundary.
 //!
-//! The first product slice accepts the decoded response body supplied by the
+//! The supported response subset accepts the decoded body supplied by the
 //! Reticulum adapter when it contains at most [`MAX_PAGE_BYTES`] of valid UTF-8
 //! Micron. It does not enable RNS Resources, Identify, forms, discovery, or
 //! Micron rendering. Request timeout is an explicit two-owner transaction:
@@ -32,9 +32,9 @@ pub const DESTINATION_HASH_LENGTH: usize = 16;
 pub const LINK_ID_LENGTH: usize = 16;
 /// Length of a truncated RNS request identifier.
 pub const REQUEST_ID_LENGTH: usize = 16;
-/// Largest UTF-8 NomadNet request path retained by this slice.
+/// Largest UTF-8 NomadNet request path retained by the client.
 pub const MAX_PAGE_PATH_BYTES: usize = 128;
-/// Largest direct NomadNet page body admitted by this slice.
+/// Largest direct NomadNet page body admitted by the client.
 pub const MAX_PAGE_BYTES: usize = 400;
 /// Initial NomadNet page requested by a minimal client.
 pub const DEFAULT_INDEX_PATH: &str = "/page/index.mu";

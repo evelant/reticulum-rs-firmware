@@ -29,12 +29,9 @@ pub struct ClientParameters {
 }
 
 impl ClientParameters {
-    /// Bind a suite-1 handshake to one expected device ID and local bearer.
-    ///
-    /// This compatibility constructor retains the original USB qualification
-    /// suite. Use [`Self::new_for_suite`] for another supported suite.
+    /// Bind the supported BLE GATT handshake to one expected device ID and bearer.
     pub const fn new(expected_device_id: DeviceId, bearer: BearerBinding) -> Self {
-        Self::new_for_suite(expected_device_id, bearer, SessionSuite::UsbQualification)
+        Self::new_for_suite(expected_device_id, bearer, SessionSuite::BleGatt)
     }
 
     /// Bind a handshake attempt to one device, bearer, and explicit suite.
@@ -116,12 +113,7 @@ impl ClientCredential {
 pub enum ClientHandshakeError {
     /// A server handshake record was not canonical.
     Record(HandshakeRecordError),
-    /// Qualification-only suite was attempted on a non-Serial/JTAG bearer.
-    QualificationSuiteForbidden {
-        /// Bearer on which the suite was rejected.
-        bearer: BearerBinding,
-    },
-    /// A non-legacy suite was configured for a bearer it does not permit.
+    /// A session suite was configured for a bearer it does not permit.
     SuiteBearerMismatch {
         /// Configured session suite.
         suite: SessionSuite,
@@ -190,7 +182,7 @@ pub struct ClientHelloFlight {
 }
 
 impl ClientHelloFlight {
-    /// Start one qualification handshake with fresh client entropy.
+    /// Start one session handshake with fresh client entropy.
     pub fn begin<R>(
         parameters: ClientParameters,
         credential: ClientCredential,
@@ -201,11 +193,6 @@ impl ClientHelloFlight {
     {
         let required_bearer = parameters.suite.required_bearer();
         if parameters.bearer != required_bearer {
-            if parameters.suite == SessionSuite::UsbQualification {
-                return Err(ClientHandshakeError::QualificationSuiteForbidden {
-                    bearer: parameters.bearer,
-                });
-            }
             return Err(ClientHandshakeError::SuiteBearerMismatch {
                 suite: parameters.suite,
                 bearer: parameters.bearer,

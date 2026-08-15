@@ -16,7 +16,7 @@ use reticulum_device_api::{
     RouteDiagnosticEntry, RouteDiagnosticResolution, RouteDiagnosticsPage, RouteDiagnosticsRequest,
     SubmissionId, SubmissionState, SubmissionStatus, decode_request, encode_response,
 };
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 use reticulum_device_api::{
     NetworkConfigMutation, NetworkConfigMutationOutcome, NetworkConfigMutationRequest,
     NetworkConfigSnapshot, NetworkRuntimeStatus, ReticulumTcpPeerConfigSummary,
@@ -114,7 +114,7 @@ struct MockPeer {
     manual_announce_availability: CapabilityAvailability,
     manual_announce_disposition: ManualServiceAnnounceDisposition,
     manual_announce_requests: usize,
-    #[cfg(feature = "experimental-network-config")]
+    #[cfg(feature = "network-config")]
     last_network_mutation: Option<OwnedNetworkMutation>,
     parameters: ServerParameters,
     max_io_chunk: usize,
@@ -139,7 +139,7 @@ struct OwnedNomadFetch {
     idempotency_key: IdempotencyKey,
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[derive(Debug, Eq, PartialEq)]
 enum OwnedNetworkMutation {
     UpsertWifi {
@@ -160,7 +160,7 @@ enum OwnedNetworkMutation {
 
 impl MockPeer {
     fn new() -> Self {
-        Self::new_for_profile(ClientSessionProfile::UsbSerialJtagQualification, usize::MAX)
+        Self::new_for_profile(ClientSessionProfile::BleGatt, usize::MAX)
     }
 
     fn new_for_profile(profile: ClientSessionProfile, max_io_chunk: usize) -> Self {
@@ -168,18 +168,10 @@ impl MockPeer {
         let summary = sample_lxmf_summary(1, &wire);
         let device_id = reticulum_device_api_session::DeviceId::new(DEVICE_BYTES);
         let parameters = match profile {
-            ClientSessionProfile::UsbSerialJtagQualification => {
-                ServerParameters::new(device_id, BearerBinding::UsbSerialJtag)
-            }
-            ClientSessionProfile::WifiQualification => ServerParameters::new_for_suite(
-                device_id,
-                BearerBinding::Wifi,
-                SessionSuite::WifiQualification,
-            ),
-            ClientSessionProfile::BleGattQualification => ServerParameters::new_for_suite(
+            ClientSessionProfile::BleGatt => ServerParameters::new_for_suite(
                 device_id,
                 BearerBinding::BleGatt,
-                SessionSuite::BleGattQualification,
+                SessionSuite::BleGatt,
             ),
         };
         Self {
@@ -209,7 +201,7 @@ impl MockPeer {
             manual_announce_availability: CapabilityAvailability::Available,
             manual_announce_disposition: ManualServiceAnnounceDisposition::Queued,
             manual_announce_requests: 0,
-            #[cfg(feature = "experimental-network-config")]
+            #[cfg(feature = "network-config")]
             last_network_mutation: None,
             parameters,
             max_io_chunk,
@@ -439,11 +431,11 @@ impl MockPeer {
                 self.manual_announce_requests += 1;
                 DeviceResponse::ManualServiceAnnounce(self.manual_announce_disposition)
             }
-            #[cfg(feature = "experimental-network-config")]
+            #[cfg(feature = "network-config")]
             DeviceRequest::NetworkConfigGet => {
                 DeviceResponse::NetworkConfig(sample_network_config())
             }
-            #[cfg(feature = "experimental-network-config")]
+            #[cfg(feature = "network-config")]
             DeviceRequest::NetworkConfigMutate(request) => {
                 self.last_network_mutation = Some(match request.mutation() {
                     NetworkConfigMutation::UpsertWifi {
@@ -484,7 +476,7 @@ impl MockPeer {
                     reboot_required: true,
                 })
             }
-            #[cfg(feature = "experimental-network-config")]
+            #[cfg(feature = "network-config")]
             DeviceRequest::NetworkStatus => DeviceResponse::NetworkStatus(sample_network_status()),
             _ => DeviceResponse::Error(ApiErrorResponse {
                 code: ApiErrorCode::UnsupportedOperation,
@@ -584,12 +576,12 @@ fn sample_lxmf_summary(handle: u64, wire: &[u8]) -> LxmfMessageSummary {
     .expect("sample summary is valid")
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn sample_network_profile_id() -> WifiNetworkProfileId {
     WifiNetworkProfileId::new([0x91; 16]).unwrap()
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn sample_network_config() -> NetworkConfigSnapshot {
     let wifi = WifiNetworkConfigSummary::new(
         sample_network_profile_id(),
@@ -601,10 +593,10 @@ fn sample_network_config() -> NetworkConfigSnapshot {
     .unwrap();
     let peer_address = ReticulumTcpPeerIpv4Address::new([192, 0, 2, 44]).unwrap();
     let peer = ReticulumTcpPeerConfigSummary::new(true, peer_address, 4242).unwrap();
-    NetworkConfigSnapshot::new(7, [Some(wifi), None, None, None], Some(peer)).unwrap()
+    NetworkConfigSnapshot::with_defaults(7, [Some(wifi), None, None, None], Some(peer)).unwrap()
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn sample_network_status() -> NetworkRuntimeStatus {
     NetworkRuntimeStatus::new(
         7,
@@ -830,7 +822,7 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
         client.announce_now().expect("manual announce queues"),
         ManualServiceAnnounceDisposition::Queued
     );
-    #[cfg(feature = "experimental-network-config")]
+    #[cfg(feature = "network-config")]
     {
         let config = client
             .network_config_get()
@@ -870,9 +862,9 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
     assert!(client.is_session_available());
 
     let peer = client.into_transport();
-    #[cfg(not(feature = "experimental-network-config"))]
+    #[cfg(not(feature = "network-config"))]
     assert_eq!(peer.request_count, 18);
-    #[cfg(feature = "experimental-network-config")]
+    #[cfg(feature = "network-config")]
     assert_eq!(peer.request_count, 21);
     assert_eq!(
         peer.last_mailbox_acknowledgement,
@@ -903,7 +895,7 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
     );
     assert_eq!(peer.last_nomad_poll, Some(NOMAD_FETCH_ID));
     assert_eq!(peer.manual_announce_requests, 1);
-    #[cfg(feature = "experimental-network-config")]
+    #[cfg(feature = "network-config")]
     assert_eq!(
         peer.last_network_mutation,
         Some(OwnedNetworkMutation::UpsertWifi {
@@ -919,67 +911,24 @@ fn real_handshake_and_multi_request_session_cover_typed_device_surface() {
 }
 
 #[test]
-fn located_send_preflights_the_authenticated_device_minor_before_new_wire_shape() {
+fn same_major_future_minor_response_is_accepted() {
     let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
     let config = ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096);
     let mut peer = MockPeer::new();
     peer.response_version = ApiVersion {
         major: ApiVersion::CURRENT.major,
-        minor: 16,
+        minor: ApiVersion::CURRENT.minor + 1,
     };
     let mut client = DeviceClient::connect(peer, credential, &mut FixedRng::new(0x99), config)
         .expect("real client/server handshake succeeds");
-    let location = LxmfMessageLocation::new(44_000_000, -73_000_000, 0, 0, 0, 0, 1_784_000_000)
-        .expect("fixture location is valid");
 
-    assert!(matches!(
-        client.lxmf_basic_send(
-            BasicLxmfSend::new(
-                LXMF_REMOTE,
-                1_784_732_100_000,
-                b"subject",
-                b"body",
-                IdempotencyKey([0xcd; 16]),
-            )
-            .with_location(location),
-        ),
-        Err(ClientError::ApiMinorTooOld {
-            feature: "LXMF message location",
-            required: 17,
-            observed: ApiVersion {
-                major: 1,
-                minor: 16,
-            },
-        })
-    ));
-
-    let peer = client.into_transport();
-    assert_eq!(peer.request_count, 1, "only capabilities preflight is sent");
-    assert_eq!(peer.last_send, None);
-}
-
-#[test]
-fn wifi_profile_uses_suite_two_across_partial_stream_io() {
-    let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
-    let config = ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096);
-    let mut client = DeviceClient::connect_with_profile(
-        MockPeer::new_for_profile(ClientSessionProfile::WifiQualification, 3),
-        credential,
-        &mut FixedRng::new(0x99),
-        config,
-        ClientSessionProfile::WifiQualification,
-    )
-    .expect("Wi-Fi profile authenticates across partial stream I/O");
-
-    assert_eq!(client.device_id().as_bytes(), &DEVICE_BYTES);
     assert_eq!(
         client
             .identity_summary()
-            .expect("authenticated request succeeds")
-            .lxmf_delivery_destination(),
-        Some(LXMF_LOCAL)
+            .expect("same-major future-minor response is compatible")
+            .primary_destination(),
+        PRIMARY
     );
-    assert_eq!(client.into_transport().request_count, 1);
 }
 
 #[test]
@@ -987,11 +936,11 @@ fn ble_gatt_profile_uses_suite_three_across_partial_stream_io() {
     let credential = ActivatedCredential::decode(&active_state()).expect("credential decodes");
     let config = ClientConfig::new(Duration::from_secs(1), Duration::from_secs(1), 8, 4_096);
     let mut client = DeviceClient::connect_with_profile(
-        MockPeer::new_for_profile(ClientSessionProfile::BleGattQualification, 3),
+        MockPeer::new_for_profile(ClientSessionProfile::BleGatt, 3),
         credential,
         &mut FixedRng::new(0x99),
         config,
-        ClientSessionProfile::BleGattQualification,
+        ClientSessionProfile::BleGatt,
     )
     .expect("BLE GATT profile authenticates across partial stream I/O");
 
@@ -1127,11 +1076,11 @@ fn reticulum_probe_start_and_poll_capture_exact_requests_and_return_typed_respon
 fn reticulum_probe_start_and_poll_preserve_typed_api_errors() {
     let start_error = ApiErrorResponse {
         code: ApiErrorCode::IdempotencyConflict,
-        operation: Some(reticulum_device_api::OP_EXPERIMENTAL_RETICULUM_PROBE_START),
+        operation: Some(reticulum_device_api::OP_RETICULUM_PROBE_START),
     };
     let poll_error = ApiErrorResponse {
         code: ApiErrorCode::NotFound,
-        operation: Some(reticulum_device_api::OP_EXPERIMENTAL_RETICULUM_PROBE_POLL),
+        operation: Some(reticulum_device_api::OP_RETICULUM_PROBE_POLL),
     };
     let mut peer = MockPeer::new();
     peer.probe_start_response = DeviceResponse::Error(start_error);

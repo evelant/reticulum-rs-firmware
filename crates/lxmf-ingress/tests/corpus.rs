@@ -366,26 +366,6 @@ fn python_opportunistic_corpus_validates_without_copying_event_payload() {
 }
 
 #[test]
-fn python_opportunistic_ceiling_is_not_mistaken_for_the_temporary_raw_inbox_ceiling() {
-    let corpus = corpus();
-    let fixture = fixture(&corpus, "opportunistic_limit_295");
-    let event = opportunistic_event(fixture);
-    let ApplicationEvent::DataReceived { payload, .. } = &event else {
-        unreachable!()
-    };
-    assert!(payload.len() > reticulum_rns_inbox_store::MAX_PAYLOAD_SIZE);
-
-    let resolver = fixture_resolver(fixture);
-    let local = LocalDeliveryDestination::new(array(&fixture.destination_hash_hex));
-    let IngressOutcome::Validated(validated) =
-        validate_application_event(&event, local, limits(), &resolver, StampPolicy::NotRequired)
-    else {
-        panic!("the Python-valid boundary must not be narrowed by a test-only store")
-    };
-    assert_eq!(validated.carrier_payload().len(), payload.len());
-}
-
-#[test]
 fn destination_and_noncarrier_events_are_classified_without_identity_lookup() {
     let corpus = corpus();
     let base_fixture = fixture(&corpus, "basic_binary");

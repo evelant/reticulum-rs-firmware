@@ -19,7 +19,7 @@
     "revision": "fab12ad9bf9f997797034950f289fe41a79dcf5a",
     "version": "1.0.1"
   },
-  "command": "PYTHONPATH=artifacts/phase0/lxmf-1.0.1-python python3.13 interop/python/generate_lxmf_1_0_1_vectors.py",
+  "command": "PYTHONPATH=target/interop/lxmf-1.0.1 python3.13 interop/python/generate_lxmf_1_0_1_vectors.py",
   "delivery_constants": {
     "destination_length": 16,
     "encrypted_packet_max_content": 295,
@@ -37,7 +37,7 @@
     "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17"
   },
   "generator": "interop/python/generate_lxmf_1_0_1_vectors.py",
-  "generator_source_sha256": "95494cf18ab1cb0097b8fe4b461ea9adbb1ac3f4cfc16017df0c628d52c160b8",
+  "generator_source_sha256": "0f7927896bfeda46029bd188a5c7ba2bd1a8ffce31762090ab1140b73ef8a56a",
   "inbound_oracles": [
     {
       "canonical_repack_hex": "94cb41d954fc40000000c4094772656574696e6773c41648656c6c6f2066726f6d20507974686f6e204c584d4680",
@@ -714,7 +714,7 @@
   "python_version": "3.13.7",
   "release_lane": "python-lxmf-1.0.1-forward-reference",
   "requirements": "interop/python/requirements-lxmf-1.0.1.txt",
-  "requirements_sha256": "f7876030b5e143e89bea278c2dc4892cd58c47f5709b72c2cc848861670b1c86",
+  "requirements_sha256": "4ca4047c6731d79062bba4677fd5bf6b6f3b8508a61bab7c5b1469a87e128c56",
   "schema": 1,
   "scope": {
     "deferred": [

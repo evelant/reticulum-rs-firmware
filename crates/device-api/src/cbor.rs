@@ -10,63 +10,51 @@ use crate::model::{
     DiagnosticLoraTxOutcome, EncodedPacketSha256, IdempotencyKey, IdentityHash, IdentitySummary,
     IngressObservation, IngressSignal, LoraDiagnostics, MAX_BODY_BYTES, MAX_DIAGNOSTIC_INTERFACES,
     MAX_MESSAGE_BYTES, MAX_RADIO_TRACE_PAGE_ENTRIES, MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES,
-    ManualServiceAnnounceDisposition, NodeDiagnosticsSnapshot,
-    OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE, OP_EXPERIMENTAL_NODE_DIAGNOSTICS,
-    OP_EXPERIMENTAL_RADIO_TRACE_PAGE, OP_EXPERIMENTAL_RETICULUM_PROBE_POLL,
-    OP_EXPERIMENTAL_RETICULUM_PROBE_START, OP_EXPERIMENTAL_ROUTE_DIAGNOSTICS_PAGE,
-    OP_IDENTITY_SUMMARY, OP_SUBMISSION_STATUS, OP_SYSTEM_CAPABILITIES, PreparedPacketDetails,
-    ProbeFailure, ProbeId, ProbePhase, ProbePollRequest, ProbePollResponse, ProbeStartAccepted,
-    ProbeStartOutcome, ProbeStartRequest, ProbeSuccess, RESPONSE_ERROR,
-    RadioTraceAppliedLoraProfile, RadioTraceAttemptOutcome, RadioTraceAttemptTerminal,
-    RadioTraceAttemptToken, RadioTraceCursor, RadioTraceDataTx, RadioTraceEvent,
-    RadioTraceEventKind, RadioTraceLogicalRx, RadioTracePacketEvidence, RadioTracePage,
-    RadioTracePageRequest, RadioTraceRouteSelected, RadioTraceTxOutcome, RequestEnvelope,
-    RequestId, ResponseEnvelope, RnsDiagnostics, RouteDiagnosticEntry, RouteDiagnosticResolution,
-    RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionFailure, SubmissionId,
-    SubmissionState, SubmissionStatus,
+    ManualServiceAnnounceDisposition, NodeDiagnosticsSnapshot, OP_IDENTITY_SUMMARY,
+    OP_MANUAL_SERVICE_ANNOUNCE, OP_NODE_DIAGNOSTICS, OP_RADIO_TRACE_PAGE, OP_RETICULUM_PROBE_POLL,
+    OP_RETICULUM_PROBE_START, OP_ROUTE_DIAGNOSTICS_PAGE, OP_SUBMISSION_STATUS,
+    OP_SYSTEM_CAPABILITIES, PreparedPacketDetails, ProbeFailure, ProbeId, ProbePhase,
+    ProbePollRequest, ProbePollResponse, ProbeStartAccepted, ProbeStartOutcome, ProbeStartRequest,
+    ProbeSuccess, RESPONSE_ERROR, RadioTraceAppliedLoraProfile, RadioTraceAttemptOutcome,
+    RadioTraceAttemptTerminal, RadioTraceAttemptToken, RadioTraceCursor, RadioTraceDataTx,
+    RadioTraceEvent, RadioTraceEventKind, RadioTraceLogicalRx, RadioTracePacketEvidence,
+    RadioTracePage, RadioTracePageRequest, RadioTraceRouteSelected, RadioTraceTxOutcome,
+    RequestEnvelope, RequestId, ResponseEnvelope, RnsDiagnostics, RouteDiagnosticEntry,
+    RouteDiagnosticResolution, RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionFailure,
+    SubmissionId, SubmissionState, SubmissionStatus,
 };
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 use crate::model::{
     GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm, MAX_RETICULUM_DNS_DHCP_SERVERS,
     MAX_RETICULUM_DNS_RAW_ATTEMPTS, MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_SSID_BYTES,
     NetworkConfigMutation, NetworkConfigMutationOutcome, NetworkConfigMutationRequest,
-    NetworkConfigSnapshot, NetworkRuntimeStatus, OP_EXPERIMENTAL_NETWORK_CONFIG_GET,
-    OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE, OP_EXPERIMENTAL_NETWORK_STATUS, ReticulumDnsDiagnostics,
-    ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt, ReticulumDnsRawOutcome,
-    ReticulumDnsRawSetupState, ReticulumDnsRawSource, ReticulumDnsResolution,
-    ReticulumDnsResolutionSource, ReticulumTcpFailure, ReticulumTcpPeerConfigSummary,
-    ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate, ReticulumTcpPeerHostname,
-    ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState, ReticulumTcpPeerUpdate, RmapConfig,
-    RmapLocation, WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId,
-    WifiNetworkUpdate, WifiSsid, WifiStationState,
+    NetworkConfigSnapshot, NetworkRuntimeStatus, OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE,
+    OP_NETWORK_STATUS, ReticulumDnsDiagnostics, ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt,
+    ReticulumDnsRawOutcome, ReticulumDnsRawSetupState, ReticulumDnsRawSource,
+    ReticulumDnsResolution, ReticulumDnsResolutionSource, ReticulumTcpFailure,
+    ReticulumTcpPeerConfigSummary, ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate,
+    ReticulumTcpPeerHostname, ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState,
+    ReticulumTcpPeerUpdate, RmapConfig, RmapLocation, WifiCredentialUpdate,
+    WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate, WifiSsid, WifiStationState,
 };
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 use crate::model::{
     LxmfBasicSendAccepted, LxmfDiscoveredPeer, LxmfMailboxStatus, LxmfMessageHandle,
     LxmfMessageLocation, LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation,
     LxmfPeerDiscoveryPage, LxmfPeerGeneration, LxmfReadChunk, LxmfReadLength,
     MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_PEER_APP_DATA_BYTES,
-    MAX_LXMF_READ_CHUNK_BYTES, OP_EXPERIMENTAL_LXMF_BASIC_SEND,
-    OP_EXPERIMENTAL_LXMF_MAILBOX_ACKNOWLEDGE, OP_EXPERIMENTAL_LXMF_MAILBOX_STATUS,
-    OP_EXPERIMENTAL_LXMF_NEXT, OP_EXPERIMENTAL_LXMF_PEER_NEXT, OP_EXPERIMENTAL_LXMF_READ,
+    MAX_LXMF_READ_CHUNK_BYTES, OP_LXMF_BASIC_SEND, OP_LXMF_MAILBOX_ACKNOWLEDGE,
+    OP_LXMF_MAILBOX_STATUS, OP_LXMF_NEXT, OP_LXMF_PEER_NEXT, OP_LXMF_READ,
 };
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 use crate::model::{
     MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES, NomadFetchFailure, NomadFetchId,
     NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse, NomadFetchStartAccepted,
     NomadFetchStartOutcome, NomadFetchStartRequest, NomadPage, NomadPagePath,
-    NomadRequestTimestampUnixMs, OP_EXPERIMENTAL_NOMAD_FETCH_POLL,
-    OP_EXPERIMENTAL_NOMAD_FETCH_START,
+    NomadRequestTimestampUnixMs, OP_NOMAD_FETCH_POLL, OP_NOMAD_FETCH_START,
 };
-#[cfg(feature = "experimental-rns-inbox")]
-use crate::model::{
-    MAX_RNS_INBOX_PAYLOAD_BYTES, OP_EXPERIMENTAL_RNS_INBOX_PEEK, OP_EXPERIMENTAL_RNS_INBOX_STATUS,
-    RnsInboxItem, RnsInboxStatus,
-};
-#[cfg(feature = "experimental-rns-data")]
-use crate::model::{
-    MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted,
-};
+#[cfg(feature = "rns-data")]
+use crate::model::{MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, OP_SUBMIT_RNS_DATA, SubmissionAccepted};
 
 const MAX_MAP_ENTRIES: u64 = 32;
 /// Maximum container/tag nesting accepted while validating an operation body
@@ -90,11 +78,11 @@ pub enum RequiredField {
     VersionMinor,
     /// Submission identifier at body key 0.
     SubmissionId,
-    /// Experimental submission destination hash at body key 0.
+    /// Submission destination hash at body key 0.
     SubmitDestination,
-    /// Experimental submission payload at body key 1.
+    /// Submission payload at body key 1.
     SubmitPayload,
-    /// Experimental submission idempotency key at body key 2.
+    /// Submission idempotency key at body key 2.
     SubmitIdempotencyKey,
     /// Capability API version at body key 0.
     CapabilityApiVersion,
@@ -102,44 +90,40 @@ pub enum RequiredField {
     CapabilityPacketOutput,
     /// Capability direct-radio-TX availability at body key 2.
     CapabilityDirectRadioTx,
-    /// Capability experimental outbound RNS DATA submission flag at body key 3.
-    CapabilityExperimentalSubmit,
+    /// Capability outbound RNS DATA submission flag at body key 3.
+    CapabilitySubmitRnsData,
     /// Capability logical message limit at body key 4.
     CapabilityMaxMessageBytes,
     /// Capability body limit at body key 5.
     CapabilityMaxBodyBytes,
-    /// Capability experimental submission payload limit at body key 6.
+    /// Capability RNS DATA submission payload limit at body key 6.
     CapabilityMaxSubmitPayloadBytes,
-    /// Capability experimental inbound RNS mailbox availability at body key 7.
-    CapabilityExperimentalRnsInbox,
-    /// Capability experimental inbound RNS mailbox payload limit at body key 8.
-    CapabilityMaxRnsInboxPayloadBytes,
-    /// Capability experimental LXMF read availability at body key 9.
-    CapabilityExperimentalLxmf,
+    /// Capability LXMF read availability at body key 9.
+    CapabilityLxmf,
     /// Capability maximum LXMF read chunk bytes at body key 10.
     CapabilityMaxLxmfReadChunkBytes,
     /// Capability basic LXMF send availability at body key 11.
-    CapabilityExperimentalLxmfBasicSend,
+    CapabilityLxmfBasicSend,
     /// Capability maximum basic LXMF title bytes at body key 12.
     CapabilityMaxLxmfBasicTitleBytes,
     /// Capability maximum basic LXMF content bytes at body key 13.
     CapabilityMaxLxmfBasicContentBytes,
     /// Capability nearby LXMF peer-discovery availability at body key 14.
-    CapabilityExperimentalLxmfPeerDiscovery,
+    CapabilityLxmfPeerDiscovery,
     /// Capability maximum nearby-peer application data at body key 15.
     CapabilityMaxLxmfPeerAppDataBytes,
     /// Capability bounded NomadNet fetch availability at body key 16.
-    CapabilityExperimentalNomad,
+    CapabilityNomad,
     /// Capability maximum NomadNet page path at body key 17.
     CapabilityMaxNomadPagePathBytes,
     /// Capability maximum NomadNet page body at body key 18.
     CapabilityMaxNomadPageBytes,
     /// Capability network-configuration availability at body key 19.
-    CapabilityExperimentalNetworkConfig,
+    CapabilityNetworkConfig,
     /// Capability manual-service-announce availability at body key 20.
     CapabilityManualServiceAnnounce,
     /// Capability Reticulum probe availability at body key 21.
-    CapabilityExperimentalReticulumProbe,
+    CapabilityReticulumProbe,
     /// Manual service announce admission disposition at body key 0.
     ManualServiceAnnounceDisposition,
     /// Known Reticulum destination at probe-start key 0.
@@ -194,9 +178,7 @@ pub enum RequiredField {
     NetworkConfigRmapPhoneLocation,
     /// Optional hostname Reticulum TCP peer at network-config body key 8.
     NetworkConfigTcpHostPeer,
-    /// Requested LoRa transmit power at network-config body key 9.
-    NetworkConfigLoraTxPowerDbm,
-    /// Complete LoRa radio profile at network-config body key 10.
+    /// Complete LoRa radio profile at network-config body key 9.
     NetworkConfigLoraProfile,
     /// LoRa center frequency at profile key 0.
     LoraProfileFrequencyHz,
@@ -298,22 +280,6 @@ pub enum RequiredField {
     IdentityPrimaryDestination,
     /// Optional identity summary `lxmf.delivery` destination hash at body key 1.
     IdentityLxmfDeliveryDestination,
-    /// Inbound RNS mailbox depth at body key 0.
-    RnsInboxDepth,
-    /// Inbound RNS mailbox capacity at body key 1.
-    RnsInboxCapacity,
-    /// Inbound RNS mailbox dropped counter at body key 2.
-    RnsInboxDroppedSinceBoot,
-    /// Inbound RNS mailbox payload limit at body key 3.
-    RnsInboxMaxPayloadBytes,
-    /// Inbound RNS mailbox durability flag at body key 4.
-    RnsInboxDurable,
-    /// Inbound RNS mailbox item identifier at body key 0.
-    RnsInboxItemId,
-    /// Inbound RNS mailbox destination hash at body key 1.
-    RnsInboxDestination,
-    /// Inbound RNS mailbox payload at body key 2.
-    RnsInboxPayload,
     /// Optional exclusive LXMF listing cursor at request body key 0.
     LxmfAfterHandle,
     /// Stable committed LXMF message handle.
@@ -337,7 +303,7 @@ pub enum RequiredField {
     /// SHA-256 of exact normalized LXMF wire bytes.
     LxmfExactWireSha256,
     /// First-arrival observation at LXMF summary key 10.
-    LxmfIngressObservation,
+    IngressObservation,
     /// Zero-based LXMF read offset.
     LxmfReadOffset,
     /// Requested maximum LXMF read bytes.
@@ -713,15 +679,8 @@ pub enum DecodeError {
         /// Supplied slot count.
         actual: u64,
     },
-    /// Experimental application payload exceeds its semantic limit.
+    /// Application payload exceeds its semantic limit.
     PayloadTooLarge {
-        /// Supplied byte count.
-        actual: usize,
-        /// Accepted byte count.
-        max: usize,
-    },
-    /// An inbound RNS mailbox payload exceeds its fixed response limit.
-    InboxPayloadTooLarge {
         /// Supplied byte count.
         actual: usize,
         /// Accepted byte count.
@@ -852,7 +811,7 @@ pub enum DecodeError {
 pub enum EncodeError {
     /// Caller-provided output buffer cannot hold the canonical message.
     OutputTooSmall,
-    /// Experimental application payload exceeds its semantic limit.
+    /// Application payload exceeds its semantic limit.
     PayloadTooLarge {
         /// Supplied byte count.
         actual: usize,
@@ -898,7 +857,7 @@ pub fn encode_request(
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
     check_encode_version(envelope.version)?;
-    #[cfg(feature = "experimental-rns-data")]
+    #[cfg(feature = "rns-data")]
     if let DeviceRequest::SubmitRnsData { payload, .. } = envelope.request
         && payload.len() > MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES
     {
@@ -907,7 +866,7 @@ pub fn encode_request(
             max: MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES,
         });
     }
-    #[cfg(feature = "experimental-lxmf")]
+    #[cfg(feature = "lxmf")]
     if let DeviceRequest::LxmfBasicSend {
         timestamp_unix_ms,
         title,
@@ -960,11 +919,7 @@ pub fn encode_request(
             put!(encoder.u8(0));
             put!(encoder.u64(id.0));
         }
-        #[cfg(feature = "experimental-rns-inbox")]
-        DeviceRequest::RnsInboxStatus | DeviceRequest::RnsInboxPeek => {
-            put!(encoder.map(0));
-        }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceRequest::LxmfNext { after } => {
             put!(encoder.map(u64::from(after.is_some())));
             if let Some(after) = after {
@@ -972,7 +927,7 @@ pub fn encode_request(
                 put!(encoder.u64(after.get()));
             }
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceRequest::LxmfRead {
             handle,
             offset,
@@ -986,17 +941,17 @@ pub fn encode_request(
             put!(encoder.u8(2));
             put!(encoder.u16(max_bytes.get()));
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceRequest::LxmfMailboxStatus => {
             put!(encoder.map(0));
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceRequest::LxmfMailboxAcknowledge { through } => {
             put!(encoder.map(1));
             put!(encoder.u8(0));
             put!(encoder.u64(through.get()));
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceRequest::LxmfBasicSend {
             destination,
             timestamp_unix_ms,
@@ -1021,7 +976,7 @@ pub fn encode_request(
                 encode_lxmf_message_location(&mut encoder, location)?;
             }
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceRequest::LxmfPeerNext { after } => {
             put!(encoder.map(if after.is_some() { 2 } else { 0 }));
             if let Some(after) = after {
@@ -1031,7 +986,7 @@ pub fn encode_request(
                 put!(encoder.u64(after.after_generation()));
             }
         }
-        #[cfg(feature = "experimental-nomad")]
+        #[cfg(feature = "nomad")]
         DeviceRequest::NomadFetchStart(request) => {
             put!(encoder.map(4));
             put!(encoder.u8(0));
@@ -1043,7 +998,7 @@ pub fn encode_request(
             put!(encoder.u8(3));
             put!(encoder.bytes(&request.idempotency_key().0));
         }
-        #[cfg(feature = "experimental-nomad")]
+        #[cfg(feature = "nomad")]
         DeviceRequest::NomadFetchPoll(request) => {
             put!(encoder.map(1));
             put!(encoder.u8(0));
@@ -1061,11 +1016,11 @@ pub fn encode_request(
             put!(encoder.u8(0));
             put!(encoder.bytes(request.id().as_bytes()));
         }
-        #[cfg(feature = "experimental-network-config")]
+        #[cfg(feature = "network-config")]
         DeviceRequest::NetworkConfigGet | DeviceRequest::NetworkStatus => {
             put!(encoder.map(0));
         }
-        #[cfg(feature = "experimental-network-config")]
+        #[cfg(feature = "network-config")]
         DeviceRequest::NetworkConfigMutate(request) => {
             encode_network_config_mutation_request(&mut encoder, request)?;
         }
@@ -1089,7 +1044,7 @@ pub fn encode_request(
         DeviceRequest::ManualServiceAnnounce => {
             put!(encoder.map(0));
         }
-        #[cfg(feature = "experimental-rns-data")]
+        #[cfg(feature = "rns-data")]
         DeviceRequest::SubmitRnsData {
             destination,
             payload,
@@ -1187,52 +1142,44 @@ pub fn encode_response(
         DeviceResponse::SubmissionStatus(status) => {
             encode_submission_status(&mut encoder, status)?;
         }
-        #[cfg(feature = "experimental-rns-inbox")]
-        DeviceResponse::RnsInboxStatus(status) => {
-            encode_rns_inbox_status(&mut encoder, status)?;
-        }
-        #[cfg(feature = "experimental-rns-inbox")]
-        DeviceResponse::RnsInboxPeek(item) => {
-            encode_rns_inbox_item(&mut encoder, &item)?;
-        }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceResponse::LxmfNext(summary) => {
             encode_lxmf_summary(&mut encoder, summary)?;
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceResponse::LxmfRead(chunk) => {
             encode_lxmf_read_chunk(&mut encoder, &chunk)?;
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceResponse::LxmfMailboxStatus(status)
         | DeviceResponse::LxmfMailboxAcknowledged(status) => {
             encode_lxmf_mailbox_status(&mut encoder, status)?;
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceResponse::LxmfBasicSendAccepted(accepted) => {
             encode_lxmf_basic_send_accepted(&mut encoder, accepted)?;
         }
-        #[cfg(feature = "experimental-lxmf")]
+        #[cfg(feature = "lxmf")]
         DeviceResponse::LxmfPeerNext(page) => {
             encode_lxmf_peer_discovery_page(&mut encoder, &page)?;
         }
-        #[cfg(feature = "experimental-nomad")]
+        #[cfg(feature = "nomad")]
         DeviceResponse::NomadFetchStartAccepted(accepted) => {
             encode_nomad_fetch_start_accepted(&mut encoder, accepted)?;
         }
-        #[cfg(feature = "experimental-nomad")]
+        #[cfg(feature = "nomad")]
         DeviceResponse::NomadFetchPoll(response) => {
             encode_nomad_fetch_poll(&mut encoder, &response)?;
         }
-        #[cfg(feature = "experimental-network-config")]
+        #[cfg(feature = "network-config")]
         DeviceResponse::NetworkConfig(config) => {
             encode_network_config(&mut encoder, config)?;
         }
-        #[cfg(feature = "experimental-network-config")]
+        #[cfg(feature = "network-config")]
         DeviceResponse::NetworkConfigMutation(outcome) => {
             encode_network_config_mutation_outcome(&mut encoder, outcome)?;
         }
-        #[cfg(feature = "experimental-network-config")]
+        #[cfg(feature = "network-config")]
         DeviceResponse::NetworkStatus(status) => {
             encode_network_status(&mut encoder, status)?;
         }
@@ -1256,7 +1203,7 @@ pub fn encode_response(
         DeviceResponse::ReticulumProbePoll(response) => {
             encode_probe_poll(&mut encoder, response)?;
         }
-        #[cfg(feature = "experimental-rns-data")]
+        #[cfg(feature = "rns-data")]
         DeviceResponse::SubmitRnsDataAccepted(accepted) => {
             encode_submission_accepted(&mut encoder, accepted)?;
         }
@@ -1310,74 +1257,54 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
         OP_SYSTEM_CAPABILITIES => DeviceResponse::SystemCapabilities(decode_capabilities(body)?),
         OP_IDENTITY_SUMMARY => DeviceResponse::IdentitySummary(decode_identity_summary(body)?),
         OP_SUBMISSION_STATUS => DeviceResponse::SubmissionStatus(decode_submission_status(body)?),
-        #[cfg(feature = "experimental-rns-inbox")]
-        OP_EXPERIMENTAL_RNS_INBOX_STATUS => {
-            DeviceResponse::RnsInboxStatus(decode_rns_inbox_status(body)?)
-        }
-        #[cfg(feature = "experimental-rns-inbox")]
-        OP_EXPERIMENTAL_RNS_INBOX_PEEK => {
-            DeviceResponse::RnsInboxPeek(decode_rns_inbox_item(body)?)
-        }
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_NEXT => DeviceResponse::LxmfNext(decode_lxmf_summary(body)?),
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_READ => DeviceResponse::LxmfRead(decode_lxmf_read_chunk(body)?),
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_MAILBOX_STATUS => {
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_NEXT => DeviceResponse::LxmfNext(decode_lxmf_summary(body)?),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_READ => DeviceResponse::LxmfRead(decode_lxmf_read_chunk(body)?),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_MAILBOX_STATUS => {
             DeviceResponse::LxmfMailboxStatus(decode_lxmf_mailbox_status(body)?)
         }
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_MAILBOX_ACKNOWLEDGE => {
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_MAILBOX_ACKNOWLEDGE => {
             DeviceResponse::LxmfMailboxAcknowledged(decode_lxmf_mailbox_status(body)?)
         }
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_BASIC_SEND => {
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_BASIC_SEND => {
             DeviceResponse::LxmfBasicSendAccepted(decode_lxmf_basic_send_accepted(body)?)
         }
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_PEER_NEXT => {
-            DeviceResponse::LxmfPeerNext(decode_lxmf_peer_discovery_page(body)?)
-        }
-        #[cfg(feature = "experimental-nomad")]
-        OP_EXPERIMENTAL_NOMAD_FETCH_START => {
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_PEER_NEXT => DeviceResponse::LxmfPeerNext(decode_lxmf_peer_discovery_page(body)?),
+        #[cfg(feature = "nomad")]
+        OP_NOMAD_FETCH_START => {
             DeviceResponse::NomadFetchStartAccepted(decode_nomad_fetch_start_accepted(body)?)
         }
-        #[cfg(feature = "experimental-nomad")]
-        OP_EXPERIMENTAL_NOMAD_FETCH_POLL => {
-            DeviceResponse::NomadFetchPoll(decode_nomad_fetch_poll(body)?)
-        }
-        #[cfg(feature = "experimental-network-config")]
-        OP_EXPERIMENTAL_NETWORK_CONFIG_GET => {
-            DeviceResponse::NetworkConfig(decode_network_config(body)?)
-        }
-        #[cfg(feature = "experimental-network-config")]
-        OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE => {
+        #[cfg(feature = "nomad")]
+        OP_NOMAD_FETCH_POLL => DeviceResponse::NomadFetchPoll(decode_nomad_fetch_poll(body)?),
+        #[cfg(feature = "network-config")]
+        OP_NETWORK_CONFIG_GET => DeviceResponse::NetworkConfig(decode_network_config(body)?),
+        #[cfg(feature = "network-config")]
+        OP_NETWORK_CONFIG_MUTATE => {
             DeviceResponse::NetworkConfigMutation(decode_network_config_mutation_outcome(body)?)
         }
-        #[cfg(feature = "experimental-network-config")]
-        OP_EXPERIMENTAL_NETWORK_STATUS => {
-            DeviceResponse::NetworkStatus(decode_network_status(body)?)
-        }
-        OP_EXPERIMENTAL_NODE_DIAGNOSTICS => {
-            DeviceResponse::NodeDiagnostics(decode_node_diagnostics(body)?)
-        }
-        OP_EXPERIMENTAL_ROUTE_DIAGNOSTICS_PAGE => {
+        #[cfg(feature = "network-config")]
+        OP_NETWORK_STATUS => DeviceResponse::NetworkStatus(decode_network_status(body)?),
+        OP_NODE_DIAGNOSTICS => DeviceResponse::NodeDiagnostics(decode_node_diagnostics(body)?),
+        OP_ROUTE_DIAGNOSTICS_PAGE => {
             DeviceResponse::RouteDiagnosticsPage(decode_route_diagnostics_page(body)?)
         }
-        OP_EXPERIMENTAL_RADIO_TRACE_PAGE => {
+        OP_RADIO_TRACE_PAGE => {
             DeviceResponse::RadioTracePage(decode_radio_trace_page_compact(body)?)
         }
-        OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE => {
+        OP_MANUAL_SERVICE_ANNOUNCE => {
             DeviceResponse::ManualServiceAnnounce(decode_manual_service_announce_disposition(body)?)
         }
-        OP_EXPERIMENTAL_RETICULUM_PROBE_START => {
+        OP_RETICULUM_PROBE_START => {
             DeviceResponse::ReticulumProbeStartAccepted(decode_probe_start_accepted(body)?)
         }
-        OP_EXPERIMENTAL_RETICULUM_PROBE_POLL => {
-            DeviceResponse::ReticulumProbePoll(decode_probe_poll(body)?)
-        }
-        #[cfg(feature = "experimental-rns-data")]
-        OP_EXPERIMENTAL_SUBMIT_RNS_DATA => {
+        OP_RETICULUM_PROBE_POLL => DeviceResponse::ReticulumProbePoll(decode_probe_poll(body)?),
+        #[cfg(feature = "rns-data")]
+        OP_SUBMIT_RNS_DATA => {
             DeviceResponse::SubmitRnsDataAccepted(decode_submission_accepted(body)?)
         }
         RESPONSE_ERROR => DeviceResponse::Error(decode_error(body)?),
@@ -1392,7 +1319,7 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
 
 type SliceEncoder<'a> = Encoder<Cursor<&'a mut [u8]>>;
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 const fn cbor_u64_len(value: u64) -> usize {
     match value {
         0..=23 => 1,
@@ -1403,7 +1330,7 @@ const fn cbor_u64_len(value: u64) -> usize {
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 const fn cbor_i32_len(value: i32) -> usize {
     if value >= 0 {
         cbor_u64_len(value as u64)
@@ -1412,7 +1339,7 @@ const fn cbor_i32_len(value: i32) -> usize {
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 const fn cbor_bytes_len(length: usize) -> usize {
     let header = match length {
         0..=23 => 1,
@@ -1423,7 +1350,7 @@ const fn cbor_bytes_len(length: usize) -> usize {
     header + length
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 const fn lxmf_message_location_len(location: LxmfMessageLocation) -> usize {
     // Seven-entry map header + seven one-byte integer keys + canonical values.
     1 + 7
@@ -1436,7 +1363,7 @@ const fn lxmf_message_location_len(location: LxmfMessageLocation) -> usize {
         + cbor_u64_len(location.updated_at_unix_seconds() as u64)
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 const fn lxmf_basic_send_body_len(
     timestamp_unix_ms: u64,
     title: usize,
@@ -1456,7 +1383,7 @@ const fn lxmf_basic_send_body_len(
         }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn encode_lxmf_message_location(
     encoder: &mut SliceEncoder<'_>,
     location: LxmfMessageLocation,
@@ -1493,7 +1420,7 @@ fn encode_capabilities(
     encoder: &mut SliceEncoder<'_>,
     capabilities: CapabilitySnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(22));
+    put!(encoder.map(20));
     put!(encoder.u8(0));
     encode_version(encoder, capabilities.api_version)?;
     put!(encoder.u8(1));
@@ -1501,47 +1428,43 @@ fn encode_capabilities(
     put!(encoder.u8(2));
     put!(encoder.u8(capabilities.direct_radio_tx.wire_code()));
     put!(encoder.u8(3));
-    put!(encoder.bool(capabilities.experimental_submit_rns_data));
+    put!(encoder.bool(capabilities.submit_rns_data));
     put!(encoder.u8(4));
     put!(encoder.u16(capabilities.max_message_bytes));
     put!(encoder.u8(5));
     put!(encoder.u16(capabilities.max_body_bytes));
     put!(encoder.u8(6));
     put!(encoder.u16(capabilities.max_submit_rns_data_payload_bytes));
-    put!(encoder.u8(7));
-    put!(encoder.u8(capabilities.experimental_rns_inbox.wire_code()));
-    put!(encoder.u8(8));
-    put!(encoder.u16(capabilities.max_rns_inbox_payload_bytes));
     put!(encoder.u8(9));
-    put!(encoder.u8(capabilities.experimental_lxmf.wire_code()));
+    put!(encoder.u8(capabilities.lxmf.wire_code()));
     put!(encoder.u8(10));
     put!(encoder.u16(capabilities.max_lxmf_read_chunk_bytes));
     put!(encoder.u8(11));
-    put!(encoder.u8(capabilities.experimental_lxmf_basic_send.wire_code()));
+    put!(encoder.u8(capabilities.lxmf_basic_send.wire_code()));
     put!(encoder.u8(12));
     put!(encoder.u16(capabilities.max_lxmf_basic_title_bytes));
     put!(encoder.u8(13));
     put!(encoder.u16(capabilities.max_lxmf_basic_content_bytes));
     put!(encoder.u8(14));
-    put!(encoder.u8(capabilities.experimental_lxmf_peer_discovery.wire_code(),));
+    put!(encoder.u8(capabilities.lxmf_peer_discovery.wire_code(),));
     put!(encoder.u8(15));
     put!(encoder.u16(capabilities.max_lxmf_peer_app_data_bytes));
     put!(encoder.u8(16));
-    put!(encoder.u8(capabilities.experimental_nomad.wire_code()));
+    put!(encoder.u8(capabilities.nomad.wire_code()));
     put!(encoder.u8(17));
     put!(encoder.u16(capabilities.max_nomad_page_path_bytes));
     put!(encoder.u8(18));
     put!(encoder.u16(capabilities.max_nomad_page_bytes));
     put!(encoder.u8(19));
-    put!(encoder.u8(capabilities.experimental_network_config.wire_code()));
+    put!(encoder.u8(capabilities.network_config.wire_code()));
     put!(encoder.u8(20));
     put!(encoder.u8(capabilities.manual_service_announce.wire_code()));
     put!(encoder.u8(21));
-    put!(encoder.u8(capabilities.experimental_reticulum_probe.wire_code()));
+    put!(encoder.u8(capabilities.reticulum_probe.wire_code()));
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_network_config_mutation_request(
     encoder: &mut SliceEncoder<'_>,
     request: NetworkConfigMutationRequest<'_>,
@@ -1623,7 +1546,7 @@ fn encode_network_config_mutation_request(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_wifi_network_summary(
     encoder: &mut SliceEncoder<'_>,
     wifi: WifiNetworkConfigSummary,
@@ -1642,7 +1565,7 @@ fn encode_wifi_network_summary(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_tcp_peer_summary(
     encoder: &mut SliceEncoder<'_>,
     peer: ReticulumTcpPeerConfigSummary,
@@ -1657,7 +1580,7 @@ fn encode_tcp_peer_summary(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_tcp_host_peer_summary(
     encoder: &mut SliceEncoder<'_>,
     peer: ReticulumTcpPeerHostConfigSummary,
@@ -1672,7 +1595,7 @@ fn encode_tcp_host_peer_summary(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_wifi_network_update(
     encoder: &mut SliceEncoder<'_>,
     wifi: WifiNetworkUpdate<'_>,
@@ -1700,7 +1623,7 @@ fn encode_wifi_network_update(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_tcp_peer_update(
     encoder: &mut SliceEncoder<'_>,
     peer: ReticulumTcpPeerUpdate,
@@ -1715,7 +1638,7 @@ fn encode_tcp_peer_update(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_tcp_host_peer_update(
     encoder: &mut SliceEncoder<'_>,
     peer: ReticulumTcpPeerHostUpdate<'_>,
@@ -1730,7 +1653,7 @@ fn encode_tcp_host_peer_update(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_gateway_policy(
     encoder: &mut SliceEncoder<'_>,
     policy: GatewayPolicy,
@@ -1743,7 +1666,7 @@ fn encode_gateway_policy(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_rmap_location(
     encoder: &mut SliceEncoder<'_>,
     location: RmapLocation,
@@ -1756,7 +1679,7 @@ fn encode_rmap_location(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_rmap_config(
     encoder: &mut SliceEncoder<'_>,
     config: RmapConfig,
@@ -1776,7 +1699,7 @@ fn encode_rmap_config(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_lora_radio_profile(
     encoder: &mut SliceEncoder<'_>,
     profile: LoraRadioProfile,
@@ -1795,12 +1718,12 @@ fn encode_lora_radio_profile(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_network_config(
     encoder: &mut SliceEncoder<'_>,
     config: NetworkConfigSnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(11));
+    put!(encoder.map(10));
     put!(encoder.u8(0));
     put!(encoder.u64(config.revision));
     put!(encoder.u8(1));
@@ -1843,13 +1766,11 @@ fn encode_network_config(
         }
     }
     put!(encoder.u8(9));
-    put!(encoder.u8(config.lora_tx_power_dbm().get()));
-    put!(encoder.u8(10));
     encode_lora_radio_profile(encoder, config.lora_profile())?;
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_network_config_mutation_outcome(
     encoder: &mut SliceEncoder<'_>,
     outcome: NetworkConfigMutationOutcome,
@@ -1878,7 +1799,7 @@ fn encode_network_config_mutation_outcome(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_network_status(
     encoder: &mut SliceEncoder<'_>,
     status: NetworkRuntimeStatus,
@@ -1942,7 +1863,7 @@ fn encode_network_status(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_reticulum_dns_diagnostics(
     encoder: &mut SliceEncoder<'_>,
     diagnostics: ReticulumDnsDiagnostics,
@@ -1979,7 +1900,7 @@ fn encode_reticulum_dns_diagnostics(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_reticulum_dns_raw_attempt(
     encoder: &mut SliceEncoder<'_>,
     attempt: ReticulumDnsRawAttempt,
@@ -1998,7 +1919,7 @@ fn encode_reticulum_dns_raw_attempt(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_reticulum_dns_resolution(
     encoder: &mut SliceEncoder<'_>,
     resolution: ReticulumDnsResolution,
@@ -2013,7 +1934,7 @@ fn encode_reticulum_dns_resolution(
     Ok(())
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn encode_optional_ipv4(
     encoder: &mut SliceEncoder<'_>,
     address: Option<[u8; 4]>,
@@ -2026,40 +1947,6 @@ fn encode_optional_ipv4(
             put!(encoder.null());
         }
     }
-    Ok(())
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-fn encode_rns_inbox_status(
-    encoder: &mut SliceEncoder<'_>,
-    status: RnsInboxStatus,
-) -> Result<(), EncodeError> {
-    put!(encoder.map(5));
-    put!(encoder.u8(0));
-    put!(encoder.u16(status.depth));
-    put!(encoder.u8(1));
-    put!(encoder.u16(status.capacity));
-    put!(encoder.u8(2));
-    put!(encoder.u64(status.dropped_since_boot));
-    put!(encoder.u8(3));
-    put!(encoder.u16(status.max_payload_bytes));
-    put!(encoder.u8(4));
-    put!(encoder.bool(status.durable));
-    Ok(())
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-fn encode_rns_inbox_item(
-    encoder: &mut SliceEncoder<'_>,
-    item: &RnsInboxItem,
-) -> Result<(), EncodeError> {
-    put!(encoder.map(3));
-    put!(encoder.u8(0));
-    put!(encoder.u64(item.id()));
-    put!(encoder.u8(1));
-    put!(encoder.bytes(&item.destination().0));
-    put!(encoder.u8(2));
-    put!(encoder.bytes(item.payload()));
     Ok(())
 }
 
@@ -2143,7 +2030,7 @@ fn encode_probe_poll(
     Ok(())
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn encode_lxmf_summary(
     encoder: &mut SliceEncoder<'_>,
     summary: LxmfMessageSummary,
@@ -2176,7 +2063,7 @@ fn encode_lxmf_summary(
     Ok(())
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn encode_lxmf_read_chunk(
     encoder: &mut SliceEncoder<'_>,
     chunk: &LxmfReadChunk,
@@ -2193,7 +2080,7 @@ fn encode_lxmf_read_chunk(
     Ok(())
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn encode_lxmf_mailbox_status(
     encoder: &mut SliceEncoder<'_>,
     status: LxmfMailboxStatus,
@@ -2215,7 +2102,7 @@ fn encode_lxmf_mailbox_status(
     Ok(())
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn encode_lxmf_basic_send_accepted(
     encoder: &mut SliceEncoder<'_>,
     accepted: LxmfBasicSendAccepted,
@@ -2228,7 +2115,7 @@ fn encode_lxmf_basic_send_accepted(
     Ok(())
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn encode_lxmf_peer_discovery_page(
     encoder: &mut SliceEncoder<'_>,
     page: &LxmfPeerDiscoveryPage,
@@ -2259,7 +2146,7 @@ fn encode_lxmf_peer_discovery_page(
     Ok(())
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn encode_lxmf_discovered_peer(
     encoder: &mut SliceEncoder<'_>,
     peer: &LxmfDiscoveredPeer,
@@ -2291,7 +2178,7 @@ fn encode_lxmf_discovered_peer(
     Ok(())
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn encode_nomad_fetch_start_accepted(
     encoder: &mut SliceEncoder<'_>,
     accepted: NomadFetchStartAccepted,
@@ -2304,7 +2191,7 @@ fn encode_nomad_fetch_start_accepted(
     Ok(())
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn encode_nomad_fetch_poll(
     encoder: &mut SliceEncoder<'_>,
     response: &NomadFetchPollResponse,
@@ -2779,7 +2666,7 @@ fn encode_submission_status(
     Ok(())
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn encode_submission_accepted(
     encoder: &mut SliceEncoder<'_>,
     accepted: SubmissionAccepted,
@@ -2985,48 +2872,36 @@ fn decode_request_body<'a>(
         OP_SYSTEM_CAPABILITIES => decode_capabilities_request(body),
         OP_IDENTITY_SUMMARY => decode_identity_summary_request(body),
         OP_SUBMISSION_STATUS => decode_status_request(body),
-        #[cfg(feature = "experimental-rns-inbox")]
-        OP_EXPERIMENTAL_RNS_INBOX_STATUS => {
-            decode_empty_request(body, DeviceRequest::RnsInboxStatus)
-        }
-        #[cfg(feature = "experimental-rns-inbox")]
-        OP_EXPERIMENTAL_RNS_INBOX_PEEK => decode_empty_request(body, DeviceRequest::RnsInboxPeek),
-        #[cfg(feature = "experimental-rns-data")]
-        OP_EXPERIMENTAL_SUBMIT_RNS_DATA => decode_submit_request(body),
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_NEXT => decode_lxmf_next_request(body),
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_READ => decode_lxmf_read_request(body),
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_MAILBOX_STATUS => {
-            decode_empty_request(body, DeviceRequest::LxmfMailboxStatus)
-        }
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_MAILBOX_ACKNOWLEDGE => decode_lxmf_mailbox_acknowledge_request(body),
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_BASIC_SEND => decode_lxmf_basic_send_request(body),
-        #[cfg(feature = "experimental-lxmf")]
-        OP_EXPERIMENTAL_LXMF_PEER_NEXT => decode_lxmf_peer_next_request(body),
-        #[cfg(feature = "experimental-nomad")]
-        OP_EXPERIMENTAL_NOMAD_FETCH_START => decode_nomad_fetch_start_request(body),
-        #[cfg(feature = "experimental-nomad")]
-        OP_EXPERIMENTAL_NOMAD_FETCH_POLL => decode_nomad_fetch_poll_request(body),
-        OP_EXPERIMENTAL_RETICULUM_PROBE_START => decode_probe_start_request(body),
-        OP_EXPERIMENTAL_RETICULUM_PROBE_POLL => decode_probe_poll_request(body),
-        #[cfg(feature = "experimental-network-config")]
-        OP_EXPERIMENTAL_NETWORK_CONFIG_GET => {
-            decode_empty_request(body, DeviceRequest::NetworkConfigGet)
-        }
-        #[cfg(feature = "experimental-network-config")]
-        OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE => decode_network_config_mutation_request(body),
-        #[cfg(feature = "experimental-network-config")]
-        OP_EXPERIMENTAL_NETWORK_STATUS => decode_empty_request(body, DeviceRequest::NetworkStatus),
-        OP_EXPERIMENTAL_NODE_DIAGNOSTICS => {
-            decode_empty_request(body, DeviceRequest::NodeDiagnostics)
-        }
-        OP_EXPERIMENTAL_ROUTE_DIAGNOSTICS_PAGE => decode_route_diagnostics_request(body),
-        OP_EXPERIMENTAL_RADIO_TRACE_PAGE => decode_radio_trace_request(body),
-        OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE => {
+        #[cfg(feature = "rns-data")]
+        OP_SUBMIT_RNS_DATA => decode_submit_request(body),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_NEXT => decode_lxmf_next_request(body),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_READ => decode_lxmf_read_request(body),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_MAILBOX_STATUS => decode_empty_request(body, DeviceRequest::LxmfMailboxStatus),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_MAILBOX_ACKNOWLEDGE => decode_lxmf_mailbox_acknowledge_request(body),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_BASIC_SEND => decode_lxmf_basic_send_request(body),
+        #[cfg(feature = "lxmf")]
+        OP_LXMF_PEER_NEXT => decode_lxmf_peer_next_request(body),
+        #[cfg(feature = "nomad")]
+        OP_NOMAD_FETCH_START => decode_nomad_fetch_start_request(body),
+        #[cfg(feature = "nomad")]
+        OP_NOMAD_FETCH_POLL => decode_nomad_fetch_poll_request(body),
+        OP_RETICULUM_PROBE_START => decode_probe_start_request(body),
+        OP_RETICULUM_PROBE_POLL => decode_probe_poll_request(body),
+        #[cfg(feature = "network-config")]
+        OP_NETWORK_CONFIG_GET => decode_empty_request(body, DeviceRequest::NetworkConfigGet),
+        #[cfg(feature = "network-config")]
+        OP_NETWORK_CONFIG_MUTATE => decode_network_config_mutation_request(body),
+        #[cfg(feature = "network-config")]
+        OP_NETWORK_STATUS => decode_empty_request(body, DeviceRequest::NetworkStatus),
+        OP_NODE_DIAGNOSTICS => decode_empty_request(body, DeviceRequest::NodeDiagnostics),
+        OP_ROUTE_DIAGNOSTICS_PAGE => decode_route_diagnostics_request(body),
+        OP_RADIO_TRACE_PAGE => decode_radio_trace_request(body),
+        OP_MANUAL_SERVICE_ANNOUNCE => {
             decode_empty_request(body, DeviceRequest::ManualServiceAnnounce)
         }
         other => Err(DecodeError::UnsupportedOperation(other)),
@@ -3155,7 +3030,7 @@ fn decode_radio_trace_request(body: &[u8]) -> Result<DeviceRequest<'static>, Dec
     )))
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_next_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3183,7 +3058,7 @@ fn decode_lxmf_next_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeErro
     Ok(DeviceRequest::LxmfNext { after })
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_read_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3230,7 +3105,7 @@ fn decode_lxmf_read_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeErro
     })
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_mailbox_acknowledge_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3261,7 +3136,7 @@ fn decode_lxmf_mailbox_acknowledge_request(body: &[u8]) -> Result<DeviceRequest<
     })
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_basic_send_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3346,7 +3221,7 @@ fn decode_lxmf_basic_send_request(body: &[u8]) -> Result<DeviceRequest<'_>, Deco
     })
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_message_location(
     decoder: &mut Decoder<'_>,
 ) -> Result<LxmfMessageLocation, DecodeError> {
@@ -3425,7 +3300,7 @@ fn decode_lxmf_message_location(
     .map_err(|_| DecodeError::InvalidLxmfMessageLocation)
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_peer_next_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3474,7 +3349,7 @@ fn decode_lxmf_peer_next_request(body: &[u8]) -> Result<DeviceRequest<'_>, Decod
     Ok(DeviceRequest::LxmfPeerNext { after })
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn decode_nomad_fetch_start_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3540,7 +3415,7 @@ fn decode_nomad_fetch_start_request(body: &[u8]) -> Result<DeviceRequest<'_>, De
     )))
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn decode_nomad_fetch_poll_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3561,7 +3436,7 @@ fn decode_nomad_fetch_poll_request(body: &[u8]) -> Result<DeviceRequest<'_>, Dec
     }))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_network_config_mutation_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -3617,7 +3492,7 @@ fn decode_network_config_mutation_request(body: &[u8]) -> Result<DeviceRequest<'
     ))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_network_config_mutation<'a>(
     kind: u8,
     value: &'a [u8],
@@ -3738,13 +3613,13 @@ fn decode_network_config_mutation<'a>(
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_wifi_profile_id(decoder: &mut Decoder<'_>) -> Result<WifiNetworkProfileId, DecodeError> {
     let bytes = decode_fixed_bytes::<16>(decoder, RequiredField::WifiNetworkProfileId)?;
     WifiNetworkProfileId::new(bytes).map_err(|_| DecodeError::InvalidWifiNetworkProfileId)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_wifi_network_update<'a>(
     decoder: &mut Decoder<'a>,
 ) -> Result<WifiNetworkUpdate<'a>, DecodeError> {
@@ -3784,7 +3659,7 @@ fn decode_wifi_network_update<'a>(
     ))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_wifi_credential_update<'a>(
     decoder: &mut Decoder<'a>,
 ) -> Result<WifiCredentialUpdate<'a>, DecodeError> {
@@ -3816,7 +3691,7 @@ fn decode_wifi_credential_update<'a>(
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_tcp_peer_update(
     decoder: &mut Decoder<'_>,
 ) -> Result<ReticulumTcpPeerUpdate, DecodeError> {
@@ -3859,7 +3734,7 @@ fn decode_tcp_peer_update(
     .map_err(|_| DecodeError::InvalidReticulumTcpPeerPort)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_tcp_host_peer_update<'a>(
     decoder: &mut Decoder<'a>,
 ) -> Result<ReticulumTcpPeerHostUpdate<'a>, DecodeError> {
@@ -3897,7 +3772,7 @@ fn decode_tcp_host_peer_update<'a>(
     .map_err(|_| DecodeError::InvalidReticulumTcpPeerPort)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_gateway_policy(decoder: &mut Decoder<'_>) -> Result<GatewayPolicy, DecodeError> {
     let entries = decode_map_len(decoder)?;
     let mut wifi_transport_enabled = None;
@@ -3935,7 +3810,7 @@ fn decode_gateway_policy(decoder: &mut Decoder<'_>) -> Result<GatewayPolicy, Dec
     ))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_rmap_location(decoder: &mut Decoder<'_>) -> Result<RmapLocation, DecodeError> {
     let entries = decode_map_len(decoder)?;
     let mut latitude_e6 = None;
@@ -3961,7 +3836,7 @@ fn decode_rmap_location(decoder: &mut Decoder<'_>) -> Result<RmapLocation, Decod
     .map_err(|_| DecodeError::InvalidRmapLocation)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_rmap_config(decoder: &mut Decoder<'_>) -> Result<RmapConfig, DecodeError> {
     let entries = decode_map_len(decoder)?;
     let mut discovery_enabled = None;
@@ -4007,7 +3882,7 @@ fn decode_rmap_config(decoder: &mut Decoder<'_>) -> Result<RmapConfig, DecodeErr
     ))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_lora_radio_profile(decoder: &mut Decoder<'_>) -> Result<LoraRadioProfile, DecodeError> {
     let entries = decode_map_len(decoder)?;
     let mut frequency_hz = None;
@@ -4113,7 +3988,7 @@ fn decode_status_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> 
     })
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn decode_submit_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -4168,25 +4043,23 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
     let mut api_version = None;
     let mut packet_output = None;
     let mut direct_radio_tx = None;
-    let mut experimental_submit = None;
+    let mut submit = None;
     let mut max_message = None;
     let mut max_body = None;
     let mut max_payload = None;
-    let mut experimental_rns_inbox = None;
-    let mut max_rns_inbox_payload = None;
-    let mut experimental_lxmf = None;
+    let mut lxmf = None;
     let mut max_lxmf_read_chunk = None;
-    let mut experimental_lxmf_basic_send = None;
+    let mut lxmf_basic_send = None;
     let mut max_lxmf_basic_title = None;
     let mut max_lxmf_basic_content = None;
-    let mut experimental_lxmf_peer_discovery = None;
+    let mut lxmf_peer_discovery = None;
     let mut max_lxmf_peer_app_data = None;
-    let mut experimental_nomad = None;
+    let mut nomad = None;
     let mut max_nomad_page_path = None;
     let mut max_nomad_page = None;
-    let mut experimental_network_config = None;
+    let mut network_config = None;
     let mut manual_service_announce = None;
-    let mut experimental_reticulum_probe = None;
+    let mut reticulum_probe = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -4210,11 +4083,8 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                 direct_radio_tx = Some(decode_direct_radio_availability(value)?);
             }
             3 => {
-                reject_duplicate(
-                    experimental_submit.is_some(),
-                    RequiredField::CapabilityExperimentalSubmit,
-                )?;
-                experimental_submit = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
+                reject_duplicate(submit.is_some(), RequiredField::CapabilitySubmitRnsData)?;
+                submit = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
             }
             4 => {
                 reject_duplicate(
@@ -4234,33 +4104,12 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                 )?;
                 max_payload = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
             }
-            7 => {
-                reject_duplicate(
-                    experimental_rns_inbox.is_some(),
-                    RequiredField::CapabilityExperimentalRnsInbox,
-                )?;
-                let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                experimental_rns_inbox = Some(decode_capability_availability(
-                    value,
-                    RequiredField::CapabilityExperimentalRnsInbox,
-                )?);
-            }
-            8 => {
-                reject_duplicate(
-                    max_rns_inbox_payload.is_some(),
-                    RequiredField::CapabilityMaxRnsInboxPayloadBytes,
-                )?;
-                max_rns_inbox_payload = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
-            }
             9 => {
-                reject_duplicate(
-                    experimental_lxmf.is_some(),
-                    RequiredField::CapabilityExperimentalLxmf,
-                )?;
+                reject_duplicate(lxmf.is_some(), RequiredField::CapabilityLxmf)?;
                 let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                experimental_lxmf = Some(decode_capability_availability(
+                lxmf = Some(decode_capability_availability(
                     value,
-                    RequiredField::CapabilityExperimentalLxmf,
+                    RequiredField::CapabilityLxmf,
                 )?);
             }
             10 => {
@@ -4272,13 +4121,13 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             }
             11 => {
                 reject_duplicate(
-                    experimental_lxmf_basic_send.is_some(),
-                    RequiredField::CapabilityExperimentalLxmfBasicSend,
+                    lxmf_basic_send.is_some(),
+                    RequiredField::CapabilityLxmfBasicSend,
                 )?;
                 let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                experimental_lxmf_basic_send = Some(decode_capability_availability(
+                lxmf_basic_send = Some(decode_capability_availability(
                     value,
-                    RequiredField::CapabilityExperimentalLxmfBasicSend,
+                    RequiredField::CapabilityLxmfBasicSend,
                 )?);
             }
             12 => {
@@ -4297,13 +4146,13 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             }
             14 => {
                 reject_duplicate(
-                    experimental_lxmf_peer_discovery.is_some(),
-                    RequiredField::CapabilityExperimentalLxmfPeerDiscovery,
+                    lxmf_peer_discovery.is_some(),
+                    RequiredField::CapabilityLxmfPeerDiscovery,
                 )?;
                 let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                experimental_lxmf_peer_discovery = Some(decode_capability_availability(
+                lxmf_peer_discovery = Some(decode_capability_availability(
                     value,
-                    RequiredField::CapabilityExperimentalLxmfPeerDiscovery,
+                    RequiredField::CapabilityLxmfPeerDiscovery,
                 )?);
             }
             15 => {
@@ -4314,14 +4163,11 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                 max_lxmf_peer_app_data = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
             }
             16 => {
-                reject_duplicate(
-                    experimental_nomad.is_some(),
-                    RequiredField::CapabilityExperimentalNomad,
-                )?;
+                reject_duplicate(nomad.is_some(), RequiredField::CapabilityNomad)?;
                 let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                experimental_nomad = Some(decode_capability_availability(
+                nomad = Some(decode_capability_availability(
                     value,
-                    RequiredField::CapabilityExperimentalNomad,
+                    RequiredField::CapabilityNomad,
                 )?);
             }
             17 => {
@@ -4340,13 +4186,13 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             }
             19 => {
                 reject_duplicate(
-                    experimental_network_config.is_some(),
-                    RequiredField::CapabilityExperimentalNetworkConfig,
+                    network_config.is_some(),
+                    RequiredField::CapabilityNetworkConfig,
                 )?;
                 let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                experimental_network_config = Some(decode_capability_availability(
+                network_config = Some(decode_capability_availability(
                     value,
-                    RequiredField::CapabilityExperimentalNetworkConfig,
+                    RequiredField::CapabilityNetworkConfig,
                 )?);
             }
             20 => {
@@ -4362,13 +4208,13 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             }
             21 => {
                 reject_duplicate(
-                    experimental_reticulum_probe.is_some(),
-                    RequiredField::CapabilityExperimentalReticulumProbe,
+                    reticulum_probe.is_some(),
+                    RequiredField::CapabilityReticulumProbe,
                 )?;
                 let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
-                experimental_reticulum_probe = Some(decode_capability_availability(
+                reticulum_probe = Some(decode_capability_availability(
                     value,
-                    RequiredField::CapabilityExperimentalReticulumProbe,
+                    RequiredField::CapabilityReticulumProbe,
                 )?);
             }
             _ => skip_strict(&mut decoder, 0)?,
@@ -4381,41 +4227,51 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
         api_version,
         packet_output: require(packet_output, RequiredField::CapabilityPacketOutput)?,
         direct_radio_tx: require(direct_radio_tx, RequiredField::CapabilityDirectRadioTx)?,
-        experimental_submit_rns_data: require(
-            experimental_submit,
-            RequiredField::CapabilityExperimentalSubmit,
-        )?,
+        submit_rns_data: require(submit, RequiredField::CapabilitySubmitRnsData)?,
         max_message_bytes: require(max_message, RequiredField::CapabilityMaxMessageBytes)?,
         max_body_bytes: require(max_body, RequiredField::CapabilityMaxBodyBytes)?,
         max_submit_rns_data_payload_bytes: require(
             max_payload,
             RequiredField::CapabilityMaxSubmitPayloadBytes,
         )?,
-        experimental_rns_inbox: experimental_rns_inbox
-            .unwrap_or(CapabilityAvailability::Unavailable),
-        max_rns_inbox_payload_bytes: max_rns_inbox_payload.unwrap_or(0),
-        experimental_lxmf: experimental_lxmf.unwrap_or(CapabilityAvailability::Unavailable),
-        max_lxmf_read_chunk_bytes: max_lxmf_read_chunk.unwrap_or(0),
-        experimental_lxmf_basic_send: experimental_lxmf_basic_send
-            .unwrap_or(CapabilityAvailability::Unavailable),
-        max_lxmf_basic_title_bytes: max_lxmf_basic_title.unwrap_or(0),
-        max_lxmf_basic_content_bytes: max_lxmf_basic_content.unwrap_or(0),
-        experimental_lxmf_peer_discovery: experimental_lxmf_peer_discovery
-            .unwrap_or(CapabilityAvailability::Unavailable),
-        max_lxmf_peer_app_data_bytes: max_lxmf_peer_app_data.unwrap_or(0),
-        experimental_nomad: experimental_nomad.unwrap_or(CapabilityAvailability::Unavailable),
-        max_nomad_page_path_bytes: max_nomad_page_path.unwrap_or(0),
-        max_nomad_page_bytes: max_nomad_page.unwrap_or(0),
-        experimental_network_config: experimental_network_config
-            .unwrap_or(CapabilityAvailability::Unavailable),
-        manual_service_announce: manual_service_announce
-            .unwrap_or(CapabilityAvailability::Unavailable),
-        experimental_reticulum_probe: experimental_reticulum_probe
-            .unwrap_or(CapabilityAvailability::Unavailable),
+        lxmf: require(lxmf, RequiredField::CapabilityLxmf)?,
+        max_lxmf_read_chunk_bytes: require(
+            max_lxmf_read_chunk,
+            RequiredField::CapabilityMaxLxmfReadChunkBytes,
+        )?,
+        lxmf_basic_send: require(lxmf_basic_send, RequiredField::CapabilityLxmfBasicSend)?,
+        max_lxmf_basic_title_bytes: require(
+            max_lxmf_basic_title,
+            RequiredField::CapabilityMaxLxmfBasicTitleBytes,
+        )?,
+        max_lxmf_basic_content_bytes: require(
+            max_lxmf_basic_content,
+            RequiredField::CapabilityMaxLxmfBasicContentBytes,
+        )?,
+        lxmf_peer_discovery: require(
+            lxmf_peer_discovery,
+            RequiredField::CapabilityLxmfPeerDiscovery,
+        )?,
+        max_lxmf_peer_app_data_bytes: require(
+            max_lxmf_peer_app_data,
+            RequiredField::CapabilityMaxLxmfPeerAppDataBytes,
+        )?,
+        nomad: require(nomad, RequiredField::CapabilityNomad)?,
+        max_nomad_page_path_bytes: require(
+            max_nomad_page_path,
+            RequiredField::CapabilityMaxNomadPagePathBytes,
+        )?,
+        max_nomad_page_bytes: require(max_nomad_page, RequiredField::CapabilityMaxNomadPageBytes)?,
+        network_config: require(network_config, RequiredField::CapabilityNetworkConfig)?,
+        manual_service_announce: require(
+            manual_service_announce,
+            RequiredField::CapabilityManualServiceAnnounce,
+        )?,
+        reticulum_probe: require(reticulum_probe, RequiredField::CapabilityReticulumProbe)?,
     })
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -4431,7 +4287,6 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
     let mut rmap_phone_location = None;
     let mut tcp_host_peer_seen = false;
     let mut tcp_host_peer = None;
-    let mut lora_tx_power_dbm = None;
     let mut lora_profile = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
@@ -4517,16 +4372,6 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
             }
             9 => {
                 reject_duplicate(
-                    lora_tx_power_dbm.is_some(),
-                    RequiredField::NetworkConfigLoraTxPowerDbm,
-                )?;
-                lora_tx_power_dbm = Some(
-                    LoraTransmitPowerDbm::new(decoder.u8().map_err(|_| DecodeError::Malformed)?)
-                        .map_err(|_| DecodeError::InvalidLoraTransmitPowerDbm)?,
-                );
-            }
-            10 => {
-                reject_duplicate(
                     lora_profile.is_some(),
                     RequiredField::NetworkConfigLoraProfile,
                 )?;
@@ -4541,34 +4386,48 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
             RequiredField::NetworkConfigTcpPeer,
         ));
     }
-    let legacy_power = lora_tx_power_dbm.unwrap_or(LoraTransmitPowerDbm::DEFAULT);
-    let lora_profile = match lora_profile {
-        Some(profile) if profile.tx_power_dbm() != legacy_power => {
-            return Err(DecodeError::InvalidNetworkConfigSnapshot);
-        }
-        Some(profile) => profile,
-        None => LoraRadioProfile::DEFAULT.with_tx_power(legacy_power),
-    };
-    NetworkConfigSnapshot::new_with_lora_profile(
+    if !tcp_host_peer_seen {
+        return Err(DecodeError::MissingField(
+            RequiredField::NetworkConfigTcpHostPeer,
+        ));
+    }
+    if !rmap_phone_location_seen {
+        return Err(DecodeError::MissingField(
+            RequiredField::NetworkConfigRmapPhoneLocation,
+        ));
+    }
+    NetworkConfigSnapshot::new(
         require(revision, RequiredField::NetworkConfigRevision)?,
         require(wifi_profiles, RequiredField::NetworkConfigWifiProfiles)?,
         tcp_peer,
         tcp_host_peer,
         GatewayPolicy::new(
-            wifi_transport_enabled.unwrap_or(true),
-            automatic_announces_enabled.unwrap_or(true),
+            require(
+                wifi_transport_enabled,
+                RequiredField::NetworkConfigWifiTransportEnabled,
+            )?,
+            require(
+                automatic_announces_enabled,
+                RequiredField::NetworkConfigAutomaticAnnouncesEnabled,
+            )?,
         ),
         RmapConfig::new(
-            rmap_discovery_enabled.unwrap_or(false),
-            rmap_share_location.unwrap_or(false),
+            require(
+                rmap_discovery_enabled,
+                RequiredField::NetworkConfigRmapDiscoveryEnabled,
+            )?,
+            require(
+                rmap_share_location,
+                RequiredField::NetworkConfigRmapShareLocation,
+            )?,
             rmap_phone_location,
         ),
-        lora_profile,
+        require(lora_profile, RequiredField::NetworkConfigLoraProfile)?,
     )
     .map_err(|_| DecodeError::InvalidNetworkConfigSnapshot)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_wifi_network_profiles(
     decoder: &mut Decoder<'_>,
 ) -> Result<[Option<WifiNetworkConfigSummary>; MAX_WIFI_NETWORK_PROFILES], DecodeError> {
@@ -4600,7 +4459,7 @@ fn decode_wifi_network_profiles(
     Ok(profiles)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_wifi_network_summary(
     decoder: &mut Decoder<'_>,
 ) -> Result<WifiNetworkConfigSummary, DecodeError> {
@@ -4653,7 +4512,7 @@ fn decode_wifi_network_summary(
     .map_err(|_| DecodeError::InvalidWifiSsid)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_tcp_peer_summary(
     decoder: &mut Decoder<'_>,
 ) -> Result<ReticulumTcpPeerConfigSummary, DecodeError> {
@@ -4696,7 +4555,7 @@ fn decode_tcp_peer_summary(
     .map_err(|_| DecodeError::InvalidReticulumTcpPeerPort)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_tcp_host_peer_summary(
     decoder: &mut Decoder<'_>,
 ) -> Result<ReticulumTcpPeerHostConfigSummary, DecodeError> {
@@ -4740,7 +4599,7 @@ fn decode_tcp_host_peer_summary(
     })
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_network_config_mutation_outcome(
     body: &[u8],
 ) -> Result<NetworkConfigMutationOutcome, DecodeError> {
@@ -5937,7 +5796,7 @@ fn decode_manual_service_announce_disposition(
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_network_status(body: &[u8]) -> Result<NetworkRuntimeStatus, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -6091,7 +5950,7 @@ fn decode_network_status(body: &[u8]) -> Result<NetworkRuntimeStatus, DecodeErro
     .map_err(|_| DecodeError::InvalidWifiSsid)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_diagnostics(
     decoder: &mut Decoder<'_>,
 ) -> Result<ReticulumDnsDiagnostics, DecodeError> {
@@ -6180,7 +6039,7 @@ fn decode_reticulum_dns_diagnostics(
     ))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_dhcp_servers(
     decoder: &mut Decoder<'_>,
 ) -> Result<[Option<[u8; 4]>; MAX_RETICULUM_DNS_DHCP_SERVERS], DecodeError> {
@@ -6196,7 +6055,7 @@ fn decode_reticulum_dns_dhcp_servers(
     Ok(servers)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_raw_attempts(
     decoder: &mut Decoder<'_>,
 ) -> Result<[Option<ReticulumDnsRawAttempt>; MAX_RETICULUM_DNS_RAW_ATTEMPTS], DecodeError> {
@@ -6219,7 +6078,7 @@ fn decode_reticulum_dns_raw_attempts(
     Ok(attempts)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_raw_attempt(
     decoder: &mut Decoder<'_>,
 ) -> Result<ReticulumDnsRawAttempt, DecodeError> {
@@ -6272,7 +6131,7 @@ fn decode_reticulum_dns_raw_attempt(
     ))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_resolution(
     decoder: &mut Decoder<'_>,
 ) -> Result<ReticulumDnsResolution, DecodeError> {
@@ -6321,7 +6180,7 @@ fn decode_reticulum_dns_resolution(
     ))
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_optional_ipv4(
     decoder: &mut Decoder<'_>,
     field: RequiredField,
@@ -6356,7 +6215,7 @@ fn decode_exact_array_len(
     Ok(expected)
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_wifi_station_state(value: u8) -> Result<WifiStationState, DecodeError> {
     match value {
         0 => Ok(WifiStationState::Disabled),
@@ -6370,7 +6229,7 @@ fn decode_wifi_station_state(value: u8) -> Result<WifiStationState, DecodeError>
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_tcp_peer_state(value: u8) -> Result<ReticulumTcpPeerState, DecodeError> {
     match value {
         0 => Ok(ReticulumTcpPeerState::Disabled),
@@ -6386,7 +6245,7 @@ fn decode_tcp_peer_state(value: u8) -> Result<ReticulumTcpPeerState, DecodeError
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_tcp_failure(value: u8) -> Result<ReticulumTcpFailure, DecodeError> {
     match value {
         0 => Ok(ReticulumTcpFailure::DnsTimeout),
@@ -6405,7 +6264,7 @@ fn decode_tcp_failure(value: u8) -> Result<ReticulumTcpFailure, DecodeError> {
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_primary_outcome(
     value: u8,
 ) -> Result<ReticulumDnsPrimaryOutcome, DecodeError> {
@@ -6424,7 +6283,7 @@ fn decode_reticulum_dns_primary_outcome(
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_raw_setup_state(
     value: u8,
 ) -> Result<ReticulumDnsRawSetupState, DecodeError> {
@@ -6441,7 +6300,7 @@ fn decode_reticulum_dns_raw_setup_state(
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_raw_source(value: u8) -> Result<ReticulumDnsRawSource, DecodeError> {
     match value {
         0 => Ok(ReticulumDnsRawSource::Dhcp),
@@ -6453,7 +6312,7 @@ fn decode_reticulum_dns_raw_source(value: u8) -> Result<ReticulumDnsRawSource, D
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_raw_outcome(
     value: u8,
     response_code: Option<u8>,
@@ -6493,7 +6352,7 @@ fn decode_reticulum_dns_raw_outcome(
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn decode_reticulum_dns_resolution_source(
     value: u8,
 ) -> Result<ReticulumDnsResolutionSource, DecodeError> {
@@ -6506,110 +6365,6 @@ fn decode_reticulum_dns_resolution_source(
             value: u64::from(other),
         }),
     }
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-fn decode_rns_inbox_status(body: &[u8]) -> Result<RnsInboxStatus, DecodeError> {
-    let mut decoder = Decoder::new(body);
-    let entries = decode_map_len(&mut decoder)?;
-    let mut depth = None;
-    let mut capacity = None;
-    let mut dropped_since_boot = None;
-    let mut max_payload_bytes = None;
-    let mut durable = None;
-    for _ in 0..entries {
-        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
-        match key {
-            0 => {
-                reject_duplicate(depth.is_some(), RequiredField::RnsInboxDepth)?;
-                depth = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
-            }
-            1 => {
-                reject_duplicate(capacity.is_some(), RequiredField::RnsInboxCapacity)?;
-                capacity = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
-            }
-            2 => {
-                reject_duplicate(
-                    dropped_since_boot.is_some(),
-                    RequiredField::RnsInboxDroppedSinceBoot,
-                )?;
-                dropped_since_boot = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            3 => {
-                reject_duplicate(
-                    max_payload_bytes.is_some(),
-                    RequiredField::RnsInboxMaxPayloadBytes,
-                )?;
-                max_payload_bytes = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
-            }
-            4 => {
-                reject_duplicate(durable.is_some(), RequiredField::RnsInboxDurable)?;
-                durable = Some(decoder.bool().map_err(|_| DecodeError::Malformed)?);
-            }
-            _ => skip_strict(&mut decoder, 0)?,
-        }
-    }
-    finish_body(&decoder, body)?;
-    Ok(RnsInboxStatus {
-        depth: require(depth, RequiredField::RnsInboxDepth)?,
-        capacity: require(capacity, RequiredField::RnsInboxCapacity)?,
-        dropped_since_boot: require(dropped_since_boot, RequiredField::RnsInboxDroppedSinceBoot)?,
-        max_payload_bytes: require(max_payload_bytes, RequiredField::RnsInboxMaxPayloadBytes)?,
-        durable: require(durable, RequiredField::RnsInboxDurable)?,
-    })
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-fn decode_rns_inbox_item(body: &[u8]) -> Result<RnsInboxItem, DecodeError> {
-    let mut decoder = Decoder::new(body);
-    let entries = decode_map_len(&mut decoder)?;
-    let mut id = None;
-    let mut destination = None;
-    let mut payload = None;
-    for _ in 0..entries {
-        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
-        match key {
-            0 => {
-                reject_duplicate(id.is_some(), RequiredField::RnsInboxItemId)?;
-                id = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            1 => {
-                reject_duplicate(destination.is_some(), RequiredField::RnsInboxDestination)?;
-                destination = Some(DestinationHash(decode_fixed_bytes::<16>(
-                    &mut decoder,
-                    RequiredField::RnsInboxDestination,
-                )?));
-            }
-            2 => {
-                reject_duplicate(payload.is_some(), RequiredField::RnsInboxPayload)?;
-                let bytes = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
-                if bytes.len() > MAX_RNS_INBOX_PAYLOAD_BYTES {
-                    return Err(DecodeError::InboxPayloadTooLarge {
-                        actual: bytes.len(),
-                        max: MAX_RNS_INBOX_PAYLOAD_BYTES,
-                    });
-                }
-                payload = Some(bytes);
-            }
-            _ => skip_strict(&mut decoder, 0)?,
-        }
-    }
-    finish_body(&decoder, body)?;
-    let id = core::num::NonZeroU64::new(require(id, RequiredField::RnsInboxItemId)?).ok_or(
-        DecodeError::InvalidValue {
-            field: RequiredField::RnsInboxItemId,
-            value: 0,
-        },
-    )?;
-    RnsInboxItem::new(
-        id,
-        require(destination, RequiredField::RnsInboxDestination)?,
-        require(payload, RequiredField::RnsInboxPayload)?,
-    )
-    .map_err(|too_large| DecodeError::InboxPayloadTooLarge {
-        actual: too_large.actual(),
-        max: too_large.maximum(),
-    })
 }
 
 fn decode_identity_summary(body: &[u8]) -> Result<IdentitySummary, DecodeError> {
@@ -6698,7 +6453,7 @@ fn decode_ingress_observation(
     ))
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_summary(body: &[u8]) -> Result<LxmfMessageSummary, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -6786,7 +6541,7 @@ fn decode_lxmf_summary(body: &[u8]) -> Result<LxmfMessageSummary, DecodeError> {
                 )?);
             }
             10 => {
-                reject_duplicate(ingress_seen, RequiredField::LxmfIngressObservation)?;
+                reject_duplicate(ingress_seen, RequiredField::IngressObservation)?;
                 ingress_seen = true;
                 ingress = Some(decode_ingress_observation(
                     &mut decoder,
@@ -6813,7 +6568,7 @@ fn decode_lxmf_summary(body: &[u8]) -> Result<LxmfMessageSummary, DecodeError> {
     .map_err(|_| DecodeError::InvalidLxmfMessageSummary)
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_read_chunk(body: &[u8]) -> Result<LxmfReadChunk, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -6875,7 +6630,7 @@ fn decode_lxmf_read_chunk(body: &[u8]) -> Result<LxmfReadChunk, DecodeError> {
     })
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_mailbox_status(body: &[u8]) -> Result<LxmfMailboxStatus, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -6937,7 +6692,7 @@ fn decode_lxmf_mailbox_status(body: &[u8]) -> Result<LxmfMailboxStatus, DecodeEr
     Ok(status)
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_basic_send_accepted(body: &[u8]) -> Result<LxmfBasicSendAccepted, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -6969,7 +6724,7 @@ fn decode_lxmf_basic_send_accepted(body: &[u8]) -> Result<LxmfBasicSendAccepted,
     ))
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_peer_discovery_page(body: &[u8]) -> Result<LxmfPeerDiscoveryPage, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -7064,7 +6819,7 @@ fn decode_lxmf_peer_discovery_page(body: &[u8]) -> Result<LxmfPeerDiscoveryPage,
     ))
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_discovered_peer(
     decoder: &mut Decoder<'_>,
 ) -> Result<LxmfDiscoveredPeer, DecodeError> {
@@ -7160,7 +6915,7 @@ fn decode_lxmf_discovered_peer(
     })
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn decode_lxmf_peer_generation(
     decoder: &mut Decoder<'_>,
     field: RequiredField,
@@ -7310,7 +7065,7 @@ fn decode_probe_success(body: &[u8]) -> Result<ProbeSuccess, DecodeError> {
     ))
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn decode_nomad_fetch_start_accepted(body: &[u8]) -> Result<NomadFetchStartAccepted, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -7347,7 +7102,7 @@ fn decode_nomad_fetch_start_accepted(body: &[u8]) -> Result<NomadFetchStartAccep
     })
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn decode_nomad_fetch_poll(body: &[u8]) -> Result<NomadFetchPollResponse, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -7397,7 +7152,7 @@ fn decode_nomad_fetch_poll(body: &[u8]) -> Result<NomadFetchPollResponse, Decode
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn decode_nomad_fetch_phase(body: &[u8]) -> Result<NomadFetchPhase, DecodeError> {
     let mut decoder = Decoder::new(body);
     let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
@@ -7415,7 +7170,7 @@ fn decode_nomad_fetch_phase(body: &[u8]) -> Result<NomadFetchPhase, DecodeError>
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn decode_nomad_fetch_failure(body: &[u8]) -> Result<NomadFetchFailure, DecodeError> {
     let mut decoder = Decoder::new(body);
     let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
@@ -7493,7 +7248,7 @@ fn decode_submission_status(body: &[u8]) -> Result<SubmissionStatus, DecodeError
     })
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn decode_submission_accepted(body: &[u8]) -> Result<SubmissionAccepted, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -7545,7 +7300,7 @@ fn decode_error(body: &[u8]) -> Result<ApiErrorResponse, DecodeError> {
     })
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn decode_nomad_fetch_id(decoder: &mut Decoder<'_>) -> Result<NomadFetchId, DecodeError> {
     NomadFetchId::from_bytes(decode_fixed_bytes::<16>(
         decoder,

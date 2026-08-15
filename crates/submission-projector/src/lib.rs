@@ -58,8 +58,8 @@ pub struct PersistRequest {
 /// Backend-neutral scalar observation of one complete authorized Reticulum
 /// frame.
 ///
-/// Both the current RF-inert inspector and a future guarded radio backend can
-/// supply this contract. It owns no packet bytes or references.
+/// The radio backend supplies this contract after preparing one complete
+/// packet. It owns no packet bytes or references.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreparedFrameObservation {
     attempt_handle: AttemptHandle,

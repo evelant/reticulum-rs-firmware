@@ -10,10 +10,10 @@ use reticulum_node_core::{
     TxPolicyDecision, TxPolicyDenial,
 };
 use reticulum_storage_model::{
-    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
-    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AcceptOutcome, AcceptanceCandidate,
-    ApplyOutcome, AuthorizationSnapshot, DestinationHash as StoredDestinationHash,
-    ExperimentalRnsDataIntent, IdempotencyKey, LxmfMessageIntent, PrincipalId, SubmissionReplay,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA,
+    AcceptOutcome, AcceptanceCandidate, ApplyOutcome, AuthorizationSnapshot,
+    DestinationHash as StoredDestinationHash, IdempotencyKey, LxmfMessageIntent, PrincipalId,
+    RnsDataIntent, SubmissionReplay,
 };
 use std::boxed::Box;
 
@@ -179,7 +179,7 @@ fn acceptance_candidate(tag: u8) -> AcceptanceCandidate {
     AcceptanceCandidate::new(
         PrincipalId::new([tag; 16]),
         IdempotencyKey::new([tag.wrapping_add(1); 16]),
-        ExperimentalRnsDataIntent::new(
+        RnsDataIntent::new(
             StoredDestinationHash::new([tag.wrapping_add(2); 16]),
             b"projector intent",
         )
@@ -189,7 +189,7 @@ fn acceptance_candidate(tag: u8) -> AcceptanceCandidate {
             7,
             9,
             1,
-            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA
                 | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
         )
         .unwrap(),
@@ -210,7 +210,7 @@ fn lxmf_acceptance_candidate(tag: u8) -> AcceptanceCandidate {
             7,
             9,
             1,
-            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA
                 | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
         )
         .unwrap(),

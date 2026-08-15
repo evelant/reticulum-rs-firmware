@@ -130,7 +130,7 @@ function baseOnboardingPresentation(view: OnboardingView): Omit<
         ready: false,
         title: "Import an activated credential",
         instruction:
-          "Choose the .rdpkey produced by the qualified USB pairing workflow. " +
+          "Choose an externally provisioned activated .rdpkey credential. " +
           "The app copies it into app-private storage without reading its secret bytes in TypeScript. " +
           "Verify the transfer filename and physical board first. Each valid board is retained as an isolated profile; after setup, use Appliances to switch boards or add another one.",
         canStart: true,
@@ -244,17 +244,6 @@ function baseOnboardingPresentation(view: OnboardingView): Omit<
         canResume: false,
         canAbort: false,
       };
-    case "awaiting_usb_reset":
-      return {
-        ready: false,
-        title: "Reset the USB connection",
-        instruction: lifecycle.observed_disconnect
-          ? "USB disappearance was observed. Reconnect the node and wait for authentication."
-          : "Activation is saved. Reset or unplug the node until it disappears, then reconnect it; an app acknowledgement cannot replace a real USB reset.",
-        canStart: false,
-        canResume: false,
-        canAbort: false,
-      };
     case "faulted":
       return {
         ready: false,
@@ -283,7 +272,7 @@ export function onboardingPresentation(view: OnboardingView): OnboardingPresenta
     ...presentation,
     canRefresh: presentation.canRefresh ?? false,
     identifierLabel:
-      presentation.identifierLabel ?? (view.method === "managed_pairing" ? "USB serial" : null),
+      presentation.identifierLabel ?? (view.method === "managed_pairing" ? "Appliance" : null),
     startLabel: presentation.startLabel ?? "Start pairing",
   };
 }

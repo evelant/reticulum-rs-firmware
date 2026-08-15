@@ -1,16 +1,15 @@
 //! Offline-capable native ownership of the durable chat runtime.
 
 use std::fmt;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use reticulum_lxmf_chat_runtime::{
-    ApplianceConfig, ApplianceHandle, ConnectFailure, ConnectionTransport, Connector,
-    ContactRequest, MessageActivityPageRequest, NetworkConfigMutationRequest,
-    NomadFetchPollRequest, NomadFetchStartRequest, PhoneLocationObservationView,
-    RadioTracePageRequest, ReticulumProbePollRequest, ReticulumProbeStartRequest, RetrySendRequest,
-    RetrySendResponse, SendRequest, SendResponse, ServiceError, start_appliance,
+use reticulum_appliance_runtime::{
+    ApplianceConfig, ApplianceHandle, ContactRequest, MessageActivityPageRequest,
+    NetworkConfigMutationRequest, NomadFetchPollRequest, NomadFetchStartRequest,
+    PhoneLocationObservationView, RadioTracePageRequest, ReticulumProbePollRequest,
+    ReticulumProbeStartRequest, RetrySendRequest, RetrySendResponse, SendRequest, SendResponse,
+    ServiceError, start_appliance,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -22,96 +21,20 @@ use crate::ble::{
 };
 use crate::credential::{
     CredentialImportError, CredentialImportPolicy, NativeCredentialStatus, NativeCredentialSummary,
-    import_credential_file, inspect_credential,
 };
 use crate::profile::NativeProfileStore;
-use crate::wifi::WifiConnector;
-
-/// Bearer selected for the native appliance session.
-///
-/// These variants are an intentional stable vocabulary. The generic
-/// [`NativeAppliance::open`] constructor retains explicit unavailable stubs;
-/// [`NativeAppliance::open_wifi`] and [`NativeAppliance::open_ble`] select the
-/// implemented proof connectors without changing that vocabulary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
-pub enum NativeTransport {
-    /// USB serial/JTAG provided to a mobile application by a future adapter.
-    UsbSerial,
-    /// Direct USB OTG provided by a future iOS/Android adapter.
-    UsbOtg,
-    /// Bluetooth Low Energy provided by a platform-owned GATT bearer.
-    BluetoothLowEnergy,
-    /// Wi-Fi provided by the native raw local-network proof bearer.
-    Wifi,
-}
-
-impl NativeTransport {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::UsbSerial => "USB serial/JTAG",
-            Self::UsbOtg => "USB OTG",
-            Self::BluetoothLowEnergy => "Bluetooth Low Energy",
-            Self::Wifi => "Wi-Fi",
-        }
-    }
-
-    const fn unavailable_reason(self) -> &'static str {
-        match self {
-            Self::UsbSerial => {
-                "USB serial/JTAG requires a platform connector; only the separate host service implements it today"
-            }
-            Self::UsbOtg => "USB OTG transport is reserved for a future native platform connector",
-            Self::BluetoothLowEnergy => {
-                "Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link"
-            }
-            Self::Wifi => {
-                "Wi-Fi requires NativeAppliance.open_wifi, a proof endpoint, and an activated credential"
-            }
-        }
-    }
-
-    fn unavailable_error(self) -> NativeApplianceError {
-        NativeApplianceError::TransportUnavailable {
-            transport: self,
-            reason: self.unavailable_reason().to_owned(),
-        }
-    }
-
-    const fn runtime_transport(self) -> ConnectionTransport {
-        match self {
-            Self::UsbSerial => ConnectionTransport::UsbSerial,
-            Self::UsbOtg => ConnectionTransport::UsbOtg,
-            Self::BluetoothLowEnergy => ConnectionTransport::BluetoothLowEnergy,
-            Self::Wifi => ConnectionTransport::Wifi,
-        }
-    }
-}
 
 /// Failure returned through the native bridge.
 #[derive(Debug, Eq, PartialEq, uniffi::Error)]
 #[allow(missing_docs)]
 pub enum NativeApplianceError {
-    InvalidArgument {
-        reason: String,
-    },
+    InvalidArgument { reason: String },
     Busy,
     Stopped,
-    TransportUnavailable {
-        transport: NativeTransport,
-        reason: String,
-    },
-    Storage {
-        reason: String,
-    },
-    CredentialPublicationUncertain {
-        reason: String,
-    },
-    Serialization {
-        reason: String,
-    },
-    Internal {
-        reason: String,
-    },
+    Storage { reason: String },
+    CredentialPublicationUncertain { reason: String },
+    Serialization { reason: String },
+    Internal { reason: String },
 }
 
 impl fmt::Display for NativeApplianceError {
@@ -120,13 +43,6 @@ impl fmt::Display for NativeApplianceError {
             Self::InvalidArgument { reason } => write!(formatter, "invalid argument: {reason}"),
             Self::Busy => formatter.write_str("appliance command queue is busy"),
             Self::Stopped => formatter.write_str("native appliance has stopped"),
-            Self::TransportUnavailable { transport, reason } => {
-                write!(
-                    formatter,
-                    "{} transport unavailable: {reason}",
-                    transport.label()
-                )
-            }
             Self::Storage { reason } => {
                 write!(formatter, "chat storage operation failed: {reason}")
             }
@@ -167,204 +83,21 @@ impl From<CredentialImportError> for NativeApplianceError {
     }
 }
 
-#[derive(Clone, Copy)]
-struct UnavailableConnector {
-    transport: NativeTransport,
-}
-
-impl Connector for UnavailableConnector {
-    fn connect(&mut self) -> Result<reticulum_lxmf_chat_runtime::ConnectedSession, ConnectFailure> {
-        Err(ConnectFailure::unavailable(
-            self.transport.runtime_transport(),
-            self.transport.unavailable_reason(),
-        ))
-    }
-}
-
-/// Native owner for one durable LXMF chat database and future device bearer.
+/// Native owner for one device-keyed profile and its BLE appliance session.
 ///
 /// App-facing semantic DTOs remain defined by
-/// `reticulum-lxmf-chat-runtime`. Methods exchange canonical JSON so the Expo
+/// `reticulum-appliance-runtime`. Methods exchange canonical JSON so the Expo
 /// adapter parses the same generated types used by the HTTP client.
 #[derive(uniffi::Object)]
 pub struct NativeAppliance {
     handle: Mutex<Option<ApplianceHandle>>,
     close_gate: AsyncMutex<()>,
-    transport: NativeTransport,
-    connector_configured: bool,
-    credential_path: Option<PathBuf>,
-    profile_store: Option<Arc<NativeProfileStore>>,
-    ble_hub: Option<Arc<BleHub>>,
+    profile_store: Arc<NativeProfileStore>,
+    ble_hub: Arc<BleHub>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl NativeAppliance {
-    /// Open one SQLite chat database and start its single-owner actor.
-    ///
-    /// The selected connector is an explicit unavailable stub. This does not
-    /// prevent local contacts, conversations, or durable outbox writes. Use
-    /// [`Self::open_wifi`] or [`Self::open_ble`] to configure an implemented
-    /// authenticated connector.
-    #[uniffi::constructor]
-    pub fn open(
-        database_path: String,
-        transport: NativeTransport,
-    ) -> Result<Arc<Self>, NativeApplianceError> {
-        if database_path.is_empty() {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "database path must not be empty".to_owned(),
-            });
-        }
-        let handle = start_appliance(
-            ApplianceConfig::new(PathBuf::from(database_path)),
-            UnavailableConnector { transport },
-        )
-        .map_err(NativeApplianceError::from)?;
-        Ok(Arc::new(Self {
-            handle: Mutex::new(Some(handle)),
-            close_gate: AsyncMutex::new(()),
-            transport,
-            connector_configured: false,
-            credential_path: None,
-            profile_store: None,
-            ble_hub: None,
-        }))
-    }
-
-    /// Open one SQLite chat database with the Wi-Fi raw-TCP proof connector.
-    ///
-    /// The endpoint must be a literal IP socket address. The current E290 proof
-    /// profile listens at `192.168.4.1:29716`. The credential path must be an
-    /// absolute path to the 96-byte activated credential imported or paired
-    /// into the app sandbox.
-    /// This suite authenticates and integrity-protects the device API but does
-    /// not add application-layer confidentiality.
-    #[uniffi::constructor]
-    pub fn open_wifi(
-        database_path: String,
-        endpoint: String,
-        credential_path: String,
-    ) -> Result<Arc<Self>, NativeApplianceError> {
-        if database_path.is_empty() {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "database path must not be empty".to_owned(),
-            });
-        }
-        let endpoint = endpoint.parse::<SocketAddr>().map_err(|error| {
-            NativeApplianceError::InvalidArgument {
-                reason: format!("Wi-Fi endpoint must be a literal IP socket address: {error}"),
-            }
-        })?;
-        if endpoint.port() == 0 {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "Wi-Fi endpoint port must not be zero".to_owned(),
-            });
-        }
-        let credential_path = PathBuf::from(credential_path);
-        if !credential_path.is_absolute() {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "Wi-Fi credential path must be absolute".to_owned(),
-            });
-        }
-        let handle = start_appliance(
-            ApplianceConfig::new(PathBuf::from(database_path)),
-            WifiConnector::new(endpoint, credential_path.clone()),
-        )
-        .map_err(NativeApplianceError::from)?;
-        Ok(Arc::new(Self {
-            handle: Mutex::new(Some(handle)),
-            close_gate: AsyncMutex::new(()),
-            transport: NativeTransport::Wifi,
-            connector_configured: true,
-            credential_path: Some(credential_path),
-            profile_store: None,
-            ble_hub: None,
-        }))
-    }
-
-    /// Open one SQLite chat database with the platform-owned BLE GATT
-    /// connector.
-    ///
-    /// The credential path must be an absolute path to the activated
-    /// credential in the app sandbox. For an initial link, the caller
-    /// establishes the shared GATT service, enables TX indications, calls
-    /// [`Self::ble_link_connected`], then [`Self::ensure_connected`]. To
-    /// replace a link, it first closes and reports the old generation, calls
-    /// [`Self::reconnect`] while no replacement is claimable, registers the
-    /// replacement, then calls [`Self::ensure_connected`]. TypeScript, Swift,
-    /// or Kotlin only move opaque bytes and report write-with-response
-    /// completion; Rust retains all authenticated session and LXMF parsing.
-    #[uniffi::constructor]
-    pub fn open_ble(
-        database_path: String,
-        credential_path: String,
-    ) -> Result<Arc<Self>, NativeApplianceError> {
-        if database_path.is_empty() {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "database path must not be empty".to_owned(),
-            });
-        }
-        let credential_path = PathBuf::from(credential_path);
-        if !credential_path.is_absolute() {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "BLE credential path must be absolute".to_owned(),
-            });
-        }
-        let ble_hub = BleHub::new();
-        let handle = start_appliance(
-            ApplianceConfig::new(PathBuf::from(database_path)),
-            BleConnector::new(credential_path.clone(), Arc::clone(&ble_hub)),
-        )
-        .map_err(NativeApplianceError::from)?;
-        Ok(Arc::new(Self {
-            handle: Mutex::new(Some(handle)),
-            close_gate: AsyncMutex::new(()),
-            transport: NativeTransport::BluetoothLowEnergy,
-            connector_configured: true,
-            credential_path: Some(credential_path),
-            profile_store: None,
-            ble_hub: Some(ble_hub),
-        }))
-    }
-
-    /// Open the active device-keyed profile with the Wi-Fi raw-TCP connector.
-    ///
-    /// Rust resolves the active profile's SQLite and credential paths. When no
-    /// profile is active, an isolated unconfigured database remains available
-    /// for the single-board onboarding UI while the connector reports a
-    /// missing credential.
-    #[uniffi::constructor]
-    pub fn open_wifi_profile(
-        profile_store: Arc<NativeProfileStore>,
-        endpoint: String,
-    ) -> Result<Arc<Self>, NativeApplianceError> {
-        let endpoint = endpoint.parse::<SocketAddr>().map_err(|error| {
-            NativeApplianceError::InvalidArgument {
-                reason: format!("Wi-Fi endpoint must be a literal IP socket address: {error}"),
-            }
-        })?;
-        if endpoint.port() == 0 {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "Wi-Fi endpoint port must not be zero".to_owned(),
-            });
-        }
-        let paths = profile_store.runtime_paths()?;
-        let handle = start_appliance(
-            ApplianceConfig::new(paths.database),
-            WifiConnector::new(endpoint, paths.credential.clone()),
-        )
-        .map_err(NativeApplianceError::from)?;
-        Ok(Arc::new(Self {
-            handle: Mutex::new(Some(handle)),
-            close_gate: AsyncMutex::new(()),
-            transport: NativeTransport::Wifi,
-            connector_configured: true,
-            credential_path: None,
-            profile_store: Some(profile_store),
-            ble_hub: None,
-        }))
-    }
-
     /// Open the active device-keyed profile with the platform-owned BLE GATT
     /// connector.
     ///
@@ -384,11 +117,8 @@ impl NativeAppliance {
         Ok(Arc::new(Self {
             handle: Mutex::new(Some(handle)),
             close_gate: AsyncMutex::new(()),
-            transport: NativeTransport::BluetoothLowEnergy,
-            connector_configured: true,
-            credential_path: None,
-            profile_store: Some(profile_store),
-            ble_hub: Some(ble_hub),
+            profile_store,
+            ble_hub,
         }))
     }
 
@@ -400,16 +130,7 @@ impl NativeAppliance {
     /// Active even when the current E290 BLE profile cannot derive its exact
     /// advertising name.
     pub fn credential_status(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
-        if let Some(profile_store) = &self.profile_store {
-            return profile_store.credential_status();
-        }
-        let path = self.credential_path.as_deref().ok_or_else(|| {
-            NativeApplianceError::TransportUnavailable {
-                transport: self.transport,
-                reason: "this native connector has no credential store".to_owned(),
-            }
-        })?;
-        Ok(inspect_credential(path))
+        self.profile_store.credential_status()
     }
 
     /// Validate one app-private staging file and publish its canonical 96-byte
@@ -417,8 +138,7 @@ impl NativeAppliance {
     ///
     /// This alpha import is create-only: it never replaces an existing path.
     /// The current BLE connector accepts only an E290 credential from which it
-    /// can derive the exact advertising name before publication; Wi-Fi retains
-    /// generic canonical credential support.
+    /// can derive the exact advertising name before publication.
     /// The caller remains responsible for deleting its staging copy after this
     /// method returns.
     /// A later BLE pairing owner will populate the same storage boundary
@@ -428,28 +148,9 @@ impl NativeAppliance {
         staging_path: String,
     ) -> Result<NativeCredentialSummary, NativeApplianceError> {
         let staging_path = PathBuf::from(staging_path);
-        let policy = match self.transport {
-            NativeTransport::BluetoothLowEnergy => CredentialImportPolicy::E290BleTarget,
-            NativeTransport::Wifi => CredentialImportPolicy::AnyDevice,
-            NativeTransport::UsbSerial | NativeTransport::UsbOtg => {
-                return Err(NativeApplianceError::TransportUnavailable {
-                    transport: self.transport,
-                    reason: "this native connector has no credential import policy".to_owned(),
-                });
-            }
-        };
-        if let Some(profile_store) = &self.profile_store {
-            return profile_store
-                .import_activated_credential(&staging_path, policy)
-                .map_err(NativeApplianceError::from);
-        }
-        let path = self.credential_path.as_deref().ok_or_else(|| {
-            NativeApplianceError::TransportUnavailable {
-                transport: self.transport,
-                reason: "this native connector has no credential store".to_owned(),
-            }
-        })?;
-        import_credential_file(path, &staging_path, policy).map_err(NativeApplianceError::from)
+        self.profile_store
+            .import_activated_credential(&staging_path, CredentialImportPolicy::E290BleTarget)
+            .map_err(NativeApplianceError::from)
     }
 
     /// Register one connected, subscribed GATT peripheral.
@@ -465,8 +166,7 @@ impl NativeAppliance {
         peripheral_id: String,
         max_write_bytes: u32,
     ) -> Result<u64, NativeBleError> {
-        self.ble_hub()?
-            .link_connected(peripheral_id, max_write_bytes)
+        self.ble_hub.link_connected(peripheral_id, max_write_bytes)
     }
 
     /// Append bytes from one confirmed TX characteristic indication.
@@ -475,7 +175,7 @@ impl NativeAppliance {
         generation: u64,
         bytes: Vec<u8>,
     ) -> Result<(), NativeBleError> {
-        self.ble_hub()?.ingest_indication(generation, bytes)
+        self.ble_hub.ingest_indication(generation, bytes)
     }
 
     /// Await the next write-with-response or disconnect command.
@@ -487,7 +187,7 @@ impl NativeAppliance {
         &self,
         generation: u64,
     ) -> Result<Option<NativeBlePlatformCommand>, NativeBleError> {
-        let hub = self.ble_hub()?;
+        let hub = Arc::clone(&self.ble_hub);
         tokio::task::spawn_blocking(move || {
             hub.next_platform_command(generation, PLATFORM_COMMAND_WAIT)
         })
@@ -499,7 +199,7 @@ impl NativeAppliance {
 
     /// Confirm that one GATT write-with-response completed successfully.
     pub fn ble_write_succeeded(&self, generation: u64, token: u64) -> Result<(), NativeBleError> {
-        self.ble_hub()?.write_succeeded(generation, token)
+        self.ble_hub.write_succeeded(generation, token)
     }
 
     /// Report that one GATT write-with-response failed.
@@ -512,17 +212,12 @@ impl NativeAppliance {
         token: u64,
         reason: String,
     ) -> Result<(), NativeBleError> {
-        self.ble_hub()?.write_failed(generation, token, reason)
+        self.ble_hub.write_failed(generation, token, reason)
     }
 
     /// Report that the platform GATT link and subscriptions are gone.
     pub fn ble_disconnected(&self, generation: u64, reason: String) -> Result<(), NativeBleError> {
-        self.ble_hub()?.disconnected(generation, reason)
-    }
-
-    /// Selected bearer, including future transports that are not available yet.
-    pub fn transport(&self) -> NativeTransport {
-        self.transport
+        self.ble_hub.disconnected(generation, reason)
     }
 
     /// Return the authoritative appliance snapshot as canonical JSON.
@@ -670,7 +365,7 @@ impl NativeAppliance {
     /// Return one peer's durable timeline as canonical JSON.
     pub async fn timeline_json(&self, destination: String) -> Result<String, NativeApplianceError> {
         let peer =
-            reticulum_lxmf_chat_runtime::parse_destination(&destination).map_err(|error| {
+            reticulum_appliance_runtime::parse_destination(&destination).map_err(|error| {
                 NativeApplianceError::InvalidArgument {
                     reason: error.to_string(),
                 }
@@ -752,7 +447,7 @@ impl NativeAppliance {
                 reason: error.to_string(),
             }
         })?;
-        let response = reticulum_lxmf_chat_runtime::MutationResponse::from(
+        let response = reticulum_appliance_runtime::MutationResponse::from(
             self.active_handle()?.upsert_contact(contact).await?,
         );
         to_json(&response)
@@ -803,14 +498,9 @@ impl NativeAppliance {
 
     /// Request a fresh device connection.
     ///
-    /// Configured Wi-Fi and BLE owners schedule a fresh connection attempt.
-    /// Reserved connector stubs return typed `TransportUnavailable` instead of
-    /// silently falling back to another bearer.
+    /// The BLE owner schedules a fresh connection attempt.
     pub async fn reconnect(&self) -> Result<(), NativeApplianceError> {
         let handle = self.active_handle()?;
-        if !self.connector_configured {
-            return Err(self.transport.unavailable_error());
-        }
         handle.reconnect().await?;
         Ok(())
     }
@@ -823,9 +513,6 @@ impl NativeAppliance {
     /// current session and transport lease.
     pub async fn ensure_connected(&self) -> Result<(), NativeApplianceError> {
         let handle = self.active_handle()?;
-        if !self.connector_configured {
-            return Err(self.transport.unavailable_error());
-        }
         handle.ensure_connected().await?;
         Ok(())
     }
@@ -833,9 +520,8 @@ impl NativeAppliance {
     /// Idempotently stop the actor and close its SQLite ownership.
     pub async fn close(&self) -> Result<(), NativeApplianceError> {
         let _close_guard = self.close_gate.lock().await;
-        if let Some(hub) = &self.ble_hub {
-            hub.request_owner_disconnect("native appliance was closed");
-        }
+        self.ble_hub
+            .request_owner_disconnect("native appliance was closed");
         let handle = self.lock_handle()?.take();
         match handle {
             Some(handle) => handle
@@ -860,13 +546,6 @@ impl NativeAppliance {
         self.lock_handle()?
             .clone()
             .ok_or(NativeApplianceError::Stopped)
-    }
-
-    fn ble_hub(&self) -> Result<Arc<BleHub>, NativeBleError> {
-        self.ble_hub
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or(NativeBleError::Unavailable)
     }
 }
 
@@ -897,15 +576,18 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use reticulum_appliance_runtime::{
+        ConnectFailure, ConnectedSession, ConnectionMetadata, ConnectionTransport, Connector,
+    };
+    use reticulum_appliance_store::{
+        AcceptanceIds, DestinationHash as CoreDestinationHash, DeviceBinding, InboundMessage,
+        OutboxMaterial, SubmissionId, SubmissionState,
+    };
+    use reticulum_appliance_sync::{DeviceSessionError, InboxCursor, InboxSummary, LxmfSession};
     use reticulum_device_api::{
         NetworkConfigMutation, NetworkConfigMutationOutcome, NetworkConfigSnapshot,
         NetworkRuntimeStatus, ReticulumTcpPeerConfigSummary, ReticulumTcpPeerIpv4Address,
         ReticulumTcpPeerState, WifiNetworkConfigSummary, WifiNetworkProfileId, WifiStationState,
-    };
-    use reticulum_lxmf_chat_app::{DeviceSessionError, InboxCursor, InboxSummary, LxmfSession};
-    use reticulum_lxmf_chat_core::{
-        AcceptanceIds, DestinationHash as CoreDestinationHash, DeviceBinding, InboundMessage,
-        OutboxMaterial, SubmissionId, SubmissionState,
     };
     use serde_json::{Value, json};
 
@@ -952,8 +634,13 @@ mod tests {
             )))
         }
 
-        fn path_string(&self) -> String {
-            self.0.to_string_lossy().into_owned()
+        fn profile_root(&self) -> PathBuf {
+            self.0.with_extension("profiles")
+        }
+
+        fn profile_store(&self) -> Arc<NativeProfileStore> {
+            NativeProfileStore::open(self.profile_root().to_string_lossy().into_owned())
+                .expect("test profile store opens")
         }
     }
 
@@ -962,6 +649,7 @@ mod tests {
             let _ = fs::remove_file(&self.0);
             let _ = fs::remove_file(self.0.with_extension("sqlite3-shm"));
             let _ = fs::remove_file(self.0.with_extension("sqlite3-wal"));
+            let _ = fs::remove_dir_all(self.profile_root());
         }
     }
 
@@ -1011,6 +699,18 @@ mod tests {
             unreachable!("the native network test has no inbox messages")
         }
 
+        fn inbox_status(&mut self) -> Result<reticulum_device_api::LxmfMailboxStatus, Self::Error> {
+            Ok(reticulum_device_api::LxmfMailboxStatus::new(None, None).unwrap())
+        }
+
+        fn acknowledge_inbox_through(
+            &mut self,
+            through: InboxCursor,
+        ) -> Result<reticulum_device_api::LxmfMailboxStatus, Self::Error> {
+            let handle = reticulum_device_api::LxmfMessageHandle::new(through.get()).unwrap();
+            Ok(reticulum_device_api::LxmfMailboxStatus::new(Some(handle), Some(handle)).unwrap())
+        }
+
         fn next_nearby_peer(
             &mut self,
             _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
@@ -1056,10 +756,12 @@ mod tests {
                 4242,
             )
             .unwrap();
-            Ok(
-                NetworkConfigSnapshot::new(9, [Some(profile), None, None, None], Some(peer))
-                    .unwrap(),
+            Ok(NetworkConfigSnapshot::with_defaults(
+                9,
+                [Some(profile), None, None, None],
+                Some(peer),
             )
+            .unwrap())
         }
 
         fn network_config_mutate(
@@ -1148,16 +850,16 @@ mod tests {
     impl Connector for NetworkTestConnector {
         fn connect(
             &mut self,
-        ) -> Result<reticulum_lxmf_chat_runtime::ConnectedSession, ConnectFailure> {
+        ) -> Result<reticulum_appliance_runtime::ConnectedSession, ConnectFailure> {
             if self.connected {
                 return Err(ConnectFailure::retryable(
                     "native network test session was already claimed",
                 ));
             }
             self.connected = true;
-            Ok(reticulum_lxmf_chat_runtime::ConnectedSession::new(
+            Ok(ConnectedSession::new(
                 NetworkTestSession,
-                reticulum_lxmf_chat_runtime::ConnectionMetadata::new(
+                ConnectionMetadata::new(
                     ConnectionTransport::BluetoothLowEnergy,
                     "test-link",
                     "test-board",
@@ -1166,21 +868,38 @@ mod tests {
         }
     }
 
-    fn open_network_test_appliance(database: &TestDatabase) -> Arc<NativeAppliance> {
-        let handle = start_appliance(
-            ApplianceConfig::new(database.0.clone()),
-            NetworkTestConnector::default(),
-        )
-        .unwrap();
+    struct OfflineTestConnector;
+
+    impl Connector for OfflineTestConnector {
+        fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
+            Err(ConnectFailure::unavailable(
+                ConnectionTransport::BluetoothLowEnergy,
+                "BLE is intentionally unavailable in this facade test",
+            ))
+        }
+    }
+
+    fn open_test_appliance<C: Connector>(
+        database: &TestDatabase,
+        connector: C,
+    ) -> Arc<NativeAppliance> {
+        let profile_store = database.profile_store();
+        let ble_hub = BleHub::new();
+        let handle = start_appliance(ApplianceConfig::new(database.0.clone()), connector).unwrap();
         Arc::new(NativeAppliance {
             handle: Mutex::new(Some(handle)),
             close_gate: AsyncMutex::new(()),
-            transport: NativeTransport::BluetoothLowEnergy,
-            connector_configured: true,
-            credential_path: None,
-            profile_store: None,
-            ble_hub: None,
+            profile_store,
+            ble_hub,
         })
+    }
+
+    fn open_offline_test_appliance(database: &TestDatabase) -> Arc<NativeAppliance> {
+        open_test_appliance(database, OfflineTestConnector)
+    }
+
+    fn open_network_test_appliance(database: &TestDatabase) -> Arc<NativeAppliance> {
+        open_test_appliance(database, NetworkTestConnector::default())
     }
 
     async fn await_network_config(appliance: &NativeAppliance) -> String {
@@ -1243,9 +962,7 @@ mod tests {
     #[tokio::test]
     async fn native_facade_owns_offline_contacts_timeline_and_outbox() {
         let database = TestDatabase::new("offline");
-        let appliance =
-            NativeAppliance::open(database.path_string(), NativeTransport::BluetoothLowEnergy)
-                .unwrap();
+        let appliance = open_offline_test_appliance(&database);
         let destination = "ab".repeat(16);
 
         assert_eq!(appliance.contacts_json().await.unwrap(), "[]");
@@ -1360,7 +1077,7 @@ mod tests {
         );
         assert_eq!(
             snapshot["last_error"],
-            "Bluetooth Low Energy requires NativeAppliance.open_ble and a platform GATT link"
+            "BLE is intentionally unavailable in this facade test"
         );
 
         appliance.close().await.unwrap();
@@ -1542,31 +1259,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_reserved_native_transport_fails_reconnect_explicitly() {
-        for transport in [
-            NativeTransport::UsbSerial,
-            NativeTransport::UsbOtg,
-            NativeTransport::BluetoothLowEnergy,
-            NativeTransport::Wifi,
-        ] {
-            let database = TestDatabase::new("transport");
-            let appliance = NativeAppliance::open(database.path_string(), transport).unwrap();
-            assert!(matches!(
-                appliance.reconnect().await,
-                Err(NativeApplianceError::TransportUnavailable {
-                    transport: actual,
-                    ..
-                }) if actual == transport
-            ));
-            appliance.close().await.unwrap();
-        }
-    }
-
-    #[tokio::test]
     async fn malformed_shared_request_json_is_an_invalid_argument() {
         let database = TestDatabase::new("bad-request");
-        let appliance =
-            NativeAppliance::open(database.path_string(), NativeTransport::Wifi).unwrap();
+        let appliance = open_offline_test_appliance(&database);
         let error = appliance
             .send_message_json(r#"{"destination":7}"#.to_owned())
             .await
@@ -1597,8 +1292,7 @@ mod tests {
     #[tokio::test]
     async fn nearby_read_requires_the_actor_owned_authenticated_session() {
         let database = TestDatabase::new("nearby-offline");
-        let appliance =
-            NativeAppliance::open(database.path_string(), NativeTransport::UsbSerial).unwrap();
+        let appliance = open_offline_test_appliance(&database);
         assert!(matches!(
             appliance.nearby_peers_json().await,
             Err(NativeApplianceError::Storage { reason })
@@ -1610,8 +1304,7 @@ mod tests {
     #[tokio::test]
     async fn radio_routes_read_requires_the_actor_owned_authenticated_session() {
         let database = TestDatabase::new("radio-routes-offline");
-        let appliance =
-            NativeAppliance::open(database.path_string(), NativeTransport::UsbSerial).unwrap();
+        let appliance = open_offline_test_appliance(&database);
         assert!(matches!(
             appliance.radio_routes_status_json().await,
             Err(NativeApplianceError::Storage { reason })
@@ -1623,8 +1316,7 @@ mod tests {
     #[tokio::test]
     async fn nomad_fetch_requires_the_actor_owned_authenticated_session() {
         let database = TestDatabase::new("nomad-offline");
-        let appliance =
-            NativeAppliance::open(database.path_string(), NativeTransport::UsbSerial).unwrap();
+        let appliance = open_offline_test_appliance(&database);
         let start = json!({
             "destination": "11".repeat(16),
             "path": "/page/index.mu",
@@ -1651,8 +1343,7 @@ mod tests {
     #[tokio::test]
     async fn reticulum_probe_requires_the_actor_owned_authenticated_session() {
         let database = TestDatabase::new("probe-offline");
-        let appliance =
-            NativeAppliance::open(database.path_string(), NativeTransport::UsbSerial).unwrap();
+        let appliance = open_offline_test_appliance(&database);
         let start = json!({
             "destination": "11".repeat(16),
             "idempotency_key": "22".repeat(16),
@@ -1675,91 +1366,15 @@ mod tests {
         appliance.close().await.unwrap();
     }
 
-    #[test]
-    fn wifi_constructor_rejects_ambiguous_or_incomplete_endpoints() {
-        let database = TestDatabase::new("bad-wifi");
-        assert!(matches!(
-            NativeAppliance::open_wifi(
-                database.path_string(),
-                "reticulum.local:4242".to_owned(),
-                "/tmp/credential.rdpkey".to_owned(),
-            ),
-            Err(NativeApplianceError::InvalidArgument { .. })
-        ));
-        assert!(matches!(
-            NativeAppliance::open_wifi(
-                database.path_string(),
-                "127.0.0.1:0".to_owned(),
-                "/tmp/credential.rdpkey".to_owned(),
-            ),
-            Err(NativeApplianceError::InvalidArgument { .. })
-        ));
-        assert!(matches!(
-            NativeAppliance::open_wifi(
-                database.path_string(),
-                "127.0.0.1:4242".to_owned(),
-                "relative/credential.rdpkey".to_owned(),
-            ),
-            Err(NativeApplianceError::InvalidArgument { .. })
-        ));
-    }
-
-    #[test]
-    fn ble_constructor_requires_an_absolute_app_private_credential_path() {
-        let database = TestDatabase::new("bad-ble");
-        assert!(matches!(
-            NativeAppliance::open_ble(
-                database.path_string(),
-                "relative/credential.rdpkey".to_owned(),
-            ),
-            Err(NativeApplianceError::InvalidArgument { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn reserved_transport_owner_rejects_ble_platform_callbacks() {
-        let database = TestDatabase::new("ble-unavailable");
-        let appliance =
-            NativeAppliance::open(database.path_string(), NativeTransport::BluetoothLowEnergy)
-                .unwrap();
-
-        assert_eq!(
-            appliance
-                .ble_link_connected("peripheral".to_owned(), 20)
-                .unwrap_err(),
-            NativeBleError::Unavailable
-        );
-        appliance.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn configured_wifi_owner_accepts_explicit_reconnect_requests() {
-        let database = TestDatabase::new("wifi-reconnect");
-        let credential = std::env::temp_dir().join("reticulum-native-missing-credential.rdpkey");
-        let appliance = NativeAppliance::open_wifi(
-            database.path_string(),
-            "127.0.0.1:9".to_owned(),
-            credential.to_string_lossy().into_owned(),
-        )
-        .unwrap();
-
-        appliance.reconnect().await.unwrap();
-        appliance.close().await.unwrap();
-    }
-
     #[tokio::test]
     async fn configured_native_owner_imports_and_inspects_one_credential() {
         let database = TestDatabase::new("credential-import");
-        let credential = database.0.with_extension("rdpkey");
         let staging = database.0.with_extension("picked.rdpkey");
         let bytes = activated_credential_bytes(*b"e290-api-1\xac\xa7\x04\xe1\x3e\x88");
         fs::write(&staging, bytes).expect("selected credential is staged");
 
-        let appliance = NativeAppliance::open_ble(
-            database.path_string(),
-            credential.to_string_lossy().into_owned(),
-        )
-        .unwrap();
+        let profile_store = database.profile_store();
+        let appliance = NativeAppliance::open_ble_profile(profile_store).unwrap();
         assert_eq!(
             appliance.credential_status().unwrap(),
             NativeCredentialStatus::Missing
@@ -1782,47 +1397,39 @@ mod tests {
             staging.exists(),
             "the app retains staging cleanup ownership"
         );
-        assert!(matches!(
-            appliance.import_activated_credential(staging.to_string_lossy().into_owned()),
-            Err(NativeApplianceError::Storage { reason })
-                if reason.contains("already exists")
-        ));
+        assert_eq!(
+            appliance
+                .import_activated_credential(staging.to_string_lossy().into_owned())
+                .expect("an exact profile import is idempotent"),
+            summary
+        );
 
         appliance.close().await.unwrap();
-        fs::remove_file(credential).expect("installed test credential is removed");
         fs::remove_file(staging).expect("staged test credential is removed");
     }
 
     #[tokio::test]
     async fn ble_import_rejects_a_non_e290_target_without_claiming_the_destination() {
         let database = TestDatabase::new("ble-import-target");
-        let credential = database.0.with_extension("rdpkey");
         let staging = database.0.with_extension("picked.rdpkey");
         let bytes = activated_credential_bytes(*b"other-api-\x01\x02\x03\x04\x05\x06");
         fs::write(&staging, bytes).expect("generic credential is staged");
 
-        let appliance = NativeAppliance::open_ble(
-            database.path_string(),
-            credential.to_string_lossy().into_owned(),
-        )
-        .unwrap();
+        let profile_store = database.profile_store();
+        let appliance = NativeAppliance::open_ble_profile(Arc::clone(&profile_store)).unwrap();
         assert!(matches!(
             appliance.import_activated_credential(staging.to_string_lossy().into_owned()),
             Err(NativeApplianceError::Storage { reason })
                 if reason.contains("current BLE import requires an E290 credential")
         ));
-        assert!(!credential.exists());
         assert_eq!(
             appliance.credential_status().unwrap(),
             NativeCredentialStatus::Missing
         );
 
-        crate::credential::install_credential(
-            &credential,
-            &bytes,
-            CredentialImportPolicy::AnyDevice,
-        )
-        .expect("generic policy can install the same credential");
+        profile_store
+            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+            .expect("generic policy can install the same credential");
         assert!(matches!(
             appliance.credential_status().unwrap(),
             NativeCredentialStatus::Active { summary }
@@ -1830,35 +1437,6 @@ mod tests {
         ));
 
         appliance.close().await.unwrap();
-        fs::remove_file(credential).expect("generic test credential is removed");
-        fs::remove_file(staging).expect("staged test credential is removed");
-    }
-
-    #[tokio::test]
-    async fn wifi_import_retains_generic_future_board_credentials() {
-        let database = TestDatabase::new("wifi-import-target");
-        let credential = database.0.with_extension("rdpkey");
-        let staging = database.0.with_extension("picked.rdpkey");
-        let bytes = activated_credential_bytes(*b"other-api-\x01\x02\x03\x04\x05\x06");
-        fs::write(&staging, bytes).expect("generic credential is staged");
-
-        let appliance = NativeAppliance::open_wifi(
-            database.path_string(),
-            "127.0.0.1:9".to_owned(),
-            credential.to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        let summary = appliance
-            .import_activated_credential(staging.to_string_lossy().into_owned())
-            .expect("Wi-Fi accepts a canonical generic credential");
-        assert_eq!(summary.expected_ble_local_name, None);
-        assert_eq!(
-            appliance.credential_status().unwrap(),
-            NativeCredentialStatus::Active { summary }
-        );
-
-        appliance.close().await.unwrap();
-        fs::remove_file(credential).expect("generic test credential is removed");
         fs::remove_file(staging).expect("staged test credential is removed");
     }
 }

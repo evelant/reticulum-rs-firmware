@@ -1,7 +1,7 @@
 [target.xtensa-esp32s3-none-elf]
-# Flash geometry and partition tables differ across supported boards. Keep
-# target compilation shared, but require each board's explicit image/flash
-# guide instead of a workspace-wide runner.
+# Flash geometry and partition placement are part of the E290 image contract.
+# Keep target compilation here, while packaging and flashing remain explicit
+# operations in the firmware guide.
 # The large Xtensa code model keeps literals reachable after the E290 product
 # task grows beyond the default l32r literal range.
 rustflags = [

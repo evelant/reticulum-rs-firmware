@@ -1,6 +1,6 @@
 extern crate std;
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 use std::string::String;
 use std::{
     ops::{Deref, DerefMut},
@@ -12,12 +12,9 @@ use embedded_storage::nor_flash::{
     ErrorType, MultiwriteNorFlash, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
     check_erase, check_read, check_write,
 };
-#[cfg(any(feature = "experimental-rns-data", feature = "experimental-lxmf"))]
+#[cfg(any(feature = "rns-data", feature = "lxmf"))]
 use reticulum_device_api::DestinationHash as ApiDestinationHash;
-#[cfg(any(
-    feature = "experimental-rns-data",
-    all(feature = "experimental-rns-inbox", feature = "experimental-lxmf")
-))]
+#[cfg(any(feature = "rns-data", feature = "lxmf"))]
 use reticulum_device_api::IdempotencyKey as ApiIdempotencyKey;
 use reticulum_device_api::{
     ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilitySnapshot, DeviceRequest, DeviceResponse,
@@ -27,25 +24,25 @@ use reticulum_device_api::{
 use reticulum_storage_actor::{
     AcceptanceProgress, BoundJournal, DriveError, JournalBinding, StorageActor, StorageDeviceId,
 };
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 use reticulum_storage_actor::{PendingKind, PendingProgress};
 use reticulum_storage_journal::{PHYSICAL_FORMAT_VERSION, format_erased};
 use reticulum_storage_model::{
-    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA, AcceptanceCandidate,
-    AuthorizationSnapshot, BootRecoveryMarker, DestinationHash, EncodedPacketSha256,
-    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
-    LifecycleState, PreparedPacketDetails as DurablePreparedPacketDetails, PrincipalId,
-    RnsAttemptToken, SubmissionFailure as DurableSubmissionFailure, SubmissionId,
+    AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA, AcceptanceCandidate, AuthorizationSnapshot,
+    BootRecoveryMarker, DestinationHash, EncodedPacketSha256, FinalDisposition, IdempotencyKey,
+    InternalFailure, InterruptedState, LifecycleState,
+    PreparedPacketDetails as DurablePreparedPacketDetails, PrincipalId, RnsAttemptToken,
+    RnsDataIntent, SubmissionFailure as DurableSubmissionFailure, SubmissionId,
 };
 
 use super::*;
 
 const PARTITION_SIZE: usize = 0x10_0000;
 const ERASE_SIZE: usize = 0x1000;
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 static OVERSIZED_PAYLOAD: [u8; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1] =
     [0x44; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1];
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 static MAXIMUM_PAYLOAD: [u8; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES] =
     [0x5a; api::MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES];
 
@@ -79,7 +76,7 @@ impl FakeNor {
         Self::formatted_with_write_faults(None, None)
     }
 
-    #[cfg(feature = "experimental-rns-data")]
+    #[cfg(feature = "rns-data")]
     fn formatted_with_lost_write_reply(lost_write_reply_after: Option<usize>) -> Self {
         Self::formatted_with_write_faults(lost_write_reply_after, None)
     }
@@ -221,17 +218,17 @@ impl<const SUBMISSIONS: usize> TestActor<SUBMISSIONS> {
         self.actor.accept(&mut self.journal, candidate)
     }
 
-    #[cfg(feature = "experimental-rns-data")]
+    #[cfg(feature = "rns-data")]
     fn drive_pending(&mut self) -> Result<PendingProgress, DriveError<FakeError>> {
         self.actor.drive_pending(&mut self.journal)
     }
 
-    #[cfg(feature = "experimental-rns-data")]
+    #[cfg(feature = "rns-data")]
     fn into_flash(self) -> FakeNor {
         self.journal.into_backend()
     }
 
-    #[cfg(feature = "experimental-rns-data")]
+    #[cfg(feature = "rns-data")]
     fn port_calls(&self) -> usize {
         self.port_calls
     }
@@ -344,7 +341,7 @@ impl SubmissionPort for UnavailablePort {
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedNomadStart {
     principal: api::PrincipalId,
@@ -354,7 +351,7 @@ struct ObservedNomadStart {
     idempotency_key: api::IdempotencyKey,
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 struct FakeNomadPort {
     availability: CapabilityAvailability,
     start_result: Result<NomadFetchStartDisposition, NomadFetchPortError>,
@@ -366,7 +363,7 @@ struct FakeNomadPort {
     observed_poll: Option<(api::PrincipalId, api::NomadFetchId)>,
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 impl FakeNomadPort {
     fn available(id: api::NomadFetchId) -> Self {
         Self {
@@ -384,7 +381,7 @@ impl FakeNomadPort {
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 impl NomadFetchPort for FakeNomadPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.availability_calls += 1;
@@ -418,67 +415,7 @@ impl NomadFetchPort for FakeNomadPort {
     }
 }
 
-#[cfg(feature = "experimental-rns-inbox")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FakeInboxCalls {
-    availability: usize,
-    status: usize,
-    peek: usize,
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-struct FakeInbox {
-    availability: CapabilityAvailability,
-    status: Result<api::RnsInboxStatus, InboundMailboxPortError>,
-    peek: Result<Option<InboundMailboxItem>, InboundMailboxPortError>,
-    calls: FakeInboxCalls,
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-impl FakeInbox {
-    fn available(peek: Option<InboundMailboxItem>) -> Self {
-        Self {
-            availability: CapabilityAvailability::Available,
-            status: Ok(api::RnsInboxStatus {
-                depth: u16::from(peek.is_some()),
-                capacity: 8,
-                dropped_since_boot: 3,
-                max_payload_bytes: api::MAX_RNS_INBOX_PAYLOAD_BYTES as u16,
-                durable: true,
-            }),
-            peek: Ok(peek),
-            calls: FakeInboxCalls {
-                availability: 0,
-                status: 0,
-                peek: 0,
-            },
-        }
-    }
-
-    fn calls(&self) -> FakeInboxCalls {
-        self.calls
-    }
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-impl InboundMailboxPort for FakeInbox {
-    fn availability(&mut self) -> CapabilityAvailability {
-        self.calls.availability += 1;
-        self.availability
-    }
-
-    fn status(&mut self) -> Result<api::RnsInboxStatus, InboundMailboxPortError> {
-        self.calls.status += 1;
-        self.status
-    }
-
-    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
-        self.calls.peek += 1;
-        self.peek
-    }
-}
-
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[derive(Debug, Default, Eq, PartialEq)]
 struct FakeLxmfOnlyPort {
     submission_availability: usize,
@@ -492,75 +429,31 @@ struct FakeLxmfOnlyPort {
     peer_max_app_data: usize,
     peer_next: usize,
     observed_peer_cursor: Option<Option<api::LxmfPeerDiscoveryCursor>>,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     network_availability: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     network_configuration: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     network_mutate: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     network_status: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     manual_announce_availability: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     manual_announce_queue: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     node_diagnostics: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     route_diagnostics: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     observed_route_cursor: Option<Option<api::DestinationHash>>,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     radio_trace: usize,
-    #[cfg(all(
-        feature = "experimental-rns-inbox",
-        feature = "experimental-nomad",
-        feature = "experimental-network-config"
-    ))]
+    #[cfg(all(feature = "nomad", feature = "network-config"))]
     observed_radio_trace_cursor: Option<Option<api::RadioTraceCursor>>,
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 impl SubmissionPort for FakeLxmfOnlyPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.submission_availability += 1;
@@ -583,7 +476,7 @@ impl SubmissionPort for FakeLxmfOnlyPort {
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 impl LxmfInboxPort for FakeLxmfOnlyPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.lxmf_availability += 1;
@@ -641,7 +534,7 @@ impl LxmfInboxPort for FakeLxmfOnlyPort {
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 impl LxmfComposePort for FakeLxmfOnlyPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.compose_availability += 1;
@@ -659,7 +552,7 @@ impl LxmfComposePort for FakeLxmfOnlyPort {
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 impl PeerDiscoveryPort for FakeLxmfOnlyPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.peer_availability += 1;
@@ -701,33 +594,7 @@ impl PeerDiscoveryPort for FakeLxmfOnlyPort {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
-impl InboundMailboxPort for FakeLxmfOnlyPort {
-    fn availability(&mut self) -> CapabilityAvailability {
-        CapabilityAvailability::Available
-    }
-
-    fn status(&mut self) -> Result<api::RnsInboxStatus, InboundMailboxPortError> {
-        Ok(api::RnsInboxStatus {
-            depth: 0,
-            capacity: 1,
-            dropped_since_boot: 0,
-            max_payload_bytes: api::MAX_RNS_INBOX_PAYLOAD_BYTES as u16,
-            durable: false,
-        })
-    }
-
-    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
-        Ok(None)
-    }
-}
-
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl NetworkConfigPort for FakeLxmfOnlyPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.network_availability += 1;
@@ -757,12 +624,7 @@ impl NetworkConfigPort for FakeLxmfOnlyPort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl ManualServiceAnnouncePort for FakeLxmfOnlyPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.manual_announce_availability += 1;
@@ -775,12 +637,7 @@ impl ManualServiceAnnouncePort for FakeLxmfOnlyPort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn node_diagnostics_snapshot() -> api::NodeDiagnosticsSnapshot {
     api::NodeDiagnosticsSnapshot::new(
         1_000,
@@ -805,12 +662,7 @@ fn node_diagnostics_snapshot() -> api::NodeDiagnosticsSnapshot {
     )
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn route_diagnostics_page() -> api::RouteDiagnosticsPage {
     let entry = api::RouteDiagnosticEntry::new(
         api::DestinationHash([0x31; 16]),
@@ -825,12 +677,7 @@ fn route_diagnostics_page() -> api::RouteDiagnosticsPage {
     api::RouteDiagnosticsPage::new(13, 1, [Some(entry), None, None, None], None).unwrap()
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn radio_trace_page() -> api::RadioTracePage {
     api::RadioTracePage::new(
         99,
@@ -855,12 +702,7 @@ fn radio_trace_page() -> api::RadioTracePage {
     .unwrap()
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl NodeDiagnosticsPort for FakeLxmfOnlyPort {
     fn node_diagnostics(
         &mut self,
@@ -888,23 +730,22 @@ impl NodeDiagnosticsPort for FakeLxmfOnlyPort {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CombinedPortCalls {
     submission_availability: usize,
     submission_status: usize,
     submission_accept: usize,
-    inbox_availability: usize,
-    inbox_status: usize,
-    inbox_peek: usize,
     lxmf_availability: usize,
     lxmf_next: usize,
     lxmf_read: usize,
+    lxmf_mailbox_status: usize,
+    lxmf_mailbox_acknowledge: usize,
     compose_availability: usize,
     compose_and_accept: usize,
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedLxmfComposeRequest {
     principal: PrincipalId,
@@ -917,7 +758,7 @@ struct ObservedLxmfComposeRequest {
     authorization: AuthorizationSnapshot,
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 struct FakeCombinedPort {
     calls: CombinedPortCalls,
     lxmf_availability: CapabilityAvailability,
@@ -928,7 +769,7 @@ struct FakeCombinedPort {
     observed_compose: Option<ObservedLxmfComposeRequest>,
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 impl FakeCombinedPort {
     fn with_lxmf(
         summary: Option<api::LxmfMessageSummary>,
@@ -949,7 +790,7 @@ impl FakeCombinedPort {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 impl SubmissionPort for FakeCombinedPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.calls.submission_availability += 1;
@@ -974,25 +815,7 @@ impl SubmissionPort for FakeCombinedPort {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
-impl InboundMailboxPort for FakeCombinedPort {
-    fn availability(&mut self) -> CapabilityAvailability {
-        self.calls.inbox_availability += 1;
-        CapabilityAvailability::Available
-    }
-
-    fn status(&mut self) -> Result<api::RnsInboxStatus, InboundMailboxPortError> {
-        self.calls.inbox_status += 1;
-        Err(InboundMailboxPortError::Unavailable)
-    }
-
-    fn peek(&mut self) -> Result<Option<InboundMailboxItem>, InboundMailboxPortError> {
-        self.calls.inbox_peek += 1;
-        Err(InboundMailboxPortError::Unavailable)
-    }
-}
-
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 impl LxmfInboxPort for FakeCombinedPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.calls.lxmf_availability += 1;
@@ -1016,9 +839,23 @@ impl LxmfInboxPort for FakeCombinedPort {
         self.calls.lxmf_read += 1;
         self.lxmf_read
     }
+
+    fn mailbox_status(&mut self) -> Result<api::LxmfMailboxStatus, LxmfInboxPortError> {
+        self.calls.lxmf_mailbox_status += 1;
+        api::LxmfMailboxStatus::new(None, None).map_err(|_| LxmfInboxPortError::Faulted)
+    }
+
+    fn acknowledge_mailbox_through(
+        &mut self,
+        through: api::LxmfMessageHandle,
+    ) -> Result<api::LxmfMailboxStatus, LxmfInboxPortError> {
+        self.calls.lxmf_mailbox_acknowledge += 1;
+        api::LxmfMailboxStatus::new(Some(through), Some(through))
+            .map_err(|_| LxmfInboxPortError::Faulted)
+    }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 impl LxmfComposePort for FakeCombinedPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.calls.compose_availability += 1;
@@ -1044,7 +881,7 @@ impl LxmfComposePort for FakeCombinedPort {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 fn lxmf_summary() -> api::LxmfMessageSummary {
     api::LxmfMessageSummary::new(
         api::LxmfMessageHandle::new(7).unwrap(),
@@ -1061,7 +898,7 @@ fn lxmf_summary() -> api::LxmfMessageSummary {
     .unwrap()
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 fn lxmf_chunk() -> api::LxmfReadChunk {
     api::LxmfReadChunk::new(api::LxmfMessageHandle::new(7).unwrap(), 0, 5, b"hello").unwrap()
 }
@@ -1101,10 +938,7 @@ fn dispatch_provenance(tag: u8) -> DispatchProvenance {
 }
 
 fn durable_authorization(tag: u8) -> AuthorizationSnapshot {
-    durable_authorization_with_permissions(
-        tag,
-        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
-    )
+    durable_authorization_with_permissions(tag, AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA)
 }
 
 fn durable_authorization_with_permissions(tag: u8, permissions: u32) -> AuthorizationSnapshot {
@@ -1125,12 +959,12 @@ fn error_code(response: DeviceResponse) -> ApiErrorCode {
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn nomad_id() -> api::NomadFetchId {
     api::NomadFetchId::new([0xa5; 8], 7).unwrap()
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn nomad_start_request() -> api::NomadFetchStartRequest<'static> {
     api::NomadFetchStartRequest::new(
         api::DestinationHash([0x22; 16]),
@@ -1140,7 +974,7 @@ fn nomad_start_request() -> api::NomadFetchStartRequest<'static> {
     )
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_dispatch_advertises_independent_runtime_limits_and_isolates_public_reads() {
     let mut submission = UnavailablePort::default();
@@ -1162,7 +996,7 @@ fn nomad_dispatch_advertises_independent_runtime_limits_and_isolates_public_read
     );
     assert_eq!(
         submission.availability_calls,
-        usize::from(cfg!(feature = "experimental-rns-data"))
+        usize::from(cfg!(feature = "rns-data"))
     );
     assert_eq!(nomad.availability_calls, 1);
     assert_eq!(nomad.start_calls, 0);
@@ -1181,12 +1015,12 @@ fn nomad_dispatch_advertises_independent_runtime_limits_and_isolates_public_read
     );
     assert_eq!(
         submission.availability_calls,
-        usize::from(cfg!(feature = "experimental-rns-data"))
+        usize::from(cfg!(feature = "rns-data"))
     );
     assert_eq!(nomad.availability_calls, 1);
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_start_is_authenticated_principal_scoped_and_distinguishes_replay() {
     let request = DeviceRequest::NomadFetchStart(nomad_start_request());
@@ -1271,7 +1105,7 @@ fn nomad_start_is_authenticated_principal_scoped_and_distinguishes_replay() {
     assert_eq!(error_code(full.response), ApiErrorCode::CapacityExhausted);
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_poll_hides_foreign_ids_and_maps_port_failures() {
     let mut submission = UnavailablePort::default();
@@ -1326,25 +1160,20 @@ fn nomad_poll_hides_foreign_ids_and_maps_port_failures() {
     assert_eq!(error_code(failed.response), ApiErrorCode::Internal);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad"))]
 #[test]
 fn full_appliance_dispatch_composes_existing_capabilities_with_nomad() {
     let mut appliance = FakeLxmfOnlyPort::default();
     let mut nomad = FakeNomadPort::available(nomad_id());
-    let response = super::dispatch_with_inbox_lxmf_peer_discovery_and_nomad(
+    let response = super::dispatch_with_lxmf_peer_discovery_and_nomad(
         &mut appliance,
         &mut nomad,
         identity_summary(),
         &DispatchContext::UNAUTHENTICATED,
         envelope(211, DeviceRequest::SystemCapabilities),
     );
-    let expected = CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
-        cfg!(feature = "experimental-rns-data"),
-        CapabilityAvailability::Available,
+    let expected = CapabilitySnapshot::for_dispatch_with_lxmf_basic_send_and_peer_discovery(
+        cfg!(feature = "rns-data"),
         CapabilityAvailability::Available,
         CapabilityAvailability::Available,
         CapabilityAvailability::Available,
@@ -1356,13 +1185,10 @@ fn full_appliance_dispatch_composes_existing_capabilities_with_nomad() {
         DeviceResponse::SystemCapabilities(expected)
     );
     assert_eq!(
-        expected.experimental_lxmf_peer_discovery(),
+        expected.lxmf_peer_discovery(),
         CapabilityAvailability::Available
     );
-    assert_eq!(
-        expected.experimental_nomad(),
-        CapabilityAvailability::Available
-    );
+    assert_eq!(expected.nomad(), CapabilityAvailability::Available);
     assert_eq!(
         expected.manual_service_announce(),
         CapabilityAvailability::Unavailable
@@ -1376,7 +1202,7 @@ fn full_appliance_dispatch_composes_existing_capabilities_with_nomad() {
         api::MAX_NOMAD_PAGE_BYTES as u16
     );
 
-    let manual = super::dispatch_with_inbox_lxmf_peer_discovery_and_nomad(
+    let manual = super::dispatch_with_lxmf_peer_discovery_and_nomad(
         &mut appliance,
         &mut nomad,
         identity_summary(),
@@ -1393,7 +1219,7 @@ fn durable_candidate(principal: u8, key: u8, payload: &[u8]) -> AcceptanceCandid
     AcceptanceCandidate::new(
         PrincipalId::new([principal; 16]),
         IdempotencyKey::new([key; 16]),
-        ExperimentalRnsDataIntent::new(DestinationHash::new([0x33; 16]), payload).unwrap(),
+        RnsDataIntent::new(DestinationHash::new([0x33; 16]), payload).unwrap(),
         durable_authorization(principal),
     )
 }
@@ -1472,15 +1298,15 @@ fn capabilities_are_public_current_and_side_effect_free() {
     assert_eq!(
         response.response,
         DeviceResponse::SystemCapabilities(CapabilitySnapshot::for_dispatch(cfg!(
-            feature = "experimental-rns-data"
+            feature = "rns-data"
         )))
     );
     let DeviceResponse::SystemCapabilities(capabilities) = response.response else {
         panic!("expected capabilities response")
     };
     assert_eq!(
-        capabilities.experimental_submit_rns_data(),
-        cfg!(feature = "experimental-rns-data"),
+        capabilities.submit_rns_data(),
+        cfg!(feature = "rns-data"),
         "dependency feature unification must not advertise adapter-local code"
     );
     assert_eq!(actor.state(), state_before);
@@ -1537,9 +1363,9 @@ fn minimal_dispatch_reports_diagnostics_as_unsupported_after_authentication() {
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
-fn lxmf_dispatcher_does_not_require_the_raw_inbox_feature_or_port() {
+fn lxmf_dispatcher_uses_only_lxmf_ports() {
     let mut port = FakeLxmfOnlyPort::default();
     let capabilities = super::dispatch_with_lxmf(
         &mut port,
@@ -1550,9 +1376,8 @@ fn lxmf_dispatcher_does_not_require_the_raw_inbox_feature_or_port() {
     assert_eq!(
         capabilities.response,
         DeviceResponse::SystemCapabilities(
-            CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
-                cfg!(feature = "experimental-rns-data"),
-                CapabilityAvailability::Unavailable,
+            CapabilitySnapshot::for_dispatch_with_lxmf_and_basic_send(
+                cfg!(feature = "rns-data"),
                 CapabilityAvailability::Available,
                 CapabilityAvailability::Available,
             )
@@ -1574,11 +1399,11 @@ fn lxmf_dispatcher_does_not_require_the_raw_inbox_feature_or_port() {
     assert_eq!(port.compose_availability, 1);
     assert_eq!(
         port.submission_availability,
-        usize::from(cfg!(feature = "experimental-rns-data"))
+        usize::from(cfg!(feature = "rns-data"))
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn lxmf_mailbox_dispatch_is_authenticated_and_uses_the_lxmf_owner_only() {
     let latest = api::LxmfMessageHandle::new(9).unwrap();
@@ -1629,27 +1454,27 @@ fn lxmf_mailbox_dispatch_is_authenticated_and_uses_the_lxmf_owner_only() {
     assert_eq!(port.observed_mailbox_acknowledgement, Some(latest));
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
-fn nearby_peer_dispatch_is_authenticated_and_only_new_entry_point_advertises_it() {
+fn nearby_peer_dispatch_is_authenticated_and_requires_peer_discovery_composition() {
     let request = envelope(113, DeviceRequest::LxmfPeerNext { after: None });
 
-    let mut legacy_port = FakeLxmfOnlyPort::default();
-    let legacy = super::dispatch_with_lxmf(
-        &mut legacy_port,
+    let mut basic_port = FakeLxmfOnlyPort::default();
+    let basic = super::dispatch_with_lxmf(
+        &mut basic_port,
         identity_summary(),
         &authenticated(1, Permissions::NONE),
         request,
     );
     assert_eq!(
-        legacy.response,
+        basic.response,
         DeviceResponse::Error(ApiErrorResponse {
             code: ApiErrorCode::UnsupportedOperation,
-            operation: Some(api::OP_EXPERIMENTAL_LXMF_PEER_NEXT),
+            operation: Some(api::OP_LXMF_PEER_NEXT),
         })
     );
-    assert_eq!(legacy_port.peer_availability, 0);
-    assert_eq!(legacy_port.peer_next, 0);
+    assert_eq!(basic_port.peer_availability, 0);
+    assert_eq!(basic_port.peer_next, 0);
 
     let mut unauthenticated_port = FakeLxmfOnlyPort::default();
     let unauthenticated = super::dispatch_with_lxmf_and_peer_discovery(
@@ -1662,14 +1487,14 @@ fn nearby_peer_dispatch_is_authenticated_and_only_new_entry_point_advertises_it(
         unauthenticated.response,
         DeviceResponse::Error(ApiErrorResponse {
             code: ApiErrorCode::AuthenticationRequired,
-            operation: Some(api::OP_EXPERIMENTAL_LXMF_PEER_NEXT),
+            operation: Some(api::OP_LXMF_PEER_NEXT),
         })
     );
     assert_eq!(unauthenticated_port.peer_availability, 0);
     assert_eq!(unauthenticated_port.peer_next, 0);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn nearby_peer_dispatch_reports_port_limit_and_returns_one_reset_page() {
     let mut capability_port = FakeLxmfOnlyPort::default();
@@ -1682,9 +1507,8 @@ fn nearby_peer_dispatch_reports_port_limit_and_returns_one_reset_page() {
     assert_eq!(
         capabilities.response,
         DeviceResponse::SystemCapabilities(
-            CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
-                cfg!(feature = "experimental-rns-data"),
-                CapabilityAvailability::Unavailable,
+            CapabilitySnapshot::for_dispatch_with_lxmf_basic_send_and_peer_discovery(
+                cfg!(feature = "rns-data"),
                 CapabilityAvailability::Available,
                 CapabilityAvailability::Available,
                 CapabilityAvailability::Available,
@@ -1723,39 +1547,7 @@ fn nearby_peer_dispatch_reports_port_limit_and_returns_one_reset_page() {
     assert_eq!(peer.observed_age_ms(), 250);
 }
 
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn composite_identity_read_acquires_neither_port() {
-    let expected = identity_summary();
-    for context in [
-        DispatchContext::UNAUTHENTICATED,
-        authenticated(1, Permissions::NONE),
-    ] {
-        let mut submission = UnavailablePort::default();
-        let mut inbox = FakeInbox::available(None);
-        let response = super::dispatch_with_inbox(
-            &mut submission,
-            &mut inbox,
-            expected,
-            &context,
-            envelope(210, DeviceRequest::IdentitySummary),
-        );
-        assert_eq!(response.response, DeviceResponse::IdentitySummary(expected));
-        assert_eq!(submission.availability_calls, 0);
-        assert_eq!(submission.status_calls, 0);
-        assert_eq!(submission.acceptance_calls, 0);
-        assert_eq!(
-            inbox.calls(),
-            FakeInboxCalls {
-                availability: 0,
-                status: 0,
-                peek: 0,
-            }
-        );
-    }
-}
-
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_identity_and_authentication_preflight_acquire_no_ports() {
     let expected = api::IdentitySummary::with_lxmf_delivery_destination(
@@ -1763,7 +1555,7 @@ fn combined_identity_and_authentication_preflight_acquire_no_ports() {
         api::DestinationHash([0xb6; 16]),
     );
     let mut port = FakeCombinedPort::with_lxmf(Some(lxmf_summary()), Some(lxmf_chunk()));
-    let identity = super::dispatch_with_inbox_and_lxmf(
+    let identity = super::dispatch_with_lxmf(
         &mut port,
         expected,
         &authenticated(1, Permissions::NONE),
@@ -1772,7 +1564,7 @@ fn combined_identity_and_authentication_preflight_acquire_no_ports() {
     assert_eq!(identity.response, DeviceResponse::IdentitySummary(expected));
     assert_eq!(port.calls, CombinedPortCalls::default());
 
-    let unauthenticated = super::dispatch_with_inbox_and_lxmf(
+    let unauthenticated = super::dispatch_with_lxmf(
         &mut port,
         expected,
         &DispatchContext::UNAUTHENTICATED,
@@ -1782,17 +1574,17 @@ fn combined_identity_and_authentication_preflight_acquire_no_ports() {
         unauthenticated.response,
         DeviceResponse::Error(ApiErrorResponse {
             code: ApiErrorCode::AuthenticationRequired,
-            operation: Some(api::OP_EXPERIMENTAL_LXMF_NEXT),
+            operation: Some(api::OP_LXMF_NEXT),
         })
     );
     assert_eq!(port.calls, CombinedPortCalls::default());
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_capabilities_query_each_availability_once() {
     let mut port = FakeCombinedPort::with_lxmf(None, None);
-    let response = super::dispatch_with_inbox_and_lxmf(
+    let response = super::dispatch_with_lxmf(
         &mut port,
         identity_summary(),
         &DispatchContext::UNAUTHENTICATED,
@@ -1801,9 +1593,8 @@ fn combined_capabilities_query_each_availability_once() {
     assert_eq!(
         response.response,
         DeviceResponse::SystemCapabilities(
-            CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
-                cfg!(feature = "experimental-rns-data"),
-                CapabilityAvailability::Available,
+            CapabilitySnapshot::for_dispatch_with_lxmf_and_basic_send(
+                cfg!(feature = "rns-data"),
                 CapabilityAvailability::Available,
                 CapabilityAvailability::Available,
             ),
@@ -1812,8 +1603,7 @@ fn combined_capabilities_query_each_availability_once() {
     assert_eq!(
         port.calls,
         CombinedPortCalls {
-            submission_availability: usize::from(cfg!(feature = "experimental-rns-data")),
-            inbox_availability: 1,
+            submission_availability: usize::from(cfg!(feature = "rns-data")),
             lxmf_availability: 1,
             compose_availability: 1,
             ..CombinedPortCalls::default()
@@ -1821,13 +1611,13 @@ fn combined_capabilities_query_each_availability_once() {
     );
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_lxmf_next_and_read_enter_only_the_selected_port_method() {
     let summary = lxmf_summary();
     let chunk = lxmf_chunk();
     let mut next_port = FakeCombinedPort::with_lxmf(Some(summary), Some(chunk));
-    let next = super::dispatch_with_inbox_and_lxmf(
+    let next = super::dispatch_with_lxmf(
         &mut next_port,
         identity_summary(),
         &authenticated(1, Permissions::NONE),
@@ -1844,7 +1634,7 @@ fn combined_lxmf_next_and_read_enter_only_the_selected_port_method() {
     );
 
     let mut read_port = FakeCombinedPort::with_lxmf(Some(summary), Some(chunk));
-    let read = super::dispatch_with_inbox_and_lxmf(
+    let read = super::dispatch_with_lxmf(
         &mut read_port,
         identity_summary(),
         &authenticated(1, Permissions::NONE),
@@ -1868,7 +1658,7 @@ fn combined_lxmf_next_and_read_enter_only_the_selected_port_method() {
     );
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_lxmf_empty_unavailable_and_port_failures_map_closed() {
     let handle = api::LxmfMessageHandle::new(7).unwrap();
@@ -1876,7 +1666,7 @@ fn combined_lxmf_empty_unavailable_and_port_failures_map_closed() {
         after: Some(handle),
     };
     let mut empty = FakeCombinedPort::with_lxmf(None, None);
-    let response = super::dispatch_with_inbox_and_lxmf(
+    let response = super::dispatch_with_lxmf(
         &mut empty,
         identity_summary(),
         &authenticated(1, Permissions::NONE),
@@ -1886,7 +1676,7 @@ fn combined_lxmf_empty_unavailable_and_port_failures_map_closed() {
 
     let mut disabled = FakeCombinedPort::with_lxmf(None, None);
     disabled.lxmf_availability = CapabilityAvailability::Disabled;
-    let response = super::dispatch_with_inbox_and_lxmf(
+    let response = super::dispatch_with_lxmf(
         &mut disabled,
         identity_summary(),
         &authenticated(1, Permissions::NONE),
@@ -1914,7 +1704,7 @@ fn combined_lxmf_empty_unavailable_and_port_failures_map_closed() {
     ] {
         let mut port = FakeCombinedPort::with_lxmf(None, None);
         port.lxmf_next = Err(port_error);
-        let response = super::dispatch_with_inbox_and_lxmf(
+        let response = super::dispatch_with_lxmf(
             &mut port,
             identity_summary(),
             &authenticated(1, Permissions::NONE),
@@ -1924,7 +1714,7 @@ fn combined_lxmf_empty_unavailable_and_port_failures_map_closed() {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 fn basic_lxmf_send_request() -> DeviceRequest<'static> {
     let location = api::LxmfMessageLocation::new(
         44_123_456,
@@ -1946,18 +1736,17 @@ fn basic_lxmf_send_request() -> DeviceRequest<'static> {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_basic_lxmf_send_derives_provenance_and_enters_only_compose_port() {
-    let permissions =
-        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS;
+    let permissions = Permissions::SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS;
     for acceptance in [
         SubmissionAcceptance::Accepted(SubmissionId::new(41)),
         SubmissionAcceptance::Replay(SubmissionId::new(41)),
     ] {
         let mut port = FakeCombinedPort::with_lxmf(None, None);
         port.compose_result = Ok(LxmfComposeAcceptance::new(acceptance, [0x67; 32]));
-        let response = super::dispatch_with_inbox_and_lxmf(
+        let response = super::dispatch_with_lxmf(
             &mut port,
             identity_summary(),
             &authenticated(5, permissions),
@@ -2005,7 +1794,7 @@ fn combined_basic_lxmf_send_derives_provenance_and_enters_only_compose_port() {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_basic_lxmf_send_rejects_auth_and_version_before_every_port_call() {
     let cases = [
@@ -2020,7 +1809,7 @@ fn combined_basic_lxmf_send_rejects_auth_and_version_before_every_port_call() {
             ApiErrorCode::PermissionDenied,
         ),
         (
-            authenticated(6, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA),
+            authenticated(6, Permissions::SUBMIT_RNS_DATA),
             ApiVersion {
                 major: ApiVersion::CURRENT.major + 1,
                 minor: 0,
@@ -2030,7 +1819,7 @@ fn combined_basic_lxmf_send_rejects_auth_and_version_before_every_port_call() {
     ];
     for (context, version, expected) in cases {
         let mut port = FakeCombinedPort::with_lxmf(None, None);
-        let response = super::dispatch_with_inbox_and_lxmf(
+        let response = super::dispatch_with_lxmf(
             &mut port,
             identity_summary(),
             &context,
@@ -2046,13 +1835,13 @@ fn combined_basic_lxmf_send_rejects_auth_and_version_before_every_port_call() {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_basic_lxmf_send_maps_unavailability_and_closed_port_errors() {
-    let context = authenticated(7, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA);
+    let context = authenticated(7, Permissions::SUBMIT_RNS_DATA);
     let mut disabled = FakeCombinedPort::with_lxmf(None, None);
     disabled.compose_availability = CapabilityAvailability::Disabled;
-    let response = super::dispatch_with_inbox_and_lxmf(
+    let response = super::dispatch_with_lxmf(
         &mut disabled,
         identity_summary(),
         &context,
@@ -2083,7 +1872,7 @@ fn combined_basic_lxmf_send_maps_unavailability_and_closed_port_errors() {
     ] {
         let mut port = FakeCombinedPort::with_lxmf(None, None);
         port.compose_result = Err(port_error);
-        let response = super::dispatch_with_inbox_and_lxmf(
+        let response = super::dispatch_with_lxmf(
             &mut port,
             identity_summary(),
             &context,
@@ -2095,7 +1884,7 @@ fn combined_basic_lxmf_send_maps_unavailability_and_closed_port_errors() {
     }
 }
 
-#[cfg(all(feature = "experimental-rns-inbox", feature = "experimental-lxmf"))]
+#[cfg(feature = "lxmf")]
 #[test]
 fn combined_basic_lxmf_send_maps_durable_acceptance_outcomes() {
     for (acceptance, expected) in [
@@ -2114,318 +1903,16 @@ fn combined_basic_lxmf_send_maps_durable_acceptance_outcomes() {
     ] {
         let mut port = FakeCombinedPort::with_lxmf(None, None);
         port.compose_result = Ok(LxmfComposeAcceptance::new(acceptance, [0x68; 32]));
-        let response = super::dispatch_with_inbox_and_lxmf(
+        let response = super::dispatch_with_lxmf(
             &mut port,
             identity_summary(),
-            &authenticated(8, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA),
+            &authenticated(8, Permissions::SUBMIT_RNS_DATA),
             envelope(232, basic_lxmf_send_request()),
         );
         assert_eq!(error_code(response.response), expected);
         assert_eq!(port.calls.compose_and_accept, 1);
         assert_eq!(port.calls.submission_accept, 0);
     }
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn composite_capabilities_report_each_port_without_cross_dispatch() {
-    let mut submission = UnavailablePort::default();
-    let mut inbox = FakeInbox::available(None);
-    let response = super::dispatch_with_inbox(
-        &mut submission,
-        &mut inbox,
-        identity_summary(),
-        &DispatchContext::UNAUTHENTICATED,
-        envelope(211, DeviceRequest::SystemCapabilities),
-    );
-    assert_eq!(
-        response.response,
-        DeviceResponse::SystemCapabilities(CapabilitySnapshot::for_dispatch_with_inbox(
-            false,
-            CapabilityAvailability::Available,
-        ))
-    );
-    assert_eq!(
-        submission.availability_calls,
-        usize::from(cfg!(feature = "experimental-rns-data"))
-    );
-    assert_eq!(submission.status_calls, 0);
-    assert_eq!(submission.acceptance_calls, 0);
-    assert_eq!(
-        inbox.calls(),
-        FakeInboxCalls {
-            availability: 1,
-            status: 0,
-            peek: 0,
-        }
-    );
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn inbox_authentication_rejection_precedes_both_ports() {
-    for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
-        let mut submission = UnavailablePort::default();
-        let mut inbox = FakeInbox::available(None);
-        let response = super::dispatch_with_inbox(
-            &mut submission,
-            &mut inbox,
-            identity_summary(),
-            &DispatchContext::UNAUTHENTICATED,
-            envelope(212, request),
-        );
-        assert_eq!(
-            error_code(response.response),
-            ApiErrorCode::AuthenticationRequired
-        );
-        assert_eq!(submission.availability_calls, 0);
-        assert_eq!(submission.status_calls, 0);
-        assert_eq!(submission.acceptance_calls, 0);
-        assert_eq!(
-            inbox.calls(),
-            FakeInboxCalls {
-                availability: 0,
-                status: 0,
-                peek: 0,
-            }
-        );
-    }
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn inbox_status_uses_only_the_inbox_port_and_needs_no_permission_bit() {
-    let mut submission = UnavailablePort::default();
-    let mut inbox = FakeInbox::available(None);
-    let expected = inbox.status.unwrap();
-    let response = super::dispatch_with_inbox(
-        &mut submission,
-        &mut inbox,
-        identity_summary(),
-        &authenticated(1, Permissions::NONE),
-        envelope(213, DeviceRequest::RnsInboxStatus),
-    );
-    assert_eq!(response.response, DeviceResponse::RnsInboxStatus(expected));
-    assert_eq!(submission.availability_calls, 0);
-    assert_eq!(submission.status_calls, 0);
-    assert_eq!(submission.acceptance_calls, 0);
-    assert_eq!(
-        inbox.calls(),
-        FakeInboxCalls {
-            availability: 1,
-            status: 1,
-            peek: 0,
-        }
-    );
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn inbox_peek_returns_an_owned_item_and_empty_is_not_found() {
-    let semantic = InboundMailboxItem::new(
-        core::num::NonZeroU64::new(17).unwrap(),
-        api::DestinationHash([0x31; 16]),
-        b"received",
-    )
-    .unwrap();
-    let mut submission = UnavailablePort::default();
-    let mut occupied = FakeInbox::available(Some(semantic));
-    let response = super::dispatch_with_inbox(
-        &mut submission,
-        &mut occupied,
-        identity_summary(),
-        &authenticated(1, Permissions::NONE),
-        envelope(214, DeviceRequest::RnsInboxPeek),
-    );
-    let DeviceResponse::RnsInboxPeek(item) = response.response else {
-        panic!("expected occupied inbox response")
-    };
-    assert_eq!(item.id(), 17);
-    assert_eq!(item.destination(), api::DestinationHash([0x31; 16]));
-    assert_eq!(item.payload(), b"received");
-    assert_eq!(submission.availability_calls, 0);
-    assert_eq!(submission.status_calls, 0);
-    assert_eq!(submission.acceptance_calls, 0);
-    assert_eq!(
-        occupied.calls(),
-        FakeInboxCalls {
-            availability: 1,
-            status: 0,
-            peek: 1,
-        }
-    );
-
-    let mut empty = FakeInbox::available(None);
-    let response = super::dispatch_with_inbox(
-        &mut submission,
-        &mut empty,
-        identity_summary(),
-        &authenticated(1, Permissions::NONE),
-        envelope(215, DeviceRequest::RnsInboxPeek),
-    );
-    assert_eq!(
-        response.response,
-        DeviceResponse::Error(ApiErrorResponse {
-            code: ApiErrorCode::NotFound,
-            operation: Some(api::OP_EXPERIMENTAL_RNS_INBOX_PEEK),
-        })
-    );
-    assert_eq!(
-        empty.calls(),
-        FakeInboxCalls {
-            availability: 1,
-            status: 0,
-            peek: 1,
-        }
-    );
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn unavailable_inbox_is_not_entered_and_port_failures_are_closed() {
-    for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
-        let mut submission = UnavailablePort::default();
-        let mut inbox = FakeInbox::available(None);
-        inbox.availability = CapabilityAvailability::Disabled;
-        let response = super::dispatch_with_inbox(
-            &mut submission,
-            &mut inbox,
-            identity_summary(),
-            &authenticated(1, Permissions::NONE),
-            envelope(216, request),
-        );
-        assert_eq!(
-            error_code(response.response),
-            ApiErrorCode::CapabilityUnavailable
-        );
-        assert_eq!(
-            inbox.calls(),
-            FakeInboxCalls {
-                availability: 1,
-                status: 0,
-                peek: 0,
-            }
-        );
-    }
-
-    for (port_error, api_error) in [
-        (
-            InboundMailboxPortError::Unavailable,
-            ApiErrorCode::CapabilityUnavailable,
-        ),
-        (InboundMailboxPortError::Busy, ApiErrorCode::Internal),
-        (InboundMailboxPortError::Backend, ApiErrorCode::Internal),
-        (InboundMailboxPortError::Faulted, ApiErrorCode::Internal),
-    ] {
-        for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
-            let mut submission = UnavailablePort::default();
-            let mut inbox = FakeInbox::available(None);
-            inbox.status = Err(port_error);
-            inbox.peek = Err(port_error);
-            let response = super::dispatch_with_inbox(
-                &mut submission,
-                &mut inbox,
-                identity_summary(),
-                &authenticated(1, Permissions::NONE),
-                envelope(217, request),
-            );
-            assert_eq!(error_code(response.response), api_error);
-        }
-    }
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn composite_version_rejection_precedes_both_ports() {
-    let mut submission = UnavailablePort::default();
-    let mut inbox = FakeInbox::available(None);
-    let response = super::dispatch_with_inbox(
-        &mut submission,
-        &mut inbox,
-        identity_summary(),
-        &authenticated(1, Permissions::NONE),
-        RequestEnvelope {
-            version: ApiVersion {
-                major: ApiVersion::CURRENT.major + 1,
-                minor: 0,
-            },
-            request_id: RequestId(219),
-            request: DeviceRequest::RnsInboxPeek,
-        },
-    );
-    assert_eq!(
-        error_code(response.response),
-        ApiErrorCode::UnsupportedVersion
-    );
-    assert_eq!(submission.availability_calls, 0);
-    assert_eq!(submission.status_calls, 0);
-    assert_eq!(submission.acceptance_calls, 0);
-    assert_eq!(
-        inbox.calls(),
-        FakeInboxCalls {
-            availability: 0,
-            status: 0,
-            peek: 0,
-        }
-    );
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn existing_submission_dispatch_never_enters_the_inbox_port() {
-    let mut submission = mounted::<2>();
-    let mut inbox = FakeInbox::available(None);
-    let response = super::dispatch_with_inbox(
-        &mut submission,
-        &mut inbox,
-        identity_summary(),
-        &authenticated(1, Permissions::READ_SUBMISSION_STATUS),
-        envelope(
-            218,
-            DeviceRequest::SubmissionStatus {
-                id: ApiSubmissionId(99),
-            },
-        ),
-    );
-    assert_eq!(error_code(response.response), ApiErrorCode::NotFound);
-    assert_eq!(submission.port_calls, 2);
-    assert_eq!(
-        inbox.calls(),
-        FakeInboxCalls {
-            availability: 0,
-            status: 0,
-            peek: 0,
-        }
-    );
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn semantic_inbox_item_owns_and_bounds_its_payload() {
-    let mut payload = [0x42_u8; api::MAX_RNS_INBOX_PAYLOAD_BYTES];
-    let item = InboundMailboxItem::new(
-        core::num::NonZeroU64::new(9).unwrap(),
-        api::DestinationHash([0x21; 16]),
-        &payload,
-    )
-    .unwrap();
-    payload.fill(0);
-    assert_eq!(item.id(), 9);
-    assert_eq!(item.destination(), api::DestinationHash([0x21; 16]));
-    assert_eq!(item.payload(), &[0x42; api::MAX_RNS_INBOX_PAYLOAD_BYTES]);
-    let debug = std::format!("{item:?}");
-    assert!(debug.contains("payload_len: 383"));
-    assert!(!debug.contains("66, 66"));
-
-    let oversized = [0_u8; api::MAX_RNS_INBOX_PAYLOAD_BYTES + 1];
-    let error = InboundMailboxItem::new(
-        core::num::NonZeroU64::new(10).unwrap(),
-        api::DestinationHash([0; 16]),
-        &oversized,
-    )
-    .unwrap_err();
-    assert_eq!(error.actual(), api::MAX_RNS_INBOX_PAYLOAD_BYTES + 1);
-    assert_eq!(error.maximum(), api::MAX_RNS_INBOX_PAYLOAD_BYTES);
 }
 
 #[test]
@@ -2491,7 +1978,7 @@ fn status_fails_closed_while_actor_is_faulted_but_capabilities_remain_public() {
     assert_eq!(
         capabilities.response,
         DeviceResponse::SystemCapabilities(CapabilitySnapshot::for_dispatch(cfg!(
-            feature = "experimental-rns-data"
+            feature = "rns-data"
         )))
     );
 }
@@ -2603,7 +2090,7 @@ fn every_durable_lifecycle_state_maps_to_its_closed_api_shape() {
     }
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn submit_request(payload: &[u8], key: u8) -> DeviceRequest<'_> {
     DeviceRequest::SubmitRnsData {
         destination: ApiDestinationHash([0x33; 16]),
@@ -2612,21 +2099,21 @@ fn submit_request(payload: &[u8], key: u8) -> DeviceRequest<'_> {
     }
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn submit_context(principal: u8) -> DispatchContext {
     submit_context_with_provenance(principal, principal)
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn submit_context_with_provenance(principal: u8, provenance_tag: u8) -> DispatchContext {
     DispatchContext::authenticated(
         ApiPrincipalId([principal; 16]),
-        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS,
+        Permissions::SUBMIT_RNS_DATA | Permissions::READ_SUBMISSION_STATUS,
         dispatch_provenance(provenance_tag),
     )
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn unavailable_service_rejects_mutation_before_acceptance() {
     let mut port = UnavailablePort::default();
@@ -2645,7 +2132,7 @@ fn unavailable_service_rejects_mutation_before_acceptance() {
     assert_eq!(port.acceptance_calls, 0);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn accepted_id(response: DeviceResponse) -> ApiSubmissionId {
     match response {
         DeviceResponse::SubmitRnsDataAccepted(accepted) => accepted.id,
@@ -2653,7 +2140,7 @@ fn accepted_id(response: DeviceResponse) -> ApiSubmissionId {
     }
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn assert_submit_rejected_without_mutation(
     context: DispatchContext,
     version: ApiVersion,
@@ -2687,7 +2174,7 @@ fn assert_submit_rejected_without_mutation(
     assert_eq!(flash.erases, 0);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn mutating_auth_and_version_rejections_precede_validation_and_storage() {
     assert_submit_rejected_without_mutation(
@@ -2710,7 +2197,7 @@ fn mutating_auth_and_version_rejections_precede_validation_and_storage() {
     );
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn durable_accept_owns_payload_and_replay_conflict_preserve_one_submission() {
     let mut actor = mounted::<2>();
@@ -2727,7 +2214,7 @@ fn durable_accept_owns_payload_and_replay_conflict_preserve_one_submission() {
     assert_eq!(
         original
             .intent()
-            .experimental_rns_data()
+            .rns_data()
             .expect("raw RNS submission retains its intent kind")
             .payload(),
         b"same"
@@ -2751,8 +2238,7 @@ fn durable_accept_owns_payload_and_replay_conflict_preserve_one_submission() {
     );
     assert_eq!(
         original.authorization().granted_permission_bits(),
-        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits()
-            | Permissions::READ_SUBMISSION_STATUS.bits()
+        Permissions::SUBMIT_RNS_DATA.bits() | Permissions::READ_SUBMISSION_STATUS.bits()
     );
 
     let replay = dispatch(
@@ -2785,7 +2271,7 @@ fn durable_accept_owns_payload_and_replay_conflict_preserve_one_submission() {
     assert_eq!(actor.state().committed_records(), 1);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn identical_idempotency_keys_are_isolated_between_principals() {
     let mut actor = mounted::<2>();
@@ -2804,7 +2290,7 @@ fn identical_idempotency_keys_are_isolated_between_principals() {
     assert_eq!(actor.state().committed_records(), 2);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn maximum_advertised_payload_is_durably_accepted() {
     let mut actor = mounted::<1>();
@@ -2822,14 +2308,14 @@ fn maximum_advertised_payload_is_durably_accepted() {
             .unwrap()
             .accepted()
             .intent()
-            .experimental_rns_data()
+            .rns_data()
             .expect("raw RNS submission retains its intent kind")
             .payload(),
         &MAXIMUM_PAYLOAD
     );
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn accepted_response_survives_remount_and_status_dispatch() {
     let mut actor = mounted::<2>();
@@ -2851,8 +2337,7 @@ fn accepted_response_survives_remount_and_status_dispatch() {
             .authorization(),
         durable_authorization_with_permissions(
             1,
-            Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA.bits()
-                | Permissions::READ_SUBMISSION_STATUS.bits(),
+            Permissions::SUBMIT_RNS_DATA.bits() | Permissions::READ_SUBMISSION_STATUS.bits(),
         )
     );
     let status = dispatch(
@@ -2874,7 +2359,7 @@ fn accepted_response_survives_remount_and_status_dispatch() {
     );
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn invalid_intent_and_actor_capacity_have_stable_api_errors() {
     let mut actor = mounted::<0>();
@@ -2895,13 +2380,13 @@ fn invalid_intent_and_actor_capacity_have_stable_api_errors() {
     assert_eq!(
         error_code(acceptance_response(
             Ok(SubmissionAcceptance::CapacityExhausted),
-            api::OP_EXPERIMENTAL_SUBMIT_RNS_DATA,
+            api::OP_SUBMIT_RNS_DATA,
         )),
         ApiErrorCode::CapacityExhausted
     );
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn identifier_exhaustion_is_internal_not_retryable_capacity() {
     let flash = FakeNor::formatted();
@@ -2920,7 +2405,7 @@ fn identifier_exhaustion_is_internal_not_retryable_capacity() {
     assert_eq!(error_code(exhausted.response), ApiErrorCode::Internal);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn lost_write_reply_is_internal_until_autonomous_reconciliation() {
     // Pre-arm the backend before mount. Mount performs only reads, so the
@@ -2970,7 +2455,7 @@ fn lost_write_reply_is_internal_until_autonomous_reconciliation() {
     assert_eq!(actor.state().committed_records(), 1);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
 fn wrong_journal_binding_is_internal_and_touches_no_storage() {
     let mut mounted_journal = BoundJournal::new(FakeNor::formatted(), test_binding());
@@ -3005,12 +2490,7 @@ fn wrong_journal_binding_is_internal_and_touches_no_storage() {
     assert_eq!(flash.erases, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NetworkConfigPortCalls {
     availability: usize,
@@ -3019,12 +2499,7 @@ struct NetworkConfigPortCalls {
     status: usize,
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FakeManualServiceAnnouncePort {
     availability: CapabilityAvailability,
@@ -3033,12 +2508,7 @@ struct FakeManualServiceAnnouncePort {
     queue_calls: usize,
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl FakeManualServiceAnnouncePort {
     const fn available(disposition: api::ManualServiceAnnounceDisposition) -> Self {
         Self {
@@ -3050,12 +2520,7 @@ impl FakeManualServiceAnnouncePort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl ManualServiceAnnouncePort for FakeManualServiceAnnouncePort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.availability_calls += 1;
@@ -3068,12 +2533,7 @@ impl ManualServiceAnnouncePort for FakeManualServiceAnnouncePort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 struct FakeNetworkConfigPort {
     availability: CapabilityAvailability,
     configuration: Result<api::NetworkConfigSnapshot, NetworkConfigPortError>,
@@ -3088,12 +2548,7 @@ struct FakeNetworkConfigPort {
     )>,
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl FakeNetworkConfigPort {
     fn available() -> Self {
         Self {
@@ -3110,12 +2565,7 @@ impl FakeNetworkConfigPort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl NetworkConfigPort for FakeNetworkConfigPort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.calls.availability += 1;
@@ -3158,37 +2608,23 @@ impl NetworkConfigPort for FakeNetworkConfigPort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn wifi_profile_id() -> api::WifiNetworkProfileId {
     api::WifiNetworkProfileId::new([0x51; 16]).unwrap()
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn network_config_snapshot() -> api::NetworkConfigSnapshot {
     let profile =
         api::WifiNetworkConfigSummary::new(wifi_profile_id(), true, 3, b"field-node", true)
             .unwrap();
     let address = api::ReticulumTcpPeerIpv4Address::new([192, 0, 2, 44]).unwrap();
     let peer = api::ReticulumTcpPeerConfigSummary::new(true, address, 4242).unwrap();
-    api::NetworkConfigSnapshot::new(7, [Some(profile), None, None, None], Some(peer)).unwrap()
+    api::NetworkConfigSnapshot::with_defaults(7, [Some(profile), None, None, None], Some(peer))
+        .unwrap()
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn network_runtime_status() -> api::NetworkRuntimeStatus {
     api::NetworkRuntimeStatus::new_with_tcp_failure(
         7,
@@ -3204,12 +2640,7 @@ fn network_runtime_status() -> api::NetworkRuntimeStatus {
     .unwrap()
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn network_mutation_request() -> api::NetworkConfigMutationRequest<'static> {
     let network = api::WifiNetworkUpdate::new(
         true,
@@ -3227,12 +2658,7 @@ fn network_mutation_request() -> api::NetworkConfigMutationRequest<'static> {
     )
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn dispatch_complete_network(
     port: &mut FakeLxmfOnlyPort,
     nomad: &mut FakeNomadPort,
@@ -3241,7 +2667,7 @@ fn dispatch_complete_network(
     context: &DispatchContext,
     request: DeviceRequest<'_>,
 ) -> ResponseEnvelope {
-    super::dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config_ports(
+    super::dispatch_with_lxmf_peer_discovery_nomad_and_network_config_ports(
         port,
         nomad,
         network,
@@ -3252,12 +2678,7 @@ fn dispatch_complete_network(
     )
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn complete_dispatch_routes_authenticated_node_route_and_radio_trace_diagnostics_to_the_primary_owner()
  {
@@ -3346,12 +2767,7 @@ fn complete_dispatch_routes_authenticated_node_route_and_radio_trace_diagnostics
     assert_eq!(manual.queue_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn complete_dispatch_advertises_network_config_runtime_availability() {
     let mut port = FakeLxmfOnlyPort::default();
@@ -3369,9 +2785,8 @@ fn complete_dispatch_advertises_network_config_runtime_availability() {
         &DispatchContext::UNAUTHENTICATED,
         DeviceRequest::SystemCapabilities,
     );
-    let expected = CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
-        cfg!(feature = "experimental-rns-data"),
-        CapabilityAvailability::Available,
+    let expected = CapabilitySnapshot::for_dispatch_with_lxmf_basic_send_and_peer_discovery(
+        cfg!(feature = "rns-data"),
         CapabilityAvailability::Available,
         CapabilityAvailability::Available,
         CapabilityAvailability::Available,
@@ -3392,12 +2807,7 @@ fn complete_dispatch_advertises_network_config_runtime_availability() {
     assert_eq!(manual_announce.queue_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn complete_dispatch_authenticates_then_coalesces_manual_service_announce() {
     let mut port = FakeLxmfOnlyPort::default();
@@ -3457,12 +2867,7 @@ fn complete_dispatch_authenticates_then_coalesces_manual_service_announce() {
     assert_eq!(nomad.poll_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn complete_dispatch_rejects_disabled_manual_announce_without_queueing() {
     let mut port = FakeLxmfOnlyPort::default();
@@ -3491,19 +2896,14 @@ fn complete_dispatch_rejects_disabled_manual_announce_without_queueing() {
     assert_eq!(nomad.availability_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn same_owner_complete_dispatch_enters_network_config_through_one_exclusive_borrow() {
     let mut port = FakeLxmfOnlyPort::default();
     let mut nomad = FakeNomadPort::available(nomad_id());
     let context = authenticated(6, Permissions::NONE);
 
-    let response = super::dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config(
+    let response = super::dispatch_with_lxmf_peer_discovery_nomad_and_network_config(
         &mut port,
         &mut nomad,
         identity_summary(),
@@ -3529,18 +2929,13 @@ fn same_owner_complete_dispatch_enters_network_config_through_one_exclusive_borr
     assert_eq!(nomad.poll_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn same_owner_complete_dispatch_queues_manual_announce_through_one_exclusive_borrow() {
     let mut port = FakeLxmfOnlyPort::default();
     let mut nomad = FakeNomadPort::available(nomad_id());
 
-    let response = super::dispatch_with_inbox_lxmf_peer_discovery_nomad_and_network_config(
+    let response = super::dispatch_with_lxmf_peer_discovery_nomad_and_network_config(
         &mut port,
         &mut nomad,
         identity_summary(),
@@ -3566,12 +2961,7 @@ fn same_owner_complete_dispatch_queues_manual_announce_through_one_exclusive_bor
     assert_eq!(nomad.poll_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn network_config_dispatch_enforces_authentication_and_management_permission_first() {
     let mut port = FakeLxmfOnlyPort::default();
@@ -3610,12 +3000,7 @@ fn network_config_dispatch_enforces_authentication_and_management_permission_fir
     assert_eq!(manual_announce.queue_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn network_config_get_and_status_invoke_only_the_network_port() {
     let mut port = FakeLxmfOnlyPort::default();
@@ -3666,12 +3051,7 @@ fn network_config_get_and_status_invoke_only_the_network_port() {
     assert_eq!(manual_announce.queue_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn network_config_mutation_returns_applied_and_revision_conflict_as_normal_outcomes() {
     let mut port = FakeLxmfOnlyPort::default();
@@ -3734,12 +3114,7 @@ fn network_config_mutation_returns_applied_and_revision_conflict_as_normal_outco
     assert_eq!(manual_announce.queue_calls, 0);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn network_config_port_failures_map_to_stable_api_errors() {
     let cases = [
@@ -3788,19 +3163,14 @@ fn network_config_port_failures_map_to_stable_api_errors() {
         assert_eq!(
             error_code(network_config_port_error(
                 port_error,
-                api::OP_EXPERIMENTAL_NETWORK_CONFIG_GET,
+                api::OP_NETWORK_CONFIG_GET,
             )),
             ApiErrorCode::Internal
         );
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ReticulumProbePortCalls {
     availability: usize,
@@ -3808,12 +3178,7 @@ struct ReticulumProbePortCalls {
     poll: usize,
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 struct FakeReticulumProbePort {
     availability: CapabilityAvailability,
     start_result: Result<ReticulumProbeStartDisposition, ReticulumProbePortError>,
@@ -3824,12 +3189,7 @@ struct FakeReticulumProbePort {
     observed_polls: Vec<(api::PrincipalId, api::ProbeId)>,
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl FakeReticulumProbePort {
     fn available() -> Self {
         Self {
@@ -3846,12 +3206,7 @@ impl FakeReticulumProbePort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 impl ReticulumProbePort for FakeReticulumProbePort {
     fn availability(&mut self) -> CapabilityAvailability {
         self.calls.availability += 1;
@@ -3885,22 +3240,12 @@ impl ReticulumProbePort for FakeReticulumProbePort {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn probe_id() -> api::ProbeId {
     api::ProbeId::new([0x91; 16]).unwrap()
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn probe_start_request() -> api::ProbeStartRequest {
     api::ProbeStartRequest::new(
         api::DestinationHash([0x92; 16]),
@@ -3908,12 +3253,7 @@ fn probe_start_request() -> api::ProbeStartRequest {
     )
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn probe_success() -> api::ProbeSuccess {
     api::ProbeSuccess::new(
         1_275,
@@ -3922,12 +3262,7 @@ fn probe_success() -> api::ProbeSuccess {
     )
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 fn dispatch_complete_probe(
     port: &mut FakeLxmfOnlyPort,
     nomad: &mut FakeNomadPort,
@@ -3935,7 +3270,7 @@ fn dispatch_complete_probe(
     context: &DispatchContext,
     request: DeviceRequest<'_>,
 ) -> ResponseEnvelope {
-    super::dispatch_with_inbox_lxmf_peer_discovery_nomad_network_config_and_probe(
+    super::dispatch_with_lxmf_peer_discovery_nomad_network_config_and_probe(
         port,
         nomad,
         probe,
@@ -3945,12 +3280,7 @@ fn dispatch_complete_probe(
     )
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn complete_dispatch_advertises_exact_probe_availability_without_starting_work() {
     for availability in [
@@ -3973,7 +3303,7 @@ fn complete_dispatch_advertises_exact_probe_availability_without_starting_work()
         let DeviceResponse::SystemCapabilities(capabilities) = response.response else {
             panic!("complete dispatcher must return capabilities");
         };
-        assert_eq!(capabilities.experimental_reticulum_probe(), availability);
+        assert_eq!(capabilities.reticulum_probe(), availability);
         assert_eq!(
             probe.calls,
             ReticulumProbePortCalls {
@@ -3987,12 +3317,7 @@ fn complete_dispatch_advertises_exact_probe_availability_without_starting_work()
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn complete_dispatch_keeps_unrelated_requests_out_of_the_probe_port() {
     let mut port = FakeLxmfOnlyPort::default();
@@ -4016,12 +3341,7 @@ fn complete_dispatch_keeps_unrelated_requests_out_of_the_probe_port() {
     assert_eq!(probe.observed_polls, []);
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn probe_start_maps_fresh_replay_conflict_and_capacity_outcomes() {
     let cases = [
@@ -4058,7 +3378,7 @@ fn probe_start_maps_fresh_replay_conflict_and_capacity_outcomes() {
             &mut port,
             &mut nomad,
             &mut probe,
-            &authenticated(11, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA),
+            &authenticated(11, Permissions::SUBMIT_RNS_DATA),
             DeviceRequest::ReticulumProbeStart(request),
         );
 
@@ -4095,12 +3415,7 @@ fn probe_start_maps_fresh_replay_conflict_and_capacity_outcomes() {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn probe_dispatch_enforces_authentication_and_start_permission_before_port_entry() {
     for (context, request, expected) in [
@@ -4138,12 +3453,7 @@ fn probe_dispatch_enforces_authentication_and_start_permission_before_port_entry
     }
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn probe_poll_returns_success_hides_foreign_ids_and_reports_missing_ids() {
     let owner = api::PrincipalId([13; 16]);
@@ -4207,12 +3517,7 @@ fn probe_poll_returns_success_hides_foreign_ids_and_reports_missing_ids() {
     );
 }
 
-#[cfg(all(
-    feature = "experimental-rns-inbox",
-    feature = "experimental-lxmf",
-    feature = "experimental-nomad",
-    feature = "experimental-network-config"
-))]
+#[cfg(all(feature = "lxmf", feature = "nomad", feature = "network-config"))]
 #[test]
 fn unavailable_probe_capability_rejects_start_and_poll_before_work() {
     for availability in [
@@ -4232,7 +3537,7 @@ fn unavailable_probe_capability_rejects_start_and_poll_before_work() {
                 &mut port,
                 &mut nomad,
                 &mut probe,
-                &authenticated(15, Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA),
+                &authenticated(15, Permissions::SUBMIT_RNS_DATA),
                 request,
             );
 

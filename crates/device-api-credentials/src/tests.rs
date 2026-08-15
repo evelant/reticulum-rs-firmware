@@ -27,7 +27,7 @@ fn audit(created: u64, modified: u64, policy: u32) -> CredentialAudit {
     CredentialAudit::new(
         AuthorityRevision::new(created),
         AuthorityRevision::new(modified),
-        PairingOrigin::UsbPhysicalPresence,
+        PairingOrigin::LocalPhysicalPresence,
         AuthorizationPolicyVersion::new(policy),
     )
 }
@@ -83,8 +83,7 @@ fn insert_ok<const N: usize>(
 
 #[test]
 fn only_active_records_select_and_device_owned_facts_mint_the_lease() {
-    let active_permissions =
-        Permissions::READ_SUBMISSION_STATUS | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA;
+    let active_permissions = Permissions::READ_SUBMISSION_STATUS | Permissions::SUBMIT_RNS_DATA;
     let revoked = CredentialRecord::revoked(
         id(3),
         CredentialGeneration::new(3),
@@ -138,7 +137,7 @@ fn only_active_records_select_and_device_owned_facts_mint_the_lease() {
     assert_eq!(lease.generation(), CredentialGeneration::new(1));
     assert_eq!(lease.authority_revision(), AuthorityRevision::new(3));
     assert_eq!(lease.policy_version(), AuthorizationPolicyVersion::new(1));
-    assert_eq!(lease.pairing_origin(), PairingOrigin::UsbPhysicalPresence);
+    assert_eq!(lease.pairing_origin(), PairingOrigin::LocalPhysicalPresence);
 }
 
 #[test]
@@ -189,7 +188,7 @@ fn replacement_snapshots_invalidate_old_grants_before_dispatch() {
             CredentialAudit::new(
                 AuthorityRevision::new(1),
                 AuthorityRevision::new(3),
-                PairingOrigin::UsbPhysicalPresence,
+                PairingOrigin::LocalPhysicalPresence,
                 AuthorizationPolicyVersion::new(2),
             ),
             RevocationReason::Explicit,
@@ -401,7 +400,7 @@ fn revision_and_permission_vocabularies_never_wrap_or_feature_drift() {
         Ok(AuthorityRevision::new(42))
     );
 
-    let all = Permissions::READ_SUBMISSION_STATUS | Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA;
+    let all = Permissions::READ_SUBMISSION_STATUS | Permissions::SUBMIT_RNS_DATA;
     assert_eq!(Permissions::from_bits(all.bits()), Ok(all));
     assert_eq!(
         Permissions::from_bits(1 << 31).unwrap_err().unknown(),
@@ -473,7 +472,7 @@ fn enrollment(
         id(id_byte),
         principal,
         permissions,
-        PairingOrigin::UsbPhysicalPresence,
+        PairingOrigin::LocalPhysicalPresence,
         AuthorizationPolicyVersion::new(policy),
         Zeroizing::new(psk),
     )
@@ -558,7 +557,7 @@ fn pending_lookup_is_exact_single_record_and_zeroizing() {
                 id(2),
                 CredentialGeneration::new(3),
                 OTHER_PRINCIPAL,
-                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                Permissions::SUBMIT_RNS_DATA,
                 CredentialStatus::Pending,
                 audit(2, 3, 7),
                 pending_psk,
@@ -692,7 +691,7 @@ fn add_pending_allocates_exact_next_facts_and_preserves_all_existing_secrets() {
         .plan_add_pending(enrollment(
             3,
             OTHER_PRINCIPAL,
-            Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+            Permissions::SUBMIT_RNS_DATA,
             9,
             new_psk,
         ))
@@ -725,10 +724,7 @@ fn add_pending_allocates_exact_next_facts_and_preserves_all_existing_secrets() {
     assert_eq!(pending.status, CredentialStatus::Pending);
     assert_eq!(pending.generation, CredentialGeneration::new(4));
     assert_eq!(pending.principal, OTHER_PRINCIPAL);
-    assert_eq!(
-        pending.permissions,
-        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA
-    );
+    assert_eq!(pending.permissions, Permissions::SUBMIT_RNS_DATA);
     assert_eq!(pending.audit.created_revision(), AuthorityRevision::new(4));
     assert_eq!(pending.audit.modified_revision(), AuthorityRevision::new(4));
     assert_eq!(
@@ -759,7 +755,7 @@ fn pairing_store_candidate_preflight_retains_opaque_owner_on_both_outcomes() {
         .plan_add_pending(enrollment(
             2,
             OTHER_PRINCIPAL,
-            Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+            Permissions::SUBMIT_RNS_DATA,
             9,
             [0xc3; 32],
         ))
@@ -818,7 +814,7 @@ fn pairing_store_preflight_rejects_same_revision_add_collision() {
         .plan_add_pending(enrollment(
             2,
             OTHER_PRINCIPAL,
-            Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+            Permissions::SUBMIT_RNS_DATA,
             9,
             [0xc4; 32],
         ))
@@ -838,7 +834,7 @@ fn pairing_store_preflight_rejects_same_revision_add_collision() {
                 id(2),
                 CredentialGeneration::new(2),
                 OTHER_PRINCIPAL,
-                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                Permissions::SUBMIT_RNS_DATA,
                 CredentialStatus::Active,
                 audit(2, 2, 9),
                 [0xc5; 32],
@@ -881,13 +877,7 @@ fn pairing_store_preflight_rejects_activate_cross_predecessor_facts_and_generati
             7,
             [0xa1; 32],
         ),
-        cross_predecessor_pending(
-            2,
-            PRINCIPAL,
-            Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
-            7,
-            [0xa1; 32],
-        ),
+        cross_predecessor_pending(2, PRINCIPAL, Permissions::SUBMIT_RNS_DATA, 7, [0xa1; 32]),
         cross_predecessor_pending(
             2,
             PRINCIPAL,
@@ -940,13 +930,7 @@ fn pairing_store_preflight_rejects_abort_cross_predecessor_facts_and_generation(
             7,
             [0xa1; 32],
         ),
-        cross_predecessor_pending(
-            2,
-            PRINCIPAL,
-            Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
-            7,
-            [0xa1; 32],
-        ),
+        cross_predecessor_pending(2, PRINCIPAL, Permissions::SUBMIT_RNS_DATA, 7, [0xa1; 32]),
         cross_predecessor_pending(
             2,
             PRINCIPAL,
@@ -1219,7 +1203,7 @@ fn activation_preserves_psks_and_policy_while_advancing_only_pending_generation(
                 id(2),
                 CredentialGeneration::new(3),
                 OTHER_PRINCIPAL,
-                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                Permissions::SUBMIT_RNS_DATA,
                 CredentialStatus::Pending,
                 audit(2, 3, 7),
                 pending_psk,
@@ -1259,10 +1243,7 @@ fn activation_preserves_psks_and_policy_while_advancing_only_pending_generation(
     assert_eq!(activated.status, CredentialStatus::Active);
     assert_eq!(activated.generation, CredentialGeneration::new(4));
     assert_eq!(activated.principal, OTHER_PRINCIPAL);
-    assert_eq!(
-        activated.permissions,
-        Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA
-    );
+    assert_eq!(activated.permissions, Permissions::SUBMIT_RNS_DATA);
     assert_eq!(
         activated.audit.created_revision(),
         AuthorityRevision::new(2)
@@ -1300,7 +1281,7 @@ fn abort_drops_only_pending_psk_and_retains_an_exact_pairing_tombstone() {
                 id(2),
                 CredentialGeneration::new(3),
                 OTHER_PRINCIPAL,
-                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                Permissions::SUBMIT_RNS_DATA,
                 CredentialStatus::Pending,
                 audit(2, 3, 7),
                 [0xb2; 32],

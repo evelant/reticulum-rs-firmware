@@ -8,8 +8,8 @@
     "modules/*"
   ],
   "scripts": {
-    "api:check": "cargo run --locked -p reticulum-lxmf-chat-service --bin export-api-bindings -- --check",
-    "api:generate": "cargo run --locked -p reticulum-lxmf-chat-service --bin export-api-bindings",
+    "api:check": "cargo run --locked -p reticulum-appliance-service --bin export-api-bindings -- --check",
+    "api:generate": "cargo run --locked -p reticulum-appliance-service --bin export-api-bindings",
     "android": "bun run native:run:android",
     "assets:check": "bun run scripts/check-generated.ts",
     "build:web": "bun run scripts/build-web.ts",

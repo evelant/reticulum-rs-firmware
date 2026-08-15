@@ -12,7 +12,6 @@ default = []
 
 [dependencies]
 embassy-sync.workspace = true
-embedded-storage.workspace = true
 rand_core.workspace = true
 reticulum-node-core = { path = "../node-core", default-features = false }
 reticulum-storage-actor = { path = "../storage-actor", default-features = false }
@@ -21,6 +20,7 @@ reticulum-submission-projector = { path = "../submission-projector", default-fea
 reticulum-tx-supervisor = { path = "../tx-supervisor", default-features = false }
 
 [dev-dependencies]
+embedded-storage.workspace = true
 reticulum-storage-journal = { path = "../storage-journal", default-features = false }
 
 [lib]

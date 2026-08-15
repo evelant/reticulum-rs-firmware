@@ -12,7 +12,6 @@ use reticulum_lxmf_model::{
 };
 use reticulum_lxmf_wire::{MessageView, WireLimits};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{string::String, vec, vec::Vec};
 
 const PARTITION_SIZE: usize = EXTENT_SIZE * 4;
@@ -396,87 +395,45 @@ fn commit_and_remount_preserve_first_arrival_transport_observation() {
 }
 
 #[test]
-fn current_mount_reads_legacy_v1_records_and_appends_v2_records() {
-    let legacy_wire = complete_wire(0x22, 600, 0xa5);
-    let legacy = complete_candidate(&legacy_wire, 1, 9, 0x22, 7, normal_stamp());
-    let legacy_digest = digest_candidate_wire(legacy);
-    let legacy_header = encode_header(
-        binding(PARTITION_SIZE),
-        LEGACY_PHYSICAL_FORMAT_VERSION,
-        MessageHandle::new(1).unwrap(),
-        0,
-        1,
-        legacy.metadata(),
-        legacy_digest,
-    );
-    let legacy_record_digest = digest_candidate_record(&legacy_header, legacy);
-    let legacy_footer = encode_footer(
-        LEGACY_PHYSICAL_FORMAT_VERSION,
-        MessageHandle::new(1).unwrap(),
-        1,
-        legacy_wire.len() as u32,
-        legacy_digest,
-        legacy_record_digest,
-        true,
-    );
-    let mut legacy_fixture_digest = Sha256::new();
-    legacy_fixture_digest.update(legacy_header);
-    legacy_fixture_digest.update(&legacy_wire);
-    legacy_fixture_digest.update(legacy_footer);
-    assert_eq!(
-        hex::encode(legacy_fixture_digest.finalize()),
-        "fa34742c3cf86f0a96580cfe9fa4e6849941605b05e80a3912b90a837b9e2a3b"
-    );
-    let mut access = bound(TestNor::erased(PARTITION_SIZE));
-    access.backend_mut().bytes[..EXTENT_HEADER_SIZE].copy_from_slice(&legacy_header);
-    access.backend_mut().bytes[EXTENT_HEADER_SIZE..EXTENT_HEADER_SIZE + legacy_wire.len()]
-        .copy_from_slice(&legacy_wire);
-    access.backend_mut().bytes[EXTENT_SIZE - RECORD_FOOTER_SIZE..EXTENT_SIZE]
-        .copy_from_slice(&legacy_footer);
+fn every_non_current_physical_version_is_rejected() {
+    let wire = complete_wire(0x22, 600, 0xa5);
+    let candidate = complete_candidate(&wire, 1, 9, 0x22, 7, normal_stamp());
+    let wire_digest = digest_candidate_wire(candidate);
 
-    let mut mounted_index = index::<4>();
-    let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
-    assert_eq!(
-        mounted.metadata(MessageHandle::new(1).unwrap()),
-        Some(legacy.metadata())
-    );
+    for version in 1..PHYSICAL_FORMAT_VERSION {
+        let header = encode_header(
+            binding(PARTITION_SIZE),
+            version,
+            MessageHandle::new(1).unwrap(),
+            0,
+            1,
+            candidate.metadata(),
+            wire_digest,
+        );
+        let record_digest = digest_candidate_record(&header, candidate);
+        let footer = encode_footer(
+            version,
+            MessageHandle::new(1).unwrap(),
+            1,
+            wire.len() as u32,
+            wire_digest,
+            record_digest,
+            true,
+        );
+        let mut access = bound(TestNor::erased(PARTITION_SIZE));
+        access.backend_mut().bytes[..EXTENT_HEADER_SIZE].copy_from_slice(&header);
+        access.backend_mut().bytes[EXTENT_HEADER_SIZE..EXTENT_HEADER_SIZE + wire.len()]
+            .copy_from_slice(&wire);
+        access.backend_mut().bytes[EXTENT_SIZE - RECORD_FOOTER_SIZE..EXTENT_SIZE]
+            .copy_from_slice(&footer);
 
-    let current_wire = complete_wire(0x33, 600, 0x5a);
-    let current_metadata = metadata(
-        2,
-        8,
-        0x33,
-        0x44,
-        9,
-        CarrierProvenance::Complete,
-        normal_stamp(),
-        current_wire.len(),
-        current_wire.len(),
-    )
-    .with_ingress_observation(Some(InboundTransportObservation::new(
-        InboundInterfaceId::new(4),
-        Some(InboundSignalObservation::new(-88, 7)),
-    )));
-    let current =
-        InboundMessageCandidate::new(current_metadata, NormalizedWire::Contiguous(&current_wire))
-            .unwrap();
-    let current_receipt = match mounted.commit(&mut access, current).unwrap() {
-        LxmfCommitOutcome::Committed(receipt) => receipt,
-        other => panic!("unexpected outcome {other:?}"),
-    };
-    assert_eq!(current_receipt.handle().get(), 2);
-
-    let mut remounted_index = index::<4>();
-    let remounted = mount(&mut access, &mut remounted_index).unwrap();
-    assert_eq!(remounted.message_count(), 2);
-    assert_eq!(
-        remounted.metadata(MessageHandle::new(1).unwrap()),
-        Some(legacy.metadata())
-    );
-    assert_eq!(
-        remounted.metadata(current_receipt.handle()),
-        Some(current_metadata)
-    );
+        assert!(matches!(
+            mount(&mut access, &mut index::<4>()),
+            Err(LxmfStoreMountError::Fault(
+                LxmfStoreFault::UnsupportedPhysicalVersion { extent: 0, actual }
+            )) if actual == version
+        ));
+    }
 }
 
 #[test]
@@ -661,7 +618,7 @@ fn wire_chunk_fails_closed_when_an_indexed_extent_header_changes() {
 }
 
 #[test]
-fn opportunistic_391_byte_carrier_exceeds_old_qualification_ceiling() {
+fn opportunistic_391_byte_carrier_commits_and_remounts() {
     let destination = [0x44; 16];
     let carrier = [0x66; 391];
     let metadata = metadata(

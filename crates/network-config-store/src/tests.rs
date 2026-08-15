@@ -219,64 +219,6 @@ fn provision_first() -> (MountedNetworkConfigStore, BoundNetworkConfigStore<Fake
     (mounted, access)
 }
 
-fn program_v1_snapshot(
-    access: &mut BoundNetworkConfigStore<FakeNor>,
-    configuration: &NetworkConfig,
-) {
-    let mut record = encode_record(
-        access.binding(),
-        NetworkConfigStoreSector::A,
-        NonZeroU64::new(1).expect("nonzero generation"),
-        0,
-        ZERO_DIGEST,
-        configuration,
-    );
-    put_u16(&mut record[..], 10, 1);
-    record[PAYLOAD_RESERVED_OFFSET..PROTECTED_SIZE].fill(0);
-    let digest = snapshot_digest(&record[..PROTECTED_SIZE]);
-    record[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
-    access.backend_mut().program(0, &record[..]);
-}
-
-fn program_v2_snapshot(
-    access: &mut BoundNetworkConfigStore<FakeNor>,
-    configuration: &NetworkConfig,
-) {
-    let mut record = encode_record(
-        access.binding(),
-        NetworkConfigStoreSector::A,
-        NonZeroU64::new(1).expect("nonzero generation"),
-        0,
-        ZERO_DIGEST,
-        configuration,
-    );
-    put_u16(&mut record[..], 10, 2);
-    record[V2_EXTENSION_RESERVED_OFFSET] = 0;
-    record[V2_HOSTNAME_END..PROTECTED_SIZE].fill(0);
-    let digest = snapshot_digest(&record[..PROTECTED_SIZE]);
-    record[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
-    access.backend_mut().program(0, &record[..]);
-}
-
-fn program_v3_snapshot(
-    access: &mut BoundNetworkConfigStore<FakeNor>,
-    configuration: &NetworkConfig,
-) {
-    let mut record = encode_record(
-        access.binding(),
-        NetworkConfigStoreSector::A,
-        NonZeroU64::new(1).expect("nonzero generation"),
-        0,
-        ZERO_DIGEST,
-        configuration,
-    );
-    put_u16(&mut record[..], 10, 3);
-    record[V2_HOSTNAME_END..PROTECTED_SIZE].fill(0);
-    let digest = snapshot_digest(&record[..PROTECTED_SIZE]);
-    record[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
-    access.backend_mut().program(0, &record[..]);
-}
-
 #[test]
 fn semantic_model_enforces_wifi_and_tcp_bounds() {
     assert_eq!(
@@ -477,7 +419,7 @@ fn redacted_projection_contains_no_password_or_password_length() {
 }
 
 #[test]
-fn semantic_equality_includes_every_v4_policy_location_and_radio_field() {
+fn semantic_equality_includes_every_policy_location_and_radio_field() {
     let left = first_config();
     let mut right = first_config();
     assert!(configuration_eq(&left, &right));
@@ -508,7 +450,7 @@ fn semantic_equality_includes_every_v4_policy_location_and_radio_field() {
 }
 
 #[test]
-fn semantic_v4_round_trips_dns_policy_phone_location_and_radio_profile() {
+fn semantic_snapshot_round_trips_dns_policy_phone_location_and_radio_profile() {
     let mut config = first_config();
     config.set_tcp_peer(Some(dns_peer(b"rmap.world", true)));
     config.set_wifi_transport_enabled(false);
@@ -522,7 +464,7 @@ fn semantic_v4_round_trips_dns_policy_phone_location_and_radio_profile() {
     config.set_lora_profile(radio_profile);
 
     let mut access = bound(FakeNor::erased());
-    let mounted = provision_erased(&mut access, &config).expect("v4 provision");
+    let mounted = provision_erased(&mut access, &config).expect("current provision");
     assert_eq!(
         read_u16(&access.backend().bytes, 10),
         SEMANTIC_FORMAT_VERSION
@@ -538,14 +480,14 @@ fn semantic_v4_round_trips_dns_policy_phone_location_and_radio_profile() {
     assert_eq!(mounted.configuration().phone_location(), Some(location));
     assert_eq!(mounted.configuration().lora_tx_power(), LoraTxPower::Dbm20);
     assert_eq!(mounted.configuration().lora_profile(), radio_profile);
-    assert_eq!(access.backend().bytes[V3_LORA_TX_POWER_DBM_OFFSET], 20);
+    assert_eq!(access.backend().bytes[LORA_TX_POWER_DBM_OFFSET], 20);
 
-    let cold = mount(&mut access).expect("cold v4 mount");
+    let cold = mount(&mut access).expect("cold mount");
     assert!(configuration_eq(cold.configuration(), &config));
 }
 
 #[test]
-fn semantic_v4_round_trips_each_supported_lora_power() {
+fn semantic_snapshot_round_trips_each_supported_lora_power() {
     for power in [
         LoraTxPower::Dbm14,
         LoraTxPower::Dbm17,
@@ -556,116 +498,22 @@ fn semantic_v4_round_trips_each_supported_lora_power() {
         config.set_lora_tx_power(power);
         let mut access = bound(FakeNor::erased());
 
-        let mounted = provision_erased(&mut access, &config).expect("v4 provision");
+        let mounted = provision_erased(&mut access, &config).expect("current provision");
         assert_eq!(mounted.configuration().lora_tx_power(), power);
         assert_eq!(
-            i32::from(access.backend().bytes[V3_LORA_TX_POWER_DBM_OFFSET]),
+            i32::from(access.backend().bytes[LORA_TX_POWER_DBM_OFFSET]),
             power.requested_dbm()
         );
-        let cold = mount(&mut access).expect("cold v4 mount");
+        let cold = mount(&mut access).expect("cold mount");
         assert_eq!(cold.configuration().lora_tx_power(), power);
     }
 }
 
 #[test]
-fn committed_v1_snapshot_mounts_with_explicit_compatibility_defaults_then_migrates() {
+fn semantic_snapshot_rejects_an_unsupported_lora_power_byte() {
     let mut access = bound(FakeNor::erased());
-    program_v1_snapshot(&mut access, &first_config());
-
-    let mounted = mount(&mut access).expect("v1 snapshot remains readable");
-    assert_first_config(mounted.configuration());
-    let predecessor = mounted.revision();
-    let mut migrated = mounted.into_configuration();
-    migrated.set_tcp_peer(Some(dns_peer(b"dublin.connect.reticulum.network", true)));
-    migrated.set_wifi_transport_enabled(false);
-    migrated.set_automatic_announces_enabled(false);
-    migrated.set_rmap_discovery_enabled(true);
-    migrated.set_rmap_share_location(true);
-    let location = PhoneLocation::new(53_349_805, -6_260_310).expect("Dublin location");
-    migrated.set_phone_location(Some(location));
-    migrated.set_lora_tx_power(LoraTxPower::Dbm22);
-
-    let successor =
-        commit_successor(&mut access, predecessor, &migrated).expect("v4 successor commit");
-    assert_eq!(
-        read_u16(&access.backend().bytes, SECTOR_SIZE + 10),
-        SEMANTIC_FORMAT_VERSION
-    );
-    assert_eq!(
-        successor.configuration().tcp_peer(),
-        Some(dns_peer(b"dublin.connect.reticulum.network", true))
-    );
-    assert!(!successor.configuration().wifi_transport_enabled());
-    assert!(!successor.configuration().automatic_announces_enabled());
-    assert!(successor.configuration().rmap_discovery_enabled());
-    assert!(successor.configuration().rmap_share_location());
-    assert_eq!(successor.configuration().phone_location(), Some(location));
-    assert_eq!(
-        successor.configuration().lora_tx_power(),
-        LoraTxPower::Dbm22
-    );
-}
-
-#[test]
-fn committed_v2_snapshot_defaults_lora_power_then_migrates_to_v4() {
-    let mut access = bound(FakeNor::erased());
-    let mut legacy = first_config();
-    legacy.set_lora_tx_power(LoraTxPower::Dbm22);
-    program_v2_snapshot(&mut access, &legacy);
-
-    let mounted = mount(&mut access).expect("v2 snapshot remains readable");
-    assert_eq!(mounted.configuration().lora_tx_power(), LoraTxPower::Dbm14);
-    let predecessor = mounted.revision();
-    let mut migrated = mounted.into_configuration();
-    migrated.set_lora_tx_power(LoraTxPower::Dbm17);
-
-    let successor =
-        commit_successor(&mut access, predecessor, &migrated).expect("v4 successor commit");
-    assert_eq!(
-        read_u16(&access.backend().bytes, SECTOR_SIZE + 10),
-        SEMANTIC_FORMAT_VERSION
-    );
-    assert_eq!(
-        access.backend().bytes[SECTOR_SIZE + V3_LORA_TX_POWER_DBM_OFFSET],
-        17
-    );
-    assert_eq!(
-        successor.configuration().lora_tx_power(),
-        LoraTxPower::Dbm17
-    );
-}
-
-#[test]
-fn committed_v3_snapshot_defaults_modulation_but_retains_power_then_migrates_to_v4() {
-    let mut access = bound(FakeNor::erased());
-    let mut legacy = first_config();
-    legacy.set_lora_tx_power(LoraTxPower::Dbm22);
-    program_v3_snapshot(&mut access, &legacy);
-
-    let mounted = mount(&mut access).expect("v3 snapshot remains readable");
-    assert_eq!(
-        mounted.configuration().lora_profile(),
-        LoraRadioProfile::DEFAULT.with_tx_power(LoraTxPower::Dbm22)
-    );
-    let predecessor = mounted.revision();
-    let mut migrated = mounted.into_configuration();
-    let selected = LoraRadioProfile::new(914_875_000, 250_000, 9, 7, LoraTxPower::Dbm22)
-        .expect("valid profile");
-    migrated.set_lora_profile(selected);
-
-    let successor = commit_successor(&mut access, predecessor, &migrated).expect("v4 successor");
-    assert_eq!(
-        read_u16(&access.backend().bytes, SECTOR_SIZE + 10),
-        SEMANTIC_FORMAT_VERSION
-    );
-    assert_eq!(successor.configuration().lora_profile(), selected);
-}
-
-#[test]
-fn semantic_v1_reserved_bytes_are_not_reinterpreted_as_v2_fields() {
-    let mut access = bound(FakeNor::erased());
-    program_v1_snapshot(&mut access, &first_config());
-    access.backend_mut().bytes[V2_POLICY_FLAGS_OFFSET] = V2_POLICY_RMAP_DISCOVERY_ENABLED;
+    let _ = provision_erased(&mut access, &first_config()).expect("current provision");
+    access.backend_mut().bytes[LORA_TX_POWER_DBM_OFFSET] = 21;
     let digest = snapshot_digest(&access.backend().bytes[..PROTECTED_SIZE]);
     access.backend_mut().bytes[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
 
@@ -680,21 +528,29 @@ fn semantic_v1_reserved_bytes_are_not_reinterpreted_as_v2_fields() {
 }
 
 #[test]
-fn semantic_v4_rejects_an_unsupported_lora_power_byte() {
-    let mut access = bound(FakeNor::erased());
-    let _ = provision_erased(&mut access, &first_config()).expect("v4 provision");
-    access.backend_mut().bytes[V3_LORA_TX_POWER_DBM_OFFSET] = 21;
-    let digest = snapshot_digest(&access.backend().bytes[..PROTECTED_SIZE]);
-    access.backend_mut().bytes[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
+fn every_non_current_semantic_version_is_rejected() {
+    for version in 1..SEMANTIC_FORMAT_VERSION {
+        let mut access = bound(FakeNor::erased());
+        let mut record = encode_record(
+            access.binding(),
+            NetworkConfigStoreSector::A,
+            NonZeroU64::new(1).expect("nonzero generation"),
+            0,
+            ZERO_DIGEST,
+            &first_config(),
+        );
+        put_u16(&mut record[..], 10, version);
+        let digest = snapshot_digest(&record[..PROTECTED_SIZE]);
+        record[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
+        access.backend_mut().program(0, &record[..]);
 
-    assert!(matches!(
-        mount(&mut access),
-        Err(NetworkConfigStoreError::Fault(
-            NetworkConfigStoreFault::CommittedSnapshotCorrupt {
-                sector: NetworkConfigStoreSector::A
-            }
-        ))
-    ));
+        assert!(matches!(
+            mount(&mut access),
+            Err(NetworkConfigStoreError::Fault(
+                NetworkConfigStoreFault::UnsupportedSemanticVersion(actual)
+            )) if actual == version
+        ));
+    }
 }
 
 #[test]

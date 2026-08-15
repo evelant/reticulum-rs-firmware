@@ -1,82 +1,97 @@
 # Verification
 
-The checked [CI workflow](../../.github/workflows/ci.yml) is the complete
-machine-readable verification matrix. This guide lists the useful local entry
-points without duplicating every package-specific CI command.
+Run the smallest relevant check while editing, then run the full host and app
+gates before handing off a change. Hardware behavior still requires a board;
+host tests do not establish radio, BLE, Wi-Fi, flash, or display behavior.
 
-## Host and policy checks
+## Host workspace
 
 From the repository root:
 
 ```sh
-cargo fmt -- --check
+cargo fmt --all -- --check
 RUST_MIN_STACK=16777216 cargo test --locked
+RUST_MIN_STACK=16777216 cargo test --locked -p reticulum-e290-firmware --lib
 cargo clippy --locked --all-targets -- -D warnings
-cargo run --locked -p xtask -- graph-policy
+cargo run --locked -p xtask -- doctor
 ```
 
-`graph-policy` checks feature isolation, dependency provenance, target
-composition, generated policy surfaces, and other boundaries that ordinary
-Rust compilation cannot express.
+`RUST_MIN_STACK` gives the larger protocol and storage tests enough stack on
+the host. The explicit firmware library command covers its portable policy and
+state-machine tests; the default workspace members exclude the ESP32-S3
+firmware. Use the target commands below for embedded compilation and final-ELF
+validation.
 
-Run the E290 flash-helper and documentation policy suite after changing
-partition tables, image commands, or flash documentation:
+To check one package while iterating:
 
 ```sh
-PYTHONPATH=interop/python \
-  python3.13 -m unittest -v interop/python/test_e290_qualification_host.py
+cargo test --locked -p PACKAGE
+cargo clippy --locked -p PACKAGE --all-targets -- -D warnings
 ```
+
+## E290 firmware
+
+Install the Espressif Rust environment, then run:
+
+```sh
+cargo run --locked -p xtask -- doctor
+cargo run --locked -p xtask -- build
+cargo run --locked -p xtask -- check-elf
+```
+
+The default firmware profile is `gateway`. Check the smaller BLE appliance
+composition separately when changing feature boundaries:
+
+```sh
+cargo run --locked -p xtask -- build --profile appliance
+```
+
+See [Build and flash E290 firmware](../getting-started/firmware-e290.md) for
+direct Cargo equivalents and flashing commands.
 
 ## Expo client
 
+From `clients/appliance`:
+
 ```sh
-cd clients/appliance
 bun install --frozen-lockfile
 bun run verify
 ```
 
-`verify` checks dependencies, formatting, TypeScript, tests, generated API
-types, and deterministic embedded assets. It does not require native mobile
-toolchains.
-
-When both Xcode and Android SDK/NDK toolchains are installed:
+Changes to a Rust DTO or native callable surface also require regenerated
+artifacts and native checks:
 
 ```sh
+bun run api:generate
+bun run native:bindings
 bun run native:verify
 ```
 
-Use the [app build guide](../getting-started/app.md) for real simulator/device
-compilation and installation.
+Generated files are checked in where the client build consumes them. Do not
+edit those outputs by hand.
 
-## E290 target
+## Interoperability vectors
 
-The current turnkey profile has its own host, graph, strict Xtensa Clippy,
-release build, and explicit image-packaging gates. Run the exact sequence in
-the [E290 firmware guide](../getting-started/firmware-e290.md#2-build-the-appliance-image).
+The deterministic Python compatibility suites are documented in
+[interop/README.md](../../interop/README.md). Run them when changing Reticulum,
+LXMF, pairing, or authenticated-session encoding.
 
-The default, display-only, Wi-Fi proof, runtime measurement, and commit-fault
-profiles are separate graphs. Do not use `--all-features`: exceptional HIL
-features are intentionally mutually exclusive.
+## Device checks
 
-## Interoperability
+Before treating a firmware change as usable, check at least:
 
-Released Reticulum and LXMF Python fixtures, deterministic vector generation,
-and RNode HIL corpora are documented in
-[interop/README.md](../../interop/README.md). Their pinned Python dependency
-sets are protocol authorities, not firmware runtime dependencies.
+- boot reaches `Ready` and USB logs remain active;
+- the app reconnects over BLE after a board reset;
+- pairing and board-only recovery still reach an authenticated session;
+- a durable LXMF message survives an app disconnect and board reset;
+- LoRa delivery works in both directions between two identically configured
+  boards;
+- a gateway build can keep BLE usable while Wi-Fi and the TCP interface are
+  enabled;
+- the display reflects pairing, connection, and unread-message state without
+  blocking the node.
 
-## Powered HIL
-
-Powered tests are not part of ordinary CI. Each runbook records:
-
-- exact source revision and clean-tree requirement;
-- firmware artifact and partition-table hashes;
-- physical board identity and radio variant;
-- transmit profile and antenna assumptions;
-- write/readback evidence;
-- acceptance criteria; and
-- explicit limits of the result.
-
-Use the [qualification index](../README.md#qualification-history) to select the
-appropriate runbook. Do not treat an older artifact's powered result as
-qualification of the current source.
+For radio changes, use the controlled procedure in
+[Range testing](range-testing.md). Record failures as tests when they can be
+reproduced without hardware, and keep device-specific observations in an issue
+or exported diagnostic file rather than the live design reference.

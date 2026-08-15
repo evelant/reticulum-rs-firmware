@@ -12,8 +12,8 @@ import {
   MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 } from "../generated/api.ts";
 
-export const NATIVE_BRIDGE_API_MAJOR = 1 as const;
-export const NATIVE_BRIDGE_API_MINOR = 23 as const;
+export const NATIVE_BRIDGE_API_MAJOR = 2 as const;
+export const NATIVE_BRIDGE_API_MINOR = 0 as const;
 
 const EXPECTED_FIELDS = {
   bridgeApiMajor: NATIVE_BRIDGE_API_MAJOR,

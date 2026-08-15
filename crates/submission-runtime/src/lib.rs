@@ -1659,7 +1659,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
             let request = SubmissionPrepareRequest {
                 destination,
                 plaintext: match &intent {
-                    SubmissionIntent::ExperimentalRnsData(intent) => intent.payload(),
+                    SubmissionIntent::RnsData(intent) => intent.payload(),
                     SubmissionIntent::LxmfMessage(intent) => intent.wire(),
                 },
                 rns_now,
@@ -1667,7 +1667,7 @@ impl<const SUBMISSIONS: usize, const PROJECTED: usize, const DIRECT_LINKS: usize
                 deadline,
             };
             let observation = match intent {
-                SubmissionIntent::ExperimentalRnsData(_) => node.prepare_submission(request, rng),
+                SubmissionIntent::RnsData(_) => node.prepare_submission(request, rng),
                 SubmissionIntent::LxmfMessage(_) => {
                     let busy_direct_link = match self.reusable_direct_link_for(node, destination) {
                         ReusableDirectLinkSelection::Ready(link) => {

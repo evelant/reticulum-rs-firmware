@@ -37,24 +37,24 @@ const CLIENT_NONCE: [u8; 32] = ascending::<32>(0x40);
 const DEVICE_CHALLENGE: [u8; 32] = ascending::<32>(0x60);
 
 const BEGIN_REQUEST_WIRE: &str = "0007524441310124010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100";
-const BEGIN_RESPONSE_WIRE: &str = "00075244413101250101010101010101010101010101010101010101010101010102580101010101010101020101010202020149653239302d6170692d31aca704e13e88101112131415161718191a1b1c1d1e1f0807060504030201202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0101010101010101010101010101010100";
-const PROOF_REQUEST_WIRE: &str = "0007524441310126010101010101010101010101010101010102010101010101010240020101010202020139101112131415161718191a1b1c1d1e1f0807060504030201404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100";
-const PROOF_RESPONSE_WIRE: &str = "00075244413101270101010101010101010101010101010101020101010101010102680101010101010101020101010202020159653239302d6170692d31aca704e13e8818171615141312112827262524232221101112131415161718191a1b1c1d1e1f0807060504030201606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f0101010101010101010101010101010100";
-const ACTIVATE_REQUEST_WIRE: &str = "000752444131012801010101010101010101010101010101010202010101010101023839101112131415161718191a1b1c1d1e1f08070605040302016a3855c27a2d61fcd00e39a85c419fb52a09043d51f3333c7989ec832b51eb5d0101010101010101010101010101010100";
-const ACTIVATE_RESPONSE_WIRE: &str = "0007524441310129010101010101010101010101010101010102020101010101010240010101010101010139101112131415161718191a1b1c1d1e1f090706050403020141a2f9c1ba3e8ab6d96d939ec1b6d6cd7f126ad9e9f3be275b3278a6031b88690101010101010101010101010101010100";
+const BEGIN_RESPONSE_WIRE: &str = "00075244413101250101010101010101010101010101010101010101010101010102580101010101010101020101010202020249653239302d6170692d31aca704e13e88101112131415161718191a1b1c1d1e1f0807060504030201202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0101010101010101010101010101010100";
+const PROOF_REQUEST_WIRE: &str = "0007524441310126010101010101010101010101010101010102010101010101010240020101010202020239101112131415161718191a1b1c1d1e1f0807060504030201404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f0101010101010101010101010101010100";
+const PROOF_RESPONSE_WIRE: &str = "00075244413101270101010101010101010101010101010101020101010101010102680101010101010101020101010202020259653239302d6170692d31aca704e13e8818171615141312112827262524232221101112131415161718191a1b1c1d1e1f0807060504030201606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f0101010101010101010101010101010100";
+const ACTIVATE_REQUEST_WIRE: &str = "000752444131012801010101010101010101010101010101010202010101010101023839101112131415161718191a1b1c1d1e1f080706050403020114f5adfaebf183840cd6a7d1227a560372d0ac8d63849a9d0d92708de1a05a1f0101010101010101010101010101010100";
+const ACTIVATE_RESPONSE_WIRE: &str = "0007524441310129010101010101010101010101010101010102020101010101010240010101010101010139101112131415161718191a1b1c1d1e1f09070605040302016b41eeccdbeac9e95a996668fb435aacb595f6b081a863fd550a6af1b0e8140c0101010101010101010101010101010100";
 const ABORT_REQUEST_WIRE: &str = "000752444131012a010101010101010101010101010101010102030101010101010101010101010101010101010101010101010100";
 const ABORT_RESPONSE_WIRE: &str = "000752444131012b01010101010101010101010101010101010203010101010101020101010101010101010101010101010101010100";
 const TRANSCRIPT_HASH: [u8; 32] = [
-    0xea, 0x2e, 0x28, 0xd9, 0xe1, 0x86, 0x96, 0xdf, 0x5b, 0x3f, 0xb8, 0xde, 0x34, 0x16, 0xcc, 0x6b,
-    0x2e, 0x98, 0xff, 0xae, 0x1e, 0x8f, 0xcd, 0xa8, 0xc1, 0x50, 0x99, 0x0e, 0x60, 0x53, 0x51, 0xcb,
+    0x1c, 0x36, 0xf5, 0xf1, 0x22, 0x84, 0x28, 0x75, 0x50, 0x21, 0x99, 0xf5, 0x29, 0x7c, 0x2d, 0xb2,
+    0x55, 0x32, 0x24, 0x06, 0x93, 0xc1, 0xb9, 0x87, 0x02, 0xee, 0xf9, 0x62, 0xcb, 0xdd, 0xd7, 0xec,
 ];
 const CLIENT_PROOF: [u8; 32] = [
-    0x6a, 0x38, 0x55, 0xc2, 0x7a, 0x2d, 0x61, 0xfc, 0xd0, 0x0e, 0x39, 0xa8, 0x5c, 0x41, 0x9f, 0xb5,
-    0x2a, 0x09, 0x04, 0x3d, 0x51, 0xf3, 0x33, 0x3c, 0x79, 0x89, 0xec, 0x83, 0x2b, 0x51, 0xeb, 0x5d,
+    0x14, 0xf5, 0xad, 0xfa, 0xeb, 0xf1, 0x83, 0x84, 0x0c, 0xd6, 0xa7, 0xd1, 0x22, 0x7a, 0x56, 0x03,
+    0x72, 0xd0, 0xac, 0x8d, 0x63, 0x84, 0x9a, 0x9d, 0x0d, 0x92, 0x70, 0x8d, 0xe1, 0xa0, 0x5a, 0x1f,
 ];
 const ACTIVATION_CONFIRMATION: [u8; 32] = [
-    0x41, 0xa2, 0xf9, 0xc1, 0xba, 0x3e, 0x8a, 0xb6, 0xd9, 0x6d, 0x93, 0x9e, 0xc1, 0xb6, 0xd6, 0xcd,
-    0x7f, 0x12, 0x6a, 0xd9, 0xe9, 0xf3, 0xbe, 0x27, 0x5b, 0x32, 0x78, 0xa6, 0x03, 0x1b, 0x88, 0x69,
+    0x6b, 0x41, 0xee, 0xcc, 0xdb, 0xea, 0xc9, 0xe9, 0x5a, 0x99, 0x66, 0x68, 0xfb, 0x43, 0x5a, 0xac,
+    0xb5, 0x95, 0xf6, 0xb0, 0x81, 0xa8, 0x63, 0xfd, 0x55, 0x0a, 0x6a, 0xf1, 0xb0, 0xe8, 0x14, 0x0c,
 ];
 
 const fn ascending<const N: usize>(start: u8) -> [u8; N] {
@@ -85,7 +85,7 @@ fn activated_generation() -> CredentialGeneration {
 
 fn proof_request() -> ProofStartRequest {
     ProofStartRequest::new(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         1,
         credential_id(),
         generation(),
@@ -96,7 +96,7 @@ fn proof_request() -> ProofStartRequest {
 
 fn proof_challenge() -> ProofChallenge {
     ProofChallenge::new(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         device_id(),
         ConnectionId::new(CONNECTION_ID).unwrap(),
         WindowId::new(WINDOW_ID).unwrap(),
@@ -166,12 +166,8 @@ fn constants_and_complete_result_vocabularies_are_frozen() {
     assert_eq!(PROTOCOL_MAJOR, 1);
     assert_eq!(PROTOCOL_MINOR, 0);
     assert_eq!(PROOF_SUITE, 2);
-    assert_eq!(BearerBinding::UsbSerialJtag.code(), 1);
     assert_eq!(BearerBinding::BleGatt.code(), 2);
-    assert_eq!(
-        BearerBinding::from_code(1),
-        Some(BearerBinding::UsbSerialJtag)
-    );
+    assert_eq!(BearerBinding::from_code(1), None);
     assert_eq!(BearerBinding::from_code(2), Some(BearerBinding::BleGatt));
     assert_eq!(BearerBinding::from_code(0), None);
     assert_eq!(
@@ -239,12 +235,12 @@ fn independent_record_vectors_match_every_successful_flight() {
     let begin_request = BeginRequest::new(0).into_record();
     assert_wire(&begin_request, BEGIN_REQUEST_WIRE);
     assert!(matches!(
-        PairingRequest::from_record(BearerBinding::UsbSerialJtag, decode_wire(&hex::decode(BEGIN_REQUEST_WIRE).unwrap())),
+        PairingRequest::from_record(BearerBinding::BleGatt, decode_wire(&hex::decode(BEGIN_REQUEST_WIRE).unwrap())),
         Ok(PairingRequest::Begin(request)) if request.sequence() == 0
     ));
 
     let offer = BeginOffer::after_pending_commit(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         device_id(),
         credential_id(),
         generation(),
@@ -254,7 +250,7 @@ fn independent_record_vectors_match_every_successful_flight() {
     let begin_response = BeginResponse::offered(0, offer).into_record();
     assert_wire(&begin_response, BEGIN_RESPONSE_WIRE);
     let decoded = PairingResponse::from_record(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         decode_wire(&hex::decode(BEGIN_RESPONSE_WIRE).unwrap()),
     )
     .unwrap();
@@ -274,7 +270,7 @@ fn independent_record_vectors_match_every_successful_flight() {
     let proof_request_record = proof_request().into_record();
     assert_wire(&proof_request_record, PROOF_REQUEST_WIRE);
     let decoded = PairingRequest::from_record(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         decode_wire(&hex::decode(PROOF_REQUEST_WIRE).unwrap()),
     )
     .unwrap();
@@ -291,7 +287,7 @@ fn independent_record_vectors_match_every_successful_flight() {
     let proof_response = ProofStartResponse::challenge(1, proof_challenge()).into_record();
     assert_wire(&proof_response, PROOF_RESPONSE_WIRE);
     let decoded = PairingResponse::from_record(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         decode_wire(&hex::decode(PROOF_RESPONSE_WIRE).unwrap()),
     )
     .unwrap();
@@ -320,7 +316,7 @@ fn independent_record_vectors_match_every_successful_flight() {
     .into_record();
     assert_wire(&activate_request, ACTIVATE_REQUEST_WIRE);
     let decoded = PairingRequest::from_record(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         decode_wire(&hex::decode(ACTIVATE_REQUEST_WIRE).unwrap()),
     )
     .unwrap();
@@ -346,7 +342,7 @@ fn independent_record_vectors_match_every_successful_flight() {
     .into_record();
     assert_wire(&activate_response, ACTIVATE_RESPONSE_WIRE);
     let decoded = PairingResponse::from_record(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         decode_wire(&hex::decode(ACTIVATE_RESPONSE_WIRE).unwrap()),
     )
     .unwrap();
@@ -368,21 +364,21 @@ fn independent_record_vectors_match_every_successful_flight() {
     let abort_request = AbortCurrentRequest::new(3).into_record();
     assert_wire(&abort_request, ABORT_REQUEST_WIRE);
     assert!(matches!(
-        PairingRequest::from_record(BearerBinding::UsbSerialJtag, decode_wire(&hex::decode(ABORT_REQUEST_WIRE).unwrap())),
+        PairingRequest::from_record(BearerBinding::BleGatt, decode_wire(&hex::decode(ABORT_REQUEST_WIRE).unwrap())),
         Ok(PairingRequest::AbortCurrent(request)) if request.sequence() == 3
     ));
 
     let abort_response = AbortCurrentResponse::new(3, AbortResult::Aborted).into_record();
     assert_wire(&abort_response, ABORT_RESPONSE_WIRE);
     assert!(matches!(
-        PairingResponse::from_record(BearerBinding::UsbSerialJtag, decode_wire(&hex::decode(ABORT_RESPONSE_WIRE).unwrap())),
+        PairingResponse::from_record(BearerBinding::BleGatt, decode_wire(&hex::decode(ABORT_RESPONSE_WIRE).unwrap())),
         Ok(PairingResponse::AbortCurrent(response))
             if response.sequence() == 3 && response.result() == AbortResult::Aborted
     ));
 }
 
 #[test]
-fn ble_profile_round_trips_only_under_ble_and_changes_the_proof_transcript() {
+fn ble_profile_round_trips_and_binds_the_proof_transcript() {
     let offer = BeginOffer::after_pending_commit(
         BearerBinding::BleGatt,
         device_id(),
@@ -400,25 +396,6 @@ fn ble_profile_round_trips_only_under_ble_and_changes_the_proof_transcript() {
         PairingResponse::Begin(response)
             if response.offer().map(BeginOffer::bearer) == Some(BearerBinding::BleGatt)
     ));
-
-    let wrong_bearer_begin = BeginResponse::offered(
-        0,
-        BeginOffer::after_pending_commit(
-            BearerBinding::BleGatt,
-            device_id(),
-            credential_id(),
-            generation(),
-            psk(),
-        )
-        .unwrap(),
-    )
-    .into_record();
-    assert_eq!(
-        PairingResponse::from_record(BearerBinding::UsbSerialJtag, wrong_bearer_begin).err(),
-        Some(DecodeError::UnsupportedBearer {
-            observed: BearerBinding::BleGatt.code()
-        })
-    );
 
     let ble_request = ProofStartRequest::new(
         BearerBinding::BleGatt,
@@ -451,13 +428,7 @@ fn ble_profile_round_trips_only_under_ble_and_changes_the_proof_transcript() {
 
     let ble_transcript = PairingTranscript::new(&ble_request, &ble_challenge).unwrap();
     assert_eq!(ble_transcript.bearer(), BearerBinding::BleGatt);
-    let usb_transcript = transcript();
-    assert_ne!(ble_transcript.as_bytes(), usb_transcript.as_bytes());
-    assert_ne!(
-        ClientProof::calculate(&psk(), &ble_transcript).as_bytes(),
-        ClientProof::calculate(&psk(), &usb_transcript).as_bytes()
-    );
-    assert!(PairingTranscript::new(&ble_request, &proof_challenge()).is_err());
+    assert_eq!(ble_transcript.as_bytes(), transcript().as_bytes());
 }
 
 #[test]
@@ -516,7 +487,7 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
         let begin = BeginResponse::failure(sequence, failure).into_record();
         assert_eq!(begin.payload(), &[failure.code()]);
         match PairingResponse::from_record(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             decode_wire(FramedRecord::encode(&begin).unwrap().encoded()),
         )
         .unwrap()
@@ -531,7 +502,7 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
 
         let proof = ProofStartResponse::failure(sequence, failure).into_record();
         match PairingResponse::from_record(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             decode_wire(FramedRecord::encode(&proof).unwrap().encoded()),
         )
         .unwrap()
@@ -555,7 +526,7 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
         let sequence = 0x8000 + index as u64;
         let record = ActivateResponse::failure(sequence, failure).into_record();
         match PairingResponse::from_record(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             decode_wire(FramedRecord::encode(&record).unwrap().encoded()),
         )
         .unwrap()
@@ -573,7 +544,7 @@ fn every_coarse_failure_round_trips_with_echoed_arbitrary_sequences() {
         let result = AbortResult::from_code(code).unwrap();
         let record = AbortCurrentResponse::new(code as u64, result).into_record();
         assert!(matches!(
-            PairingResponse::from_record(BearerBinding::UsbSerialJtag, decode_wire(
+            PairingResponse::from_record(BearerBinding::BleGatt, decode_wire(
                 FramedRecord::encode(&record).unwrap().encoded()
             )),
             Ok(PairingResponse::AbortCurrent(response))
@@ -656,7 +627,7 @@ fn request_union_rejects_nonzero_pre_authentication_fields_kinds_and_lengths() {
     ];
     for (record, expected) in cases {
         assert_eq!(
-            PairingRequest::from_record(BearerBinding::UsbSerialJtag, record).err(),
+            PairingRequest::from_record(BearerBinding::BleGatt, record).err(),
             Some(expected)
         );
     }
@@ -710,7 +681,7 @@ fn response_union_rejects_nonzero_pre_authentication_fields_shapes_and_codes() {
     ];
     for (record, expected) in cases {
         assert_eq!(
-            PairingResponse::from_record(BearerBinding::UsbSerialJtag, record).err(),
+            PairingResponse::from_record(BearerBinding::BleGatt, record).err(),
             Some(expected)
         );
     }
@@ -724,7 +695,7 @@ fn response_union_rejects_nonzero_pre_authentication_fields_shapes_and_codes() {
         for code in 5_u8..=u8::MAX {
             assert_eq!(
                 PairingResponse::from_record(
-                    BearerBinding::UsbSerialJtag,
+                    BearerBinding::BleGatt,
                     record(kind, [0; 16], 0, &[code], [0; 16])
                 )
                 .err(),
@@ -741,7 +712,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         (0, 2, DecodeError::UnsupportedVersion { major: 2, minor: 0 }),
         (2, 1, DecodeError::UnsupportedVersion { major: 1, minor: 1 }),
         (4, 3, DecodeError::UnsupportedSuite { observed: 3 }),
-        (6, 2, DecodeError::UnsupportedBearer { observed: 2 }),
+        (6, 1, DecodeError::UnsupportedBearer { observed: 1 }),
         (7, 1, DecodeError::ReservedBitsSet),
     ];
     for (index, value, expected) in profile_cases {
@@ -749,7 +720,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         request_payload[index] = value;
         assert_eq!(
             PairingRequest::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(
                     RECORD_KIND_PROOF_START_REQUEST,
                     [0; 16],
@@ -774,7 +745,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         payload[start..end].fill(0);
         assert_eq!(
             PairingRequest::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(
                     RECORD_KIND_PROOF_START_REQUEST,
                     [0; 16],
@@ -800,7 +771,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         payload[start..end].fill(0);
         assert_eq!(
             PairingRequest::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(RECORD_KIND_ACTIVATE_REQUEST, [0; 16], 2, &payload, [0; 16])
             )
             .err(),
@@ -809,7 +780,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
     }
 
     let mut begin = BeginOffer::after_pending_commit(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         device_id(),
         credential_id(),
         generation(),
@@ -821,7 +792,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         begin[index] = 1;
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(RECORD_KIND_BEGIN_RESPONSE, [0; 16], 0, &begin[..], [0; 16])
             )
             .err(),
@@ -832,7 +803,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
     begin[15] = 1;
     assert_eq!(
         PairingResponse::from_record(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             record(RECORD_KIND_BEGIN_RESPONSE, [0; 16], 0, &begin[..], [0; 16])
         )
         .err(),
@@ -846,7 +817,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         (56, 88, InvalidField::ZeroPairingPsk),
     ] {
         let mut payload = BeginOffer::after_pending_commit(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             device_id(),
             credential_id(),
             generation(),
@@ -857,7 +828,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         payload[start..end].fill(0);
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(
                     RECORD_KIND_BEGIN_RESPONSE,
                     [0; 16],
@@ -883,7 +854,7 @@ fn profile_reserved_and_every_required_nonzero_field_are_validated() {
         payload[start..end].fill(0);
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(
                     RECORD_KIND_PROOF_START_RESPONSE,
                     [0; 16],
@@ -1082,7 +1053,7 @@ fn typed_constructors_reject_zero_values_and_transcript_reference_mismatch() {
     );
     assert_eq!(
         ProofStartRequest::new(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             0,
             CredentialId::new([0; 16]),
             generation(),
@@ -1092,7 +1063,7 @@ fn typed_constructors_reject_zero_values_and_transcript_reference_mismatch() {
     );
     assert_eq!(
         ProofStartRequest::new(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             0,
             credential_id(),
             CredentialGeneration::new(0),
@@ -1102,7 +1073,7 @@ fn typed_constructors_reject_zero_values_and_transcript_reference_mismatch() {
     );
     assert_eq!(
         ProofStartRequest::new(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             0,
             credential_id(),
             generation(),
@@ -1112,7 +1083,7 @@ fn typed_constructors_reject_zero_values_and_transcript_reference_mismatch() {
     );
 
     let other = ProofStartRequest::new(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         1,
         CredentialId::new([0xaa; 16]),
         generation(),
@@ -1140,13 +1111,13 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         (0, 2, DecodeError::UnsupportedVersion { major: 2, minor: 0 }),
         (2, 1, DecodeError::UnsupportedVersion { major: 1, minor: 1 }),
         (4, 3, DecodeError::UnsupportedSuite { observed: 3 }),
-        (6, 2, DecodeError::UnsupportedBearer { observed: 2 }),
+        (6, 1, DecodeError::UnsupportedBearer { observed: 1 }),
         (7, 1, DecodeError::ReservedBitsSet),
     ];
 
     for (profile_index, value, expected) in profile_cases {
         let mut begin = BeginOffer::after_pending_commit(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             device_id(),
             credential_id(),
             generation(),
@@ -1157,7 +1128,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         begin[8 + profile_index] = value;
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(RECORD_KIND_BEGIN_RESPONSE, [0; 16], 0, &begin[..], [0; 16])
             )
             .err(),
@@ -1168,7 +1139,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         challenge[8 + profile_index] = value;
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(
                     RECORD_KIND_PROOF_START_RESPONSE,
                     [0; 16],
@@ -1187,7 +1158,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         challenge[index] = 1;
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(
                     RECORD_KIND_PROOF_START_RESPONSE,
                     [0; 16],
@@ -1218,7 +1189,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         payload[start..end].fill(0);
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16])
             )
             .err(),
@@ -1230,7 +1201,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
         payload[index] = 1;
         assert_eq!(
             PairingResponse::from_record(
-                BearerBinding::UsbSerialJtag,
+                BearerBinding::BleGatt,
                 record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16])
             )
             .err(),
@@ -1239,7 +1210,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
     }
 
     let begin = BeginOffer::after_pending_commit(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         device_id(),
         credential_id(),
         generation(),
@@ -1249,7 +1220,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
     .encode_payload();
     assert_eq!(
         PairingResponse::from_record(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             record(
                 RECORD_KIND_BEGIN_RESPONSE,
                 [0; 16],
@@ -1268,7 +1239,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
     let challenge = proof_challenge().encode_payload();
     assert_eq!(
         PairingResponse::from_record(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             record(
                 RECORD_KIND_PROOF_START_RESPONSE,
                 [0; 16],
@@ -1286,7 +1257,7 @@ fn every_success_response_rejects_noncanonical_profile_reference_and_shape() {
 
     assert_eq!(
         PairingResponse::from_record(
-            BearerBinding::UsbSerialJtag,
+            BearerBinding::BleGatt,
             record(
                 RECORD_KIND_ACTIVATE_RESPONSE,
                 [0; 16],
@@ -1358,7 +1329,7 @@ fn activate_continuation_and_confirmation_reject_substituted_references() {
 
     payload[8..24].fill(0xaa);
     let substituted_id = PairingResponse::from_record(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16]),
     )
     .unwrap();
@@ -1372,7 +1343,7 @@ fn activate_continuation_and_confirmation_reject_substituted_references() {
     payload[8..24].copy_from_slice(&CREDENTIAL_ID_BYTES);
     payload[24..32].copy_from_slice(&(ACTIVATED_GENERATION + 1).to_le_bytes());
     let substituted_generation = PairingResponse::from_record(
-        BearerBinding::UsbSerialJtag,
+        BearerBinding::BleGatt,
         record(RECORD_KIND_ACTIVATE_RESPONSE, [0; 16], 2, &payload, [0; 16]),
     )
     .unwrap();

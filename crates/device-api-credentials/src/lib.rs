@@ -35,7 +35,7 @@ pub use snapshot::{
     encode_e290_credential_snapshot,
 };
 
-/// Exact PSK size required by qualification-suite credentials.
+/// Exact PSK size required by device API credentials.
 pub const CREDENTIAL_PSK_LENGTH: usize = 32;
 /// Initial E290 product ceiling for current and retained credential records.
 pub const E290_CREDENTIAL_RECORD_CAPACITY: usize = 16;
@@ -130,12 +130,8 @@ pub enum CredentialStatus {
 /// Device-observed origin of a credential enrollment ceremony.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PairingOrigin {
-    /// Wired lab pairing under an exclusive physical-presence window.
-    UsbPhysicalPresence,
-    /// Future display/code/QR-confirmed local pairing ceremony.
-    ConfirmedOutOfBand,
-    /// Credential imported by an explicitly authorized recovery flow.
-    RecoveryImport,
+    /// Local pairing confirmed under an exclusive physical-presence window.
+    LocalPhysicalPresence,
 }
 
 /// Bounded reason retained by a revoked-credential tombstone.
@@ -143,10 +139,6 @@ pub enum PairingOrigin {
 pub enum RevocationReason {
     /// User or administrator explicitly revoked the client.
     Explicit,
-    /// Credential was replaced during safe two-credential rotation.
-    Rotated,
-    /// Device-wide credential reset invalidated the client.
-    FactoryReset,
     /// Pending enrollment was abandoned or failed possession proof.
     PairingAborted,
 }
@@ -909,7 +901,7 @@ impl<const CAPACITY: usize> DispatchLease<'_, CAPACITY> {
     /// Enrollment ceremony that introduced the revalidated credential.
     ///
     /// Product authorization policy may use this immutable device-owned audit
-    /// fact when applying an explicitly bounded compatibility rule. It is not
+    /// fact when applying an explicitly bounded policy rule. It is not
     /// supplied by the client or encoded in the logical request.
     pub const fn pairing_origin(&self) -> PairingOrigin {
         self.pairing_origin

@@ -177,23 +177,6 @@ pub(crate) fn install_credential(
     Ok(summary)
 }
 
-pub(crate) fn import_credential_file(
-    destination: &Path,
-    source: &Path,
-    policy: CredentialImportPolicy,
-) -> Result<NativeCredentialSummary, CredentialImportError> {
-    if source == destination {
-        return Err(
-            "credential import staging path must differ from its destination"
-                .to_owned()
-                .into(),
-        );
-    }
-    let (bytes, summary) = read_import_credential_file(source, policy)?;
-    install_credential(destination, &bytes[..], policy)?;
-    Ok(summary)
-}
-
 pub(crate) fn read_import_credential_file(
     source: &Path,
     policy: CredentialImportPolicy,
@@ -650,38 +633,11 @@ mod tests {
     }
 
     #[test]
-    fn file_import_leaves_staging_cleanup_to_the_app_owner() {
-        let directory = TestDirectory::new();
-        let destination = directory.credential();
-        let staging = directory.0.join("picked-credential.rdpkey");
-        fs::write(
-            &staging,
-            credential_bytes([0xac, 0xa7, 0x04, 0xe1, 0x3f, 0x88]),
-        )
-        .expect("test staging credential is written");
-
-        let summary =
-            import_credential_file(&destination, &staging, CredentialImportPolicy::AnyDevice)
-                .expect("staged import succeeds");
-        assert_eq!(
-            summary.expected_ble_local_name.as_deref(),
-            Some("reticulum-e290-e13f88")
-        );
-        assert_eq!(
-            summary.expected_ble_recovery_local_name.as_deref(),
-            Some("reticulum-pair-e13f88")
-        );
-        assert!(staging.exists());
-        assert!(destination.exists());
-    }
-
-    #[test]
     fn file_import_rejects_noncanonical_source_shapes() {
         let directory = TestDirectory::new();
-        let destination = directory.credential();
         let relative = Path::new("relative-credential.rdpkey");
         assert!(
-            import_credential_file(&destination, relative, CredentialImportPolicy::AnyDevice,)
+            read_import_credential_file(relative, CredentialImportPolicy::AnyDevice,)
                 .expect_err("relative import path is rejected")
                 .to_string()
                 .contains("must be absolute")
@@ -692,12 +648,11 @@ mod tests {
         bytes.push(0xff);
         fs::write(&trailing, bytes).expect("test trailing source is written");
         assert!(
-            import_credential_file(&destination, &trailing, CredentialImportPolicy::AnyDevice,)
+            read_import_credential_file(&trailing, CredentialImportPolicy::AnyDevice,)
                 .expect_err("trailing import bytes are rejected")
                 .to_string()
                 .contains("trailing bytes")
         );
-        assert!(!destination.exists());
 
         #[cfg(unix)]
         {
@@ -705,7 +660,7 @@ mod tests {
             std::os::unix::fs::symlink(&trailing, &symlink)
                 .expect("test source symlink is created");
             assert!(
-                import_credential_file(&destination, &symlink, CredentialImportPolicy::AnyDevice,)
+                read_import_credential_file(&symlink, CredentialImportPolicy::AnyDevice,)
                     .expect_err("source symlink is rejected")
                     .to_string()
                     .contains("regular non-symlink")

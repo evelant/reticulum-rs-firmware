@@ -111,7 +111,6 @@ function timeline(
     outbox_id: null,
     submission_id: null,
     current_attempt_number: null,
-    automatic_retry_count: null,
     status: null,
     packet_evidence: null,
     ingress_observation: null,
@@ -239,7 +238,7 @@ describe("transmission map scene", () => {
     const second = location(42_360_000, -71_050_000, 1_700_000_060_000);
     const scene = buildTransmissionMapScene({
       messageActivityEvents: [
-        activity(8, 2, second, { kind: "outbound_requeued", trigger: "automatic" }),
+        activity(8, 2, second, { kind: "outbound_requeued" }),
         activity(4, 1, first, { kind: "outbound_queued" }),
       ],
     });

@@ -57,9 +57,6 @@ interoperable RNode senders may transmit split frames back-to-back. The project
 radio owner separately applies a recoverable progress deadline and reissues
 continuous `SetRx` when a false preamble leaves the modem latched.
 
-The historical initial consumer was the Heltec Tracker V2 TX HIL. Its fixed
-0 dBm modem request selects `SetPaConfig(0x04, 0x07, 0x00, 0x01)`, OCP `0x28`,
-and encoded power `0x00`, while its private hooks settle and one-shot-arm the
-external FEM. Current consumers also include the shared board-neutral RNode
-radio core, the permanent E290 LoRa actor, and the optional generic LoRaWAN
-continuous path. No upstream issue or pull request has been opened.
+The current product consumer is the board-neutral RNode radio core used by the
+permanent E290 LoRa actor. The patched generic LoRaWAN path also uses the same
+continuous-receive ownership contract when that upstream feature is enabled.

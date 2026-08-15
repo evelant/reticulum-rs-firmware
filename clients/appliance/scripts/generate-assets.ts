@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { assertExpectedBun, EXPECTED_BUN_REVISION, EXPECTED_BUN_VERSION } from "./toolchain.ts";
 
 const clientDirectory = fileURLToPath(new URL("../", import.meta.url));
-export const assetDirectory = resolve(clientDirectory, "../../crates/lxmf-chat-service/assets");
+export const assetDirectory = resolve(clientDirectory, "../../crates/appliance-service/assets");
 
 export const generatedAssetNames = ["app.js", "index.html", "manifest.json", "style.css"] as const;
 export type GeneratedAssetName = (typeof generatedAssetNames)[number];

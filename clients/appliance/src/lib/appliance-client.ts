@@ -68,8 +68,6 @@ export interface ApplianceClient {
   beginAddAppliance?(): Promise<NoContent>;
   /**
    * Report whether this bootstrapped client can add an appliance over BLE.
-   *
-   * Native Wi-Fi builds retain profile switching while returning false here.
    */
   supportsAdditionalBleOnboarding?(): boolean;
   /**
@@ -82,9 +80,7 @@ export interface ApplianceClient {
    * Report whether the bootstrapped runtime owns a BLE central capable of
    * credential-free discovery.
    *
-   * This check must be synchronous and side-effect free. It lets transports
-   * such as native Wi-Fi omit an otherwise nonfunctional BLE action even when
-   * they share the same client implementation.
+   * This check must be synchronous and side-effect free.
    */
   supportsBleCandidateDiscovery?(): boolean;
   contacts(): Promise<ContactView[]>;
@@ -93,7 +89,7 @@ export interface ApplianceClient {
   /**
    * Rust-owned authenticated peer discovery, when compiled into this client.
    *
-   * Optional during the alpha bridge transition: callers must show an
+   * Optional for client backends that do not implement discovery: callers must show an
    * unavailable state rather than parsing raw device-API records themselves.
    */
   nearbyPeers?(): Promise<NearbyPeerView[]>;
@@ -102,8 +98,8 @@ export interface ApplianceClient {
   /**
    * Read the board-owned desired Wi-Fi and Reticulum TCP configuration.
    *
-   * These operations are optional because the HTTP/SoftAP prototype does not
-   * yet expose the authenticated network-management lane. Callers must
+   * These operations are optional because not every local bearer exposes the
+   * authenticated network-management lane. Callers must
    * capability-gate the Connectivity workspace rather than inventing a second
    * protocol path.
    */
@@ -141,8 +137,8 @@ export interface ApplianceClient {
   upsertContact(destination: string, request: ContactRequest): Promise<MutationResponse>;
   send(request: SendRequest): Promise<SendResponse>;
   /**
-   * Create a replacement durable device submission for one legacy or
-   * permanently terminal outbox row without creating a new LXMF message.
+   * Create a replacement durable device submission for one retryable terminal
+   * outbox row without creating a new LXMF message.
    */
   retryMessage(request: RetrySendRequest): Promise<RetrySendResponse>;
   /**
@@ -155,7 +151,7 @@ export interface ApplianceClient {
    * security completed. The operating system may either show a passkey sheet
    * for a new bond or silently reuse a saved bond. Native implementations
    * expose this deterministic barrier because iOS does not report the latter
-   * transition; HTTP/USB onboarding does not need it.
+   * transition; host-service clients do not need it.
    */
   continueOnboarding?(): Promise<NoContent>;
   refreshOnboarding(): Promise<NoContent>;
@@ -176,7 +172,7 @@ export interface ApplianceClient {
    * already usable physical link. Foreground automatic recovery uses this
    * idempotent path; explicit operator reconnect remains destructive.
    */
-  ensureConnected?(): Promise<NoContent>;
+  ensureConnected(): Promise<NoContent>;
   reconnect(): Promise<NoContent>;
   subscribeInvalidations(onInvalidate: () => void, onError: () => void): (() => void) | null;
   dispose(): void;

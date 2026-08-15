@@ -1,6 +1,6 @@
 [package]
 name = "reticulum-tx-handoff"
-description = "Bounded owning Embassy channels for Reticulum packet dispatch"
+description = "Bounded Reticulum packet-interface permit and acknowledgement channels"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,9 +15,7 @@ embassy-sync.workspace = true
 reticulum-node-core = { path = "../node-core", default-features = false }
 
 [dev-dependencies]
-embassy-futures.workspace = true
 rand_core.workspace = true
-reticulum-rns-rete = { path = "../rns-rete", default-features = false }
 static_cell.workspace = true
 
 [lib]

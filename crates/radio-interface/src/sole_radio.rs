@@ -2,7 +2,7 @@
 
 use core::{future::Future, num::NonZeroU64};
 
-use crate::{FrameSignal, LabRxProfile, RnodeTxFrames, SX1262_FRAME_MTU};
+use crate::{FrameSignal, LoRaProfile, RnodeTxFrames, SX1262_FRAME_MTU};
 
 /// Opaque identity of one complete immutable radio configuration.
 ///
@@ -192,8 +192,8 @@ pub enum BoundedRxOutcome {
     Frame(BoundedRxObservation),
     /// The configured symbol timeout expired before a preamble was detected.
     ///
-    /// This legacy outcome remains for finite hardware receive windows. The
-    /// permanent product path uses [`Self::SchedulerYield`] while leaving the
+    /// This outcome supports radios that expose finite hardware receive
+    /// windows. The E290 path uses [`Self::SchedulerYield`] while leaving the
     /// modem in continuous receive.
     NoPreambleTimeout,
     /// The caller-provided scheduler future completed before a receive IRQ.
@@ -436,7 +436,7 @@ pub trait SoleRnodeRadio {
     fn configuration_fingerprint(&self) -> RadioConfigurationFingerprint;
 
     /// Validated modulation/packet profile actually used for airtime.
-    fn airtime_profile(&self) -> LabRxProfile;
+    fn airtime_profile(&self) -> LoRaProfile;
 
     /// Conservative watchdog bound for one complete receive operation.
     ///

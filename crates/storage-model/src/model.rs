@@ -3,16 +3,13 @@
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
-    MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES, MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES,
+    AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA,
+    MAX_ENCODED_PACKET_BYTES, MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES, MAX_RNS_DATA_BYTES,
     MIN_LXMF_MESSAGE_WIRE_BYTES,
 };
 
-const EXPERIMENTAL_RNS_DATA_DIGEST_DOMAIN: &[u8] =
-    b"reticulum-rs-firmware/storage-model/experimental-rns-data/v1\0";
-// Retain the schema-3 digest domain even though the source vocabulary now
-// makes delivery-method selection explicitly separate from message ownership.
-const LXMF_MESSAGE_DIGEST_DOMAIN: &[u8] = b"reticulum-rs-firmware/storage-model/direct-lxmf/v1\0";
+const RNS_DATA_DIGEST_DOMAIN: &[u8] = b"reticulum-rs-firmware/storage-model/rns-data/v1\0";
+const LXMF_MESSAGE_DIGEST_DOMAIN: &[u8] = b"reticulum-rs-firmware/storage-model/lxmf-message/v1\0";
 
 /// Authenticated local-client principal owning one submission.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -46,7 +43,7 @@ impl IdempotencyKey {
     }
 }
 
-/// Complete Reticulum destination hash for the experimental DATA intent.
+/// Complete Reticulum destination hash for a generic RNS DATA intent.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DestinationHash([u8; 16]);
 
@@ -65,7 +62,7 @@ impl DestinationHash {
 /// SHA-256 of canonical semantic intent content.
 ///
 /// This is neither a digest of API CBOR nor Reticulum's delivery-proof token.
-/// Semantic schema 3 does not store this redundant value in an acceptance;
+/// The durable schema does not store this redundant value in an acceptance;
 /// callers derive it from the immutable intent when needed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContentSha256([u8; 32]);
@@ -81,9 +78,9 @@ impl ContentSha256 {
         &self.0
     }
 
-    fn for_experimental_rns_data(intent: &ExperimentalRnsDataIntent) -> Self {
+    fn for_rns_data(intent: &RnsDataIntent) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(EXPERIMENTAL_RNS_DATA_DIGEST_DOMAIN);
+        hasher.update(RNS_DATA_DIGEST_DOMAIN);
         hasher.update(intent.destination.as_bytes());
         hasher.update(intent.payload_len.to_be_bytes());
         hasher.update(intent.payload());
@@ -99,7 +96,7 @@ impl ContentSha256 {
     }
 }
 
-/// Failure to construct a fixed-capacity experimental RNS DATA intent.
+/// Failure to construct a fixed-capacity RNS DATA intent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IntentTooLarge {
     actual: usize,
@@ -118,24 +115,24 @@ impl IntentTooLarge {
     }
 }
 
-/// Fixed-capacity owned input for the host-only experimental RNS DATA intent.
+/// Fixed-capacity owned input for a generic RNS DATA submission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExperimentalRnsDataIntent {
+pub struct RnsDataIntent {
     destination: DestinationHash,
     payload_len: u16,
-    payload: [u8; MAX_EXPERIMENTAL_RNS_DATA_BYTES],
+    payload: [u8; MAX_RNS_DATA_BYTES],
 }
 
-impl ExperimentalRnsDataIntent {
+impl RnsDataIntent {
     /// Copy one borrowed payload into bounded durable intent storage.
     pub fn new(destination: DestinationHash, payload: &[u8]) -> Result<Self, IntentTooLarge> {
-        if payload.len() > MAX_EXPERIMENTAL_RNS_DATA_BYTES {
+        if payload.len() > MAX_RNS_DATA_BYTES {
             return Err(IntentTooLarge {
                 actual: payload.len(),
-                maximum: MAX_EXPERIMENTAL_RNS_DATA_BYTES,
+                maximum: MAX_RNS_DATA_BYTES,
             });
         }
-        let mut owned = [0_u8; MAX_EXPERIMENTAL_RNS_DATA_BYTES];
+        let mut owned = [0_u8; MAX_RNS_DATA_BYTES];
         owned[..payload.len()].copy_from_slice(payload);
         Ok(Self {
             destination,
@@ -156,7 +153,7 @@ impl ExperimentalRnsDataIntent {
 
     /// Canonical semantic content digest.
     pub fn content_sha256(&self) -> ContentSha256 {
-        ContentSha256::for_experimental_rns_data(self)
+        ContentSha256::for_rns_data(self)
     }
 }
 
@@ -238,7 +235,7 @@ impl LxmfMessageIntent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmissionIntent {
     /// Generic destination-encrypted RNS DATA constrained to its protocol MDU.
-    ExperimentalRnsData(ExperimentalRnsDataIntent),
+    RnsData(RnsDataIntent),
     /// Exact complete signed LXMF wire retained before delivery planning.
     LxmfMessage(LxmfMessageIntent),
 }
@@ -247,7 +244,7 @@ impl SubmissionIntent {
     /// Complete destination hash common to all currently modeled intents.
     pub fn destination(&self) -> DestinationHash {
         match self {
-            Self::ExperimentalRnsData(intent) => intent.destination(),
+            Self::RnsData(intent) => intent.destination(),
             Self::LxmfMessage(intent) => intent.destination(),
         }
     }
@@ -255,15 +252,15 @@ impl SubmissionIntent {
     /// Canonical semantic content digest with an intent-specific domain.
     pub fn content_sha256(&self) -> ContentSha256 {
         match self {
-            Self::ExperimentalRnsData(intent) => intent.content_sha256(),
+            Self::RnsData(intent) => intent.content_sha256(),
             Self::LxmfMessage(intent) => intent.content_sha256(),
         }
     }
 
     /// Borrow generic destination-DATA content when this is that intent kind.
-    pub const fn experimental_rns_data(&self) -> Option<&ExperimentalRnsDataIntent> {
+    pub const fn rns_data(&self) -> Option<&RnsDataIntent> {
         match self {
-            Self::ExperimentalRnsData(intent) => Some(intent),
+            Self::RnsData(intent) => Some(intent),
             Self::LxmfMessage(_) => None,
         }
     }
@@ -271,15 +268,15 @@ impl SubmissionIntent {
     /// Borrow exact LXMF content when this is that intent kind.
     pub const fn lxmf_message(&self) -> Option<&LxmfMessageIntent> {
         match self {
-            Self::ExperimentalRnsData(_) => None,
+            Self::RnsData(_) => None,
             Self::LxmfMessage(intent) => Some(intent),
         }
     }
 }
 
-impl From<ExperimentalRnsDataIntent> for SubmissionIntent {
-    fn from(intent: ExperimentalRnsDataIntent) -> Self {
-        Self::ExperimentalRnsData(intent)
+impl From<RnsDataIntent> for SubmissionIntent {
+    fn from(intent: RnsDataIntent) -> Self {
+        Self::RnsData(intent)
     }
 }
 
@@ -353,7 +350,7 @@ impl AuthorizationSnapshot {
         if unknown != 0 {
             return Err(AuthorizationSnapshotError::UnknownPermissionBits { unknown });
         }
-        if granted_permission_bits & AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA == 0 {
+        if granted_permission_bits & AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA == 0 {
             return Err(AuthorizationSnapshotError::MissingSubmitPermission);
         }
         Ok(Self {
@@ -409,7 +406,7 @@ pub enum AuthorizationSnapshotError {
         /// Older complete authority revision.
         authority_revision: u64,
     },
-    /// Permission bitset contains vocabulary unknown to semantic schema 3.
+    /// Permission bitset contains vocabulary unknown to the current schema.
     UnknownPermissionBits {
         /// Bits outside [`crate::AUTHORIZATION_KNOWN_PERMISSION_BITS`].
         unknown: u32,

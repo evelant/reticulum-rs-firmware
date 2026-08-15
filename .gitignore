@@ -1,9 +1,8 @@
 # Cargo build output
 /target/
 **/target/
-/e290-node.bin
 
-# Local research checkouts and generated conformance evidence
+# Local research checkouts and temporary outputs
 /artifacts/
 /reference/
 /tmp/

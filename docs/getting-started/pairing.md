@@ -1,150 +1,95 @@
 # Pair and switch appliances
 
-The normal native setup path is fileless BLE onboarding. The board creates the
-device credential inside the native Rust owner; TypeScript never handles its
-secret bytes. Importing an `.rdpkey` remains a development/recovery fallback,
-not the expected first-run flow.
+The native app pairs directly over BLE. Rust creates and stores the device
+credential inside the native owner; TypeScript never receives its secret
+bytes. Importing a credential file is a development recovery path, not normal
+onboarding.
 
-These instructions describe the physically qualified iOS path. The same UI is
-available on Android, but Android BLE hardware remains unqualified.
+## Controls
 
-## Before starting
+- `RST` restarts the application.
+- `BOOT` is GPIO0 and selects the ROM download loader.
+- the middle button labelled `21` is GPIO21 and confirms physical presence.
 
-- Flash the current [`ble-api-proof` E290 image](firmware-e290.md).
-- Keep a 915 MHz antenna attached and wait for the display to leave
-  `STARTING`.
-- Install a native app build; Expo Go and the web target cannot perform this
-  BLE flow.
-- Grant the app Bluetooth permission and keep it in the foreground.
+Use GPIO21 only after the app asks for it. Holding `BOOT` during reset enters
+the loader instead of pairing mode.
 
-The E290 has three relevant controls:
+## Pair a new appliance
 
-- `RST` restarts the application;
-- `BOOT` is GPIO0 and is used only for ROM download mode; and
-- the middle button labelled `21` is GPIO21 and confirms pairing presence.
+1. Flash and boot the current appliance or gateway firmware.
+2. Wait for the display to reach `READY` and grant the app Bluetooth
+   permission.
+3. Open **Appliances**, choose **Add appliance**, and scan for nearby boards.
+4. Select the board whose displayed suffix matches the advertisement. The app
+   never silently chooses the first result.
+5. Start pairing. When prompted for presence, hold GPIO21 continuously for at
+   least two seconds. The pairing window is deliberately forgiving.
+6. Enter the six-digit passkey shown on that board in the operating-system
+   Bluetooth prompt.
+7. Return to the app and continue. Keep the app foregrounded while it creates
+   the appliance credential and reconnects normally.
 
-## Pair the first board
+The board retains both the Bluetooth bond and the device credential. Ordinary
+reconnects do not display another passkey.
 
-1. Open **Add appliance**.
-2. Choose **Find nearby boards**.
-3. Select the intended `reticulum-pair-…` advertisement. A board without a
-   durable Bluetooth bond reserves this recovery-only name; its six-character
-   suffix is the one shown on the display. The app never auto-selects the first
-   board.
-4. Release GPIO21 before choosing **Start pairing**.
-5. When the selected BLE link is open and the app asks for presence, hold the
-   middle GPIO21 button continuously for at least two seconds. A three-second
-   hold is fine; there is no narrow start-time requirement.
-6. For a new Bluetooth bond, enter the six digits shown on that board in the
-   operating-system Bluetooth prompt.
-7. Return to the app and choose **Continue after holding GPIO21**. Do not wait
-   for the board to say `READY - OPEN APP` first; that display state appears
-   only after the following application credential exchange completes.
-8. Keep the app foregrounded and the board nearby while it activates the
-   credential and reconnects as a normal authenticated appliance.
+Repeat the flow to add another appliance. Each profile has an isolated device
+credential and SQLite database.
 
-The application pairing window remains open for five minutes after the
-recognized hold. After the first authenticated app session succeeds, the board
-returns to its normal `reticulum-e290-…` name. Reboots later reuse both the
-durable Bluetooth bond and the device credential, so normal reconnect does not
-show another code.
+## Switch appliances
 
-## Add a second board
+Open **Appliances** and select a saved profile. The app closes the current BLE,
+session, and database owners before opening the selected profile.
 
-Open **Appliances**, choose **Add appliance**, and repeat the same flow for the
-other advertisement. Each board receives an isolated app-private credential
-profile and SQLite database.
+Switching does not transfer contacts, messages, credentials, or Reticulum
+identity between boards.
 
-If a discovery name exactly matches a saved profile, the app offers to switch
-to it instead of starting a second pairing ceremony for the same board.
+BLE appliance discovery and Reticulum peer discovery are different:
 
-## Switch boards
+- **Add appliance** finds a nearby board that the phone can control.
+- **Nearby** lists `lxmf.delivery` peers learned by the connected board over
+  Reticulum.
 
-Open **Appliances** and select the saved profile. The app closes the current
-BLE/database owner before opening the selected one, then scans for that
-profile's exact E290 advertisement and authenticates it.
+Choose a peer in **Nearby** to open or save it as a contact. Manual destination
+hash entry remains available when no announce is visible.
 
-Switching does not transfer contacts, message databases, device credentials,
-or Reticulum private identity between boards.
+## Recover a stale or unavailable Bluetooth bond
 
-## Find Reticulum contacts
+Use board-only recovery when the retained bond belongs to another phone or an
+ordinary reconnect cannot use it. The previous phone is not required.
 
-Appliance discovery and Reticulum peer discovery are separate:
+1. Hold GPIO21 before pressing `RST`.
+2. Keep GPIO21 held through reset for at least three seconds, then release it.
+3. Wait for the display to show Bluetooth recovery.
+4. Forget a stale operating-system Bluetooth entry on the new phone if one is
+   present.
+5. In the app, choose **Repair Bluetooth** for an existing profile or **Add
+   appliance** for a new profile.
+6. When the app later asks for physical presence, hold GPIO21 again and finish
+   the displayed-passkey flow.
 
-- **Find nearby boards** uses phone BLE only to select and authorize an
-  appliance.
-- **Nearby** in the messaging UI asks the connected appliance for authenticated
-  `lxmf.delivery` announces it learned over Reticulum.
+The reset-time hold clears only the board's Bluetooth bond. It preserves the
+Reticulum identity, device credentials, network configuration, messages, and
+submission journal. The later hold separately authorizes the new connection.
 
-Choose a Reticulum peer from **Nearby** to add or open the contact. Manual
-destination-hash entry remains available as an advanced fallback.
+## Troubleshooting
 
-## Recovery
+If no board appears:
 
-### No board appears
+- keep the app foregrounded and confirm Bluetooth permission;
+- confirm the display reached `READY` or the recovery screen;
+- reset once without holding `BOOT`;
+- close another phone or host process that may own the sole GATT connection;
+  and
+- confirm the selected app profile is looking for the expected board suffix.
 
-- Confirm the board display reached `READY`.
-- Confirm Bluetooth permission and keep the app foregrounded.
-- Reboot the board once with `RST`; do not hold `BOOT`.
-- Ensure another phone or host process is not holding the GATT connection.
+If no passkey appears, release GPIO21 and hold it again after the app reports
+that the selected BLE link is open. If credential activation completed but the
+normal reconnect did not, use **Repair Bluetooth** instead of creating a
+second profile.
 
-If the board remains attached to a phone you cannot access, use the
-[board-only Bluetooth recovery](#replace-an-unavailable-phones-bluetooth-bond)
-below. You do not need the previous phone to release or forget the board.
-
-### Replace an unavailable phone's Bluetooth bond
-
-Use this when the board's one retained Bluetooth bond belongs to another phone,
-or when that bond is stale and ordinary reconnect cannot recover it:
-
-1. Hold the middle GPIO21 button before pressing `RST`.
-2. Keep GPIO21 held continuously while the board resets, for at least three
-   seconds total.
-3. Release GPIO21. The firmware clears only its retained Bluetooth bond and
-   continues booting.
-4. Wait for the board to finish booting and show
-   `BLE RECOVERY - OPEN APP`. Keep GPIO21 released while the app finds the
-   `reticulum-pair-…` advertisement and opens the board.
-5. If this phone already lists the board in iOS or Android Bluetooth settings,
-   forget or unpair that stale operating-system entry.
-6. In the app, use **Repair Bluetooth** for an existing appliance profile, or
-   **Add appliance** if this phone has no profile for the board.
-7. When the app asks for physical presence, hold GPIO21 again and complete the
-   displayed-code flow.
-
-The reset-time hold and the later pairing hold are deliberately separate. The
-first authorizes deletion of the board's old Bluetooth bond; it does not leave
-pairing authorized for whichever phone connects next. Ordinary saved profiles
-target only `reticulum-e290-…`, so they cannot consume the board's sole BLE
-slot while it advertises `reticulum-pair-…` for explicit recovery.
-
-This recovery does **not** factory-reset the appliance. It preserves the
-Reticulum identity and destinations, application credentials, Wi-Fi and TCP
-configuration, messages, journals, and app data stored on the board. The
-previous phone is not required, although its cached Bluetooth bond will no
-longer connect after the board accepts a replacement.
-
-### The code never appears
-
-- Release GPIO21, then hold it continuously for at least two seconds only after
-  the app has opened the selected device.
-- Confirm you held the middle `21` button, not `BOOT`.
-- Keep the app on the pairing screen; the five-minute application window is
-  intentionally forgiving.
-
-### Pairing completed but reconnect is slow
-
-Leave the app foregrounded. The board deliberately keeps the
-`reticulum-pair-…` name through the replacement phone's first authenticated app
-session, then returns to `reticulum-e290-…`. Use **Repair Bluetooth** again if
-that complete sequence did not finish; do not begin a separate credential
-pairing ceremony while activation is being committed.
-
-### The board was factory-reset
-
-A factory reset rotates the node identity and BLE address. Remove the obsolete
-peripheral from the operating-system Bluetooth settings, remove or replace the
-old app profile, and pair the freshly provisioned board as a new appliance.
-
-For protocol ownership, security boundaries, and the remaining negative-test
-matrix, see [ADR 0019](../adr/0019-secure-ble-appliance-onboarding.md).
+A full flash-data erase rotates the node identity, BLE identity, bond, and
+device credentials. Remove the corresponding app profile and pair the
+appliance as new after such an erase. A board using any other on-device format
+must be fully erased and re-paired before installing this image. If the app
+also reports an unsupported local database schema, follow the reset procedure
+in the [app guide](app.md#reset-incompatible-app-data).

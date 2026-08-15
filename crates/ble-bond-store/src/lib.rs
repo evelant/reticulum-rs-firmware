@@ -7,9 +7,9 @@
 //! complete, the predecessor remains authoritative.
 //!
 //! This crate deliberately has no dependency on a Bluetooth stack. It stores
-//! only the portable bond material needed by an integration: the peer BD_ADDR,
-//! optional IRK, mandatory LTK, and the invariant that the bond was established
-//! with authenticated security.
+//! only the portable bond material needed by an integration: the peer identity
+//! address and its kind, optional IRK, mandatory LTK, and the invariant that
+//! the bond was established with authenticated security.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -34,7 +34,7 @@ pub const SECTOR_SIZE: usize = 4_096;
 /// Current on-flash physical format version.
 pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
 /// Current portable bond semantic version.
-pub const SEMANTIC_FORMAT_VERSION: u16 = 1;
+pub const SEMANTIC_FORMAT_VERSION: u16 = 2;
 /// Number of bonds retained by this format.
 pub const BOND_CAPACITY: usize = 1;
 
@@ -97,6 +97,39 @@ pub enum BondStoreSector {
     B,
 }
 
+/// Bluetooth identity-address kind retained with a bond.
+///
+/// Only public and random identity addresses are durable. Controller-specific
+/// resolved-address variants must be normalized to one of these kinds by the
+/// Bluetooth integration before constructing a [`BleBond`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BleAddressKind {
+    /// Public Bluetooth device address.
+    Public,
+    /// Random Bluetooth device address.
+    Random,
+}
+
+impl BleAddressKind {
+    const PUBLIC_CODE: u8 = 1;
+    const RANDOM_CODE: u8 = 2;
+
+    const fn encode(self) -> u8 {
+        match self {
+            Self::Public => Self::PUBLIC_CODE,
+            Self::Random => Self::RANDOM_CODE,
+        }
+    }
+
+    const fn decode(value: u8) -> Option<Self> {
+        match value {
+            Self::PUBLIC_CODE => Some(Self::Public),
+            Self::RANDOM_CODE => Some(Self::Random),
+            _ => None,
+        }
+    }
+}
+
 impl BondStoreSector {
     const fn id(self) -> u8 {
         match self {
@@ -141,6 +174,7 @@ impl BondStoreSector {
 /// requires_debug::<BleBond>();
 /// ```
 pub struct BleBond {
+    address_kind: BleAddressKind,
     address: [u8; 6],
     irk: Option<[u8; 16]>,
     ltk: [u8; 16],
@@ -148,8 +182,23 @@ pub struct BleBond {
 
 impl BleBond {
     /// Construct one bonded, authenticated peer.
-    pub const fn new(address: [u8; 6], irk: Option<[u8; 16]>, ltk: [u8; 16]) -> Self {
-        Self { address, irk, ltk }
+    pub const fn new(
+        address_kind: BleAddressKind,
+        address: [u8; 6],
+        irk: Option<[u8; 16]>,
+        ltk: [u8; 16],
+    ) -> Self {
+        Self {
+            address_kind,
+            address,
+            irk,
+            ltk,
+        }
+    }
+
+    /// Return the peer Bluetooth identity-address kind.
+    pub const fn address_kind(&self) -> BleAddressKind {
+        self.address_kind
     }
 
     /// Borrow the peer Bluetooth device address in integration-defined byte
@@ -265,6 +314,10 @@ pub enum BondStoreFault {
     /// No valid committed state exists and programmed data remains. Explicit
     /// [`recover_empty`] is required before provisioning.
     RecoveryRequired,
+    /// A committed record uses a physical format this build does not support.
+    UnsupportedPhysicalVersion(u16),
+    /// A committed record uses a semantic format this build does not support.
+    UnsupportedSemanticVersion(u16),
     /// Both sectors contain valid committed records at the same generation.
     GenerationConflict,
     /// The current generation is `u64::MAX` and cannot be advanced safely.
@@ -305,6 +358,8 @@ struct ValidRecord {
 enum SectorStatus {
     Erased,
     Valid(ValidRecord),
+    UnsupportedPhysical(u16),
+    UnsupportedSemantic(u16),
     Invalid,
 }
 
@@ -472,6 +527,7 @@ fn encode_record(
             } else {
                 0
             };
+        record[15] = bond.address_kind.encode();
         record[24..30].copy_from_slice(&bond.address);
         if let Some(irk) = &bond.irk {
             record[32..48].copy_from_slice(irk);
@@ -502,11 +558,18 @@ where
     if !tail_erased || record[COMMIT_OFFSET..RECORD_SIZE] != COMMIT_MARKER {
         return Ok(SectorStatus::Invalid);
     }
-    if &record[..8] != MAGIC
-        || read_u16(&record[..], 8) != PHYSICAL_FORMAT_VERSION
-        || read_u16(&record[..], 10) != SEMANTIC_FORMAT_VERSION
-        || record[12] != sector.id()
-        || record[15] != 0
+    if &record[..8] != MAGIC {
+        return Ok(SectorStatus::Invalid);
+    }
+    let physical = read_u16(&record[..], 8);
+    if physical != PHYSICAL_FORMAT_VERSION {
+        return Ok(SectorStatus::UnsupportedPhysical(physical));
+    }
+    let semantic = read_u16(&record[..], 10);
+    if semantic != SEMANTIC_FORMAT_VERSION {
+        return Ok(SectorStatus::UnsupportedSemantic(semantic));
+    }
+    if record[12] != sector.id()
         || record[30..32].iter().any(|byte| *byte != 0)
         || record[64..PROTECTED_SIZE].iter().any(|byte| *byte != 0)
         || record[DIGEST_OFFSET + DIGEST_SIZE..PREFIX_SIZE]
@@ -529,7 +592,10 @@ where
             if flags != REQUIRED_BOND_FLAGS && flags != REQUIRED_BOND_FLAGS | FLAG_IRK_PRESENT {
                 return Ok(SectorStatus::Invalid);
             }
-            let mut bond = BleBond::new([0_u8; 6], None, [0_u8; 16]);
+            let Some(address_kind) = BleAddressKind::decode(record[15]) else {
+                return Ok(SectorStatus::Invalid);
+            };
+            let mut bond = BleBond::new(address_kind, [0_u8; 6], None, [0_u8; 16]);
             bond.address.copy_from_slice(&record[24..30]);
             if flags & FLAG_IRK_PRESENT != 0 {
                 bond.irk = Some([0_u8; 16]);
@@ -544,7 +610,7 @@ where
             RecordValue::Bond(bond)
         }
         RECORD_KIND_CLEARED => {
-            if record[14] != 0 || record[24..64].iter().any(|byte| *byte != 0) {
+            if record[14] != 0 || record[15] != 0 || record[24..64].iter().any(|byte| *byte != 0) {
                 return Ok(SectorStatus::Invalid);
             }
             RecordValue::Cleared
@@ -560,6 +626,14 @@ where
 
 fn select(a: SectorStatus, b: SectorStatus) -> Result<MountedBondStore, BondStoreFault> {
     match (a, b) {
+        (SectorStatus::UnsupportedPhysical(version), _)
+        | (_, SectorStatus::UnsupportedPhysical(version)) => {
+            Err(BondStoreFault::UnsupportedPhysicalVersion(version))
+        }
+        (SectorStatus::UnsupportedSemantic(version), _)
+        | (_, SectorStatus::UnsupportedSemantic(version)) => {
+            Err(BondStoreFault::UnsupportedSemanticVersion(version))
+        }
         (SectorStatus::Erased, SectorStatus::Erased) => Ok(MountedBondStore {
             generation: None,
             active_sector: None,
@@ -726,7 +800,8 @@ fn record_digest(protected: &[u8]) -> [u8; DIGEST_SIZE] {
 }
 
 fn bond_matches(left: &BleBond, right: &BleBond) -> bool {
-    left.address == right.address
+    left.address_kind == right.address_kind
+        && left.address == right.address
         && constant_time_optional_key_eq(left.irk.as_ref(), right.irk.as_ref())
         && constant_time_key_eq(&left.ltk, &right.ltk)
 }

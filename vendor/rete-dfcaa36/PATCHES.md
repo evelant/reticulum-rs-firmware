@@ -23,4 +23,5 @@ compiler-emitted startup stack audit before packaging or flashing.
 
 The upstream tree at this exact revision does not contain a top-level license
 file. Project provenance and the retained upstream license declaration remain
-recorded in the repository `NOTICE` and `docs/provenance.md` files.
+recorded in the repository `NOTICE` and
+`docs/reference/dependencies.md` files.

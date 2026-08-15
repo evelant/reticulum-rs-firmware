@@ -1,10 +1,10 @@
 # Python-authoritative LXMF foundation corpus for CPython 3.13.7.
 #
-# LXMF remains versioned 1.0.1 at the exact forward-reference revision cloned
-# during Phase 0. RNS is pinned to the 1.3.5 release used by LXMF's Precursor
-# interoperability vectors. Install the complete set into an isolated target;
-# the generator also verifies LXMessage.py, LXStamper.py and vendored u-msgpack
-# source digests before producing bytes.
+# LXMF is pinned to the exact forward-reference revision used by this corpus.
+# RNS is pinned to the 1.3.5 release used by LXMF's Precursor interoperability
+# vectors. Install the complete set into an isolated target; the generator also
+# verifies LXMessage.py, LXStamper.py, and vendored u-msgpack source digests
+# before producing bytes.
 cffi==2.0.0
 cryptography==49.0.0
 lxmf @ git+https://github.com/markqvist/LXMF.git@fab12ad9bf9f997797034950f289fe41a79dcf5a

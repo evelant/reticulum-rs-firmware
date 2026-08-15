@@ -4,10 +4,10 @@ use minicbor::{Decoder, Encoder, encode::write::Cursor};
 
 use crate::model::{
     Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, BootRecoveryMarker,
-    BootRecoveryPolicy, DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent,
-    FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState, JournalEntry,
-    LifecycleState, LxmfMessageIntent, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
-    StateTransition, SubmissionFailure, SubmissionId, SubmissionIntent, TransportRecoveryReason,
+    BootRecoveryPolicy, DestinationHash, EncodedPacketSha256, FinalDisposition, IdempotencyKey,
+    InternalFailure, InterruptedState, JournalEntry, LifecycleState, LxmfMessageIntent,
+    PreparedPacketDetails, PrincipalId, RnsAttemptToken, RnsDataIntent, StateTransition,
+    SubmissionFailure, SubmissionId, SubmissionIntent, TransportRecoveryReason,
 };
 use crate::{JOURNAL_SCHEMA_VERSION, MAX_JOURNAL_RECORD_BYTES};
 
@@ -107,7 +107,7 @@ fn encode_inner(entry: &JournalEntry, output: &mut [u8]) -> Result<usize, ()> {
 fn encode_accepted(encoder: &mut Encoder<Cursor<&mut [u8]>>, accepted: Accepted) -> Result<(), ()> {
     let intent = accepted.intent();
     put!(encoder.map(match intent {
-        SubmissionIntent::ExperimentalRnsData(_) => 7,
+        SubmissionIntent::RnsData(_) => 7,
         SubmissionIntent::LxmfMessage(_) => 6,
     }));
     put!(encoder.u8(0));
@@ -120,7 +120,7 @@ fn encode_accepted(encoder: &mut Encoder<Cursor<&mut [u8]>>, accepted: Accepted)
     encode_authorization(encoder, accepted.authorization())?;
     put!(encoder.u8(4));
     match intent {
-        SubmissionIntent::ExperimentalRnsData(intent) => {
+        SubmissionIntent::RnsData(intent) => {
             put!(encoder.u8(0));
             put!(encoder.u8(5));
             put!(encoder.bytes(intent.destination().as_bytes()));
@@ -384,8 +384,8 @@ fn decode_accepted(decoder: &mut Decoder<'_>) -> Result<Accepted, DecodeError> {
             let destination = DestinationHash::new(decode_fixed_bytes(decoder)?);
             expect_key(decoder, 6)?;
             let payload = decoder.bytes().map_err(|_| DecodeError::Malformed)?;
-            ExperimentalRnsDataIntent::new(destination, payload)
-                .map(SubmissionIntent::ExperimentalRnsData)
+            RnsDataIntent::new(destination, payload)
+                .map(SubmissionIntent::RnsData)
                 .map_err(|_| DecodeError::InvalidByteStringLength)?
         }
         1 if entries == 6 => {

@@ -14,7 +14,7 @@ function view(lifecycle: OnboardingState): OnboardingView {
   return {
     available: true,
     method: "managed_pairing",
-    snapshot: { revision: 1, usb_serial: "ACA704E13E88", lifecycle },
+    snapshot: { revision: 1, device_label: "ACA704E13E88", lifecycle },
   };
 }
 
@@ -58,17 +58,6 @@ describe("onboarding recovery presentation", () => {
     expect(presentation.canRefresh).not.toBeTrue();
   });
 
-  test("requires a real disconnect before describing reconnection", () => {
-    const before = onboardingPresentation(
-      view({ state: "awaiting_usb_reset", observed_disconnect: false }),
-    );
-    const after = onboardingPresentation(
-      view({ state: "awaiting_usb_reset", observed_disconnect: true }),
-    );
-    expect(before.instruction).toContain("disappears");
-    expect(after.instruction).toContain("disappearance was observed");
-  });
-
   test("offers an explicit local recheck only from faulted state", () => {
     const presentation = onboardingPresentation(
       view({ state: "faulted", reason: "device_unavailable" }),
@@ -87,7 +76,7 @@ describe("native credential import presentation", () => {
       method: "credential_import",
       snapshot: {
         revision: 0,
-        usb_serial: "",
+        device_label: "",
         lifecycle: { state: "needs_pairing" },
       },
     });
@@ -96,7 +85,7 @@ describe("native credential import presentation", () => {
     expect(presentation.canStart).toBeTrue();
     expect(presentation.startLabel).toBe("Choose credential");
     expect(presentation.identifierLabel).toBeNull();
-    expect(presentation.instruction).toContain("qualified USB pairing workflow");
+    expect(presentation.instruction).toContain("externally provisioned");
     expect(presentation.instruction).toContain("Each valid board is retained");
     expect(presentation.instruction).toContain("use Appliances to switch boards");
   });
@@ -107,7 +96,7 @@ describe("native credential import presentation", () => {
       method: "credential_import",
       snapshot: {
         revision: 0,
-        usb_serial: "reticulum-e290-e13e88",
+        device_label: "reticulum-e290-e13e88",
         lifecycle: { state: "credential_ready" },
       },
     });
@@ -123,7 +112,7 @@ describe("native credential import presentation", () => {
       method: "credential_import",
       snapshot: {
         revision: 0,
-        usb_serial: "",
+        device_label: "",
         lifecycle: { state: "faulted", reason: "invalid_credential_artifact" },
       },
     });
@@ -140,7 +129,7 @@ describe("native credential import presentation", () => {
       method: "credential_import",
       snapshot: {
         revision: 0,
-        usb_serial: "",
+        device_label: "",
         lifecycle: { state: "faulted", reason: "unsupported_device" },
       },
     });
@@ -158,7 +147,7 @@ describe("credential-free BLE discovery presentation", () => {
     method: "credential_import",
     snapshot: {
       revision: 0,
-      usb_serial: "",
+      device_label: "",
       lifecycle: { state: "needs_pairing" },
     },
   };
@@ -179,7 +168,7 @@ describe("credential-free BLE discovery presentation", () => {
           ...missingCredential,
           snapshot: {
             revision: 0,
-            usb_serial: "",
+            device_label: "",
             lifecycle: { state: "credential_ready" },
           },
         },
@@ -201,7 +190,7 @@ describe("credential-free BLE discovery presentation", () => {
           {
             available: true,
             method: "managed_pairing",
-            snapshot: { lifecycle, revision: 2, usb_serial: "board-a" },
+            snapshot: { lifecycle, revision: 2, device_label: "board-a" },
           },
           true,
         ).available,

@@ -22,15 +22,15 @@ pub use index::{
 pub use model::{
     Accepted, AuditEntry, AuditEvent, AuthorizationSnapshot, AuthorizationSnapshotError,
     BootRecoveryMarker, BootRecoveryPolicy, ContentSha256, DestinationHash, EncodedPacketSha256,
-    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, IntentTooLarge, InternalFailure,
-    InterruptedState, InvalidLxmfMessageWireLength, InvalidPacketLength, JournalEntry,
-    LifecycleState, LxmfMessageIntent, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
+    FinalDisposition, IdempotencyKey, IntentTooLarge, InternalFailure, InterruptedState,
+    InvalidLxmfMessageWireLength, InvalidPacketLength, JournalEntry, LifecycleState,
+    LxmfMessageIntent, PreparedPacketDetails, PrincipalId, RnsAttemptToken, RnsDataIntent,
     StateTransition, SubmissionFailure, SubmissionId, SubmissionIntent, TransitionError,
     TransportRecoveryReason, validate_transition,
 };
 
-/// Maximum application bytes in the initial experimental RNS DATA intent.
-pub const MAX_EXPERIMENTAL_RNS_DATA_BYTES: usize = 383;
+/// Maximum application bytes in a durable RNS DATA intent.
+pub const MAX_RNS_DATA_BYTES: usize = 383;
 
 /// Minimum complete LXMF wire bytes needed to retain its destination.
 pub const MIN_LXMF_MESSAGE_WIRE_BYTES: usize = 16;
@@ -58,18 +58,18 @@ pub const MAX_STATE_TRANSITIONS_PER_SUBMISSION: usize = 3;
 pub const MAX_TRANSPORT_AUDITS_PER_SUBMISSION: usize = 1;
 
 /// Maximum committed semantic records, including acceptance, for one
-/// submission under schema 3.
+/// submission under the current schema.
 pub const MAX_DURABLE_RECORDS_PER_SUBMISSION: usize =
     1 + MAX_STATE_TRANSITIONS_PER_SUBMISSION + MAX_TRANSPORT_AUDITS_PER_SUBMISSION;
 
 /// Current project-owned durable-record semantic schema.
-pub const JOURNAL_SCHEMA_VERSION: u16 = 3;
+pub const JOURNAL_SCHEMA_VERSION: u16 = 4;
 
 /// Stable persisted bit granting owned-submission status reads.
 pub const AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS: u32 = 1 << 0;
 
-/// Stable persisted bit granting experimental outbound RNS DATA submission.
-pub const AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA: u32 = 1 << 1;
+/// Stable persisted bit granting outbound RNS DATA submission.
+pub const AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA: u32 = 1 << 1;
 
 /// Stable persisted bit granting board-owned network configuration mutation.
 ///
@@ -78,7 +78,7 @@ pub const AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA: u32 = 1 << 1;
 /// authorize a submission.
 pub const AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG: u32 = 1 << 2;
 
-/// Complete permission mask understood by durable authorization schema 3.
+/// Complete permission mask understood by the current durable schema.
 pub const AUTHORIZATION_KNOWN_PERMISSION_BITS: u32 = AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS
-    | AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+    | AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA
     | AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG;

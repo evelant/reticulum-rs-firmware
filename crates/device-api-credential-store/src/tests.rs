@@ -275,7 +275,7 @@ fn new_pending(id_byte: u8, psk: [u8; 32]) -> NewPendingCredential {
         CredentialId::new([id_byte; 16]),
         PrincipalId([0x61; 16]),
         Permissions::READ_SUBMISSION_STATUS,
-        PairingOrigin::UsbPhysicalPresence,
+        PairingOrigin::LocalPhysicalPresence,
         AuthorizationPolicyVersion::new(1),
         Zeroizing::new(psk),
     )
@@ -423,9 +423,9 @@ fn digest_formula_flushes_secret_buffer_and_matches_external_golden_vector() {
     // Independently generated with OpenSSL SHA-256 over the normative domain,
     // canonical empty revision-1 test prefix, and public flush trailer.
     let expected = [
-        0xe9, 0xb9, 0xa5, 0x5f, 0xb1, 0x1d, 0x11, 0x1e, 0xc7, 0x00, 0x91, 0x30, 0xa3, 0x10, 0xbd,
-        0x40, 0x24, 0xde, 0x79, 0x5a, 0xa7, 0x70, 0x7a, 0x9a, 0xbb, 0x6d, 0x17, 0xbf, 0x8c, 0xac,
-        0xe2, 0x8c,
+        0x98, 0x29, 0x60, 0xb9, 0x02, 0xf4, 0x15, 0x61, 0x36, 0xcb, 0xb6, 0xd4, 0xc4, 0x65, 0xd3,
+        0x90, 0xd9, 0x96, 0x65, 0x65, 0x30, 0x1c, 0x18, 0x27, 0xff, 0x51, 0x7c, 0x36, 0x05, 0x78,
+        0xe1, 0xae,
     ];
     let (_mounted, access) = provisioned();
     assert_eq!(
@@ -827,12 +827,25 @@ fn header_device_binding_version_and_snapshot_corruption_fail_closed() {
         ))
     ));
 
-    for (offset, expected) in [
-        (8, CredentialStoreFault::UnsupportedPhysicalVersion(2)),
-        (10, CredentialStoreFault::UnsupportedSemanticVersion(2)),
+    for (offset, version, expected) in [
+        (
+            8,
+            PHYSICAL_FORMAT_VERSION + 1,
+            CredentialStoreFault::UnsupportedPhysicalVersion(PHYSICAL_FORMAT_VERSION + 1),
+        ),
+        (
+            10,
+            SEMANTIC_FORMAT_VERSION - 1,
+            CredentialStoreFault::UnsupportedSemanticVersion(SEMANTIC_FORMAT_VERSION - 1),
+        ),
+        (
+            10,
+            SEMANTIC_FORMAT_VERSION + 1,
+            CredentialStoreFault::UnsupportedSemanticVersion(SEMANTIC_FORMAT_VERSION + 1),
+        ),
     ] {
         let mut flash = access.backend().clone();
-        flash.bytes[offset..offset + 2].copy_from_slice(&2_u16.to_le_bytes());
+        flash.bytes[offset..offset + 2].copy_from_slice(&version.to_le_bytes());
         let digest = snapshot_digest(
             flash.bytes[..SNAPSHOT_PREFIX_SIZE]
                 .try_into()

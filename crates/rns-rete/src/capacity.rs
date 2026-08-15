@@ -1,4 +1,4 @@
-//! Observable capacity and defensive admission control for the Phase-0 Rete node.
+//! Observable capacity and defensive admission control for the embedded Rete node.
 //!
 //! Rete's heapless transport uses independent fixed-capacity collections. Some
 //! have recoverable overflow policies (path LRU eviction, dedup FIFO eviction,
@@ -114,11 +114,11 @@ pub(crate) fn heapless_capacity_snapshot<
     }
 }
 
-/// Capacity snapshot for the initial Phase-0 profile.
+/// Capacity snapshot for the default embedded profile.
 #[cfg(test)]
 pub(crate) type ProbeCapacitySnapshot = HeaplessCapacitySnapshot;
 
-/// Snapshot the initial Phase-0 profile without spelling its const generics.
+/// Snapshot the default embedded profile without spelling its const generics.
 #[cfg(test)]
 pub(crate) fn probe_capacity_snapshot(node: &ProbeNode) -> ProbeCapacitySnapshot {
     heapless_capacity_snapshot(node)
@@ -221,11 +221,11 @@ pub(crate) fn try_initiate_heapless_link_at<
     Ok(result)
 }
 
-/// Link admission error for the initial Phase-0 profile.
+/// Link admission error for the default embedded profile.
 #[cfg(test)]
 pub(crate) type ProbeLinkError = LinkAdmissionError;
 
-/// Guarded link initiation for the initial Phase-0 profile.
+/// Guarded link initiation for the default embedded profile.
 #[cfg(test)]
 pub(crate) fn try_initiate_probe_link<R: RngCore + CryptoRng>(
     node: &mut ProbeNode,
@@ -278,7 +278,7 @@ mod tests {
 
     fn node() -> ProbeNode {
         let identity = crate::Identity::from_seed(&[0x43; 32]).unwrap();
-        ProbeNode::new(identity, "reticulum", &["phase0"]).unwrap()
+        ProbeNode::new(identity, "reticulum", &["interop"]).unwrap()
     }
 
     fn pending_announce(tag: u8) -> PendingAnnounce {

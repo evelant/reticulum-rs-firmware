@@ -8,9 +8,8 @@ use embedded_storage::nor_flash::{
 };
 use reticulum_storage_model::{
     AUTHORIZATION_KNOWN_PERMISSION_BITS, Accepted, AuthorizationSnapshot, DestinationHash,
-    ExperimentalRnsDataIntent, IdempotencyKey, LxmfMessageIntent, MAX_EXPERIMENTAL_RNS_DATA_BYTES,
-    MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES, MAX_JOURNAL_RECORD_BYTES, PrincipalId,
-    encode_journal_entry,
+    IdempotencyKey, LxmfMessageIntent, MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES,
+    MAX_JOURNAL_RECORD_BYTES, MAX_RNS_DATA_BYTES, PrincipalId, RnsDataIntent, encode_journal_entry,
 };
 use std::vec;
 use std::vec::Vec;
@@ -212,8 +211,8 @@ fn map_check_error(error: NorFlashErrorKind) -> FakeError {
 }
 
 fn accepted(id: u64, principal: u8, key: u8, payload: &[u8]) -> JournalEntry {
-    let intent = ExperimentalRnsDataIntent::new(DestinationHash::new([0x31; 16]), payload)
-        .expect("test intent fits");
+    let intent =
+        RnsDataIntent::new(DestinationHash::new([0x31; 16]), payload).expect("test intent fits");
     JournalEntry::Accepted(Accepted::new(
         SubmissionId::new(id),
         PrincipalId::new([principal; 16]),
@@ -380,8 +379,8 @@ fn largest_semantically_permitted_record_uses_538_body_bytes_and_round_trips() {
     let encoded_len = encode_journal_entry(&entry, &mut canonical)
         .expect("the semantic maximum must fit the physical body");
 
-    // Schema 3's method-neutral LXMF variant retains all 431 signed wire bytes and
-    // maximum-width identifiers and provenance in one canonical record.
+    // The current method-neutral LXMF variant retains all 431 signed wire bytes
+    // and maximum-width identifiers and provenance in one canonical record.
     assert_eq!(encoded_len, 538);
     assert_eq!(BODY_SIZE - encoded_len, 6);
 
@@ -397,12 +396,11 @@ fn largest_semantically_permitted_record_uses_538_body_bytes_and_round_trips() {
     assert_eq!(semantic_error.maximum(), MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES);
 
     // Generic destination DATA remains independently constrained to 383 bytes.
-    let oversized_payload = [0_u8; MAX_EXPERIMENTAL_RNS_DATA_BYTES + 1];
-    let semantic_error =
-        ExperimentalRnsDataIntent::new(DestinationHash::new([0x31; 16]), &oversized_payload)
-            .expect_err("generic DATA must retain its protocol MDU");
-    assert_eq!(semantic_error.actual(), MAX_EXPERIMENTAL_RNS_DATA_BYTES + 1);
-    assert_eq!(semantic_error.maximum(), MAX_EXPERIMENTAL_RNS_DATA_BYTES);
+    let oversized_payload = [0_u8; MAX_RNS_DATA_BYTES + 1];
+    let semantic_error = RnsDataIntent::new(DestinationHash::new([0x31; 16]), &oversized_payload)
+        .expect_err("generic DATA must retain its protocol MDU");
+    assert_eq!(semantic_error.actual(), MAX_RNS_DATA_BYTES + 1);
+    assert_eq!(semantic_error.maximum(), MAX_RNS_DATA_BYTES);
 
     let mut flash = formatted();
     let AppendOutcome::Appended(state) =
@@ -472,29 +470,26 @@ fn format_is_explicit_requires_every_byte_erased_and_never_erases() {
 }
 
 #[test]
-fn schema_two_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() {
-    assert_eq!(
-        JOURNAL_SCHEMA_VERSION, 3,
-        "this regression fixture covers the explicit schema-2 to schema-3 boundary"
-    );
-    let old_manifest = encode_manifest_for_schema(
+fn non_current_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() {
+    let non_current_schema = JOURNAL_SCHEMA_VERSION - 1;
+    let non_current_manifest = encode_manifest_for_schema(
         Manifest {
             bank: Bank::A,
             generation: 1,
             baseline_count: 0,
             baseline_tail: ZERO_DIGEST,
         },
-        2,
+        non_current_schema,
     );
     let mut flash = FakeNor::erased();
-    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&old_manifest);
+    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&non_current_manifest);
     let before = flash.bytes.clone();
     let writes = flash.writes;
     let erases = flash.erases;
 
     assert!(matches!(
         mount::<1, _>(&mut flash, SubmissionId::new(1)),
-        Err(JournalError::UnsupportedSemanticVersion(2))
+        Err(JournalError::UnsupportedSemanticVersion(version)) if version == non_current_schema
     ));
     assert!(matches!(
         append::<1, _>(
@@ -502,11 +497,11 @@ fn schema_two_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() 
             SubmissionId::new(1),
             accepted(1, 0x11, 0x22, b"must not append"),
         ),
-        Err(JournalError::UnsupportedSemanticVersion(2))
+        Err(JournalError::UnsupportedSemanticVersion(version)) if version == non_current_schema
     ));
     assert!(matches!(
         compact::<1, _>(&mut flash, SubmissionId::new(1)),
-        Err(JournalError::UnsupportedSemanticVersion(2))
+        Err(JournalError::UnsupportedSemanticVersion(version)) if version == non_current_schema
     ));
 
     assert_eq!(flash.bytes, before);
@@ -515,20 +510,19 @@ fn schema_two_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() 
 }
 
 #[test]
-fn malformed_schema_two_manifest_remains_manifest_corruption() {
-    assert_eq!(JOURNAL_SCHEMA_VERSION, 3);
-    let mut old_manifest = encode_manifest_for_schema(
+fn malformed_non_current_manifest_remains_manifest_corruption() {
+    let mut non_current_manifest = encode_manifest_for_schema(
         Manifest {
             bank: Bank::A,
             generation: 1,
             baseline_count: 0,
             baseline_tail: ZERO_DIGEST,
         },
-        2,
+        JOURNAL_SCHEMA_VERSION - 1,
     );
-    old_manifest[MANIFEST_DATA_SIZE] ^= 0x01;
+    non_current_manifest[MANIFEST_DATA_SIZE] ^= 0x01;
     let mut flash = FakeNor::erased();
-    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&old_manifest);
+    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&non_current_manifest);
     let before = flash.bytes.clone();
 
     assert!(matches!(
@@ -541,26 +535,26 @@ fn malformed_schema_two_manifest_remains_manifest_corruption() {
 }
 
 #[test]
-fn physical_one_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() {
-    assert_eq!(PHYSICAL_FORMAT_VERSION, 2);
-    let old_manifest = encode_manifest_for_physical(
+fn non_current_physical_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only() {
+    let non_current_physical = PHYSICAL_FORMAT_VERSION - 1;
+    let non_current_manifest = encode_manifest_for_physical(
         Manifest {
             bank: Bank::A,
             generation: 1,
             baseline_count: 0,
             baseline_tail: ZERO_DIGEST,
         },
-        1,
+        non_current_physical,
     );
     let mut flash = FakeNor::erased();
-    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&old_manifest);
+    flash.bytes[..MANIFEST_SIZE].copy_from_slice(&non_current_manifest);
     let before = flash.bytes.clone();
     let writes = flash.writes;
     let erases = flash.erases;
 
     assert!(matches!(
         mount::<1, _>(&mut flash, SubmissionId::new(1)),
-        Err(JournalError::UnsupportedPhysicalVersion(1))
+        Err(JournalError::UnsupportedPhysicalVersion(version)) if version == non_current_physical
     ));
     assert!(matches!(
         append::<1, _>(
@@ -568,11 +562,11 @@ fn physical_one_manifest_is_typed_unsupported_and_all_mount_paths_are_read_only(
             SubmissionId::new(1),
             accepted(1, 0x11, 0x22, b"must not append"),
         ),
-        Err(JournalError::UnsupportedPhysicalVersion(1))
+        Err(JournalError::UnsupportedPhysicalVersion(version)) if version == non_current_physical
     ));
     assert!(matches!(
         compact::<1, _>(&mut flash, SubmissionId::new(1)),
-        Err(JournalError::UnsupportedPhysicalVersion(1))
+        Err(JournalError::UnsupportedPhysicalVersion(version)) if version == non_current_physical
     ));
 
     assert_eq!(flash.bytes, before);
@@ -605,45 +599,71 @@ fn unsupported_schema_manifests_preserve_two_bank_trajectory_classification() {
         assert_eq!(flash.erases, 0);
     }
 
-    let old_a1 = encode_manifest_for_schema(
+    let non_current_schema = JOURNAL_SCHEMA_VERSION - 1;
+    let different_non_current_schema = JOURNAL_SCHEMA_VERSION - 2;
+    let non_current_a1 = encode_manifest_for_schema(
         Manifest {
             bank: Bank::A,
             generation: 1,
             baseline_count: 0,
             baseline_tail: ZERO_DIGEST,
         },
-        2,
+        non_current_schema,
     );
     let mut interrupted_first_generation = FakeNor::erased();
     interrupted_first_generation.bytes[MANIFEST_A_OFFSET..MANIFEST_A_OFFSET + MANIFEST_SIZE]
-        .copy_from_slice(&old_a1);
+        .copy_from_slice(&non_current_a1);
     interrupted_first_generation.bytes[MANIFEST_B_OFFSET] = 0xfe;
     assert_read_only_error(interrupted_first_generation, JournalError::ManifestCorrupt);
 
-    let old_a2 = encode_manifest_for_schema(
+    let non_current_a2 = encode_manifest_for_schema(
         Manifest {
             bank: Bank::A,
             generation: 2,
             baseline_count: 0,
             baseline_tail: ZERO_DIGEST,
         },
-        2,
+        non_current_schema,
     );
     let mut interrupted_retirement = FakeNor::erased();
     interrupted_retirement.bytes[MANIFEST_A_OFFSET..MANIFEST_A_OFFSET + MANIFEST_SIZE]
-        .copy_from_slice(&old_a2);
+        .copy_from_slice(&non_current_a2);
     interrupted_retirement.bytes[MANIFEST_B_OFFSET] = 0xfe;
     assert_read_only_error(
         interrupted_retirement,
-        JournalError::UnsupportedSemanticVersion(2),
+        JournalError::UnsupportedSemanticVersion(non_current_schema),
     );
 
     for (a_generation, a_schema, b_generation, b_schema, expected) in [
-        (1, 2, 1, 2, JournalError::ManifestConflict),
-        (1, 2, 3, 2, JournalError::ManifestConflict),
-        (1, 2, 2, 0, JournalError::ManifestConflict),
-        (1, 2, 2, 3, JournalError::ManifestConflict),
-        (1, 2, 2, 2, JournalError::UnsupportedSemanticVersion(2)),
+        (
+            1,
+            non_current_schema,
+            1,
+            non_current_schema,
+            JournalError::ManifestConflict,
+        ),
+        (
+            1,
+            non_current_schema,
+            3,
+            non_current_schema,
+            JournalError::ManifestConflict,
+        ),
+        (1, non_current_schema, 2, 0, JournalError::ManifestConflict),
+        (
+            1,
+            non_current_schema,
+            2,
+            different_non_current_schema,
+            JournalError::ManifestConflict,
+        ),
+        (
+            1,
+            non_current_schema,
+            2,
+            non_current_schema,
+            JournalError::UnsupportedSemanticVersion(non_current_schema),
+        ),
     ] {
         let mut flash = FakeNor::erased();
         let a = encode_manifest_for_schema(
@@ -1203,7 +1223,7 @@ fn compaction_round_trips_a_to_b_and_b_to_a_with_exact_semantic_replay() {
 }
 
 #[test]
-fn retired_manifest_prevents_fallback_after_a_new_generation_suffix_is_corrupted() {
+fn retired_manifest_prevents_predecessor_resurrection_after_successor_corruption() {
     let mut base = formatted();
     let first = accepted(1, 0x11, 0x21, b"copied baseline");
     append::<4, _>(&mut base, SubmissionId::new(1), first).expect("baseline append succeeds");

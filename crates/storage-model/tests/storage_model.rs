@@ -1,18 +1,17 @@
 use reticulum_storage_model::{
-    AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
-    AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG,
-    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AcceptOutcome, AcceptanceCandidate, Accepted,
-    ApplyError, ApplyOutcome, AuditEntry, AuditEvent, AuthorizationSnapshot,
-    AuthorizationSnapshotError, BootRecoveryDecision, BootRecoveryMarker, ContentSha256,
-    DestinationHash, EncodedPacketSha256, ExperimentalRnsDataIntent, FinalDisposition,
-    IdempotencyKey, InternalFailure, InterruptedState, JOURNAL_SCHEMA_VERSION, JournalEntry,
-    LifecycleState, LxmfMessageIntent, MAX_DURABLE_RECORDS_PER_SUBMISSION,
-    MAX_ENCODED_PACKET_BYTES, MAX_EXPERIMENTAL_RNS_DATA_BYTES, MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES,
-    MAX_JOURNAL_RECORD_BYTES, MAX_STATE_TRANSITIONS_PER_SUBMISSION,
-    MAX_TRANSPORT_AUDITS_PER_SUBMISSION, MIN_LXMF_MESSAGE_WIRE_BYTES, PlanOutcome,
-    PreparedPacketDetails, PrincipalId, RnsAttemptToken, StateTransition, SubmissionFailure,
-    SubmissionId, SubmissionIndex, SubmissionIntent, SubmissionReplay, TransitionError,
-    TransportRecoveryReason, decode_journal_entry, encode_journal_entry, validate_transition,
+    AUTHORIZATION_KNOWN_PERMISSION_BITS, AUTHORIZATION_PERMISSION_MANAGE_NETWORK_CONFIG,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA,
+    AcceptOutcome, AcceptanceCandidate, Accepted, ApplyError, ApplyOutcome, AuditEntry, AuditEvent,
+    AuthorizationSnapshot, AuthorizationSnapshotError, BootRecoveryDecision, BootRecoveryMarker,
+    ContentSha256, DestinationHash, EncodedPacketSha256, FinalDisposition, IdempotencyKey,
+    InternalFailure, InterruptedState, JOURNAL_SCHEMA_VERSION, JournalEntry, LifecycleState,
+    LxmfMessageIntent, MAX_DURABLE_RECORDS_PER_SUBMISSION, MAX_ENCODED_PACKET_BYTES,
+    MAX_INLINE_LXMF_MESSAGE_WIRE_BYTES, MAX_JOURNAL_RECORD_BYTES, MAX_RNS_DATA_BYTES,
+    MAX_STATE_TRANSITIONS_PER_SUBMISSION, MAX_TRANSPORT_AUDITS_PER_SUBMISSION,
+    MIN_LXMF_MESSAGE_WIRE_BYTES, PlanOutcome, PreparedPacketDetails, PrincipalId, RnsAttemptToken,
+    RnsDataIntent, StateTransition, SubmissionFailure, SubmissionId, SubmissionIndex,
+    SubmissionIntent, SubmissionReplay, TransitionError, TransportRecoveryReason,
+    decode_journal_entry, encode_journal_entry, validate_transition,
 };
 
 fn principal(tag: u8) -> PrincipalId {
@@ -23,8 +22,8 @@ fn key(tag: u8) -> IdempotencyKey {
     IdempotencyKey::new([tag; 16])
 }
 
-fn intent(destination: u8, payload: &[u8]) -> ExperimentalRnsDataIntent {
-    ExperimentalRnsDataIntent::new(DestinationHash::new([destination; 16]), payload).unwrap()
+fn intent(destination: u8, payload: &[u8]) -> RnsDataIntent {
+    RnsDataIntent::new(DestinationHash::new([destination; 16]), payload).unwrap()
 }
 
 fn lxmf_intent(destination: u8, trailing: &[u8]) -> LxmfMessageIntent {
@@ -43,8 +42,7 @@ fn authorization(tag: u8) -> AuthorizationSnapshot {
         generation,
         generation + 10,
         u32::from(tag) + 1,
-        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
-            | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+        AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
     )
     .unwrap()
 }
@@ -149,7 +147,7 @@ fn encoded(entry: JournalEntry) -> Vec<u8> {
 
 #[test]
 fn maximum_intent_is_owned_hashed_and_fits_one_record() {
-    let payload = [0x5a; MAX_EXPERIMENTAL_RNS_DATA_BYTES];
+    let payload = [0x5a; MAX_RNS_DATA_BYTES];
     let intent = intent(0x44, &payload);
     assert_eq!(intent.payload(), payload);
     assert_eq!(intent.content_sha256(), intent.content_sha256());
@@ -185,11 +183,10 @@ fn maximum_intent_is_owned_hashed_and_fits_one_record() {
         Err(reticulum_storage_model::DecodeError::RecordTooLarge)
     );
 
-    let oversized = [0_u8; MAX_EXPERIMENTAL_RNS_DATA_BYTES + 1];
-    let error =
-        ExperimentalRnsDataIntent::new(DestinationHash::new([0; 16]), &oversized).unwrap_err();
-    assert_eq!(error.actual(), MAX_EXPERIMENTAL_RNS_DATA_BYTES + 1);
-    assert_eq!(error.maximum(), MAX_EXPERIMENTAL_RNS_DATA_BYTES);
+    let oversized = [0_u8; MAX_RNS_DATA_BYTES + 1];
+    let error = RnsDataIntent::new(DestinationHash::new([0; 16]), &oversized).unwrap_err();
+    assert_eq!(error.actual(), MAX_RNS_DATA_BYTES + 1);
+    assert_eq!(error.maximum(), MAX_RNS_DATA_BYTES);
 }
 
 #[test]
@@ -247,7 +244,7 @@ fn lxmf_message_record_golden_and_kind_shape_are_strict() {
     let actual = encoded(entry);
 
     const GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x03, 0x01, 0x00, 0x02, 0xa6, 0x00, 0x07, 0x01, 0x50, 0x11, 0x11, 0x11, 0x11,
+        0xa3, 0x00, 0x04, 0x01, 0x00, 0x02, 0xa6, 0x00, 0x07, 0x01, 0x50, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x02, 0x50, 0x22,
         0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
         0x03, 0xa5, 0x00, 0x50, 0x45, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
@@ -280,7 +277,7 @@ fn accepted_record_golden_and_every_truncated_prefix_are_strict() {
     // Filled from this crate's canonical encoder and frozen against accidental
     // field-number, provenance-shape, or integer-encoding drift.
     const GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x03, 0x01, 0x00, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x50, // Principal.
+        0xa3, 0x00, 0x04, 0x01, 0x00, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x50, // Principal.
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, // Idempotency key.
         0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
@@ -293,10 +290,10 @@ fn accepted_record_golden_and_every_truncated_prefix_are_strict() {
     ];
     assert_eq!(actual, GOLDEN);
     assert_eq!(decode_journal_entry(GOLDEN), Ok(entry));
-    let mut schema_two = GOLDEN.to_vec();
-    schema_two[2] = 0x02;
+    let mut non_current_schema = GOLDEN.to_vec();
+    non_current_schema[2] = (JOURNAL_SCHEMA_VERSION - 1) as u8;
     assert_eq!(
-        decode_journal_entry(&schema_two),
+        decode_journal_entry(&non_current_schema),
         Err(reticulum_storage_model::DecodeError::UnsupportedSchema)
     );
     for end in 0..GOLDEN.len() {
@@ -333,11 +330,11 @@ fn transition_and_audit_goldens_round_trip() {
     )
     .unwrap();
     const TRANSITION_GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x03, 0x01, 0x01, 0x02, 0xa8, 0x00, 0x07, 0x01, 0x03, 0x02, 0x04, 0x05, 0x03,
+        0xa3, 0x00, 0x04, 0x01, 0x01, 0x02, 0xa8, 0x00, 0x07, 0x01, 0x03, 0x02, 0x04, 0x05, 0x03,
         0x06, 0x01, 0x07, 0x09, 0x08, 0x01, 0x09, 0x00,
     ];
     const AUDIT_GOLDEN: &[u8] = &[
-        0xa3, 0x00, 0x03, 0x01, 0x02, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58,
+        0xa3, 0x00, 0x04, 0x01, 0x02, 0x02, 0xa7, 0x00, 0x07, 0x01, 0x02, 0x02, 0x01, 0x03, 0x58,
         0x20, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
         0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
         0x55, 0x55, 0x55, 0x04, 0xf5, 0x05, 0x01, 0x06, 0x19, 0x12, 0x34,
@@ -397,7 +394,7 @@ fn noncanonical_and_invalid_authorization_are_rejected() {
     ));
     let canonical = encoded(entry);
 
-    // Schema 3 encoded with an unnecessarily wide uint8 representation.
+    // The current schema encoded with an unnecessarily wide uint8 representation.
     let mut noncanonical = canonical.clone();
     assert_eq!(
         &noncanonical[..3],
@@ -423,7 +420,7 @@ fn noncanonical_and_invalid_authorization_are_rejected() {
 
 #[test]
 fn authorization_snapshot_rejects_noncanonical_or_insufficient_facts() {
-    let submit = AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA;
+    let submit = AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA;
     let valid = AuthorizationSnapshot::new([1; 16], 4, 7, 2, submit).unwrap();
     assert_eq!(valid.credential_id(), &[1; 16]);
     assert_eq!(valid.credential_generation(), 4);
@@ -492,10 +489,7 @@ fn accepted_digest_is_recomputed_from_serialized_intent() {
     let JournalEntry::Accepted(decoded) = decode_journal_entry(&bytes).unwrap() else {
         panic!("acceptance kind changed")
     };
-    assert_eq!(
-        decoded.intent(),
-        SubmissionIntent::ExperimentalRnsData(intent(3, b"y"))
-    );
+    assert_eq!(decoded.intent(), SubmissionIntent::RnsData(intent(3, b"y")));
     assert_eq!(decoded.content_sha256(), decoded.intent().content_sha256());
     let JournalEntry::Accepted(original) = original else {
         unreachable!()
@@ -1093,7 +1087,7 @@ fn first_transport_audit_checks_token_and_preserves_accumulated_uncertainty() {
 }
 
 #[test]
-fn schema_three_has_an_explicit_one_transport_audit_bound() {
+fn durable_schema_has_an_explicit_one_transport_audit_bound() {
     assert_eq!(MAX_STATE_TRANSITIONS_PER_SUBMISSION, 3);
     assert_eq!(MAX_TRANSPORT_AUDITS_PER_SUBMISSION, 1);
     assert_eq!(MAX_DURABLE_RECORDS_PER_SUBMISSION, 5);
@@ -1381,9 +1375,9 @@ fn boot_policy_never_replays_an_lxmf_quarantine_awaiting_its_deferred_final() {
 }
 
 #[test]
-fn boot_policy_finalizes_legacy_awaiting_lxmf_as_interrupted() {
+fn boot_policy_finalizes_awaiting_lxmf_as_interrupted() {
     let mut awaiting = live::<1>(SubmissionId::new(21));
-    let id = accepted_lxmf(&mut awaiting, 1, 1, b"legacy-awaiting").id();
+    let id = accepted_lxmf(&mut awaiting, 1, 1, b"awaiting-delivery").id();
     append_planned_transition(&mut awaiting, transition(id, 1, LifecycleState::Preparing));
     append_planned_transition(
         &mut awaiting,
@@ -1393,7 +1387,7 @@ fn boot_policy_finalizes_legacy_awaiting_lxmf_as_interrupted() {
     let BootRecoveryDecision::FinalizeInterrupted(finalize) =
         awaiting.boot_recovery(id, 91).unwrap()
     else {
-        panic!("legacy awaiting LXMF state must not resume")
+        panic!("awaiting LXMF state must not resume after reset")
     };
     assert_eq!(finalize.revision(), 3);
     assert!(matches!(

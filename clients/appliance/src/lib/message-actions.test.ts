@@ -19,7 +19,6 @@ function message(overrides: Partial<TimelineView> = {}): TimelineView {
     outbox_id: 3,
     submission_id: 4,
     current_attempt_number: 1,
-    automatic_retry_count: 0,
     packet_evidence: null,
     ingress_observation: null,
     receiver_location: null,
@@ -83,7 +82,6 @@ describe("timeline message actions", () => {
       status: "preparing",
       submission_id: 5,
       current_attempt_number: 2,
-      automatic_retry_count: 1,
       packet_evidence: {
         encoded_packet_len: 218,
         encoded_packet_sha256: "cd".repeat(32),
@@ -100,7 +98,6 @@ describe("timeline message actions", () => {
       outbox_id: null,
       submission_id: null,
       current_attempt_number: null,
-      automatic_retry_count: null,
       status: null,
     });
     const observed = message({

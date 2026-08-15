@@ -59,11 +59,6 @@ import { assertNativeBridgeContract } from "./native-contract.ts";
 import { type NativeErrorPredicate, normalizeNativeError } from "./native-error.ts";
 import { nativePlatformOs } from "./native-platform";
 
-// Previous single-profile artifacts are supplied only to Rust's one-time
-// migration. New credentials and identity-bound databases live below the
-// native-owned device-keyed profile root.
-const DATABASE_FILE_NAME = "reticulum-lxmf-chat-alpha-schema3.sqlite3";
-const DEVICE_CREDENTIAL_FILE_NAME = "reticulum-device-credential.rdpkey";
 const PROFILE_STORE_DIRECTORY_NAME = "reticulum-appliance-profiles";
 
 export type NativeCredentialState =
@@ -245,7 +240,7 @@ function nativeOnboardingView(
       method: filelessBleAvailable ? "managed_pairing" : "credential_import",
       snapshot: {
         revision: 0,
-        usb_serial: "",
+        device_label: "",
         lifecycle: { state: "needs_pairing" },
       },
     };
@@ -256,7 +251,7 @@ function nativeOnboardingView(
       method: "credential_import",
       snapshot: {
         revision: 0,
-        usb_serial: "",
+        device_label: "",
         lifecycle: { state: "faulted", reason: "invalid_credential_artifact" },
       },
     };
@@ -272,7 +267,7 @@ function nativeOnboardingView(
       method: "credential_import",
       snapshot: {
         revision: 0,
-        usb_serial: "",
+        device_label: "",
         lifecycle: { state: "faulted", reason: "unsupported_device" },
       },
     };
@@ -285,10 +280,7 @@ function nativeOnboardingView(
       // lossless JavaScript number. This projection only needs a stable local
       // revision; the generated native summary retains the exact bigint.
       revision: 0,
-      // The shared HTTP DTO still calls this USB-specific field `usb_serial`.
-      // Do not overload it with a BLE name; ready connection metadata carries
-      // the neutral endpoint and device label.
-      usb_serial: "",
+      device_label: "",
       lifecycle: { state: "credential_ready" },
     },
   };
@@ -325,7 +317,7 @@ function failedBleOnboardingView(
     snapshot: {
       lifecycle,
       revision: boundedOnboardingRevision(revision),
-      usb_serial: peripheralId,
+      device_label: peripheralId,
     },
   };
 }
@@ -377,7 +369,7 @@ function nativeBleOnboardingView(
     snapshot: {
       lifecycle,
       revision: boundedOnboardingRevision(projection.revision),
-      usb_serial: peripheralId,
+      device_label: peripheralId,
     },
   };
 }
@@ -389,7 +381,7 @@ function connectingBleOnboardingView(peripheralId: string): OnboardingView {
     snapshot: {
       lifecycle: { state: "working", stage: "opening_device" },
       revision: 0,
-      usb_serial: peripheralId,
+      device_label: peripheralId,
     },
   };
 }
@@ -404,19 +396,9 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
     fileSystem.Paths.document,
     PROFILE_STORE_DIRECTORY_NAME,
   ).uri;
-  const databaseUri = new fileSystem.File(fileSystem.Paths.document, DATABASE_FILE_NAME).uri;
-  const deviceCredentialUri = new fileSystem.File(
-    fileSystem.Paths.document,
-    DEVICE_CREDENTIAL_FILE_NAME,
-  ).uri;
-  const wifiEndpoint = process.env.EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT?.trim() ?? "";
   const blePeripheralName = normalizeBlePeripheralName(process.env.EXPO_PUBLIC_APPLIANCE_BLE_NAME);
-  const bleCentral = wifiEndpoint === "" ? await import("./ble-central") : null;
-  const profileStore = bindings.NativeProfileStore.open(
-    nativePathFromFileUri(profileStoreUri),
-    nativePathFromFileUri(databaseUri),
-    nativePathFromFileUri(deviceCredentialUri),
-  );
+  const bleCentral = await import("./ble-central");
+  const profileStore = bindings.NativeProfileStore.open(nativePathFromFileUri(profileStoreUri));
   const onboardingPhase = (phase: number): NativeBleOnboardingPhase => {
     switch (phase) {
       case bindings.NativeBleOnboardingPhase.Idle:
@@ -486,46 +468,39 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
     }
   };
   return {
-    bleOnboarding:
-      bleCentral === null
-        ? undefined
-        : {
-            destroy(onboarding): void {
-              if (bindings.NativeBleOnboarding.instanceOf(onboarding)) {
-                onboarding.uniffiDestroy();
-              }
-            },
-            open(store): NativeBleOnboardingLike {
-              return bindings.NativeBleOnboarding.open(store);
-            },
-            snapshot(onboarding): NativeBleOnboardingProjection {
-              const snapshot = onboarding.snapshot();
-              return {
-                completedProfile: snapshot.completedProfile,
-                failure:
-                  snapshot.failure === undefined ? undefined : onboardingFailure(snapshot.failure),
-                phase: onboardingPhase(snapshot.phase),
-                revision: snapshot.revision,
-              };
-            },
-          },
-    createBle:
-      bleCentral === null
-        ? undefined
-        : () => ({
-            central: bleCentral.createBleCentral(),
-            decodeCommand(command) {
-              if (bindings.NativeBlePlatformCommand.Write.instanceOf(command)) {
-                return { kind: "write", ...command.inner };
-              }
-              if (bindings.NativeBlePlatformCommand.Disconnect.instanceOf(command)) {
-                return { kind: "disconnect", ...command.inner };
-              }
-              throw new Error("native Rust bridge returned an unknown BLE platform command");
-            },
-            peripheralName: blePeripheralName,
-            profile: bleGattProfileFromNative(bindings.nativeBleGattProfile()),
-          }),
+    bleOnboarding: {
+      destroy(onboarding): void {
+        if (bindings.NativeBleOnboarding.instanceOf(onboarding)) {
+          onboarding.uniffiDestroy();
+        }
+      },
+      open(store): NativeBleOnboardingLike {
+        return bindings.NativeBleOnboarding.open(store);
+      },
+      snapshot(onboarding): NativeBleOnboardingProjection {
+        const snapshot = onboarding.snapshot();
+        return {
+          completedProfile: snapshot.completedProfile,
+          failure: snapshot.failure === undefined ? undefined : onboardingFailure(snapshot.failure),
+          phase: onboardingPhase(snapshot.phase),
+          revision: snapshot.revision,
+        };
+      },
+    },
+    createBle: () => ({
+      central: bleCentral.createBleCentral(),
+      decodeCommand(command) {
+        if (bindings.NativeBlePlatformCommand.Write.instanceOf(command)) {
+          return { kind: "write", ...command.inner };
+        }
+        if (bindings.NativeBlePlatformCommand.Disconnect.instanceOf(command)) {
+          return { kind: "disconnect", ...command.inner };
+        }
+        throw new Error("native Rust bridge returned an unknown BLE platform command");
+      },
+      peripheralName: blePeripheralName,
+      profile: bleGattProfileFromNative(bindings.nativeBleGattProfile()),
+    }),
     bridge: {
       contract: bindings.nativeBridgeContract(),
       isNativeError: bindings.NativeApplianceError.instanceOf,
@@ -558,9 +533,6 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
         return appliance.importActivatedCredential(stagingPath);
       },
       open(store): NativeApplianceLike {
-        if (wifiEndpoint !== "") {
-          return bindings.NativeAppliance.openWifiProfile(store, wifiEndpoint);
-        }
         return bindings.NativeAppliance.openBleProfile(store);
       },
       profileSnapshot(store): NativeProfileStoreSnapshot {
@@ -617,12 +589,10 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
  * Offline-first native adapter backed by the Rust single-owner actor and an
  * active device profile's app-private SQLite database.
  *
- * `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT` opts a native build into the raw-TCP
- * Wi-Fi proof connector and its app-private activated credential. Without that
- * build-time endpoint, the platform foreground BLE central owns GATT while the
- * Rust bridge owns authentication and protocol bytes. Local contacts,
- * timelines, and durable outbox writes work immediately in both modes, even
- * while the initial BLE scan runs in the background.
+ * The platform foreground BLE central owns GATT while the Rust bridge owns
+ * authentication and protocol bytes. Local contacts, timelines, and durable
+ * outbox writes work immediately, even while the initial BLE scan runs in the
+ * background.
  */
 export class NativeApplianceClient implements ApplianceClient {
   readonly #loadRuntime: NativeApplianceRuntimeLoader;
@@ -880,7 +850,7 @@ export class NativeApplianceClient implements ApplianceClient {
           snapshot: {
             lifecycle: { state: "working", stage: "activating" },
             revision: boundedOnboardingRevision(projection.revision),
-            usb_serial: activeOnboarding.peripheralId,
+            device_label: activeOnboarding.peripheralId,
           },
         };
       }
@@ -1285,7 +1255,7 @@ export class NativeApplianceClient implements ApplianceClient {
             snapshot: {
               lifecycle: { state: "needs_pairing" },
               revision: 0,
-              usb_serial: active.peripheralId,
+              device_label: active.peripheralId,
             },
           };
         }
@@ -1521,7 +1491,7 @@ export class NativeApplianceClient implements ApplianceClient {
           snapshot: {
             lifecycle: { state: "needs_pairing" },
             revision: 0,
-            usb_serial: peripheralId,
+            device_label: peripheralId,
           },
         };
         return;
@@ -1619,7 +1589,7 @@ export class NativeApplianceClient implements ApplianceClient {
             snapshot: {
               lifecycle: { state: "needs_pairing" },
               revision: 0,
-              usb_serial: active.peripheralId,
+              device_label: active.peripheralId,
             },
           };
         }
@@ -1642,7 +1612,7 @@ export class NativeApplianceClient implements ApplianceClient {
         snapshot: {
           lifecycle: { state: "needs_pairing" },
           revision: 0,
-          usb_serial: active.peripheralId,
+          device_label: active.peripheralId,
         },
       };
       return;

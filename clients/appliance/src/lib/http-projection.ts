@@ -10,9 +10,9 @@ function connectionFromHttp(connection: HttpConnectionState): ConnectionState {
     case "ready":
       return {
         state: "ready",
-        transport: "usb_serial",
-        endpoint: connection.port,
-        device_label: connection.usb_serial,
+        transport: connection.transport,
+        endpoint: connection.endpoint,
+        device_label: connection.device_label,
       };
     case "starting":
     case "disconnected":
@@ -24,10 +24,7 @@ function connectionFromHttp(connection: HttpConnectionState): ConnectionState {
   }
 }
 
-/**
- * Adapt the frozen HTTP-v1 USB field names to the transport-neutral model used
- * by the universal application and native Rust bridge.
- */
+/** Adapt the HTTP snapshot to the universal application's connection model. */
 export function applianceSnapshotFromHttp(snapshot: HttpApplianceSnapshot): ApplianceSnapshot {
   return {
     ...snapshot,

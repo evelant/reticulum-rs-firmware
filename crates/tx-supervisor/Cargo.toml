@@ -1,6 +1,6 @@
 [package]
 name = "reticulum-tx-supervisor"
-description = "Permanent RF-inert supervisor for Reticulum TX ownership machines"
+description = "Transport-neutral Reticulum node and interface supervisor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,18 +11,14 @@ publish.workspace = true
 default = []
 
 [dependencies]
-embassy-futures.workspace = true
 embassy-sync.workspace = true
-embassy-time.workspace = true
 rand_core.workspace = true
 reticulum-interface-router = { path = "../interface-router", default-features = false }
 reticulum-node-core = { path = "../node-core", default-features = false }
-reticulum-tx-dispatch = { path = "../tx-dispatch", default-features = false }
 reticulum-tx-handoff = { path = "../tx-handoff", default-features = false }
 
 [dev-dependencies]
 reticulum-rns-rete = { path = "../rns-rete", default-features = false }
-static_cell.workspace = true
 
 [lib]
 path = "src/lib.rs"

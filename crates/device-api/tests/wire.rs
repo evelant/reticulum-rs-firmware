@@ -11,173 +11,124 @@ use reticulum_device_api::{
     MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES,
     MAX_RADIO_TRACE_PAGE_ENTRIES, MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES,
     MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES, ManualServiceAnnounceDisposition, NodeDiagnosticsSnapshot,
-    OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE, OP_EXPERIMENTAL_NODE_DIAGNOSTICS,
-    OP_EXPERIMENTAL_RADIO_TRACE_PAGE, OP_EXPERIMENTAL_RETICULUM_PROBE_POLL,
-    OP_EXPERIMENTAL_RETICULUM_PROBE_START, OP_EXPERIMENTAL_ROUTE_DIAGNOSTICS_PAGE,
-    OP_IDENTITY_SUMMARY, OP_SUBMISSION_STATUS, Permissions, PreparedPacketDetails, PrincipalId,
-    ProbeFailure, ProbeId, ProbePhase, ProbePollRequest, ProbePollResponse, ProbeStartAccepted,
-    ProbeStartOutcome, ProbeStartRequest, ProbeSuccess, RadioTraceAppliedLoraProfile,
-    RadioTraceAttemptOutcome, RadioTraceAttemptTerminal, RadioTraceAttemptToken, RadioTraceCursor,
-    RadioTraceDataTx, RadioTraceEvent, RadioTraceEventKind, RadioTraceLogicalRx,
-    RadioTracePacketEvidence, RadioTracePage, RadioTracePageRequest, RadioTraceRouteSelected,
-    RadioTraceTxOutcome, RequestEnvelope, RequestId, RequiredField, RequiredPermission,
-    ResponseEnvelope, RnsDiagnostics, RouteDiagnosticEntry, RouteDiagnosticResolution,
-    RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionFailure, SubmissionId,
-    SubmissionState, SubmissionStatus, authorize_request, decode_request, decode_response,
-    encode_request, encode_response,
+    OP_IDENTITY_SUMMARY, OP_MANUAL_SERVICE_ANNOUNCE, OP_NODE_DIAGNOSTICS, OP_RADIO_TRACE_PAGE,
+    OP_RETICULUM_PROBE_POLL, OP_RETICULUM_PROBE_START, OP_ROUTE_DIAGNOSTICS_PAGE,
+    OP_SUBMISSION_STATUS, Permissions, PreparedPacketDetails, PrincipalId, ProbeFailure, ProbeId,
+    ProbePhase, ProbePollRequest, ProbePollResponse, ProbeStartAccepted, ProbeStartOutcome,
+    ProbeStartRequest, ProbeSuccess, RadioTraceAppliedLoraProfile, RadioTraceAttemptOutcome,
+    RadioTraceAttemptTerminal, RadioTraceAttemptToken, RadioTraceCursor, RadioTraceDataTx,
+    RadioTraceEvent, RadioTraceEventKind, RadioTraceLogicalRx, RadioTracePacketEvidence,
+    RadioTracePage, RadioTracePageRequest, RadioTraceRouteSelected, RadioTraceTxOutcome,
+    RequestEnvelope, RequestId, RequiredField, RequiredPermission, ResponseEnvelope,
+    RnsDiagnostics, RouteDiagnosticEntry, RouteDiagnosticResolution, RouteDiagnosticsPage,
+    RouteDiagnosticsRequest, SubmissionFailure, SubmissionId, SubmissionState, SubmissionStatus,
+    authorize_request, decode_request, decode_response, encode_request, encode_response,
 };
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 use reticulum_device_api::{
     DEFAULT_RETICULUM_TCP_PORT, GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm,
     MAX_RETICULUM_DNS_DHCP_SERVERS, MAX_RETICULUM_DNS_RAW_ATTEMPTS,
     MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES, MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_PASSPHRASE_BYTES,
     MAX_WIFI_SSID_BYTES, MIN_WIFI_PASSPHRASE_BYTES, NetworkConfigMutation,
     NetworkConfigMutationOutcome, NetworkConfigMutationRequest, NetworkConfigSnapshot,
-    NetworkRuntimeStatus, OP_EXPERIMENTAL_NETWORK_CONFIG_GET,
-    OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE, OP_EXPERIMENTAL_NETWORK_STATUS, ReticulumDnsDiagnostics,
-    ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt, ReticulumDnsRawOutcome,
-    ReticulumDnsRawSetupState, ReticulumDnsRawSource, ReticulumDnsResolution,
-    ReticulumDnsResolutionSource, ReticulumTcpFailure, ReticulumTcpPeerConfigSummary,
-    ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate, ReticulumTcpPeerHostname,
-    ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState, ReticulumTcpPeerUpdate, RmapConfig,
-    RmapLocation, WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId,
-    WifiNetworkUpdate, WifiStationState,
+    NetworkRuntimeStatus, OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE, OP_NETWORK_STATUS,
+    ReticulumDnsDiagnostics, ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt,
+    ReticulumDnsRawOutcome, ReticulumDnsRawSetupState, ReticulumDnsRawSource,
+    ReticulumDnsResolution, ReticulumDnsResolutionSource, ReticulumTcpFailure,
+    ReticulumTcpPeerConfigSummary, ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate,
+    ReticulumTcpPeerHostname, ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState,
+    ReticulumTcpPeerUpdate, RmapConfig, RmapLocation, WifiCredentialUpdate,
+    WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate, WifiStationState,
 };
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 use reticulum_device_api::{
-    LxmfBasicSendAccepted, LxmfDiscoveredPeer, LxmfIngressObservation, LxmfIngressSignal,
-    LxmfMailboxStatus, LxmfMessageHandle, LxmfMessageLocation, LxmfMessageSummary,
-    LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation, LxmfPeerDiscoveryPage,
-    LxmfPeerGeneration, LxmfReadChunk, LxmfReadLength, MAX_LXMF_READ_CHUNK_BYTES,
-    OP_EXPERIMENTAL_LXMF_BASIC_SEND, OP_EXPERIMENTAL_LXMF_MAILBOX_ACKNOWLEDGE,
-    OP_EXPERIMENTAL_LXMF_MAILBOX_STATUS, OP_EXPERIMENTAL_LXMF_NEXT, OP_EXPERIMENTAL_LXMF_PEER_NEXT,
-    OP_EXPERIMENTAL_LXMF_READ,
+    LxmfBasicSendAccepted, LxmfDiscoveredPeer, LxmfMailboxStatus, LxmfMessageHandle,
+    LxmfMessageLocation, LxmfMessageSummary, LxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation,
+    LxmfPeerDiscoveryPage, LxmfPeerGeneration, LxmfReadChunk, LxmfReadLength,
+    MAX_LXMF_READ_CHUNK_BYTES, OP_LXMF_BASIC_SEND, OP_LXMF_MAILBOX_ACKNOWLEDGE,
+    OP_LXMF_MAILBOX_STATUS, OP_LXMF_NEXT, OP_LXMF_PEER_NEXT, OP_LXMF_READ,
 };
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 use reticulum_device_api::{
     MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS, NomadFetchFailure, NomadFetchId, NomadFetchPhase,
     NomadFetchPollRequest, NomadFetchPollResponse, NomadFetchStartAccepted, NomadFetchStartOutcome,
     NomadFetchStartRequest, NomadPage, NomadPagePath, NomadRequestTimestampUnixMs,
-    OP_EXPERIMENTAL_NOMAD_FETCH_POLL, OP_EXPERIMENTAL_NOMAD_FETCH_START,
+    OP_NOMAD_FETCH_POLL, OP_NOMAD_FETCH_START,
 };
-#[cfg(feature = "experimental-rns-inbox")]
-use reticulum_device_api::{
-    MAX_RNS_INBOX_PAYLOAD_BYTES, OP_EXPERIMENTAL_RNS_INBOX_PEEK, OP_EXPERIMENTAL_RNS_INBOX_STATUS,
-    RnsInboxItem, RnsInboxStatus,
-};
-#[cfg(feature = "experimental-rns-data")]
-use reticulum_device_api::{OP_EXPERIMENTAL_SUBMIT_RNS_DATA, SubmissionAccepted};
+#[cfg(feature = "rns-data")]
+use reticulum_device_api::{OP_SUBMIT_RNS_DATA, SubmissionAccepted};
 
 const GOLDEN_CAPABILITIES_REQUEST: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+    0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
 ];
 const GOLDEN_PROBE_START_REQUEST: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03, 0xa2,
+    0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03, 0xa2,
     0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
     0x0e, 0x0f, 0x01, 0x50, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb,
     0xfc, 0xfd, 0xfe, 0xff,
 ];
 const GOLDEN_PROBE_POLL_REQUEST: &[u8] = &[
-    0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x13, 0x03, 0xa1,
+    0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x13, 0x03, 0xa1,
     0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad,
     0xae, 0xaf,
 ];
 
 fn golden_capabilities_response() -> Vec<u8> {
     let mut encoded = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xb6, 0x00,
-        0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0xf4, 0x02, 0x00, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xb4, 0x00,
+        0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0xf4, 0x02, 0x00, 0x03,
     ];
-    encoded.push(if cfg!(feature = "experimental-rns-data") {
+    encoded.push(if cfg!(feature = "rns-data") {
         0xf5
     } else {
         0xf4
     });
     encoded.extend_from_slice(&[
-        0x04, 0x19, 0x02, 0x00, 0x05, 0x19, 0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f, 0x07,
+        0x04, 0x19, 0x02, 0x00, 0x05, 0x19, 0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f,
     ]);
-    encoded.push(if cfg!(feature = "experimental-rns-inbox") {
-        0x02
-    } else {
-        0x00
-    });
-    encoded.push(0x08);
-    if cfg!(feature = "experimental-rns-inbox") {
-        encoded.extend_from_slice(&[0x19, 0x01, 0x7f]);
-    } else {
-        encoded.push(0x00);
-    }
-    encoded.extend_from_slice(&[
-        0x09,
-        if cfg!(feature = "experimental-lxmf") {
-            0x02
-        } else {
-            0x00
-        },
-        0x0a,
-    ]);
-    if cfg!(feature = "experimental-lxmf") {
+    encoded.extend_from_slice(&[0x09, if cfg!(feature = "lxmf") { 0x02 } else { 0x00 }, 0x0a]);
+    if cfg!(feature = "lxmf") {
         encoded.extend_from_slice(&[0x19, 0x01, 0xa0]);
     } else {
         encoded.push(0x00);
     }
-    encoded.extend_from_slice(&[
-        0x0b,
-        if cfg!(feature = "experimental-lxmf") {
-            0x02
-        } else {
-            0x00
-        },
-        0x0c,
-    ]);
-    if cfg!(feature = "experimental-lxmf") {
+    encoded.extend_from_slice(&[0x0b, if cfg!(feature = "lxmf") { 0x02 } else { 0x00 }, 0x0c]);
+    if cfg!(feature = "lxmf") {
         encoded.extend_from_slice(&[0x19, 0x01, 0x27]);
     } else {
         encoded.push(0x00);
     }
     encoded.push(0x0d);
-    if cfg!(feature = "experimental-lxmf") {
+    if cfg!(feature = "lxmf") {
         encoded.extend_from_slice(&[0x19, 0x01, 0x27]);
     } else {
         encoded.push(0x00);
     }
-    encoded.extend_from_slice(&[
-        0x0e,
-        if cfg!(feature = "experimental-lxmf") {
-            0x02
-        } else {
-            0x00
-        },
-        0x0f,
-    ]);
-    if cfg!(feature = "experimental-lxmf") {
+    encoded.extend_from_slice(&[0x0e, if cfg!(feature = "lxmf") { 0x02 } else { 0x00 }, 0x0f]);
+    if cfg!(feature = "lxmf") {
         encoded.extend_from_slice(&[0x19, 0x01, 0x00]);
     } else {
         encoded.push(0x00);
     }
     encoded.extend_from_slice(&[
         0x10,
-        if cfg!(feature = "experimental-nomad") {
-            0x02
-        } else {
-            0x00
-        },
+        if cfg!(feature = "nomad") { 0x02 } else { 0x00 },
         0x11,
     ]);
-    if cfg!(feature = "experimental-nomad") {
+    if cfg!(feature = "nomad") {
         encoded.extend_from_slice(&[0x18, 0x80]);
     } else {
         encoded.push(0x00);
     }
     encoded.push(0x12);
-    if cfg!(feature = "experimental-nomad") {
+    if cfg!(feature = "nomad") {
         encoded.extend_from_slice(&[0x19, 0x01, 0x90]);
     } else {
         encoded.push(0x00);
     }
     encoded.extend_from_slice(&[
         0x13,
-        if cfg!(feature = "experimental-network-config") {
+        if cfg!(feature = "network-config") {
             0x02
         } else {
             0x00
@@ -269,77 +220,15 @@ fn exact_capabilities_response_golden_round_trip() {
 }
 
 #[test]
-fn legacy_capabilities_default_absent_inbox_and_lxmf_fields() {
-    const LEGACY: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa7, 0x00,
-        0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0xf4, 0x02, 0x00, 0x03, 0xf4, 0x04, 0x19, 0x02, 0x00,
-        0x05, 0x19, 0x01, 0xc0, 0x06, 0x19, 0x01, 0x7f,
-    ];
-
-    for minor in [0_u8, 1] {
-        let mut encoded = LEGACY.to_vec();
-        encoded[6] = minor;
-        encoded[19] = minor;
-        let decoded = decode_response(&encoded).unwrap();
-        assert_eq!(decoded.version.minor, u16::from(minor));
-        let DeviceResponse::SystemCapabilities(capabilities) = decoded.response else {
-            panic!("expected capabilities response")
-        };
-        assert_eq!(capabilities.api_version().minor, u16::from(minor));
-        assert_eq!(
-            capabilities.experimental_rns_inbox(),
-            CapabilityAvailability::Unavailable
-        );
-        assert_eq!(capabilities.max_rns_inbox_payload_bytes(), 0);
-        assert_eq!(
-            capabilities.experimental_lxmf(),
-            CapabilityAvailability::Unavailable
-        );
-        assert_eq!(capabilities.max_lxmf_read_chunk_bytes(), 0);
-        assert_eq!(
-            capabilities.experimental_lxmf_basic_send(),
-            CapabilityAvailability::Unavailable
-        );
-        assert_eq!(capabilities.max_lxmf_basic_title_bytes(), 0);
-        assert_eq!(capabilities.max_lxmf_basic_content_bytes(), 0);
-        assert_eq!(
-            capabilities.experimental_lxmf_peer_discovery(),
-            CapabilityAvailability::Unavailable
-        );
-        assert_eq!(capabilities.max_lxmf_peer_app_data_bytes(), 0);
-        assert_eq!(
-            capabilities.manual_service_announce(),
-            CapabilityAvailability::Unavailable
-        );
-        assert_eq!(
-            capabilities.experimental_reticulum_probe(),
-            CapabilityAvailability::Unavailable
-        );
-    }
-}
-
-#[test]
-fn inbox_capability_availability_is_a_closed_wire_vocabulary() {
-    let mut encoded = golden_capabilities_response();
-    let key = encoded
-        .windows(2)
-        .rposition(|window| {
-            window
-                == [
-                    0x07,
-                    CapabilitySnapshot::current()
-                        .experimental_rns_inbox()
-                        .wire_code(),
-                ]
-        })
-        .expect("capability key 7");
-    encoded.splice(key + 1..=key + 1, [0x18, 99]);
+fn capability_snapshot_requires_the_complete_v2_surface() {
+    let mut incomplete = golden_capabilities_response();
+    incomplete[13] = 0xb3;
+    incomplete.truncate(incomplete.len() - 2);
     assert_eq!(
-        decode_response(&encoded),
-        Err(DecodeError::InvalidValue {
-            field: RequiredField::CapabilityExperimentalRnsInbox,
-            value: 99,
-        })
+        decode_response(&incomplete),
+        Err(DecodeError::MissingField(
+            RequiredField::CapabilityReticulumProbe
+        ))
     );
 }
 
@@ -348,21 +237,13 @@ fn lxmf_capability_availability_is_a_closed_wire_vocabulary() {
     let mut encoded = golden_capabilities_response();
     let key = encoded
         .windows(2)
-        .rposition(|window| {
-            window
-                == [
-                    0x09,
-                    CapabilitySnapshot::current()
-                        .experimental_lxmf()
-                        .wire_code(),
-                ]
-        })
+        .rposition(|window| window == [0x09, CapabilitySnapshot::current().lxmf().wire_code()])
         .expect("capability key 9");
     encoded.splice(key + 1..=key + 1, [0x18, 99]);
     assert_eq!(
         decode_response(&encoded),
         Err(DecodeError::InvalidValue {
-            field: RequiredField::CapabilityExperimentalLxmf,
+            field: RequiredField::CapabilityLxmf,
             value: 99,
         })
     );
@@ -371,10 +252,10 @@ fn lxmf_capability_availability_is_a_closed_wire_vocabulary() {
 #[test]
 fn exact_identity_summary_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f,
     ];
@@ -395,7 +276,7 @@ fn exact_identity_summary_goldens_round_trip() {
 #[test]
 fn exact_identity_summary_with_lxmf_destination_golden_round_trip() {
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x01, 0x50, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
         0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
@@ -424,7 +305,7 @@ fn exact_identity_summary_with_lxmf_destination_golden_round_trip() {
 fn identity_summary_is_copy_only_public_and_read_only() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<IdentitySummary>();
-    assert_eq!(API_VERSION_MINOR, 18);
+    assert_eq!((API_VERSION_MAJOR, API_VERSION_MINOR), (2, 0));
     assert_eq!(OP_IDENTITY_SUMMARY, 0x0003);
 
     let summary = IdentitySummary::new(PRIMARY_DESTINATION);
@@ -455,11 +336,11 @@ fn identity_summary_is_copy_only_public_and_read_only() {
 #[test]
 fn manual_service_announce_is_authenticated_coalescing_and_wire_stable() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0d, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0d, 0x03,
         0xa0,
     ];
     const QUEUED_RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0d, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0d, 0x03,
         0xa1, 0x00, 0x00,
     ];
     let request = RequestEnvelope {
@@ -489,11 +370,8 @@ fn manual_service_announce_is_authenticated_coalescing_and_wire_stable() {
     let written = encode_response(&pending, &mut output).unwrap();
     assert_eq!(decode_response(&output[..written]).unwrap(), pending);
 
-    assert_eq!(OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE, 0xf00d);
-    assert_eq!(
-        request.request.operation(),
-        OP_EXPERIMENTAL_MANUAL_SERVICE_ANNOUNCE
-    );
+    assert_eq!(OP_MANUAL_SERVICE_ANNOUNCE, 0xf00d);
+    assert_eq!(request.request.operation(), OP_MANUAL_SERVICE_ANNOUNCE);
     assert!(request.request.is_mutating());
     assert_eq!(
         authorize_request(&DispatchContext::UNAUTHENTICATED, &request.request),
@@ -544,7 +422,7 @@ fn manual_service_announce_capability_and_disposition_are_strict() {
     );
 
     let invalid_disposition = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0d, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0d, 0x03, 0xa1,
         0x00, 0x02,
     ];
     assert_eq!(
@@ -556,7 +434,7 @@ fn manual_service_announce_capability_and_disposition_are_strict() {
     );
 
     let duplicate_disposition = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0d, 0x03, 0xa2,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0d, 0x03, 0xa2,
         0x00, 0x00, 0x00, 0x01,
     ];
     assert_eq!(
@@ -577,11 +455,8 @@ fn exact_reticulum_probe_start_request_is_mutating_and_permission_gated() {
         decode_request(GOLDEN_PROBE_START_REQUEST).unwrap(),
         expected
     );
-    assert_eq!(OP_EXPERIMENTAL_RETICULUM_PROBE_START, 0xf012);
-    assert_eq!(
-        expected.request.operation(),
-        OP_EXPERIMENTAL_RETICULUM_PROBE_START
-    );
+    assert_eq!(OP_RETICULUM_PROBE_START, 0xf012);
+    assert_eq!(expected.request.operation(), OP_RETICULUM_PROBE_START);
     assert!(expected.request.is_mutating());
     assert_eq!(
         authorize_request(&DispatchContext::UNAUTHENTICATED, &expected.request),
@@ -594,14 +469,14 @@ fn exact_reticulum_probe_start_request_is_mutating_and_permission_gated() {
             &expected.request,
         ),
         Err(AuthorizationError::PermissionDenied(
-            RequiredPermission::ExperimentalSubmitRnsData
+            RequiredPermission::SubmitRnsData
         ))
     );
     assert_eq!(
         authorize_request(
             &DispatchContext::authenticated(
                 principal,
-                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                Permissions::SUBMIT_RNS_DATA,
                 dispatch_provenance(),
             ),
             &expected.request,
@@ -613,12 +488,12 @@ fn exact_reticulum_probe_start_request_is_mutating_and_permission_gated() {
 #[test]
 fn exact_reticulum_probe_start_responses_distinguish_fresh_and_replayed() {
     const ACCEPTED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
         0xac, 0xad, 0xae, 0xaf, 0x01, 0x00,
     ];
     const REPLAYED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x12, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
         0xac, 0xad, 0xae, 0xaf, 0x01, 0x01,
     ];
@@ -653,11 +528,8 @@ fn exact_reticulum_probe_poll_request_is_authenticated_read_only() {
     let written = encode_request(&expected, &mut output).unwrap();
     assert_eq!(&output[..written], GOLDEN_PROBE_POLL_REQUEST);
     assert_eq!(decode_request(GOLDEN_PROBE_POLL_REQUEST).unwrap(), expected);
-    assert_eq!(OP_EXPERIMENTAL_RETICULUM_PROBE_POLL, 0xf013);
-    assert_eq!(
-        expected.request.operation(),
-        OP_EXPERIMENTAL_RETICULUM_PROBE_POLL
-    );
+    assert_eq!(OP_RETICULUM_PROBE_POLL, 0xf013);
+    assert_eq!(expected.request.operation(), OP_RETICULUM_PROBE_POLL);
     assert!(!expected.request.is_mutating());
     assert_eq!(
         authorize_request(&DispatchContext::UNAUTHENTICATED, &expected.request),
@@ -710,7 +582,7 @@ fn reticulum_probe_poll_round_trips_all_pending_and_failure_values() {
 #[test]
 fn exact_reticulum_probe_success_preserves_final_hop_signal_pair() {
     const SUCCESS: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x13, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x13, 0x03,
         0xa2, 0x00, 0x01, 0x01, 0xa3, 0x00, 0x19, 0x04, 0xd2, 0x01, 0x02, 0x02, 0xa3, 0x00, 0x07,
         0x01, 0x38, 0x60, 0x02, 0x04,
     ];
@@ -740,32 +612,20 @@ fn exact_reticulum_probe_success_preserves_final_hop_signal_pair() {
 }
 
 #[test]
-fn reticulum_probe_capability_is_optional_and_strict() {
+fn reticulum_probe_capability_is_available_and_strict() {
     assert_eq!(
-        CapabilitySnapshot::current().experimental_reticulum_probe(),
+        CapabilitySnapshot::current().reticulum_probe(),
         CapabilityAvailability::Available
     );
     assert_eq!(
-        CapabilitySnapshot::for_dispatch(false).experimental_reticulum_probe(),
+        CapabilitySnapshot::for_dispatch(false).reticulum_probe(),
         CapabilityAvailability::Unavailable
     );
     assert_eq!(
         CapabilitySnapshot::for_dispatch(false)
             .with_dispatch_reticulum_probe(CapabilityAvailability::Disabled)
-            .experimental_reticulum_probe(),
+            .reticulum_probe(),
         CapabilityAvailability::Disabled
-    );
-
-    let mut legacy = golden_capabilities_response();
-    legacy[13] = 0xb5;
-    legacy.truncate(legacy.len() - 2);
-    let decoded = decode_response(&legacy).unwrap();
-    let DeviceResponse::SystemCapabilities(capabilities) = decoded.response else {
-        panic!("expected capabilities response")
-    };
-    assert_eq!(
-        capabilities.experimental_reticulum_probe(),
-        CapabilityAvailability::Unavailable
     );
 
     let mut invalid = golden_capabilities_response();
@@ -773,18 +633,18 @@ fn reticulum_probe_capability_is_optional_and_strict() {
     assert_eq!(
         decode_response(&invalid),
         Err(DecodeError::InvalidValue {
-            field: RequiredField::CapabilityExperimentalReticulumProbe,
+            field: RequiredField::CapabilityReticulumProbe,
             value: 99,
         })
     );
 
     let mut duplicate = golden_capabilities_response();
-    duplicate[13] = 0xb7;
+    duplicate[13] = 0xb5;
     duplicate.extend_from_slice(&[0x15, 0x02]);
     assert_eq!(
         decode_response(&duplicate),
         Err(DecodeError::DuplicateField(
-            RequiredField::CapabilityExperimentalReticulumProbe
+            RequiredField::CapabilityReticulumProbe
         ))
     );
 }
@@ -985,23 +845,23 @@ fn sample_node_diagnostics() -> NodeDiagnosticsSnapshot {
 #[test]
 fn diagnostics_operations_have_exact_authenticated_read_only_wire_shapes() {
     const NODE_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0e, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0e, 0x03,
         0xa0,
     ];
     const NODE_RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0e, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0e, 0x03,
         0xa6, 0x00, 0x19, 0x03, 0xe8, 0x01, 0x84, 0xa6, 0x00, 0x01, 0x01, 0x00, 0x02, 0x01, 0x03,
         0x02, 0x04, 0x19, 0x01, 0xf4, 0x05, 0x1a, 0x00, 0x01, 0xe8, 0x48, 0xf6, 0xf6, 0xf6, 0x03,
         0xaa, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x06, 0x07,
         0x07, 0x08, 0x08, 0x09, 0x09, 0x0a, 0x04, 0x02, 0x05, 0x03, 0x06, 0x01,
     ];
     const ROUTE_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0f, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0f, 0x03,
         0xa1, 0x00, 0x50, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
         0x20, 0x20, 0x20, 0x20,
     ];
     const ROUTE_RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0f, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0f, 0x03,
         0xa3, 0x00, 0x09, 0x01, 0x01, 0x02, 0x84, 0xa4, 0x00, 0x50, 0x10, 0x10, 0x10, 0x10, 0x10,
         0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x02, 0x02, 0x03, 0x03,
         0x04, 0x00, 0xf6, 0xf6, 0xf6,
@@ -1071,8 +931,8 @@ fn diagnostics_operations_have_exact_authenticated_read_only_wire_shapes() {
         assert_eq!(&output[..written], golden);
         assert_eq!(decode_response(golden).unwrap(), response);
     }
-    assert_eq!(OP_EXPERIMENTAL_NODE_DIAGNOSTICS, 0xf00e);
-    assert_eq!(OP_EXPERIMENTAL_ROUTE_DIAGNOSTICS_PAGE, 0xf00f);
+    assert_eq!(OP_NODE_DIAGNOSTICS, 0xf00e);
+    assert_eq!(OP_ROUTE_DIAGNOSTICS_PAGE, 0xf00f);
 }
 
 #[test]
@@ -1143,7 +1003,7 @@ fn radio_trace_packet(seed: u8, with_attempt: bool) -> RadioTracePacketEvidence 
 #[test]
 fn radio_trace_request_has_an_exact_boot_bound_authenticated_read_only_wire_shape() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x14, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x14, 0x03,
         0xa1, 0x00, 0x82, 0x18, 0x63, 0x18, 0x27,
     ];
     let request = RequestEnvelope {
@@ -1173,10 +1033,10 @@ fn radio_trace_request_has_an_exact_boot_bound_authenticated_read_only_wire_shap
         ),
         Ok(())
     );
-    assert_eq!(OP_EXPERIMENTAL_RADIO_TRACE_PAGE, 0xf014);
+    assert_eq!(OP_RADIO_TRACE_PAGE, 0xf014);
 
     let partial_cursor = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x14, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x14, 0x03,
         0xa1, 0x00, 0x81, 0x18, 0x63,
     ];
     assert_eq!(
@@ -1659,7 +1519,7 @@ fn lora_data_tx_evidence_round_trips_and_retained_slot_rejects_ordinary_records(
 #[test]
 fn route_diagnostics_request_rejects_duplicate_cursor() {
     let mut bytes = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0f, 0x03, 0xa2,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0f, 0x03, 0xa2,
         0x00, 0x50,
     ];
     bytes.extend_from_slice(&[0x11; 16]);
@@ -1676,11 +1536,11 @@ fn route_diagnostics_request_rejects_duplicate_cursor() {
 #[test]
 fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     const UNKNOWN_REQUEST_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x18,
         0x63, 0x82, 0x01, 0x02,
     ];
     const UNKNOWN_RESPONSE_FIELD: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
@@ -1694,7 +1554,7 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     );
 
     let missing = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa0,
     ];
     assert_eq!(
         decode_response(&missing),
@@ -1704,7 +1564,7 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     );
 
     let duplicate = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x00, 0x50, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
         0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
@@ -1717,7 +1577,7 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     );
 
     let wrong_length = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa1, 0x00,
         0x4f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e,
     ];
@@ -1731,7 +1591,7 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     );
 
     let wrong_lxmf_length = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x03, 0x03, 0xa2, 0x00,
         0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f, 0x01, 0x4f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
         0x2b, 0x2c, 0x2d, 0x2e,
@@ -1746,219 +1606,7 @@ fn identity_summary_unknown_fields_are_skipped_but_required_field_is_strict() {
     );
 }
 
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn exact_experimental_inbox_status_goldens_round_trip() {
-    const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
-        0xa0,
-    ];
-    const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x02, 0x03,
-        0xa5, 0x00, 0x03, 0x01, 0x18, 0x20, 0x02, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x03, 0x19, 0x01, 0x7f, 0x04, 0xf5,
-    ];
-    let request = RequestEnvelope {
-        version: ApiVersion::CURRENT,
-        request_id: RequestId(42),
-        request: DeviceRequest::RnsInboxStatus,
-    };
-    let status = RnsInboxStatus {
-        depth: 3,
-        capacity: 32,
-        dropped_since_boot: 0x0102_0304_0506_0708,
-        max_payload_bytes: MAX_RNS_INBOX_PAYLOAD_BYTES as u16,
-        durable: true,
-    };
-    let response = ResponseEnvelope {
-        version: ApiVersion::CURRENT,
-        request_id: RequestId(42),
-        response: DeviceResponse::RnsInboxStatus(status),
-    };
-    let mut output = [0_u8; MAX_MESSAGE_BYTES];
-    let request_len = encode_request(&request, &mut output).unwrap();
-    assert_eq!(&output[..request_len], REQUEST);
-    assert_eq!(decode_request(REQUEST).unwrap(), request);
-    let response_len = encode_response(&response, &mut output).unwrap();
-    assert_eq!(&output[..response_len], RESPONSE);
-    assert_eq!(decode_response(RESPONSE).unwrap(), response);
-    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_RNS_INBOX_STATUS);
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn exact_experimental_inbox_peek_goldens_round_trip() {
-    const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
-        0xa0,
-    ];
-    const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x03, 0x03,
-        0xa3, 0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x50, 0x10, 0x11,
-        0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x02,
-        0x43, 0x61, 0x62, 0x63,
-    ];
-    let request = RequestEnvelope {
-        version: ApiVersion::CURRENT,
-        request_id: RequestId(42),
-        request: DeviceRequest::RnsInboxPeek,
-    };
-    let item = RnsInboxItem::new(
-        core::num::NonZeroU64::new(0x0102_0304_0506_0708).unwrap(),
-        PRIMARY_DESTINATION,
-        b"abc",
-    )
-    .unwrap();
-    let response = ResponseEnvelope {
-        version: ApiVersion::CURRENT,
-        request_id: RequestId(42),
-        response: DeviceResponse::RnsInboxPeek(item),
-    };
-    let mut output = [0_u8; MAX_MESSAGE_BYTES];
-    let request_len = encode_request(&request, &mut output).unwrap();
-    assert_eq!(&output[..request_len], REQUEST);
-    assert_eq!(decode_request(REQUEST).unwrap(), request);
-    let response_len = encode_response(&response, &mut output).unwrap();
-    assert_eq!(&output[..response_len], RESPONSE);
-    assert_eq!(decode_response(RESPONSE).unwrap(), response);
-    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_RNS_INBOX_PEEK);
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn inbox_item_is_owned_bounded_and_redacts_payload_from_debug() {
-    let mut source = [0x5a_u8; MAX_RNS_INBOX_PAYLOAD_BYTES];
-    let item = RnsInboxItem::new(
-        core::num::NonZeroU64::new(7).unwrap(),
-        PRIMARY_DESTINATION,
-        &source,
-    )
-    .unwrap();
-    source.fill(0);
-    assert_eq!(item.id(), 7);
-    assert_eq!(item.destination(), PRIMARY_DESTINATION);
-    assert_eq!(item.payload_len() as usize, MAX_RNS_INBOX_PAYLOAD_BYTES);
-    assert_eq!(item.payload(), &[0x5a; MAX_RNS_INBOX_PAYLOAD_BYTES]);
-    let debug = std::format!("{item:?}");
-    assert!(debug.contains("payload_len: 383"));
-    assert!(!debug.contains("90, 90"));
-
-    let oversized = [0_u8; MAX_RNS_INBOX_PAYLOAD_BYTES + 1];
-    let error = RnsInboxItem::new(
-        core::num::NonZeroU64::new(8).unwrap(),
-        PRIMARY_DESTINATION,
-        &oversized,
-    )
-    .unwrap_err();
-    assert_eq!(error.actual(), MAX_RNS_INBOX_PAYLOAD_BYTES + 1);
-    assert_eq!(error.maximum(), MAX_RNS_INBOX_PAYLOAD_BYTES);
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn maximum_inbox_payload_fits_the_frozen_message_and_body_limits() {
-    let payload = [0x6b_u8; MAX_RNS_INBOX_PAYLOAD_BYTES];
-    let envelope = ResponseEnvelope {
-        version: ApiVersion::CURRENT,
-        request_id: RequestId(u64::MAX),
-        response: DeviceResponse::RnsInboxPeek(
-            RnsInboxItem::new(
-                core::num::NonZeroU64::new(u64::MAX).unwrap(),
-                DestinationHash([0xff; 16]),
-                &payload,
-            )
-            .unwrap(),
-        ),
-    };
-    let mut output = [0_u8; MAX_MESSAGE_BYTES];
-    let written = encode_response(&envelope, &mut output).unwrap();
-    assert!(written <= MAX_MESSAGE_BYTES);
-    assert_eq!(decode_response(&output[..written]).unwrap(), envelope);
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn inbox_wire_fields_are_required_unique_and_bounded() {
-    let missing_status_depth = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x02, 0x03, 0xa4,
-        0x01, 0x01, 0x02, 0x00, 0x03, 0x19, 0x01, 0x7f, 0x04, 0xf4,
-    ];
-    assert_eq!(
-        decode_response(&missing_status_depth),
-        Err(DecodeError::MissingField(RequiredField::RnsInboxDepth))
-    );
-
-    let duplicate_item_id = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa4,
-        0x00, 0x01, 0x00, 0x02, 0x01, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02,
-        0x40,
-    ];
-    assert_eq!(
-        decode_response(&duplicate_item_id),
-        Err(DecodeError::DuplicateField(RequiredField::RnsInboxItemId))
-    );
-
-    let wrong_destination_width = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa3,
-        0x00, 0x01, 0x01, 0x4f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x40,
-    ];
-    assert_eq!(
-        decode_response(&wrong_destination_width),
-        Err(DecodeError::InvalidByteStringLength {
-            field: RequiredField::RnsInboxDestination,
-            expected: 16,
-            actual: 15,
-        })
-    );
-
-    let zero_item_id = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa3,
-        0x00, 0x00, 0x01, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x40,
-    ];
-    assert_eq!(
-        decode_response(&zero_item_id),
-        Err(DecodeError::InvalidValue {
-            field: RequiredField::RnsInboxItemId,
-            value: 0,
-        })
-    );
-
-    let oversized = [0x5a_u8; MAX_RNS_INBOX_PAYLOAD_BYTES + 1];
-    let mut encoded = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x02, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x03, 0x03, 0xa3,
-        0x00, 0x01, 0x01, 0x50,
-    ];
-    encoded.extend_from_slice(&[0; 16]);
-    encoded.extend([0x02, 0x59, 0x01, 0x80]);
-    encoded.extend_from_slice(&oversized);
-    assert_eq!(
-        decode_response(&encoded),
-        Err(DecodeError::InboxPayloadTooLarge {
-            actual: MAX_RNS_INBOX_PAYLOAD_BYTES + 1,
-            max: MAX_RNS_INBOX_PAYLOAD_BYTES,
-        })
-    );
-}
-
-#[cfg(feature = "experimental-rns-inbox")]
-#[test]
-fn inbox_reads_require_authentication_but_no_persisted_permission_bit() {
-    let authenticated = DispatchContext::authenticated(
-        PrincipalId([0x72; 16]),
-        Permissions::NONE,
-        dispatch_provenance(),
-    );
-    for request in [DeviceRequest::RnsInboxStatus, DeviceRequest::RnsInboxPeek] {
-        assert!(!request.is_mutating());
-        assert_eq!(
-            authorize_request(&DispatchContext::UNAUTHENTICATED, &request),
-            Err(AuthorizationError::AuthenticationRequired)
-        );
-        assert_eq!(authorize_request(&authenticated, &request), Ok(()));
-    }
-}
-
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn lxmf_summary() -> LxmfMessageSummary {
     LxmfMessageSummary::new(
         LxmfMessageHandle::new(7).unwrap(),
@@ -1975,15 +1623,15 @@ fn lxmf_summary() -> LxmfMessageSummary {
     .unwrap()
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
-fn exact_experimental_lxmf_next_goldens_round_trip() {
+fn exact_lxmf_next_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
         0xa1, 0x00, 0x07,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
         0xaa, 0x00, 0x07, 0x01, 0x58, 0x20, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22,
@@ -2013,15 +1661,15 @@ fn exact_experimental_lxmf_next_goldens_round_trip() {
     let response_len = encode_response(&response, &mut output).unwrap();
     assert_eq!(&output[..response_len], RESPONSE);
     assert_eq!(decode_response(RESPONSE).unwrap(), response);
-    assert_eq!(request.request.operation(), OP_EXPERIMENTAL_LXMF_NEXT);
-    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_LXMF_NEXT);
+    assert_eq!(request.request.operation(), OP_LXMF_NEXT);
+    assert_eq!(response.response.kind(), OP_LXMF_NEXT);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn lxmf_summary_round_trips_optional_first_arrival_evidence() {
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x04, 0x03,
         0xab, 0x00, 0x07, 0x01, 0x58, 0x20, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x02, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22,
@@ -2033,9 +1681,9 @@ fn lxmf_summary_round_trips_optional_first_arrival_evidence() {
         0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x0a, 0xa3, 0x00, 0x07, 0x01, 0x38,
         0x68, 0x02, 0x07,
     ];
-    let summary = lxmf_summary().with_ingress_observation(Some(LxmfIngressObservation::new(
+    let summary = lxmf_summary().with_ingress_observation(Some(IngressObservation::new(
         7,
-        Some(LxmfIngressSignal::new(-105, 7)),
+        Some(IngressSignal::new(-105, 7)),
     )));
     let response = ResponseEnvelope {
         version: ApiVersion::CURRENT,
@@ -2048,7 +1696,7 @@ fn lxmf_summary_round_trips_optional_first_arrival_evidence() {
     assert_eq!(decode_response(RESPONSE).unwrap(), response);
 
     let interface_only =
-        lxmf_summary().with_ingress_observation(Some(LxmfIngressObservation::new(4, None)));
+        lxmf_summary().with_ingress_observation(Some(IngressObservation::new(4, None)));
     let interface_only_response = ResponseEnvelope {
         version: ApiVersion::CURRENT,
         request_id: RequestId(42),
@@ -2061,14 +1709,14 @@ fn lxmf_summary_round_trips_optional_first_arrival_evidence() {
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn lxmf_summary_rejects_half_present_signal_observations() {
     let response = ResponseEnvelope {
         version: ApiVersion::CURRENT,
         request_id: RequestId(42),
         response: DeviceResponse::LxmfNext(lxmf_summary().with_ingress_observation(Some(
-            LxmfIngressObservation::new(7, Some(LxmfIngressSignal::new(-105, 7))),
+            IngressObservation::new(7, Some(IngressSignal::new(-105, 7))),
         ))),
     };
     let mut output = [0_u8; MAX_MESSAGE_BYTES];
@@ -2097,15 +1745,15 @@ fn lxmf_summary_rejects_half_present_signal_observations() {
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
-fn exact_experimental_lxmf_read_goldens_round_trip() {
+fn exact_lxmf_read_goldens_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
         0xa3, 0x00, 0x07, 0x01, 0x19, 0x01, 0x00, 0x02, 0x19, 0x01, 0xa0,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x05, 0x03,
         0xa4, 0x00, 0x07, 0x01, 0x19, 0x01, 0x00, 0x02, 0x19, 0x02, 0x00, 0x03, 0x43, 0x61, 0x62,
         0x63,
     ];
@@ -2131,27 +1779,27 @@ fn exact_experimental_lxmf_read_goldens_round_trip() {
     let response_len = encode_response(&response, &mut output).unwrap();
     assert_eq!(&output[..response_len], RESPONSE);
     assert_eq!(decode_response(RESPONSE).unwrap(), response);
-    assert_eq!(request.request.operation(), OP_EXPERIMENTAL_LXMF_READ);
-    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_LXMF_READ);
+    assert_eq!(request.request.operation(), OP_LXMF_READ);
+    assert_eq!(response.response.kind(), OP_LXMF_READ);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
-fn exact_experimental_lxmf_mailbox_goldens_are_authenticated_and_strict() {
+fn exact_lxmf_mailbox_goldens_are_authenticated_and_strict() {
     const STATUS_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x10, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x10, 0x03,
         0xa0,
     ];
     const STATUS_RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x10, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x10, 0x03,
         0xa3, 0x00, 0x09, 0x01, 0x07, 0x02, 0x02,
     ];
     const ACKNOWLEDGE_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x11, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x11, 0x03,
         0xa1, 0x00, 0x09,
     ];
     const ACKNOWLEDGE_RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x11, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x11, 0x03,
         0xa3, 0x00, 0x09, 0x01, 0x09, 0x02, 0x00,
     ];
     let latest = LxmfMessageHandle::new(9).unwrap();
@@ -2215,13 +1863,10 @@ fn exact_experimental_lxmf_mailbox_goldens_are_authenticated_and_strict() {
 
     assert!(!status_request.request.is_mutating());
     assert!(acknowledge_request.request.is_mutating());
-    assert_eq!(
-        status_request.request.operation(),
-        OP_EXPERIMENTAL_LXMF_MAILBOX_STATUS
-    );
+    assert_eq!(status_request.request.operation(), OP_LXMF_MAILBOX_STATUS);
     assert_eq!(
         acknowledge_request.request.operation(),
-        OP_EXPERIMENTAL_LXMF_MAILBOX_ACKNOWLEDGE
+        OP_LXMF_MAILBOX_ACKNOWLEDGE
     );
     assert_eq!(status.uncollected_count(), 2);
     assert!(LxmfMailboxStatus::new(Some(acknowledged), Some(latest)).is_err());
@@ -2234,7 +1879,7 @@ fn exact_experimental_lxmf_mailbox_goldens_are_authenticated_and_strict() {
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn basic_lxmf_send_request(
     title: &'static [u8],
     content: &'static [u8],
@@ -2259,18 +1904,18 @@ fn basic_lxmf_send_request(
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn exact_basic_lxmf_send_goldens_are_source_free_and_borrowed() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
         0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
         0x0d, 0x0e, 0x0f, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0x43,
         0x74, 0x74, 0x6c, 0x03, 0x47, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x04, 0x50, 0xf0,
         0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa2,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa2,
         0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01, 0x58, 0x20, 0x20, 0x21,
         0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
         0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
@@ -2304,15 +1949,15 @@ fn exact_basic_lxmf_send_goldens_are_source_free_and_borrowed() {
     assert!(REQUEST.as_ptr_range().contains(&content.as_ptr()));
     assert_eq!(decoded, request);
     assert!(request.request.is_mutating());
-    assert_eq!(request.request.operation(), OP_EXPERIMENTAL_LXMF_BASIC_SEND);
+    assert_eq!(request.request.operation(), OP_LXMF_BASIC_SEND);
 
     let response_len = encode_response(&response, &mut output).unwrap();
     assert_eq!(&output[..response_len], RESPONSE);
     assert_eq!(decode_response(RESPONSE).unwrap(), response);
-    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_LXMF_BASIC_SEND);
+    assert_eq!(response.response.kind(), OP_LXMF_BASIC_SEND);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn basic_lxmf_send_round_trips_optional_message_location() {
     let location = LxmfMessageLocation::new(
@@ -2352,7 +1997,7 @@ fn basic_lxmf_send_round_trips_optional_message_location() {
     assert!(LxmfMessageLocation::new(0, 180_000_001, 0, 0, 0, 0, 0).is_err());
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn discovered_peer(app_data: &[u8]) -> LxmfDiscoveredPeer {
     LxmfDiscoveredPeer::new(
         DestinationHash(core::array::from_fn(|index| 0x10 + index as u8)),
@@ -2368,19 +2013,19 @@ fn discovered_peer(app_data: &[u8]) -> LxmfDiscoveredPeer {
     .unwrap()
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn exact_nearby_lxmf_peer_goldens_use_complete_boot_scoped_cursors() {
     const FIRST_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
         0xa0,
     ];
     const NEXT_REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
         0xa2, 0x00, 0x48, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x09,
     ];
     const RESPONSE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x07, 0x03,
         0xa6, 0x00, 0x48, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x09, 0x02, 0x0b,
         0x03, 0x03, 0x04, 0xf5, 0x05, 0xa9, 0x00, 0x50, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
         0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x01, 0x50, 0x20, 0x21, 0x22, 0x23,
@@ -2427,26 +2072,23 @@ fn exact_nearby_lxmf_peer_goldens_use_complete_boot_scoped_cursors() {
     assert_eq!(&output[..written], RESPONSE);
     assert_eq!(decode_response(RESPONSE).unwrap(), response);
     assert!(!first_request.request.is_mutating());
-    assert_eq!(
-        first_request.request.operation(),
-        OP_EXPERIMENTAL_LXMF_PEER_NEXT
-    );
-    assert_eq!(response.response.kind(), OP_EXPERIMENTAL_LXMF_PEER_NEXT);
+    assert_eq!(first_request.request.operation(), OP_LXMF_PEER_NEXT);
+    assert_eq!(response.response.kind(), OP_LXMF_PEER_NEXT);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn nearby_lxmf_peer_cursor_and_response_shapes_are_strict() {
     const ONLY_INCARNATION: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
         0x00, 0x48, 0, 1, 2, 3, 4, 5, 6, 7,
     ];
     const ONLY_GENERATION: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa1,
         0x01, 0x00,
     ];
     const SHORT_INCARNATION: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa2,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x07, 0x03, 0xa2,
         0x00, 0x47, 0, 1, 2, 3, 4, 5, 6, 0x01, 0x00,
     ];
     assert_eq!(
@@ -2492,7 +2134,7 @@ fn nearby_lxmf_peer_cursor_and_response_shapes_are_strict() {
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn append_cbor_bytes(encoded: &mut Vec<u8>, bytes: &[u8]) {
     match bytes.len() {
         0..=23 => encoded.push(0x40 + bytes.len() as u8),
@@ -2502,16 +2144,16 @@ fn append_cbor_bytes(encoded: &mut Vec<u8>, bytes: &[u8]) {
     encoded.extend_from_slice(bytes);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn raw_peer_response(app_data: &[u8], peer_generation: u8) -> Vec<u8> {
     let mut encoded = vec![
         0xa4,
         0x00,
         0xa2,
         0x00,
+        0x02,
         0x01,
-        0x01,
-        0x05,
+        0x00,
         0x01,
         0x01,
         0x02,
@@ -2552,7 +2194,7 @@ fn raw_peer_response(app_data: &[u8], peer_generation: u8) -> Vec<u8> {
     encoded
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn nearby_lxmf_peer_cbor_rejects_zero_generation_and_oversize_app_data() {
     assert_eq!(
@@ -2574,7 +2216,7 @@ fn nearby_lxmf_peer_cbor_rejects_zero_generation_and_oversize_app_data() {
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn maximum_nearby_peer_record_fits_the_frozen_message_and_body_limits() {
     let incarnation = LxmfPeerDiscoveryIncarnation::new([0xa5; 8]);
@@ -2610,10 +2252,10 @@ fn maximum_nearby_peer_record_fits_the_frozen_message_and_body_limits() {
     assert_eq!(decode_response(&output[..written]).unwrap(), envelope);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 fn raw_basic_lxmf_send(title: &[u8], content: &[u8]) -> Vec<u8> {
     let mut encoded = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x06, 0x03, 0xa5,
         0x00, 0x50,
     ];
     encoded.extend_from_slice(&[0; 16]);
@@ -2626,7 +2268,7 @@ fn raw_basic_lxmf_send(title: &[u8], content: &[u8]) -> Vec<u8> {
     encoded
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn basic_lxmf_send_enforces_individual_and_total_cbor_limits() {
     static TITLE_MAX: [u8; MAX_LXMF_BASIC_TITLE_BYTES] = [0x74; MAX_LXMF_BASIC_TITLE_BYTES];
@@ -2697,7 +2339,7 @@ fn basic_lxmf_send_enforces_individual_and_total_cbor_limits() {
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn basic_lxmf_send_reuses_submit_permission() {
     let request = basic_lxmf_send_request(b"", b"").request;
@@ -2712,14 +2354,14 @@ fn basic_lxmf_send_reuses_submit_permission() {
             &request,
         ),
         Err(AuthorizationError::PermissionDenied(
-            RequiredPermission::ExperimentalSubmitRnsData
+            RequiredPermission::SubmitRnsData
         ))
     );
     assert_eq!(
         authorize_request(
             &DispatchContext::authenticated(
                 principal,
-                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                Permissions::SUBMIT_RNS_DATA,
                 dispatch_provenance(),
             ),
             &request,
@@ -2728,7 +2370,7 @@ fn basic_lxmf_send_reuses_submit_permission() {
     );
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn lxmf_reads_require_authentication_but_no_persisted_permission_bit() {
     let authenticated = DispatchContext::authenticated(
@@ -2755,7 +2397,7 @@ fn lxmf_reads_require_authentication_but_no_persisted_permission_bit() {
     }
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn lxmf_model_is_owned_bounded_and_redacts_message_bytes() {
     assert!(LxmfMessageHandle::new(0).is_err());
@@ -2830,7 +2472,7 @@ fn lxmf_model_is_owned_bounded_and_redacts_message_bytes() {
     ));
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn maximum_lxmf_read_chunk_fits_frozen_message_limit() {
     let bytes = [0xa5; MAX_LXMF_READ_CHUNK_BYTES];
@@ -2854,11 +2496,11 @@ fn maximum_lxmf_read_chunk_fits_frozen_message_limit() {
     assert_eq!(decode_response(&output[..written]).unwrap(), envelope);
 }
 
-#[cfg(feature = "experimental-lxmf")]
+#[cfg(feature = "lxmf")]
 #[test]
 fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
     let missing_read_max = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa2,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa2,
         0x00, 0x01, 0x01, 0x00,
     ];
     assert_eq!(
@@ -2867,7 +2509,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
     );
 
     let duplicate_handle = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
         0x00, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01,
     ];
     assert_eq!(
@@ -2876,7 +2518,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
     );
 
     let zero_after = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x04, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x04, 0x03, 0xa1,
         0x00, 0x00,
     ];
     assert_eq!(
@@ -2889,7 +2531,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
 
     for (encoded_max, value) in [([0x00, 0x00, 0x00], 0_u64), ([0x19, 0x01, 0xa1], 417)] {
         let mut request = vec![
-            0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03,
+            0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03,
             0xa3, 0x00, 0x01, 0x01, 0x00, 0x02,
         ];
         if value == 0 {
@@ -2907,7 +2549,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
     }
 
     let empty_chunk = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
         0x00, 0x01, 0x01, 0x00, 0x02, 0x01, 0x03, 0x40,
     ];
     assert_eq!(
@@ -2916,7 +2558,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
     );
 
     let outside_chunk = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
         0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0x41, 0x61,
     ];
     assert_eq!(
@@ -2925,7 +2567,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
     );
 
     let mut oversized_chunk = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x05, 0x03, 0xa4,
         0x00, 0x01, 0x01, 0x00, 0x02, 0x19, 0x01, 0xa1, 0x03, 0x59, 0x01, 0xa1,
     ];
     oversized_chunk.extend_from_slice(&[0; MAX_LXMF_READ_CHUNK_BYTES + 1]);
@@ -2998,7 +2640,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
     );
 
     let unknown_next_field = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x03, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x04, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x04, 0x03, 0xa1,
         0x18, 0x63, 0x82, 0x01, 0x02,
     ];
     assert_eq!(
@@ -3010,7 +2652,7 @@ fn lxmf_wire_fields_are_required_unique_and_strictly_bounded() {
 #[test]
 fn exact_typed_error_response_golden_round_trip() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x04, 0x01, 0x02,
     ];
     let envelope = ResponseEnvelope {
@@ -3031,15 +2673,15 @@ fn exact_typed_error_response_golden_round_trip() {
 fn immediate_submission_rejections_have_distinct_error_goldens() {
     const MUTATING_OPERATION: u16 = 0xf001;
     const CAPACITY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x09, 0x01, 0x19, 0xf0, 0x01,
     ];
     const IDEMPOTENCY_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x0a, 0x01, 0x19, 0xf0, 0x01,
     ];
     const RETRY_LATER_GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x00, 0x03, 0xa2, 0x00,
         0x0b, 0x01, 0x19, 0xf0, 0x01,
     ];
     for (code, golden) in [
@@ -3125,15 +2767,15 @@ fn every_valid_submission_state_round_trips_with_only_its_own_details() {
 #[test]
 fn contradictory_submission_status_wire_shapes_are_rejected() {
     let queued_with_length = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa3, 0x00, 0x01,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa3, 0x00, 0x01,
         0x01, 0x00, 0x02, 0x18, 0x61,
     ];
     let awaiting_delivery_without_hash = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa3, 0x00, 0x01,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa3, 0x00, 0x01,
         0x01, 0x02, 0x02, 0x18, 0x61,
     ];
     let failed_without_failure = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x01,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x01,
         0x01, 0x04,
     ];
     for malformed in [
@@ -3152,7 +2794,7 @@ fn contradictory_submission_status_wire_shapes_are_rejected() {
 fn unknown_envelope_version_and_body_fields_are_skipped() {
     // Envelope key 99, version key 7, and empty-body key 55 are all unknown.
     let bytes = [
-        0xa5, 0x00, 0xa3, 0x00, 0x01, 0x01, 0x12, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
+        0xa5, 0x00, 0xa3, 0x00, 0x02, 0x01, 0x00, 0x07, 0x82, 0x01, 0x02, 0x01, 0x18, 0x2a, 0x02,
         0x01, 0x03, 0xa1, 0x18, 0x37, 0xa1, 0x00, 0xf5, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
     assert_eq!(decode_request(&bytes).unwrap(), capabilities_request());
@@ -3169,7 +2811,7 @@ fn unknown_envelope_version_and_body_fields_are_skipped() {
 #[test]
 fn unknown_status_body_field_is_skipped() {
     let bytes = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x18,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x18,
         0x2a, 0x18, 0x63, 0x82, 0x01, 0x02,
     ];
     let decoded = decode_request(&bytes).unwrap();
@@ -3185,7 +2827,7 @@ fn unknown_status_body_field_is_skipped() {
 #[test]
 fn unknown_operation_is_typed() {
     let bytes = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x19, 0x12, 0x34, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0x12, 0x34, 0x03,
         0xa0,
     ];
     assert_eq!(
@@ -3197,7 +2839,7 @@ fn unknown_operation_is_typed() {
 #[test]
 fn incompatible_major_version_is_typed_but_same_major_minors_are_accepted() {
     let incompatible = [
-        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x03, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
     ];
     assert_eq!(
         decode_request(&incompatible),
@@ -3208,14 +2850,14 @@ fn incompatible_major_version_is_typed_but_same_major_minors_are_accepted() {
     );
 
     let newer_minor = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x09, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
     ];
     assert_eq!(decode_request(&newer_minor).unwrap().version.minor, 9);
 
-    let previous_minor = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
+    let current_minor = [
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa0,
     ];
-    assert_eq!(decode_request(&previous_minor).unwrap().version.minor, 0);
+    assert_eq!(decode_request(&current_minor).unwrap().version.minor, 0);
 }
 
 #[test]
@@ -3247,7 +2889,7 @@ fn incompatible_major_version_is_rejected_before_encoding() {
 #[test]
 fn missing_required_envelope_and_body_fields_are_typed() {
     let missing_body = [
-        0xa3, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x01,
+        0xa3, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01,
     ];
     assert_eq!(
         decode_request(&missing_body),
@@ -3255,7 +2897,7 @@ fn missing_required_envelope_and_body_fields_are_typed() {
     );
 
     let missing_submission_id = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa0,
     ];
     assert_eq!(
         decode_request(&missing_submission_id),
@@ -3266,7 +2908,7 @@ fn missing_required_envelope_and_body_fields_are_typed() {
 #[test]
 fn duplicate_required_fields_are_rejected_at_each_level() {
     let duplicate_envelope_id = [
-        0xa5, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x01, 0x18, 0x2b, 0x02, 0x01,
+        0xa5, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x01, 0x18, 0x2b, 0x02, 0x01,
         0x03, 0xa0,
     ];
     assert_eq!(
@@ -3286,7 +2928,7 @@ fn duplicate_required_fields_are_rejected_at_each_level() {
     );
 
     let duplicate_submission_id = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x01,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x07, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x01,
         0x00, 0x02,
     ];
     assert_eq!(
@@ -3315,7 +2957,7 @@ fn every_truncated_golden_request_is_rejected() {
 #[test]
 fn malformed_and_unknown_responses_are_typed() {
     let unknown_kind = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x18, 0x63, 0x03, 0xa0,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x18, 0x63, 0x03, 0xa0,
     ];
     assert_eq!(
         decode_response(&unknown_kind),
@@ -3323,7 +2965,7 @@ fn malformed_and_unknown_responses_are_typed() {
     );
 
     let duplicate_error_code = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x03, 0xa2, 0x00, 0x01,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x00, 0x03, 0xa2, 0x00, 0x01,
         0x00, 0x02,
     ];
     assert_eq!(
@@ -3332,7 +2974,7 @@ fn malformed_and_unknown_responses_are_typed() {
     );
 
     let invalid_error_code = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x03, 0xa1, 0x00, 0x18,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x00, 0x03, 0xa1, 0x00, 0x18,
         0x63,
     ];
     assert_eq!(
@@ -3345,7 +2987,7 @@ fn malformed_and_unknown_responses_are_typed() {
 }
 
 #[test]
-fn api_v1_numeric_enum_vocabularies_are_closed_and_frozen() {
+fn api_numeric_enum_vocabularies_are_closed_and_stable() {
     assert_eq!(
         [
             CapabilityAvailability::Unavailable.wire_code(),
@@ -3425,7 +3067,7 @@ fn api_v1_numeric_enum_vocabularies_are_closed_and_frozen() {
     );
 
     let unknown_state = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x01,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0xa2, 0x00, 0x01,
         0x01, 0x18, 0x63,
     ];
     assert_eq!(
@@ -3437,7 +3079,7 @@ fn api_v1_numeric_enum_vocabularies_are_closed_and_frozen() {
     );
 
     let unknown_failure = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x03, 0xa3, 0x00, 0x01,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0xa3, 0x00, 0x01,
         0x01, 0x04, 0x04, 0x18, 0x63,
     ];
     assert_eq!(
@@ -3473,7 +3115,7 @@ fn oversized_encoded_body_is_rejected_independently_of_message_limit() {
         0x00,
         0xa2,
         0x00,
-        0x01,
+        0x02,
         0x01,
         0x00,
         0x01,
@@ -3523,7 +3165,7 @@ fn indefinite_values_and_excessive_field_counts_are_rejected() {
     );
 
     let unknown_body_bytes = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa1, 0x18,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x01, 0x03, 0xa1, 0x18,
         0x37, 0x5f, 0x41, 0x00, 0xff,
     ];
     assert_eq!(
@@ -3663,29 +3305,10 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
         capabilities.max_submit_rns_data_payload_bytes() as usize,
         MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES
     );
+    assert_eq!(capabilities.submit_rns_data(), cfg!(feature = "rns-data"));
     assert_eq!(
-        capabilities.experimental_submit_rns_data(),
-        cfg!(feature = "experimental-rns-data")
-    );
-    assert_eq!(
-        capabilities.experimental_rns_inbox(),
-        if cfg!(feature = "experimental-rns-inbox") {
-            CapabilityAvailability::Available
-        } else {
-            CapabilityAvailability::Unavailable
-        }
-    );
-    assert_eq!(
-        capabilities.max_rns_inbox_payload_bytes(),
-        if cfg!(feature = "experimental-rns-inbox") {
-            383
-        } else {
-            0
-        }
-    );
-    assert_eq!(
-        capabilities.experimental_lxmf(),
-        if cfg!(feature = "experimental-lxmf") {
+        capabilities.lxmf(),
+        if cfg!(feature = "lxmf") {
             CapabilityAvailability::Available
         } else {
             CapabilityAvailability::Unavailable
@@ -3693,15 +3316,11 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         capabilities.max_lxmf_read_chunk_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
-            416
-        } else {
-            0
-        }
+        if cfg!(feature = "lxmf") { 416 } else { 0 }
     );
     assert_eq!(
-        capabilities.experimental_lxmf_basic_send(),
-        if cfg!(feature = "experimental-lxmf") {
+        capabilities.lxmf_basic_send(),
+        if cfg!(feature = "lxmf") {
             CapabilityAvailability::Available
         } else {
             CapabilityAvailability::Unavailable
@@ -3709,7 +3328,7 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         capabilities.max_lxmf_basic_title_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
+        if cfg!(feature = "lxmf") {
             MAX_LXMF_BASIC_TITLE_BYTES as u16
         } else {
             0
@@ -3717,15 +3336,15 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         capabilities.max_lxmf_basic_content_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
+        if cfg!(feature = "lxmf") {
             MAX_LXMF_BASIC_CONTENT_BYTES as u16
         } else {
             0
         }
     );
     assert_eq!(
-        capabilities.experimental_lxmf_peer_discovery(),
-        if cfg!(feature = "experimental-lxmf") {
+        capabilities.lxmf_peer_discovery(),
+        if cfg!(feature = "lxmf") {
             CapabilityAvailability::Available
         } else {
             CapabilityAvailability::Unavailable
@@ -3733,15 +3352,15 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         capabilities.max_lxmf_peer_app_data_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
+        if cfg!(feature = "lxmf") {
             MAX_LXMF_PEER_APP_DATA_BYTES as u16
         } else {
             0
         }
     );
     assert_eq!(
-        capabilities.experimental_nomad(),
-        if cfg!(feature = "experimental-nomad") {
+        capabilities.nomad(),
+        if cfg!(feature = "nomad") {
             CapabilityAvailability::Available
         } else {
             CapabilityAvailability::Unavailable
@@ -3749,7 +3368,7 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         capabilities.max_nomad_page_path_bytes(),
-        if cfg!(feature = "experimental-nomad") {
+        if cfg!(feature = "nomad") {
             MAX_NOMAD_PAGE_PATH_BYTES as u16
         } else {
             0
@@ -3757,95 +3376,50 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         capabilities.max_nomad_page_bytes(),
-        if cfg!(feature = "experimental-nomad") {
+        if cfg!(feature = "nomad") {
             MAX_NOMAD_PAGE_BYTES as u16
         } else {
             0
         }
     );
     assert_eq!(
-        capabilities.experimental_network_config(),
-        if cfg!(feature = "experimental-network-config") {
+        capabilities.network_config(),
+        if cfg!(feature = "network-config") {
             CapabilityAvailability::Available
         } else {
             CapabilityAvailability::Unavailable
         }
     );
 
-    let legacy_dispatch = CapabilitySnapshot::for_dispatch(true);
+    let base_dispatch = CapabilitySnapshot::for_dispatch(true);
+    assert_eq!(base_dispatch.submit_rns_data(), cfg!(feature = "rns-data"));
+    assert_eq!(base_dispatch.lxmf(), CapabilityAvailability::Unavailable);
+    assert_eq!(base_dispatch.max_lxmf_read_chunk_bytes(), 0);
     assert_eq!(
-        legacy_dispatch.experimental_submit_rns_data(),
-        cfg!(feature = "experimental-rns-data")
-    );
-    assert_eq!(
-        legacy_dispatch.experimental_rns_inbox(),
+        base_dispatch.lxmf_basic_send(),
         CapabilityAvailability::Unavailable
     );
-    assert_eq!(legacy_dispatch.max_rns_inbox_payload_bytes(), 0);
+    assert_eq!(base_dispatch.max_lxmf_basic_title_bytes(), 0);
+    assert_eq!(base_dispatch.max_lxmf_basic_content_bytes(), 0);
     assert_eq!(
-        legacy_dispatch.experimental_lxmf(),
+        base_dispatch.lxmf_peer_discovery(),
         CapabilityAvailability::Unavailable
     );
-    assert_eq!(legacy_dispatch.max_lxmf_read_chunk_bytes(), 0);
+    assert_eq!(base_dispatch.max_lxmf_peer_app_data_bytes(), 0);
+    assert_eq!(base_dispatch.nomad(), CapabilityAvailability::Unavailable);
+    assert_eq!(base_dispatch.max_nomad_page_path_bytes(), 0);
+    assert_eq!(base_dispatch.max_nomad_page_bytes(), 0);
     assert_eq!(
-        legacy_dispatch.experimental_lxmf_basic_send(),
+        base_dispatch.network_config(),
         CapabilityAvailability::Unavailable
     );
-    assert_eq!(legacy_dispatch.max_lxmf_basic_title_bytes(), 0);
-    assert_eq!(legacy_dispatch.max_lxmf_basic_content_bytes(), 0);
-    assert_eq!(
-        legacy_dispatch.experimental_lxmf_peer_discovery(),
-        CapabilityAvailability::Unavailable
-    );
-    assert_eq!(legacy_dispatch.max_lxmf_peer_app_data_bytes(), 0);
-    assert_eq!(
-        legacy_dispatch.experimental_nomad(),
-        CapabilityAvailability::Unavailable
-    );
-    assert_eq!(legacy_dispatch.max_nomad_page_path_bytes(), 0);
-    assert_eq!(legacy_dispatch.max_nomad_page_bytes(), 0);
-    assert_eq!(
-        legacy_dispatch.experimental_network_config(),
-        CapabilityAvailability::Unavailable
-    );
-    assert!(!CapabilitySnapshot::for_dispatch(false).experimental_submit_rns_data());
+    assert!(!CapabilitySnapshot::for_dispatch(false).submit_rns_data());
 
-    let inbox_dispatch =
-        CapabilitySnapshot::for_dispatch_with_inbox(true, CapabilityAvailability::Disabled);
+    let lxmf_dispatch =
+        CapabilitySnapshot::for_dispatch_with_lxmf(true, CapabilityAvailability::Disabled);
     assert_eq!(
-        inbox_dispatch.experimental_rns_inbox(),
-        if cfg!(feature = "experimental-rns-inbox") {
-            CapabilityAvailability::Disabled
-        } else {
-            CapabilityAvailability::Unavailable
-        }
-    );
-    assert_eq!(
-        inbox_dispatch.max_rns_inbox_payload_bytes(),
-        if cfg!(feature = "experimental-rns-inbox") {
-            383
-        } else {
-            0
-        }
-    );
-    assert_eq!(
-        inbox_dispatch.experimental_lxmf(),
-        CapabilityAvailability::Unavailable
-    );
-    assert_eq!(inbox_dispatch.max_lxmf_read_chunk_bytes(), 0);
-    assert_eq!(
-        inbox_dispatch.experimental_lxmf_basic_send(),
-        CapabilityAvailability::Unavailable
-    );
-
-    let lxmf_dispatch = CapabilitySnapshot::for_dispatch_with_inbox_and_lxmf(
-        true,
-        CapabilityAvailability::Disabled,
-        CapabilityAvailability::Disabled,
-    );
-    assert_eq!(
-        lxmf_dispatch.experimental_lxmf(),
-        if cfg!(feature = "experimental-lxmf") {
+        lxmf_dispatch.lxmf(),
+        if cfg!(feature = "lxmf") {
             CapabilityAvailability::Disabled
         } else {
             CapabilityAvailability::Unavailable
@@ -3853,26 +3427,21 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         lxmf_dispatch.max_lxmf_read_chunk_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
-            416
-        } else {
-            0
-        }
+        if cfg!(feature = "lxmf") { 416 } else { 0 }
     );
     assert_eq!(
-        lxmf_dispatch.experimental_lxmf_basic_send(),
+        lxmf_dispatch.lxmf_basic_send(),
         CapabilityAvailability::Unavailable
     );
 
-    let send_dispatch = CapabilitySnapshot::for_dispatch_with_inbox_lxmf_and_basic_send(
+    let send_dispatch = CapabilitySnapshot::for_dispatch_with_lxmf_and_basic_send(
         true,
-        CapabilityAvailability::Disabled,
         CapabilityAvailability::Disabled,
         CapabilityAvailability::Disabled,
     );
     assert_eq!(
-        send_dispatch.experimental_lxmf_basic_send(),
-        if cfg!(feature = "experimental-lxmf") {
+        send_dispatch.lxmf_basic_send(),
+        if cfg!(feature = "lxmf") {
             CapabilityAvailability::Disabled
         } else {
             CapabilityAvailability::Unavailable
@@ -3880,7 +3449,7 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         send_dispatch.max_lxmf_basic_title_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
+        if cfg!(feature = "lxmf") {
             MAX_LXMF_BASIC_TITLE_BYTES as u16
         } else {
             0
@@ -3888,29 +3457,27 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         send_dispatch.max_lxmf_basic_content_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
+        if cfg!(feature = "lxmf") {
             MAX_LXMF_BASIC_CONTENT_BYTES as u16
         } else {
             0
         }
     );
     assert_eq!(
-        send_dispatch.experimental_lxmf_peer_discovery(),
+        send_dispatch.lxmf_peer_discovery(),
         CapabilityAvailability::Unavailable
     );
 
-    let peer_dispatch =
-        CapabilitySnapshot::for_dispatch_with_inbox_lxmf_basic_send_and_peer_discovery(
-            true,
-            CapabilityAvailability::Disabled,
-            CapabilityAvailability::Disabled,
-            CapabilityAvailability::Disabled,
-            CapabilityAvailability::Disabled,
-            128,
-        );
+    let peer_dispatch = CapabilitySnapshot::for_dispatch_with_lxmf_basic_send_and_peer_discovery(
+        true,
+        CapabilityAvailability::Disabled,
+        CapabilityAvailability::Disabled,
+        CapabilityAvailability::Disabled,
+        128,
+    );
     assert_eq!(
-        peer_dispatch.experimental_lxmf_peer_discovery(),
-        if cfg!(feature = "experimental-lxmf") {
+        peer_dispatch.lxmf_peer_discovery(),
+        if cfg!(feature = "lxmf") {
             CapabilityAvailability::Disabled
         } else {
             CapabilityAvailability::Unavailable
@@ -3918,21 +3485,17 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         peer_dispatch.max_lxmf_peer_app_data_bytes(),
-        if cfg!(feature = "experimental-lxmf") {
-            128
-        } else {
-            0
-        }
+        if cfg!(feature = "lxmf") { 128 } else { 0 }
     );
 
     let composed_dispatch = peer_dispatch.with_dispatch_nomad(CapabilityAvailability::Disabled);
     assert_eq!(
-        composed_dispatch.experimental_lxmf_peer_discovery(),
-        peer_dispatch.experimental_lxmf_peer_discovery()
+        composed_dispatch.lxmf_peer_discovery(),
+        peer_dispatch.lxmf_peer_discovery()
     );
     assert_eq!(
-        composed_dispatch.experimental_nomad(),
-        if cfg!(feature = "experimental-nomad") {
+        composed_dispatch.nomad(),
+        if cfg!(feature = "nomad") {
             CapabilityAvailability::Disabled
         } else {
             CapabilityAvailability::Unavailable
@@ -3940,7 +3503,7 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         composed_dispatch.max_nomad_page_path_bytes(),
-        if cfg!(feature = "experimental-nomad") {
+        if cfg!(feature = "nomad") {
             MAX_NOMAD_PAGE_PATH_BYTES as u16
         } else {
             0
@@ -3948,7 +3511,7 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
     assert_eq!(
         composed_dispatch.max_nomad_page_bytes(),
-        if cfg!(feature = "experimental-nomad") {
+        if cfg!(feature = "nomad") {
             MAX_NOMAD_PAGE_BYTES as u16
         } else {
             0
@@ -3958,8 +3521,8 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     let network_dispatch =
         composed_dispatch.with_dispatch_network_config(CapabilityAvailability::Disabled);
     assert_eq!(
-        network_dispatch.experimental_network_config(),
-        if cfg!(feature = "experimental-network-config") {
+        network_dispatch.network_config(),
+        if cfg!(feature = "network-config") {
             CapabilityAvailability::Disabled
         } else {
             CapabilityAvailability::Unavailable
@@ -3967,7 +3530,7 @@ fn capability_snapshot_separates_direct_radio_from_outbound_rns_submission() {
     );
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 fn submit_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
     RequestEnvelope {
         version: ApiVersion::CURRENT,
@@ -3986,11 +3549,11 @@ fn submit_request(payload: &'static [u8]) -> RequestEnvelope<'static> {
     }
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
-fn exact_experimental_submit_golden_and_borrowed_payload() {
+fn exact_submit_golden_and_borrowed_payload() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
         0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
         0x0d, 0x0e, 0x0f, 0x01, 0x43, 0x61, 0x62, 0x63, 0x02, 0x50, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4,
         0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
@@ -4012,11 +3575,11 @@ fn exact_experimental_submit_golden_and_borrowed_payload() {
     assert_eq!(decoded, expected);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
-fn exact_experimental_submit_accepted_response_has_only_submission_id() {
+fn exact_submit_accepted_response_has_only_submission_id() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa1,
         0x00, 0x1b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     ];
     let envelope = ResponseEnvelope {
@@ -4026,16 +3589,16 @@ fn exact_experimental_submit_accepted_response_has_only_submission_id() {
             id: SubmissionId(0x0102_0304_0506_0708),
         }),
     };
-    assert_eq!(envelope.response.kind(), OP_EXPERIMENTAL_SUBMIT_RNS_DATA);
+    assert_eq!(envelope.response.kind(), OP_SUBMIT_RNS_DATA);
     let mut output = [0u8; MAX_MESSAGE_BYTES];
     let written = encode_response(&envelope, &mut output).unwrap();
     assert_eq!(&output[..written], GOLDEN);
     assert_eq!(decode_response(GOLDEN).unwrap(), envelope);
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
-fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
+fn submit_is_mutating_and_requires_auth_and_permission() {
     let request = submit_request(b"abc").request;
     assert!(request.is_mutating());
     assert_eq!(
@@ -4049,14 +3612,14 @@ fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
             &request,
         ),
         Err(AuthorizationError::PermissionDenied(
-            RequiredPermission::ExperimentalSubmitRnsData
+            RequiredPermission::SubmitRnsData
         ))
     );
     assert_eq!(
         authorize_request(
             &DispatchContext::authenticated(
                 principal,
-                Permissions::EXPERIMENTAL_SUBMIT_RNS_DATA,
+                Permissions::SUBMIT_RNS_DATA,
                 dispatch_provenance(),
             ),
             &request,
@@ -4065,9 +3628,9 @@ fn experimental_submit_is_mutating_and_requires_auth_and_permission() {
     );
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
-fn experimental_submit_rejects_oversize_payload_on_encode_and_decode() {
+fn submit_rejects_oversize_payload_on_encode_and_decode() {
     static PAYLOAD: [u8; MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1] =
         [0x5a; MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES + 1];
     let mut output = [0u8; MAX_MESSAGE_BYTES];
@@ -4080,7 +3643,7 @@ fn experimental_submit_rejects_oversize_payload_on_encode_and_decode() {
     );
 
     let mut encoded = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
         0x00, 0x50,
     ];
     encoded.extend(0u8..16);
@@ -4098,11 +3661,11 @@ fn experimental_submit_rejects_oversize_payload_on_encode_and_decode() {
     );
 }
 
-#[cfg(feature = "experimental-rns-data")]
+#[cfg(feature = "rns-data")]
 #[test]
-fn experimental_submit_rejects_duplicate_and_wrong_width_fields() {
+fn submit_rejects_duplicate_and_wrong_width_fields() {
     let duplicate_destination = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa4,
         0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x50, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x40, 0x02, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0,
@@ -4115,7 +3678,7 @@ fn experimental_submit_rejects_duplicate_and_wrong_width_fields() {
     );
 
     let wrong_destination_width = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03, 0xa3,
         0x00, 0x4f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x40, 0x02, 0x50, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
@@ -4129,7 +3692,7 @@ fn experimental_submit_rejects_duplicate_and_wrong_width_fields() {
     );
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn nomad_fetch_id() -> NomadFetchId {
     NomadFetchId::new(
         [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7],
@@ -4138,10 +3701,10 @@ fn nomad_fetch_id() -> NomadFetchId {
     .unwrap()
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn nomad_fetch_start_wire(encoded_path: &[u8], encoded_timestamp: &[u8]) -> Vec<u8> {
     let mut wire = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa4, 0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
         0x0c, 0x0d, 0x0e, 0x0f, 0x01,
     ];
@@ -4155,7 +3718,7 @@ fn nomad_fetch_start_wire(encoded_path: &[u8], encoded_timestamp: &[u8]) -> Vec<
     wire
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 fn nomad_fetch_start_request() -> RequestEnvelope<'static> {
     RequestEnvelope {
         version: ApiVersion::CURRENT,
@@ -4175,7 +3738,7 @@ fn nomad_fetch_start_request() -> RequestEnvelope<'static> {
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_value_types_enforce_exact_logical_bounds() {
     assert_eq!(NomadPagePath::new("/").unwrap().as_str(), "/");
@@ -4225,11 +3788,11 @@ fn nomad_value_types_enforce_exact_logical_bounds() {
     assert!(NomadPage::new(&[b'x'; MAX_NOMAD_PAGE_BYTES + 1]).is_err());
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn exact_nomad_fetch_start_request_golden_and_authorization() {
     const GOLDEN: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa4, 0x00, 0x50, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
         0x0c, 0x0d, 0x0e, 0x0f, 0x01, 0x65, 0x2f, 0x70, 0x61, 0x67, 0x65, 0x02, 0x01, 0x03, 0x50,
         0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe,
@@ -4240,10 +3803,7 @@ fn exact_nomad_fetch_start_request_golden_and_authorization() {
     let written = encode_request(&expected, &mut output).unwrap();
     assert_eq!(&output[..written], GOLDEN);
     assert_eq!(decode_request(GOLDEN).unwrap(), expected);
-    assert_eq!(
-        expected.request.operation(),
-        OP_EXPERIMENTAL_NOMAD_FETCH_START
-    );
+    assert_eq!(expected.request.operation(), OP_NOMAD_FETCH_START);
     assert!(expected.request.is_mutating());
     assert_eq!(
         authorize_request(&DispatchContext::UNAUTHENTICATED, &expected.request),
@@ -4262,16 +3822,16 @@ fn exact_nomad_fetch_start_request_golden_and_authorization() {
     );
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn exact_nomad_fetch_start_response_distinguishes_fresh_and_replayed() {
     const ACCEPTED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08, 0x01, 0x00,
     ];
     const REPLAYED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08, 0x01, 0x01,
     ];
@@ -4294,24 +3854,24 @@ fn exact_nomad_fetch_start_response_distinguishes_fresh_and_replayed() {
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn exact_nomad_fetch_poll_request_and_states_round_trip() {
     const REQUEST: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa1, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08,
     ];
     const PENDING: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x00, 0x01, 0x04,
     ];
     const READY: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x01, 0x01, 0x45, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
     ];
     const FAILED: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x02, 0x01, 0x03,
     ];
     let request = RequestEnvelope {
@@ -4325,10 +3885,7 @@ fn exact_nomad_fetch_poll_request_and_states_round_trip() {
     let written = encode_request(&request, &mut output).unwrap();
     assert_eq!(&output[..written], REQUEST);
     assert_eq!(decode_request(REQUEST).unwrap(), request);
-    assert_eq!(
-        request.request.operation(),
-        OP_EXPERIMENTAL_NOMAD_FETCH_POLL
-    );
+    assert_eq!(request.request.operation(), OP_NOMAD_FETCH_POLL);
     assert!(!request.request.is_mutating());
     assert_eq!(
         authorize_request(&DispatchContext::UNAUTHENTICATED, &request.request),
@@ -4360,11 +3917,11 @@ fn exact_nomad_fetch_poll_request_and_states_round_trip() {
     }
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn maximum_nomad_page_has_exact_bounded_body_and_message_sizes() {
     const ENVELOPE_PREFIX: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         0xff, 0xff, 0x02, 0x19, 0xf0, 0x09, 0x03,
     ];
     let page = NomadPage::new(&[b'x'; MAX_NOMAD_PAGE_BYTES]).unwrap();
@@ -4384,11 +3941,11 @@ fn maximum_nomad_page_has_exact_bounded_body_and_message_sizes() {
     assert_eq!(decode_response(&output[..written]).unwrap(), expected);
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_fetch_decoder_rejects_zero_sequence_and_invalid_state_values() {
     let zero_sequence = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa1, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
     ];
@@ -4398,7 +3955,7 @@ fn nomad_fetch_decoder_rejects_zero_sequence_and_invalid_state_values() {
     );
 
     let invalid_state = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x03, 0x01, 0x00,
     ];
     assert_eq!(
@@ -4410,11 +3967,11 @@ fn nomad_fetch_decoder_rejects_zero_sequence_and_invalid_state_values() {
     );
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_fetch_decoder_rejects_unknown_closed_outcome_phase_and_failure_values() {
     let unknown_start_outcome = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x08, 0x03,
         0xa2, 0x00, 0x50, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x01, 0x02, 0x03, 0x04,
         0x05, 0x06, 0x07, 0x08, 0x01, 0x02,
     ];
@@ -4427,7 +3984,7 @@ fn nomad_fetch_decoder_rejects_unknown_closed_outcome_phase_and_failure_values()
     );
 
     let unknown_pending_phase = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x00, 0x01, 0x05,
     ];
     assert_eq!(
@@ -4439,7 +3996,7 @@ fn nomad_fetch_decoder_rejects_unknown_closed_outcome_phase_and_failure_values()
     );
 
     let unknown_terminal_failure = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x02, 0x01, 0x07,
     ];
     assert_eq!(
@@ -4451,7 +4008,7 @@ fn nomad_fetch_decoder_rejects_unknown_closed_outcome_phase_and_failure_values()
     );
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_fetch_start_decoder_enforces_path_and_timestamp_semantics() {
     let relative_path = nomad_fetch_start_wire(&[0x64, b'p', b'a', b'g', b'e'], &[0x01]);
@@ -4504,11 +4061,11 @@ fn nomad_fetch_start_decoder_enforces_path_and_timestamp_semantics() {
     );
 }
 
-#[cfg(feature = "experimental-nomad")]
+#[cfg(feature = "nomad")]
 #[test]
 fn nomad_ready_page_decoder_rejects_invalid_utf8_and_oversize_values() {
     let invalid_utf8 = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x01, 0x01, 0x41, 0xff,
     ];
     assert_eq!(
@@ -4517,7 +4074,7 @@ fn nomad_ready_page_decoder_rejects_invalid_utf8_and_oversize_values() {
     );
 
     let mut oversized_page = vec![
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x09, 0x03,
         0xa2, 0x00, 0x01, 0x01, 0x59, 0x01, 0x91,
     ];
     oversized_page.extend(core::iter::repeat_n(b'x', MAX_NOMAD_PAGE_BYTES + 1));
@@ -4530,7 +4087,7 @@ fn nomad_ready_page_decoder_rejects_invalid_utf8_and_oversize_values() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn network_upsert_request() -> RequestEnvelope<'static> {
     let wifi = WifiNetworkUpdate::new(
         true,
@@ -4552,12 +4109,12 @@ fn network_upsert_request() -> RequestEnvelope<'static> {
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn network_wifi_upsert_is_borrowed_redacted_bounded_and_authorized() {
     let request = network_upsert_request();
     let expected = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
         0x00, 0x00, 0x01, 0xa2, 0x00, 0x50, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
         0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x01, 0xa4, 0x00, 0xf5, 0x01, 0x44, b'm', b'e',
         b's', b'h', 0x02, 0xa2, 0x00, 0x01, 0x01, 0x48, b'p', b'a', b's', b's', b'w', b'o', b'r',
@@ -4608,7 +4165,7 @@ fn network_wifi_upsert_is_borrowed_redacted_bounded_and_authorized() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn network_config_read_owns_four_redacted_profiles_and_one_tcp_peer() {
     let profiles = [
@@ -4663,7 +4220,7 @@ fn network_config_read_owns_four_redacted_profiles_and_one_tcp_peer() {
         version: ApiVersion::CURRENT,
         request_id: RequestId(10),
         response: DeviceResponse::NetworkConfig(
-            NetworkConfigSnapshot::new(12, profiles, Some(tcp_peer)).unwrap(),
+            NetworkConfigSnapshot::with_defaults(12, profiles, Some(tcp_peer)).unwrap(),
         ),
     };
     let mut output = [0_u8; MAX_MESSAGE_BYTES];
@@ -4694,6 +4251,25 @@ fn network_config_read_owns_four_redacted_profiles_and_one_tcp_peer() {
         [192, 0, 2, 1]
     );
 
+    let mut missing_lora_profile = output[..written].to_vec();
+    let body_header = missing_lora_profile
+        .windows(3)
+        .position(|window| window == [0x03, 0xaa, 0x00])
+        .expect("network configuration body map")
+        + 1;
+    let profile_field = missing_lora_profile
+        .windows(2)
+        .rposition(|window| window == [0x09, 0xa5])
+        .expect("complete LoRa profile field");
+    missing_lora_profile[body_header] = 0xa9;
+    missing_lora_profile.truncate(profile_field);
+    assert_eq!(
+        decode_response(&missing_lora_profile),
+        Err(DecodeError::MissingField(
+            RequiredField::NetworkConfigLoraProfile
+        ))
+    );
+
     let read = DeviceRequest::NetworkConfigGet;
     assert!(!read.is_mutating());
     assert_eq!(
@@ -4713,7 +4289,7 @@ fn network_config_read_owns_four_redacted_profiles_and_one_tcp_peer() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn network_mutations_and_live_status_round_trip() {
     let principal = PrincipalId([0x33; 16]);
@@ -4838,35 +4414,10 @@ fn network_mutations_and_live_status_round_trip() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
-fn network_status_v19_tcp_diagnostics_have_exact_backward_compatible_wire_codes() {
-    const LEGACY_V18_STATUS: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x08, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa8,
-        0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
-        0x04,
-    ];
-    let legacy = ResponseEnvelope {
-        version: ApiVersion { major: 1, minor: 8 },
-        request_id: RequestId(1),
-        response: DeviceResponse::NetworkStatus(
-            NetworkRuntimeStatus::new(
-                1,
-                1,
-                WifiStationState::Disconnected,
-                None,
-                None,
-                None,
-                None,
-                ReticulumTcpPeerState::Faulted,
-            )
-            .unwrap(),
-        ),
-    };
-    assert_eq!(decode_response(LEGACY_V18_STATUS).unwrap(), legacy);
+fn network_status_tcp_failures_have_exact_wire_codes() {
     let mut output = [0_u8; MAX_MESSAGE_BYTES];
-    let written = encode_response(&legacy, &mut output).unwrap();
-    assert_eq!(&output[..written], LEGACY_V18_STATUS);
 
     let failures = [
         (ReticulumTcpFailure::DnsTimeout, 0),
@@ -4899,7 +4450,7 @@ fn network_status_v19_tcp_diagnostics_have_exact_backward_compatible_wire_codes(
             ),
         };
         let mut exact = [
-            0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03,
+            0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03,
             0xa9, 0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06,
             0xf6, 0x07, 0x05, 0x08, 0x00,
         ];
@@ -4912,11 +4463,11 @@ fn network_status_v19_tcp_diagnostics_have_exact_backward_compatible_wire_codes(
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
-fn network_status_v19_rejects_duplicate_unknown_and_malformed_tcp_diagnostics() {
+fn network_status_rejects_duplicate_unknown_and_malformed_tcp_diagnostics() {
     const DUPLICATE_FAILURE: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xaa,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xaa,
         0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
         0x05, 0x08, 0x00, 0x08, 0x01,
     ];
@@ -4928,7 +4479,7 @@ fn network_status_v19_rejects_duplicate_unknown_and_malformed_tcp_diagnostics() 
     );
 
     let mut unknown_failure = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa9,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa9,
         0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
         0x05, 0x08, 0x09,
     ];
@@ -4947,7 +4498,7 @@ fn network_status_v19_rejects_duplicate_unknown_and_malformed_tcp_diagnostics() 
     );
 
     let mut unknown_state = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa8,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa8,
         0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
         0x06,
     ];
@@ -4968,7 +4519,7 @@ fn network_status_v19_rejects_duplicate_unknown_and_malformed_tcp_diagnostics() 
     assert_eq!(status.last_tcp_failure, None);
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn dns_diagnostics_fixture() -> ReticulumDnsDiagnostics {
     let response_code =
         ReticulumDnsRawOutcome::response_code_outcome(3).expect("nonzero DNS response code");
@@ -5008,7 +4559,7 @@ fn dns_diagnostics_fixture() -> ReticulumDnsDiagnostics {
     )
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 fn dns_diagnostic_status() -> ResponseEnvelope {
     ResponseEnvelope {
         version: ApiVersion::CURRENT,
@@ -5031,11 +4582,11 @@ fn dns_diagnostic_status() -> ResponseEnvelope {
     }
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
-fn network_status_v110_dns_diagnostics_have_exact_bounded_wire_shape() {
+fn network_status_dns_diagnostics_have_exact_bounded_wire_shape() {
     const EXACT: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x12, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xaa,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xaa,
         0x00, 0x01, 0x01, 0x01, 0x02, 0x03, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0x44, 0xc0, 0xa8, 0x32,
         0x63, 0x06, 0x38, 0x3b, 0x07, 0x05, 0x08, 0x01, 0x09, 0xa6, 0x00, 0x44, 0xc0, 0xa8, 0x32,
         0x01, 0x01, 0x83, 0x44, 0xc0, 0xa8, 0x32, 0x01, 0x44, 0x08, 0x08, 0x08, 0x08, 0xf6, 0x02,
@@ -5066,29 +4617,9 @@ fn network_status_v110_dns_diagnostics_have_exact_bounded_wire_shape() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
-fn network_status_v110_accepts_v19_without_dns_diagnostics() {
-    const LEGACY_V19_STATUS: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0c, 0x03, 0xa9,
-        0x00, 0x01, 0x01, 0x01, 0x02, 0x03, 0x03, 0xf6, 0x04, 0xf6, 0x05, 0xf6, 0x06, 0xf6, 0x07,
-        0x05, 0x08, 0x01,
-    ];
-    let decoded = decode_response(LEGACY_V19_STATUS).unwrap();
-    assert_eq!(decoded.version, ApiVersion { major: 1, minor: 9 });
-    let DeviceResponse::NetworkStatus(status) = decoded.response else {
-        panic!("unexpected response kind");
-    };
-    assert_eq!(
-        status.last_tcp_failure,
-        Some(ReticulumTcpFailure::DnsLookupFailed)
-    );
-    assert_eq!(status.dns_diagnostics, None);
-}
-
-#[cfg(feature = "experimental-network-config")]
-#[test]
-fn network_status_v110_dns_diagnostics_reject_bad_slot_and_response_code_shapes() {
+fn network_status_dns_diagnostics_reject_bad_slot_and_response_code_shapes() {
     let mut encoded = [0_u8; MAX_MESSAGE_BYTES];
     let written = encode_response(&dns_diagnostic_status(), &mut encoded).unwrap();
     let exact = &encoded[..written];
@@ -5128,20 +4659,21 @@ fn network_status_v110_dns_diagnostics_reject_bad_slot_and_response_code_shapes(
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
-fn network_config_v18_round_trips_gateway_rmap_and_hostname_peer() {
+fn network_config_round_trips_gateway_rmap_and_hostname_peer() {
     let location = RmapLocation::new(42_360_100, -71_058_900).unwrap();
     let host_peer =
         ReticulumTcpPeerHostConfigSummary::new(true, "rmap.world", DEFAULT_RETICULUM_TCP_PORT)
             .unwrap();
-    let snapshot = NetworkConfigSnapshot::new_full(
+    let snapshot = NetworkConfigSnapshot::new(
         9,
         [None; MAX_WIFI_NETWORK_PROFILES],
         None,
         Some(host_peer),
         GatewayPolicy::new(false, false),
         RmapConfig::new(true, true, Some(location)),
+        LoraRadioProfile::DEFAULT,
     )
     .unwrap();
     let expected = ResponseEnvelope {
@@ -5163,27 +4695,11 @@ fn network_config_v18_round_trips_gateway_rmap_and_hostname_peer() {
     assert!(snapshot.rmap_share_location());
     assert_eq!(snapshot.rmap_phone_location(), Some(location));
     assert_eq!(snapshot.lora_tx_power_dbm(), LoraTransmitPowerDbm::DEFAULT);
-
-    const LEGACY_V17_EMPTY: &[u8] = &[
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0a, 0x03, 0xa3,
-        0x00, 0x01, 0x01, 0x80, 0x02, 0xf6,
-    ];
-    let DeviceResponse::NetworkConfig(legacy) = decode_response(LEGACY_V17_EMPTY).unwrap().response
-    else {
-        panic!("expected legacy network configuration")
-    };
-    assert!(legacy.wifi_transport_enabled());
-    assert!(legacy.automatic_announces_enabled());
-    assert!(!legacy.rmap_discovery_enabled());
-    assert!(!legacy.rmap_share_location());
-    assert_eq!(legacy.rmap_phone_location(), None);
-    assert_eq!(legacy.tcp_host_peer(), None);
-    assert_eq!(legacy.lora_tx_power_dbm(), LoraTransmitPowerDbm::DEFAULT);
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
-fn lora_transmit_power_is_validated_round_trips_and_defaults_for_api_110() {
+fn lora_transmit_power_is_validated_and_round_trips_in_the_atomic_profile() {
     for value in [14, 17, 20, 22] {
         let power = LoraTransmitPowerDbm::new(value).expect("qualified power");
         assert_eq!(power.get(), value);
@@ -5197,14 +4713,14 @@ fn lora_transmit_power_is_validated_round_trips_and_defaults_for_api_110() {
         LoraTransmitPowerDbm::DBM_14
     );
 
-    let snapshot = NetworkConfigSnapshot::new_complete(
+    let snapshot = NetworkConfigSnapshot::new(
         17,
         [None; MAX_WIFI_NETWORK_PROFILES],
         None,
         None,
         GatewayPolicy::new(false, true),
         RmapConfig::new(false, false, None),
-        LoraTransmitPowerDbm::DBM_20,
+        LoraRadioProfile::DEFAULT.with_tx_power(LoraTransmitPowerDbm::DBM_20),
     )
     .unwrap();
     let expected = ResponseEnvelope {
@@ -5219,8 +4735,8 @@ fn lora_transmit_power_is_validated_round_trips_and_defaults_for_api_110() {
 
     let power_field = output[..written]
         .windows(2)
-        .rposition(|window| window == [0x09, 0x14])
-        .expect("canonical key 9 and 20 dBm value");
+        .rposition(|window| window == [0x04, 0x14])
+        .expect("canonical profile power key and 20 dBm value");
     let mut invalid_power = output[..written].to_vec();
     invalid_power[power_field + 1] = 15;
     assert_eq!(
@@ -5228,62 +4744,26 @@ fn lora_transmit_power_is_validated_round_trips_and_defaults_for_api_110() {
         Err(DecodeError::InvalidLoraTransmitPowerDbm)
     );
 
-    let body_map = output[..written]
-        .windows(3)
-        .position(|window| window == [0x03, 0xab, 0x00])
-        .expect("eleven-field network configuration body");
-    let mut duplicate_power = output[..written].to_vec();
-    duplicate_power[body_map + 1] = 0xac;
-    duplicate_power.extend_from_slice(&[0x09, 0x0e]);
-    assert_eq!(
-        decode_response(&duplicate_power),
-        Err(DecodeError::DuplicateField(
-            RequiredField::NetworkConfigLoraTxPowerDbm,
-        ))
-    );
-
-    let mut api_110 = output[..power_field].to_vec();
-    api_110[body_map + 1] = 0xa9;
-    let version_minor = api_110
-        .windows(5)
-        .position(|window| window == [0xa2, 0x00, 0x01, 0x01, 0x12])
-        .expect("current API version map");
-    api_110[version_minor + 4] = 0x0a;
-    let decoded = decode_response(&api_110).unwrap();
-    assert_eq!(
-        decoded.version,
-        ApiVersion {
-            major: 1,
-            minor: 10,
-        }
-    );
-    let DeviceResponse::NetworkConfig(legacy) = decoded.response else {
-        panic!("expected legacy network configuration")
-    };
-    assert_eq!(legacy.lora_tx_power_dbm(), LoraTransmitPowerDbm::DEFAULT);
-    assert!(!legacy.wifi_transport_enabled());
-    assert!(legacy.automatic_announces_enabled());
-
     assert!(
-        NetworkConfigSnapshot::new_complete(
+        NetworkConfigSnapshot::new(
             0,
             [None; MAX_WIFI_NETWORK_PROFILES],
             None,
             None,
             GatewayPolicy::new(true, true),
             RmapConfig::new(false, false, None),
-            LoraTransmitPowerDbm::DBM_17,
+            LoraRadioProfile::DEFAULT.with_tx_power(LoraTransmitPowerDbm::DBM_17),
         )
         .is_err()
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn lora_radio_profile_round_trips_atomically_and_uses_mutation_kind_seven() {
     let profile = LoraRadioProfile::new(914_875_000, 250_000, 9, 7, LoraTransmitPowerDbm::DBM_22)
         .expect("valid profile");
-    let snapshot = NetworkConfigSnapshot::new_with_lora_profile(
+    let snapshot = NetworkConfigSnapshot::new(
         18,
         [None; MAX_WIFI_NETWORK_PROFILES],
         None,
@@ -5327,7 +4807,7 @@ fn lora_radio_profile_round_trips_atomically_and_uses_mutation_kind_seven() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn lora_transmit_power_mutation_uses_kind_six_and_rejects_unknown_power() {
     let request = RequestEnvelope {
@@ -5354,7 +4834,7 @@ fn lora_transmit_power_mutation_uses_kind_six_and_rejects_unknown_power() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
     assert_eq!(MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES, 96);
@@ -5395,13 +4875,14 @@ fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
         ReticulumTcpPeerHostConfigSummary::new(true, "rmap.world", DEFAULT_RETICULUM_TCP_PORT)
             .unwrap();
     assert!(
-        NetworkConfigSnapshot::new_full(
+        NetworkConfigSnapshot::new(
             1,
             [None; MAX_WIFI_NETWORK_PROFILES],
             Some(ipv4),
             Some(hostname),
             GatewayPolicy::new(true, true),
             RmapConfig::new(false, false, None),
+            LoraRadioProfile::DEFAULT,
         )
         .is_err()
     );
@@ -5463,7 +4944,7 @@ fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
     );
 
     let missing_gateway_field = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
         0x00, 0x04, 0x01, 0xa1, 0x00, 0xf5, 0x02, 0x01, 0x03, 0x50, 0x11, 0x11, 0x11, 0x11, 0x11,
         0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     ];
@@ -5475,7 +4956,7 @@ fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
     );
 
     let missing_rmap_location_field = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x09, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa4,
         0x00, 0x05, 0x01, 0xa2, 0x00, 0xf5, 0x01, 0xf4, 0x02, 0x01, 0x03, 0x50, 0x22, 0x22, 0x22,
         0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
     ];
@@ -5485,12 +4966,12 @@ fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
     );
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn network_value_bounds_reject_invalid_profiles_and_secrets() {
-    assert_eq!(OP_EXPERIMENTAL_NETWORK_CONFIG_GET, 0xf00a);
-    assert_eq!(OP_EXPERIMENTAL_NETWORK_CONFIG_MUTATE, 0xf00b);
-    assert_eq!(OP_EXPERIMENTAL_NETWORK_STATUS, 0xf00c);
+    assert_eq!(OP_NETWORK_CONFIG_GET, 0xf00a);
+    assert_eq!(OP_NETWORK_CONFIG_MUTATE, 0xf00b);
+    assert_eq!(OP_NETWORK_STATUS, 0xf00c);
     assert_eq!(MAX_WIFI_NETWORK_PROFILES, 4);
     assert_eq!(MAX_WIFI_SSID_BYTES, 32);
     assert_eq!(MIN_WIFI_PASSPHRASE_BYTES, 8);
@@ -5519,10 +5000,15 @@ fn network_value_bounds_reject_invalid_profiles_and_secrets() {
         true,
     )
     .unwrap();
-    assert!(NetworkConfigSnapshot::new(0, [Some(profile), None, None, None], None).is_err());
-    assert!(NetworkConfigSnapshot::new(1, [None, Some(profile), None, None], None).is_err());
     assert!(
-        NetworkConfigSnapshot::new(1, [Some(profile), Some(profile), None, None], None).is_err()
+        NetworkConfigSnapshot::with_defaults(0, [Some(profile), None, None, None], None).is_err()
+    );
+    assert!(
+        NetworkConfigSnapshot::with_defaults(1, [None, Some(profile), None, None], None).is_err()
+    );
+    assert!(
+        NetworkConfigSnapshot::with_defaults(1, [Some(profile), Some(profile), None, None], None,)
+            .is_err()
     );
 
     let maximum = RequestEnvelope {
@@ -5548,7 +5034,7 @@ fn network_value_bounds_reject_invalid_profiles_and_secrets() {
     assert_eq!(decode_request(&output[..written]).unwrap(), maximum);
 }
 
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 #[test]
 fn network_wire_rejects_zero_ids_invalid_secrets_and_contradictory_results() {
     let request = network_upsert_request();
@@ -5579,7 +5065,7 @@ fn network_wire_rejects_zero_ids_invalid_secrets_and_contradictory_results() {
     );
 
     let contradictory_conflict = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0b, 0x03, 0xa3,
         0x00, 0x01, 0x01, 0x0e, 0x02, 0xf5,
     ];
     assert_eq!(
@@ -5588,7 +5074,7 @@ fn network_wire_rejects_zero_ids_invalid_secrets_and_contradictory_results() {
     );
 
     let too_many_profiles = [
-        0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0a, 0x03, 0xa3,
+        0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x01, 0x02, 0x19, 0xf0, 0x0a, 0x03, 0xa3,
         0x00, 0x01, 0x01, 0x85, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0x02, 0xf6,
     ];
     assert_eq!(
@@ -5601,11 +5087,11 @@ fn network_wire_rejects_zero_ids_invalid_secrets_and_contradictory_results() {
 }
 
 #[test]
-fn experimental_operation_is_unavailable_without_feature() {
-    #[cfg(not(feature = "experimental-rns-data"))]
+fn operation_is_unavailable_without_feature() {
+    #[cfg(not(feature = "rns-data"))]
     {
         let request = [
-            0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03,
+            0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03,
             0xa0,
         ];
         assert_eq!(
@@ -5614,7 +5100,7 @@ fn experimental_operation_is_unavailable_without_feature() {
         );
 
         let response = [
-            0xa4, 0x00, 0xa2, 0x00, 0x01, 0x01, 0x01, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03,
+            0xa4, 0x00, 0xa2, 0x00, 0x02, 0x01, 0x00, 0x01, 0x09, 0x02, 0x19, 0xf0, 0x01, 0x03,
             0xa1, 0x00, 0x01,
         ];
         assert_eq!(
@@ -5623,37 +5109,7 @@ fn experimental_operation_is_unavailable_without_feature() {
         );
     }
 
-    #[cfg(not(feature = "experimental-rns-inbox"))]
-    for operation in [0xf002_u16, 0xf003] {
-        let encoded_operation = operation.to_be_bytes();
-        let request = [
-            0xa4,
-            0x00,
-            0xa2,
-            0x00,
-            0x01,
-            0x01,
-            0x02,
-            0x01,
-            0x09,
-            0x02,
-            0x19,
-            encoded_operation[0],
-            encoded_operation[1],
-            0x03,
-            0xa0,
-        ];
-        assert_eq!(
-            decode_request(&request),
-            Err(DecodeError::UnsupportedOperation(operation))
-        );
-        assert_eq!(
-            decode_response(&request),
-            Err(DecodeError::UnsupportedResponseKind(operation))
-        );
-    }
-
-    #[cfg(not(feature = "experimental-lxmf"))]
+    #[cfg(not(feature = "lxmf"))]
     for operation in [0xf004_u16, 0xf005, 0xf006, 0xf007] {
         let encoded_operation = operation.to_be_bytes();
         let envelope = [
@@ -5661,9 +5117,9 @@ fn experimental_operation_is_unavailable_without_feature() {
             0x00,
             0xa2,
             0x00,
+            0x02,
             0x01,
-            0x01,
-            0x03,
+            0x00,
             0x01,
             0x09,
             0x02,
@@ -5683,7 +5139,7 @@ fn experimental_operation_is_unavailable_without_feature() {
         );
     }
 
-    #[cfg(not(feature = "experimental-nomad"))]
+    #[cfg(not(feature = "nomad"))]
     for operation in [0xf008_u16, 0xf009] {
         let encoded_operation = operation.to_be_bytes();
         let envelope = [
@@ -5691,9 +5147,9 @@ fn experimental_operation_is_unavailable_without_feature() {
             0x00,
             0xa2,
             0x00,
+            0x02,
             0x01,
-            0x01,
-            0x06,
+            0x00,
             0x01,
             0x09,
             0x02,
@@ -5713,7 +5169,7 @@ fn experimental_operation_is_unavailable_without_feature() {
         );
     }
 
-    #[cfg(not(feature = "experimental-network-config"))]
+    #[cfg(not(feature = "network-config"))]
     for operation in [0xf00a_u16, 0xf00b, 0xf00c] {
         let encoded_operation = operation.to_be_bytes();
         let envelope = [
@@ -5721,9 +5177,9 @@ fn experimental_operation_is_unavailable_without_feature() {
             0x00,
             0xa2,
             0x00,
+            0x02,
             0x01,
-            0x01,
-            0x07,
+            0x00,
             0x01,
             0x09,
             0x02,

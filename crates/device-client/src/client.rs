@@ -17,7 +17,7 @@ use reticulum_device_api::{
     RequestId, RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionId, SubmissionStatus,
     decode_response, encode_request,
 };
-#[cfg(feature = "experimental-network-config")]
+#[cfg(feature = "network-config")]
 use reticulum_device_api::{
     NetworkConfigMutationOutcome, NetworkConfigMutationRequest, NetworkConfigSnapshot,
     NetworkRuntimeStatus,
@@ -42,9 +42,9 @@ const LXMF_PARSE_MAX_NESTING: usize = 16;
 
 /// Byte-stream transport accepted by [`DeviceClient`].
 ///
-/// This blanket trait deliberately adds no serial-specific methods. Callers
-/// configure baud rate, DTR/RTS, finite OS I/O timeouts, and reconnect policy
-/// before constructing the client.
+/// This blanket trait deliberately adds no bearer-specific methods. Callers
+/// configure bearer setup, finite OS I/O timeouts, and reconnect policy before
+/// constructing the client.
 pub trait ClientTransport: Read + Write {}
 
 impl<T: Read + Write> ClientTransport for T {}
@@ -108,35 +108,21 @@ impl Default for ClientConfig {
 
 /// Transcript and bearer profile for one authenticated client connection.
 ///
-/// All current profiles provide authentication and integrity but no
-/// application-layer confidentiality. The Wi-Fi and BLE profiles are explicit
-/// proof profiles for local wireless links; neither is the final wireless
-/// security construction.
+/// The current profile provides authentication and integrity but no
+/// application-layer confidentiality.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientSessionProfile {
-    /// Original suite-1 USB Serial/JTAG qualification profile.
-    UsbSerialJtagQualification,
-    /// Suite-2 Wi-Fi-bound authentication and integrity qualification profile.
-    WifiQualification,
-    /// Suite-3 BLE GATT-bound authentication and integrity qualification profile.
-    BleGattQualification,
+    /// Suite-3 BLE GATT-bound authentication and integrity product profile.
+    BleGatt,
 }
 
 impl ClientSessionProfile {
     const fn parameters(self, device_id: DeviceId) -> ClientParameters {
         match self {
-            Self::UsbSerialJtagQualification => {
-                ClientParameters::new(device_id, BearerBinding::UsbSerialJtag)
-            }
-            Self::WifiQualification => ClientParameters::new_for_suite(
-                device_id,
-                BearerBinding::Wifi,
-                SessionSuite::WifiQualification,
-            ),
-            Self::BleGattQualification => ClientParameters::new_for_suite(
+            Self::BleGatt => ClientParameters::new_for_suite(
                 device_id,
                 BearerBinding::BleGatt,
-                SessionSuite::BleGattQualification,
+                SessionSuite::BleGatt,
             ),
         }
     }
@@ -151,42 +137,42 @@ pub enum Operation {
     IdentitySummary,
     /// `submission.status`.
     SubmissionStatus,
-    /// `experimental.lxmf.next`.
+    /// `lxmf.next`.
     LxmfNext,
-    /// `experimental.lxmf.read`.
+    /// `lxmf.read`.
     LxmfRead,
-    /// `experimental.lxmf.mailbox_status`.
+    /// `lxmf.mailbox_status`.
     LxmfMailboxStatus,
-    /// `experimental.lxmf.mailbox_acknowledge`.
+    /// `lxmf.mailbox_acknowledge`.
     LxmfMailboxAcknowledge,
-    /// `experimental.lxmf.basic_send`.
+    /// `lxmf.basic_send`.
     LxmfBasicSend,
-    /// `experimental.lxmf.peer_next`.
+    /// `lxmf.peer_next`.
     LxmfPeerNext,
-    /// `experimental.nomad.fetch_start`.
+    /// `nomad.fetch_start`.
     NomadFetchStart,
-    /// `experimental.nomad.fetch_poll`.
+    /// `nomad.fetch_poll`.
     NomadFetchPoll,
-    /// `experimental.reticulum_probe.start`.
+    /// `reticulum_probe.start`.
     ReticulumProbeStart,
-    /// `experimental.reticulum_probe.poll`.
+    /// `reticulum_probe.poll`.
     ReticulumProbePoll,
-    /// `experimental.network_config.get`.
-    #[cfg(feature = "experimental-network-config")]
+    /// `network_config.get`.
+    #[cfg(feature = "network-config")]
     NetworkConfigGet,
-    /// `experimental.network_config.mutate`.
-    #[cfg(feature = "experimental-network-config")]
+    /// `network_config.mutate`.
+    #[cfg(feature = "network-config")]
     NetworkConfigMutate,
-    /// `experimental.network.status`.
-    #[cfg(feature = "experimental-network-config")]
+    /// `network.status`.
+    #[cfg(feature = "network-config")]
     NetworkStatus,
-    /// `experimental.node.diagnostics`.
+    /// `node.diagnostics`.
     NodeDiagnostics,
-    /// `experimental.route_diagnostics.page`.
+    /// `route_diagnostics.page`.
     RouteDiagnosticsPage,
-    /// `experimental.radio_trace.page`.
+    /// `radio_trace.page`.
     RadioTracePage,
-    /// `experimental.manual_service_announce`.
+    /// `manual_service_announce`.
     ManualServiceAnnounce,
 }
 
@@ -196,26 +182,26 @@ impl Operation {
             Self::SystemCapabilities => "system.capabilities",
             Self::IdentitySummary => "identity.summary",
             Self::SubmissionStatus => "submission.status",
-            Self::LxmfNext => "experimental.lxmf.next",
-            Self::LxmfRead => "experimental.lxmf.read",
-            Self::LxmfMailboxStatus => "experimental.lxmf.mailbox_status",
-            Self::LxmfMailboxAcknowledge => "experimental.lxmf.mailbox_acknowledge",
-            Self::LxmfBasicSend => "experimental.lxmf.basic_send",
-            Self::LxmfPeerNext => "experimental.lxmf.peer_next",
-            Self::NomadFetchStart => "experimental.nomad.fetch_start",
-            Self::NomadFetchPoll => "experimental.nomad.fetch_poll",
-            Self::ReticulumProbeStart => "experimental.reticulum_probe.start",
-            Self::ReticulumProbePoll => "experimental.reticulum_probe.poll",
-            #[cfg(feature = "experimental-network-config")]
-            Self::NetworkConfigGet => "experimental.network_config.get",
-            #[cfg(feature = "experimental-network-config")]
-            Self::NetworkConfigMutate => "experimental.network_config.mutate",
-            #[cfg(feature = "experimental-network-config")]
-            Self::NetworkStatus => "experimental.network.status",
-            Self::NodeDiagnostics => "experimental.node.diagnostics",
-            Self::RouteDiagnosticsPage => "experimental.route_diagnostics.page",
-            Self::RadioTracePage => "experimental.radio_trace.page",
-            Self::ManualServiceAnnounce => "experimental.manual_service_announce",
+            Self::LxmfNext => "lxmf.next",
+            Self::LxmfRead => "lxmf.read",
+            Self::LxmfMailboxStatus => "lxmf.mailbox_status",
+            Self::LxmfMailboxAcknowledge => "lxmf.mailbox_acknowledge",
+            Self::LxmfBasicSend => "lxmf.basic_send",
+            Self::LxmfPeerNext => "lxmf.peer_next",
+            Self::NomadFetchStart => "nomad.fetch_start",
+            Self::NomadFetchPoll => "nomad.fetch_poll",
+            Self::ReticulumProbeStart => "reticulum_probe.start",
+            Self::ReticulumProbePoll => "reticulum_probe.poll",
+            #[cfg(feature = "network-config")]
+            Self::NetworkConfigGet => "network_config.get",
+            #[cfg(feature = "network-config")]
+            Self::NetworkConfigMutate => "network_config.mutate",
+            #[cfg(feature = "network-config")]
+            Self::NetworkStatus => "network.status",
+            Self::NodeDiagnostics => "node.diagnostics",
+            Self::RouteDiagnosticsPage => "route_diagnostics.page",
+            Self::RadioTracePage => "radio_trace.page",
+            Self::ManualServiceAnnounce => "manual_service_announce",
         }
     }
 }
@@ -277,20 +263,6 @@ pub enum ClientError {
     RequestEncoding(EncodeError),
     /// Logical response decoding failed.
     ResponseDecoding(DecodeError),
-    /// Device API major version is incompatible.
-    IncompatibleApiVersion {
-        /// Device-selected version.
-        observed: ApiVersion,
-    },
-    /// A requested backward-compatible feature needs a newer API minor revision.
-    ApiMinorTooOld {
-        /// Human-readable feature withheld by the client.
-        feature: &'static str,
-        /// First API minor revision implementing the feature.
-        required: u16,
-        /// Authenticated device-selected version.
-        observed: ApiVersion,
-    },
     /// Device echoed a different logical request ID.
     RequestIdMismatch {
         /// ID sent by this client.
@@ -390,24 +362,6 @@ impl fmt::Display for ClientError {
             Self::ResponseDecoding(error) => {
                 write!(formatter, "response decoding failed: {error:?}")
             }
-            Self::IncompatibleApiVersion { observed } => write!(
-                formatter,
-                "device API {}.{} is incompatible with client major {}",
-                observed.major,
-                observed.minor,
-                ApiVersion::CURRENT.major
-            ),
-            Self::ApiMinorTooOld {
-                feature,
-                required,
-                observed,
-            } => write!(
-                formatter,
-                "{feature} requires device API {}.{required}, but the device reports {}.{}",
-                ApiVersion::CURRENT.major,
-                observed.major,
-                observed.minor,
-            ),
             Self::RequestIdMismatch { expected, observed } => write!(
                 formatter,
                 "device returned request ID {} instead of {}",
@@ -579,12 +533,11 @@ pub struct DeviceClient<T> {
     device_id: DeviceId,
     session_id: SessionId,
     next_request_id: Option<u64>,
-    observed_api_version: Option<ApiVersion>,
     config: ClientConfig,
 }
 
 impl<T: ClientTransport> DeviceClient<T> {
-    /// Authenticate one already-open USB Serial/JTAG byte stream.
+    /// Authenticate one already-open BLE GATT device-API byte stream.
     ///
     /// `transport` must use finite blocking I/O timeouts. The supplied random
     /// source provides the fresh client handshake nonce.
@@ -602,7 +555,7 @@ impl<T: ClientTransport> DeviceClient<T> {
             credential,
             rng,
             config,
-            ClientSessionProfile::UsbSerialJtagQualification,
+            ClientSessionProfile::BleGatt,
         )
     }
 
@@ -660,7 +613,6 @@ impl<T: ClientTransport> DeviceClient<T> {
             device_id,
             session_id,
             next_request_id: Some(1),
-            observed_api_version: None,
             config,
         })
     }
@@ -914,9 +866,6 @@ impl<T: ClientTransport> DeviceClient<T> {
         &mut self,
         send: BasicLxmfSend<'_>,
     ) -> Result<LxmfBasicSendAccepted, ClientError> {
-        if send.location.is_some() {
-            self.require_api_minor(17, "LXMF message location")?;
-        }
         match self.exchange(DeviceRequest::LxmfBasicSend {
             destination: send.destination,
             timestamp_unix_ms: send.timestamp_unix_ms,
@@ -1025,7 +974,7 @@ impl<T: ClientTransport> DeviceClient<T> {
     }
 
     /// Read the complete redacted desired network configuration.
-    #[cfg(feature = "experimental-network-config")]
+    #[cfg(feature = "network-config")]
     pub fn network_config_get(&mut self) -> Result<NetworkConfigSnapshot, ClientError> {
         match self.exchange(DeviceRequest::NetworkConfigGet)? {
             DeviceResponse::NetworkConfig(config) => Ok(config),
@@ -1041,7 +990,7 @@ impl<T: ClientTransport> DeviceClient<T> {
     }
 
     /// Apply one compare-and-swap desired-network mutation.
-    #[cfg(feature = "experimental-network-config")]
+    #[cfg(feature = "network-config")]
     pub fn network_config_mutate(
         &mut self,
         request: NetworkConfigMutationRequest<'_>,
@@ -1060,7 +1009,7 @@ impl<T: ClientTransport> DeviceClient<T> {
     }
 
     /// Read current secret-free Wi-Fi station and Reticulum TCP state.
-    #[cfg(feature = "experimental-network-config")]
+    #[cfg(feature = "network-config")]
     pub fn network_status(&mut self) -> Result<NetworkRuntimeStatus, ClientError> {
         match self.exchange(DeviceRequest::NetworkStatus)? {
             DeviceResponse::NetworkStatus(status) => Ok(status),
@@ -1129,7 +1078,7 @@ impl<T: ClientTransport> DeviceClient<T> {
     /// Capability-check and queue ordinary primary, LXMF, and NomadNet announces.
     ///
     /// This performs a fresh capability query before the mutating request so an
-    /// older, disabled, or profile-limited device is never asked to schedule
+    /// disabled or profile-limited device is never asked to schedule
     /// output it did not advertise.
     pub fn manual_service_announce(
         &mut self,
@@ -1228,43 +1177,13 @@ impl<T: ClientTransport> DeviceClient<T> {
 
         let response =
             decode_response(response_message.encoded()).map_err(ClientError::ResponseDecoding)?;
-        if response.version.major != ApiVersion::CURRENT.major {
-            return Err(ClientError::IncompatibleApiVersion {
-                observed: response.version,
-            });
-        }
         if response.request_id != request_id {
             return Err(ClientError::RequestIdMismatch {
                 expected: request_id,
                 observed: response.request_id,
             });
         }
-        self.observed_api_version = Some(response.version);
         Ok(response.response)
-    }
-
-    fn require_api_minor(
-        &mut self,
-        required: u16,
-        feature: &'static str,
-    ) -> Result<(), ClientError> {
-        let observed = match self.observed_api_version {
-            Some(version) => version,
-            None => {
-                self.system_capabilities()?;
-                self.observed_api_version
-                    .expect("a valid capabilities response records its envelope version")
-            }
-        };
-        if observed.minor < required {
-            Err(ClientError::ApiMinorTooOld {
-                feature,
-                required,
-                observed,
-            })
-        } else {
-            Ok(())
-        }
     }
 
     fn allocate_request_id(&mut self) -> Result<RequestId, ClientError> {

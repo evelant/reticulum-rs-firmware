@@ -29,7 +29,6 @@ export function timelineActivityRevision(entry: TimelineView): string {
     entry.status ?? "no-status",
     entry.submission_id ?? "no-submission",
     entry.current_attempt_number ?? "no-attempt",
-    entry.automatic_retry_count ?? "no-retry-count",
     entry.packet_evidence?.encoded_packet_len ?? "no-packet-length",
     entry.packet_evidence?.encoded_packet_sha256 ?? "no-packet-hash",
     entry.ingress_observation?.interface_id ?? "no-ingress-interface",
@@ -63,10 +62,10 @@ export function timelineStatusLabel(entry: TimelineView): string {
 /**
  * Actions that can faithfully round-trip through the app's UTF-8 composer.
  *
- * Explicit replacement is available only for legacy or permanently terminal
- * failures that preserve the original semantic LXMF message. Current
- * board-owned delivery remains `preparing` and needs no app rearm. Explicit
- * downstream rejection is not a lossy-network condition and is not retryable.
+ * Explicit replacement is available only for retryable terminal failures and
+ * preserves the original semantic LXMF message. Current board-owned delivery
+ * remains `preparing` and needs no app action. Explicit downstream rejection
+ * is not a lossy-network condition and is not retryable.
  */
 export function timelineMessageCapabilities(entry: TimelineView): TimelineMessageCapabilities {
   const composerCompatible = entry.title.encoding === "utf8" && entry.content.encoding === "utf8";
@@ -85,9 +84,8 @@ export function timelineMessageCapabilities(entry: TimelineView): TimelineMessag
  *
  * This is not another carrier attempt within the current board-owned delivery
  * loop. The fresh key creates a replacement durable device submission for a
- * legacy or permanently terminal row. Destination, timestamp, title, content,
- * timeline sequence, and LXMF message identity remain owned by the existing
- * outbox row.
+ * retryable terminal row. Destination, timestamp, title, content, timeline
+ * sequence, and LXMF message identity remain owned by the existing outbox row.
  */
 export function retryMessageRequest(
   entry: TimelineView,

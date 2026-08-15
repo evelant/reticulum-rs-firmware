@@ -1,4 +1,4 @@
-"""Independent qualification-session vector checks."""
+"""Independent session vector checks."""
 
 from __future__ import annotations
 
@@ -36,23 +36,23 @@ class DeviceApiSessionVectorTests(unittest.TestCase):
         generated = vectors.build_vectors()
         self.assertEqual(
             generated["handshake"]["transcript_hash_hex"],
-            "f2c370c91c390b560e11f504bf1ccc858cf6f9b391be79652c79057cd30ef7e6",
+            "d5ba810802c893d9e0fb48c8c39ca93105739e2c3db7cad46391b36c09e0b994",
         )
         self.assertEqual(
             generated["key_schedule"]["session_id_hex"],
-            "43500f898ee83026808be25bf16c1144",
+            "8ab0532b2da56a401b3847a26d7b06cd",
         )
         self.assertEqual(
             generated["handshake"]["server_proof_hex"],
-            "f8dadb11a16a3ff23cb346843583ad980b5a4b22cc75c5a058b403089a8401e5",
+            "e78f45ba3c2d5dc97adbce04ce69eaab2ee9715bb421d577de91309dbe9f83c5",
         )
         self.assertEqual(
             generated["handshake"]["client_proof_hex"],
-            "419b56f8245fb32647258ed4102531c606543b32cd125af94b5fff96fa21496d",
+            "e75a98367a87d0905ea1dc7d3112644d8a37db3dfa757ed43a655b7f0b4ad858",
         )
         self.assertEqual(
             generated["records"]["request_tag_hex"],
-            "fba3e2eedff43b16b35829413cee6bc2",
+            "f8020c2c9ee75f5706744264dd7eb560",
         )
 
     def test_every_hello_byte_is_transcript_bound(self) -> None:

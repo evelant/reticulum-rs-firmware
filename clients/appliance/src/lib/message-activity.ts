@@ -224,10 +224,7 @@ export function messageActivityPresentation(
       break;
     }
     case "outbound_requeued":
-      title =
-        event.activity.trigger === "automatic"
-          ? "Legacy automatic rearm queued"
-          : "Replacement submission queued";
+      title = "Replacement submission queued";
       tone = "warning";
       break;
   }

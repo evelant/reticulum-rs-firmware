@@ -20,7 +20,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
-reticulum-device-api-adapter = { path = "../device-api-adapter", features = ["experimental-rns-data"] }
+reticulum-device-api-adapter = { path = "../device-api-adapter", features = ["rns-data"] }
 reticulum-storage-model = { path = "../storage-model" }
 
 [lib]

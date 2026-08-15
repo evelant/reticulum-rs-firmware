@@ -804,7 +804,7 @@ def build_vectors() -> dict[str, object]:
             RNS.Destination.OUT,
             RNS.Destination.PLAIN,
             "reticulum_rs_firmware",
-            "phase0",
+            "interop",
         )
         plain_payload = b"rete foundation conformance"
         plain_packet = RNS.Packet(plain_destination, plain_payload)
@@ -868,7 +868,7 @@ def build_vectors() -> dict[str, object]:
             },
             "plain_data": {
                 "app_name": "reticulum_rs_firmware",
-                "aspects": ["phase0"],
+                "aspects": ["interop"],
                 "origin": "created and packed by Python RNS 1.3.8",
                 "normalization": "lowercase hexadecimal; no wire-byte normalization",
                 "payload_hex": plain_payload.hex(),

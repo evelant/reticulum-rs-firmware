@@ -17,10 +17,9 @@ use reticulum_storage_journal::{
     ERASE_SIZE, PARTITION_SIZE, PHYSICAL_FORMAT_VERSION, format_erased,
 };
 use reticulum_storage_model::{
-    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
-    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AuthorizationSnapshot,
-    DestinationHash as StoredDestinationHash, ExperimentalRnsDataIntent, FinalDisposition,
-    IdempotencyKey, LxmfMessageIntent, PrincipalId, SubmissionFailure,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA,
+    AuthorizationSnapshot, DestinationHash as StoredDestinationHash, FinalDisposition,
+    IdempotencyKey, LxmfMessageIntent, PrincipalId, RnsDataIntent, SubmissionFailure,
 };
 use std::{boxed::Box, vec, vec::Vec};
 
@@ -912,7 +911,7 @@ fn candidate(destination: DestinationHash) -> AcceptanceCandidate {
     AcceptanceCandidate::new(
         PrincipalId::new([0x11; 16]),
         IdempotencyKey::new([0x12; 16]),
-        ExperimentalRnsDataIntent::new(
+        RnsDataIntent::new(
             StoredDestinationHash::new(*destination.as_bytes()),
             b"portable durable submission",
         )
@@ -922,7 +921,7 @@ fn candidate(destination: DestinationHash) -> AcceptanceCandidate {
             7,
             9,
             1,
-            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA
                 | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
         )
         .unwrap(),
@@ -941,7 +940,7 @@ fn lxmf_message_candidate(destination: DestinationHash, carrier_len: usize) -> A
             7,
             9,
             1,
-            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA
                 | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
         )
         .unwrap(),
@@ -958,7 +957,7 @@ fn exact_lxmf_message_candidate(wire: &[u8], idempotency_tag: u8) -> AcceptanceC
             7,
             9,
             1,
-            AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
+            AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA
                 | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
         )
         .unwrap(),

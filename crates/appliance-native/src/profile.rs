@@ -60,12 +60,6 @@ pub(crate) struct NativeProfileRuntimePaths {
     pub(crate) credential: PathBuf,
 }
 
-#[derive(Clone, Debug)]
-struct LegacyPaths {
-    database: PathBuf,
-    credential: PathBuf,
-}
-
 enum ProfileMetadataError {
     Rejected { reason: String },
     PublicationUncertain { reason: String },
@@ -96,53 +90,15 @@ impl ProfileMetadataError {
 #[derive(uniffi::Object)]
 pub struct NativeProfileStore {
     root: PathBuf,
-    legacy: Option<LegacyPaths>,
     gate: Mutex<()>,
 }
 
 #[uniffi::export]
 impl NativeProfileStore {
-    /// Open or create an app-private profile root.
-    ///
-    /// The optional legacy paths identify the previous single-database and
-    /// single-credential layout. When the legacy credential is canonical,
-    /// both artifacts are migrated to its validated device-ID profile before
-    /// the store is returned. An invalid legacy credential remains untouched
-    /// and is reported through [`Self::credential_status`].
+    /// Open or create an app-private device-keyed profile root.
     #[uniffi::constructor]
-    pub fn open(
-        root_directory: String,
-        legacy_database_path: Option<String>,
-        legacy_credential_path: Option<String>,
-    ) -> Result<Arc<Self>, NativeApplianceError> {
+    pub fn open(root_directory: String) -> Result<Arc<Self>, NativeApplianceError> {
         let root = validated_absolute_path(&root_directory, "profile root")?;
-        let legacy = match (legacy_database_path, legacy_credential_path) {
-            (None, None) => None,
-            (Some(database), Some(credential)) => Some(LegacyPaths {
-                database: validated_absolute_path(&database, "legacy database path")?,
-                credential: validated_absolute_path(&credential, "legacy credential path")?,
-            }),
-            _ => {
-                return Err(NativeApplianceError::InvalidArgument {
-                    reason: "legacy database and credential paths must be supplied together"
-                        .to_owned(),
-                });
-            }
-        };
-        if let Some(legacy) = &legacy
-            && (legacy.database.starts_with(&root) || legacy.credential.starts_with(&root))
-        {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "legacy artifact paths must be outside the new profile root".to_owned(),
-            });
-        }
-        if let Some(legacy) = &legacy
-            && legacy.database == legacy.credential
-        {
-            return Err(NativeApplianceError::InvalidArgument {
-                reason: "legacy database and credential paths must differ".to_owned(),
-            });
-        }
 
         create_private_directory(&root, "profile root")?;
         create_private_directory(&root.join(PROFILES_DIRECTORY), "profiles directory")?;
@@ -153,12 +109,10 @@ impl NativeProfileStore {
 
         let store = Arc::new(Self {
             root,
-            legacy,
             gate: Mutex::new(()),
         });
         {
             let _guard = store.lock_gate()?;
-            store.migrate_legacy_if_present()?;
             store.validate_active_profile_if_present()?;
         }
         Ok(store)
@@ -172,9 +126,8 @@ impl NativeProfileStore {
 
     /// Inspect the active profile's credential without returning secret bytes.
     ///
-    /// An empty store is `Missing`. A malformed legacy artifact or active
-    /// profile is `Invalid` so the existing onboarding recovery boundary is
-    /// preserved.
+    /// An empty store is `Missing`. A malformed active profile is `Invalid` so
+    /// the onboarding recovery boundary remains explicit.
     pub fn credential_status(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
         let _guard = self.lock_gate()?;
         self.credential_status_locked()
@@ -354,18 +307,6 @@ impl NativeProfileStore {
             return Ok(self.profile_paths(&profile_key));
         }
 
-        if let Some(legacy) = &self.legacy
-            && !matches!(
-                inspect_credential(&legacy.credential),
-                NativeCredentialStatus::Missing
-            )
-        {
-            return Ok(NativeProfileRuntimePaths {
-                database: legacy.database.clone(),
-                credential: legacy.credential.clone(),
-            });
-        }
-
         Ok(NativeProfileRuntimePaths {
             database: self.root.join(UNCONFIGURED_DIRECTORY).join(DATABASE_FILE),
             credential: self.root.join(UNCONFIGURED_DIRECTORY).join(CREDENTIAL_FILE),
@@ -454,18 +395,6 @@ impl NativeProfileStore {
         policy: CredentialImportPolicy,
     ) -> Result<NativeCredentialSummary, CredentialImportError> {
         let _guard = self.lock_gate().map_err(profile_error_as_import)?;
-        if let Some(legacy) = &self.legacy
-            && matches!(
-                inspect_credential(&legacy.credential),
-                NativeCredentialStatus::Invalid { .. }
-            )
-        {
-            return Err(CredentialImportError::Rejected {
-                reason: "legacy app-private credential is invalid; replacement requires an explicit recovery flow"
-                    .to_owned(),
-            });
-        }
-
         let (bytes, summary) = read_import_credential_file(staging_path, policy)?;
         self.install_and_activate_profile_locked(bytes.as_slice(), &summary, policy)
             .map(|profile| profile.credential)
@@ -625,9 +554,6 @@ impl NativeProfileStore {
 
     fn credential_status_locked(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
         let Some(profile_key) = read_active_profile(&self.root)? else {
-            if let Some(legacy) = &self.legacy {
-                return Ok(inspect_credential(&legacy.credential));
-            }
             return Ok(NativeCredentialStatus::Missing);
         };
         let paths = self.profile_paths(&profile_key);
@@ -684,88 +610,6 @@ impl NativeProfileStore {
         NativeProfileRuntimePaths {
             database: directory.join(DATABASE_FILE),
             credential: directory.join(CREDENTIAL_FILE),
-        }
-    }
-
-    fn migrate_legacy_if_present(&self) -> Result<(), NativeApplianceError> {
-        let Some(legacy) = &self.legacy else {
-            return Ok(());
-        };
-        match inspect_credential(&legacy.credential) {
-            NativeCredentialStatus::Missing => {
-                let unconfigured_database =
-                    self.root.join(UNCONFIGURED_DIRECTORY).join(DATABASE_FILE);
-                move_sqlite_family_if_present(&legacy.database, &unconfigured_database)?;
-                Ok(())
-            }
-            NativeCredentialStatus::Invalid { .. } => Ok(()),
-            NativeCredentialStatus::Active { summary } => {
-                let profile_key = validate_profile_key(&summary.device_id)?;
-                if let Some(active) = read_active_profile(&self.root)?
-                    && active != profile_key
-                {
-                    return Err(NativeApplianceError::Storage {
-                        reason: format!(
-                            "legacy credential identifies {profile_key}, but active profile is {active}"
-                        ),
-                    });
-                }
-
-                let paths = self.profile_paths(&profile_key);
-                create_private_directory(
-                    paths
-                        .credential
-                        .parent()
-                        .expect("profile credential has a directory"),
-                    "device profile",
-                )?;
-                let legacy_bytes = read_credential_bytes(&legacy.credential)
-                    .map_err(|reason| NativeApplianceError::Storage { reason })?;
-                match inspect_credential(&paths.credential) {
-                    NativeCredentialStatus::Missing => {
-                        install_credential(
-                            &paths.credential,
-                            &legacy_bytes[..],
-                            CredentialImportPolicy::AnyDevice,
-                        )?;
-                    }
-                    NativeCredentialStatus::Active {
-                        summary: existing_summary,
-                    } => {
-                        let existing = read_credential_bytes(&paths.credential)
-                            .map_err(|reason| NativeApplianceError::Storage { reason })?;
-                        if existing.as_slice() != legacy_bytes.as_slice()
-                            || existing_summary != summary
-                        {
-                            return Err(NativeApplianceError::Storage {
-                                reason: "legacy credential conflicts with its device profile"
-                                    .to_owned(),
-                            });
-                        }
-                    }
-                    NativeCredentialStatus::Invalid { reason } => {
-                        return Err(NativeApplianceError::Storage {
-                            reason: format!(
-                                "legacy credential target profile is invalid: {reason}"
-                            ),
-                        });
-                    }
-                }
-
-                move_sqlite_family_if_present(&legacy.database, &paths.database)?;
-                write_active_profile(&self.root, &profile_key)
-                    .map_err(ProfileMetadataError::into_native)?;
-                fs::remove_file(&legacy.credential)
-                    .map_err(storage_error("remove migrated legacy credential"))?;
-                sync_directory(
-                    legacy
-                        .credential
-                        .parent()
-                        .expect("validated legacy credential has a directory"),
-                    "legacy credential directory",
-                )?;
-                Ok(())
-            }
         }
     }
 
@@ -934,68 +778,6 @@ fn write_active_profile(root: &Path, profile_key: &str) -> Result<(), ProfileMet
     })
 }
 
-fn move_sqlite_family_if_present(
-    source: &Path,
-    destination: &Path,
-) -> Result<(), NativeApplianceError> {
-    let destination_parent = destination
-        .parent()
-        .expect("profile database has a directory");
-    create_private_directory(destination_parent, "database profile directory")?;
-    move_file_if_present(source, destination, "legacy chat database")?;
-    for suffix in ["-wal", "-shm"] {
-        let source_sidecar = PathBuf::from(format!("{}{suffix}", source.display()));
-        let destination_sidecar = PathBuf::from(format!("{}{suffix}", destination.display()));
-        move_file_if_present(
-            &source_sidecar,
-            &destination_sidecar,
-            "legacy SQLite sidecar",
-        )?;
-    }
-    sync_directory(destination_parent, "database profile directory")
-}
-
-fn move_file_if_present(
-    source: &Path,
-    destination: &Path,
-    label: &str,
-) -> Result<(), NativeApplianceError> {
-    let source_exists = match fs::symlink_metadata(source) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(NativeApplianceError::Storage {
-                    reason: format!("{label} must be a regular non-symlink file"),
-                });
-            }
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(storage_error("inspect legacy database artifact")(error)),
-    };
-    let destination_exists = match fs::symlink_metadata(destination) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(NativeApplianceError::Storage {
-                    reason: format!("profile {label} target must be a regular non-symlink file"),
-                });
-            }
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(storage_error("inspect profile database artifact")(error)),
-    };
-    match (source_exists, destination_exists) {
-        (false, _) => Ok(()),
-        (true, false) => fs::rename(source, destination)
-            .map_err(storage_error("migrate legacy database artifact")),
-        (true, true) => Err(NativeApplianceError::Storage {
-            reason: format!(
-                "both legacy and per-profile {label} exist; refusing to guess which database is authoritative"
-            ),
-        }),
-    }
-}
-
 fn create_private_directory(path: &Path, label: &str) -> Result<(), NativeApplianceError> {
     create_directory_all(path).map_err(storage_error("create private profile directory"))?;
     require_private_directory(path, label)
@@ -1108,7 +890,7 @@ mod tests {
     }
 
     fn open_store(directory: &TestDirectory) -> Arc<NativeProfileStore> {
-        NativeProfileStore::open(directory.path_string(), None, None).unwrap()
+        NativeProfileStore::open(directory.path_string()).unwrap()
     }
 
     fn write_onboarding_credential(store: &NativeProfileStore, bytes: &[u8]) {
@@ -1485,61 +1267,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_single_profile_is_migrated_without_exposing_or_rewriting_secret_bytes() {
-        let container = TestDirectory::new("legacy");
-        create_directory_all(&container.0).unwrap();
-        let root = container.0.join("new-profiles");
-        let legacy_database = container
-            .0
-            .join("reticulum-lxmf-chat-alpha-schema3.sqlite3");
-        let legacy_credential = container.0.join("reticulum-device-credential.rdpkey");
-        let bytes = activated_credential_bytes(*b"legacy-device-01", 0x31);
-        fs::write(&legacy_database, b"legacy database").unwrap();
-        fs::write(
-            PathBuf::from(format!("{}-wal", legacy_database.display())),
-            b"legacy wal",
-        )
-        .unwrap();
-        fs::write(
-            PathBuf::from(format!("{}-shm", legacy_database.display())),
-            b"legacy shm",
-        )
-        .unwrap();
-        fs::write(&legacy_credential, bytes).unwrap();
-        #[cfg(unix)]
-        fs::set_permissions(&legacy_credential, fs::Permissions::from_mode(0o600)).unwrap();
-
-        let store = NativeProfileStore::open(
-            root.to_string_lossy().into_owned(),
-            Some(legacy_database.to_string_lossy().into_owned()),
-            Some(legacy_credential.to_string_lossy().into_owned()),
-        )
-        .unwrap();
-        let NativeCredentialStatus::Active { summary } = store.credential_status().unwrap() else {
-            panic!("migrated credential must be active");
-        };
-        let paths = store.runtime_paths().unwrap();
-
-        assert_eq!(summary.device_id, hex::encode(*b"legacy-device-01"));
-        assert_eq!(fs::read(&paths.credential).unwrap(), bytes);
-        assert_eq!(fs::read(&paths.database).unwrap(), b"legacy database");
-        assert_eq!(
-            fs::read(PathBuf::from(format!("{}-wal", paths.database.display()))).unwrap(),
-            b"legacy wal"
-        );
-        assert_eq!(
-            fs::read(PathBuf::from(format!("{}-shm", paths.database.display()))).unwrap(),
-            b"legacy shm"
-        );
-        assert!(!legacy_credential.exists());
-        assert!(!legacy_database.exists());
-        assert_eq!(
-            store.snapshot().unwrap().active_profile_key,
-            Some(summary.device_id)
-        );
-    }
-
-    #[test]
     fn duplicate_import_is_idempotent_but_different_secret_cannot_replace_profile() {
         let directory = TestDirectory::new("duplicate");
         let store = open_store(&directory);
@@ -1570,59 +1297,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_legacy_credential_preserves_existing_recovery_boundary() {
-        let container = TestDirectory::new("invalid-legacy");
-        create_directory_all(&container.0).unwrap();
-        let root = container.0.join("new-profiles");
-        let legacy_database = container.0.join("legacy.sqlite3");
-        let legacy_credential = container.0.join("legacy.rdpkey");
-        fs::write(&legacy_database, b"legacy database").unwrap();
-        fs::write(&legacy_credential, b"not a credential").unwrap();
-
-        let store = NativeProfileStore::open(
-            root.to_string_lossy().into_owned(),
-            Some(legacy_database.to_string_lossy().into_owned()),
-            Some(legacy_credential.to_string_lossy().into_owned()),
-        )
-        .unwrap();
-        assert!(matches!(
-            store.credential_status().unwrap(),
-            NativeCredentialStatus::Invalid { .. }
-        ));
-        assert_eq!(store.runtime_paths().unwrap().database, legacy_database);
-        assert!(legacy_credential.exists());
-        assert!(legacy_database.exists());
-    }
-
-    #[test]
-    fn credential_free_legacy_database_moves_to_the_unconfigured_profile() {
-        let container = TestDirectory::new("unconfigured-legacy");
-        create_directory_all(&container.0).unwrap();
-        let root = container.0.join("new-profiles");
-        let legacy_database = container.0.join("legacy.sqlite3");
-        let legacy_credential = container.0.join("missing.rdpkey");
-        fs::write(&legacy_database, b"credential-free database").unwrap();
-
-        let store = NativeProfileStore::open(
-            root.to_string_lossy().into_owned(),
-            Some(legacy_database.to_string_lossy().into_owned()),
-            Some(legacy_credential.to_string_lossy().into_owned()),
-        )
-        .unwrap();
-        let paths = store.runtime_paths().unwrap();
-
-        assert_eq!(
-            store.credential_status().unwrap(),
-            NativeCredentialStatus::Missing
-        );
-        assert_eq!(
-            fs::read(paths.database).unwrap(),
-            b"credential-free database"
-        );
-        assert!(!legacy_database.exists());
-    }
-
-    #[test]
     fn malformed_active_metadata_fails_closed_instead_of_selecting_a_profile() {
         let directory = TestDirectory::new("bad-active");
         let store = open_store(&directory);
@@ -1633,7 +1307,7 @@ mod tests {
         fs::set_permissions(&metadata, fs::Permissions::from_mode(0o600)).unwrap();
 
         assert!(matches!(
-            NativeProfileStore::open(directory.path_string(), None, None),
+            NativeProfileStore::open(directory.path_string()),
             Err(NativeApplianceError::Storage { reason })
                 if reason.contains("unsupported or malformed")
         ));

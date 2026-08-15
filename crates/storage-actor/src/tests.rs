@@ -19,11 +19,10 @@ use reticulum_storage_journal::{
     SLOT_SIZE, format_erased,
 };
 use reticulum_storage_model::{
-    AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA,
-    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AuthorizationSnapshot, DestinationHash,
-    ExperimentalRnsDataIntent, FinalDisposition, IdempotencyKey, InternalFailure, InterruptedState,
-    LifecycleState, LxmfMessageIntent, PrincipalId, SubmissionFailure, SubmissionIndex,
-    SubmissionReplay,
+    AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS, AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA,
+    AuthorizationSnapshot, DestinationHash, FinalDisposition, IdempotencyKey, InternalFailure,
+    InterruptedState, LifecycleState, LxmfMessageIntent, PrincipalId, RnsDataIntent,
+    SubmissionFailure, SubmissionIndex, SubmissionReplay,
 };
 use reticulum_submission_projector::{
     AcknowledgementKind, AcknowledgementReply, PersistenceReply, PreparedFrameObservation,
@@ -302,15 +301,13 @@ fn candidate(tag: u8, payload: &[u8]) -> AcceptanceCandidate {
         7,
         9,
         1,
-        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
-            | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+        AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
     )
     .unwrap();
     AcceptanceCandidate::new(
         PrincipalId::new([tag; 16]),
         IdempotencyKey::new([tag.wrapping_add(1); 16]),
-        ExperimentalRnsDataIntent::new(DestinationHash::new([tag.wrapping_add(2); 16]), payload)
-            .unwrap(),
+        RnsDataIntent::new(DestinationHash::new([tag.wrapping_add(2); 16]), payload).unwrap(),
         authorization,
     )
 }
@@ -323,8 +320,7 @@ fn lxmf_candidate(tag: u8, trailing: &[u8]) -> AcceptanceCandidate {
         7,
         9,
         1,
-        AUTHORIZATION_PERMISSION_EXPERIMENTAL_SUBMIT_RNS_DATA
-            | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
+        AUTHORIZATION_PERMISSION_SUBMIT_RNS_DATA | AUTHORIZATION_PERMISSION_READ_SUBMISSION_STATUS,
     )
     .unwrap();
     let mut wire = vec![tag.wrapping_add(2); 16];

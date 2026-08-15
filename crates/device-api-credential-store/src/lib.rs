@@ -40,7 +40,7 @@ pub const SECTOR_SIZE: usize = 4_096;
 /// Current physical layout version.
 pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
 /// Current credential snapshot semantic version.
-pub const SEMANTIC_FORMAT_VERSION: u16 = 1;
+pub const SEMANTIC_FORMAT_VERSION: u16 = 2;
 /// Fixed credential capacity encoded by this store.
 pub const RECORD_CAPACITY: usize = E290_CREDENTIAL_RECORD_CAPACITY;
 

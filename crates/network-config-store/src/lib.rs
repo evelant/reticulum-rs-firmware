@@ -10,10 +10,8 @@
 //! The semantic model owns four WPA2-Personal access points, one optional
 //! outbound IPv4-or-DNS Reticulum TCP peer, explicit transport and announcement
 //! policy, an optional phone-supplied fixed-point location, and one atomic LoRa
-//! radio profile. Version-1 through version-3 snapshots remain readable with
-//! explicit compatibility defaults; every new snapshot uses semantic version
-//! 4, whose extension bytes are decoded only after the committed semantic
-//! version selects that layout.
+//! radio profile. The reader accepts only the current semantic format; changing
+//! that format requires explicitly reprovisioning this alpha appliance.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -42,9 +40,7 @@ pub const SECTOR_SIZE: usize = 4_096;
 /// Current on-flash physical format version.
 pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
 /// Current semantic configuration version written by every mutation.
-pub const SEMANTIC_FORMAT_VERSION: u16 = 4;
-/// Oldest semantic configuration version accepted by the reader.
-pub const MIN_SUPPORTED_SEMANTIC_FORMAT_VERSION: u16 = 1;
+pub const SEMANTIC_FORMAT_VERSION: u16 = 5;
 /// Maximum number of saved WPA2 access-point profiles.
 pub const WIFI_PROFILE_CAPACITY: usize = 4;
 /// Maximum IEEE 802.11 SSID length in bytes.
@@ -72,21 +68,20 @@ const TCP_PEER_SLOT_SIZE: usize = 64;
 const WIFI_SLOTS_OFFSET: usize = HEADER_SIZE;
 const TCP_PEER_OFFSET: usize = WIFI_SLOTS_OFFSET + WIFI_PROFILE_CAPACITY * WIFI_SLOT_SIZE;
 const PAYLOAD_RESERVED_OFFSET: usize = TCP_PEER_OFFSET + TCP_PEER_SLOT_SIZE;
-const V2_EXTENSION_OFFSET: usize = PAYLOAD_RESERVED_OFFSET;
-const V2_POLICY_FLAGS_OFFSET: usize = V2_EXTENSION_OFFSET;
-const V2_LOCATION_PRESENT_OFFSET: usize = V2_EXTENSION_OFFSET + 1;
-const V2_HOSTNAME_LENGTH_OFFSET: usize = V2_EXTENSION_OFFSET + 2;
-const V2_EXTENSION_RESERVED_OFFSET: usize = V2_EXTENSION_OFFSET + 3;
-const V3_LORA_TX_POWER_DBM_OFFSET: usize = V2_EXTENSION_RESERVED_OFFSET;
-const V2_LATITUDE_OFFSET: usize = V2_EXTENSION_OFFSET + 4;
-const V2_LONGITUDE_OFFSET: usize = V2_EXTENSION_OFFSET + 8;
-const V2_HOSTNAME_OFFSET: usize = V2_EXTENSION_OFFSET + 12;
-const V2_HOSTNAME_END: usize = V2_HOSTNAME_OFFSET + MAX_DNS_HOSTNAME_LENGTH;
-const V4_LORA_FREQUENCY_HZ_OFFSET: usize = V2_HOSTNAME_END;
-const V4_LORA_BANDWIDTH_HZ_OFFSET: usize = V4_LORA_FREQUENCY_HZ_OFFSET + 4;
-const V4_LORA_SPREADING_FACTOR_OFFSET: usize = V4_LORA_BANDWIDTH_HZ_OFFSET + 4;
-const V4_LORA_CODING_RATE_DENOMINATOR_OFFSET: usize = V4_LORA_SPREADING_FACTOR_OFFSET + 1;
-const V4_LORA_PROFILE_END: usize = V4_LORA_CODING_RATE_DENOMINATOR_OFFSET + 1;
+const EXTENSION_OFFSET: usize = PAYLOAD_RESERVED_OFFSET;
+const POLICY_FLAGS_OFFSET: usize = EXTENSION_OFFSET;
+const LOCATION_PRESENT_OFFSET: usize = EXTENSION_OFFSET + 1;
+const HOSTNAME_LENGTH_OFFSET: usize = EXTENSION_OFFSET + 2;
+const LORA_TX_POWER_DBM_OFFSET: usize = EXTENSION_OFFSET + 3;
+const LATITUDE_OFFSET: usize = EXTENSION_OFFSET + 4;
+const LONGITUDE_OFFSET: usize = EXTENSION_OFFSET + 8;
+const HOSTNAME_OFFSET: usize = EXTENSION_OFFSET + 12;
+const HOSTNAME_END: usize = HOSTNAME_OFFSET + MAX_DNS_HOSTNAME_LENGTH;
+const LORA_FREQUENCY_HZ_OFFSET: usize = HOSTNAME_END;
+const LORA_BANDWIDTH_HZ_OFFSET: usize = LORA_FREQUENCY_HZ_OFFSET + 4;
+const LORA_SPREADING_FACTOR_OFFSET: usize = LORA_BANDWIDTH_HZ_OFFSET + 4;
+const LORA_CODING_RATE_DENOMINATOR_OFFSET: usize = LORA_SPREADING_FACTOR_OFFSET + 1;
+const LORA_PROFILE_END: usize = LORA_CODING_RATE_DENOMINATOR_OFFSET + 1;
 const PROTECTED_SIZE: usize = 1_024;
 const DIGEST_OFFSET: usize = PROTECTED_SIZE;
 const DIGEST_SIZE: usize = 32;
@@ -99,14 +94,14 @@ const MAGIC: &[u8; 8] = b"RTNETC01";
 const HEADER_FLAG_TCP_PEER_PRESENT: u8 = 1 << 0;
 const TCP_ADDRESS_FAMILY_IPV4: u8 = 4;
 const TCP_ADDRESS_FAMILY_DNS: u8 = 16;
-const V2_POLICY_WIFI_TRANSPORT_ENABLED: u8 = 1 << 0;
-const V2_POLICY_AUTOMATIC_ANNOUNCES_ENABLED: u8 = 1 << 1;
-const V2_POLICY_RMAP_DISCOVERY_ENABLED: u8 = 1 << 2;
-const V2_POLICY_RMAP_SHARE_LOCATION: u8 = 1 << 3;
-const V2_POLICY_VALID_MASK: u8 = V2_POLICY_WIFI_TRANSPORT_ENABLED
-    | V2_POLICY_AUTOMATIC_ANNOUNCES_ENABLED
-    | V2_POLICY_RMAP_DISCOVERY_ENABLED
-    | V2_POLICY_RMAP_SHARE_LOCATION;
+const POLICY_WIFI_TRANSPORT_ENABLED: u8 = 1 << 0;
+const POLICY_AUTOMATIC_ANNOUNCES_ENABLED: u8 = 1 << 1;
+const POLICY_RMAP_DISCOVERY_ENABLED: u8 = 1 << 2;
+const POLICY_RMAP_SHARE_LOCATION: u8 = 1 << 3;
+const POLICY_VALID_MASK: u8 = POLICY_WIFI_TRANSPORT_ENABLED
+    | POLICY_AUTOMATIC_ANNOUNCES_ENABLED
+    | POLICY_RMAP_DISCOVERY_ENABLED
+    | POLICY_RMAP_SHARE_LOCATION;
 const ZERO_DIGEST: [u8; DIGEST_SIZE] = [0; DIGEST_SIZE];
 
 // Keep this domain exactly one SHA-256 block. A final public block overwrites
@@ -122,13 +117,12 @@ const COMMIT_MARKER: [u8; COMMIT_SIZE] = [
 const _: () = assert!(PARTITION_SIZE == 2 * SECTOR_SIZE);
 const _: () = assert!(TCP_PEER_OFFSET == 640);
 const _: () = assert!(PAYLOAD_RESERVED_OFFSET == 704);
-const _: () = assert!(V2_EXTENSION_RESERVED_OFFSET == 707);
-const _: () = assert!(V3_LORA_TX_POWER_DBM_OFFSET == 707);
-const _: () = assert!(V2_HOSTNAME_OFFSET == 716);
-const _: () = assert!(V2_HOSTNAME_END == 812);
-const _: () = assert!(V4_LORA_PROFILE_END == 822);
+const _: () = assert!(LORA_TX_POWER_DBM_OFFSET == 707);
+const _: () = assert!(HOSTNAME_OFFSET == 716);
+const _: () = assert!(HOSTNAME_END == 812);
+const _: () = assert!(LORA_PROFILE_END == 822);
 const _: () = assert!(PAYLOAD_RESERVED_OFFSET < PROTECTED_SIZE);
-const _: () = assert!(V2_HOSTNAME_END < PROTECTED_SIZE);
+const _: () = assert!(HOSTNAME_END < PROTECTED_SIZE);
 const _: () = assert!(COMMIT_OFFSET + COMMIT_SIZE == RECORD_SIZE);
 const _: () =
     assert!((DIGEST_DOMAIN.len() + PROTECTED_SIZE + DIGEST_FLUSH_TRAILER.len()).is_multiple_of(64));
@@ -208,7 +202,7 @@ pub enum NetworkConfigModelError {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum LoraTxPower {
-    /// Requested +14 dBm output and the compatibility default.
+    /// Requested +14 dBm output and the product default.
     #[default]
     Dbm14,
     /// Requested +17 dBm output.
@@ -259,7 +253,7 @@ impl TryFrom<i32> for LoraTxPower {
     }
 }
 
-/// Atomic, transport-independent LoRa compatibility profile.
+/// Atomic, transport-independent LoRa radio profile.
 ///
 /// This persistent model validates numeric shape only. A product board must
 /// additionally validate the occupied channel, fitted RF path, and driver
@@ -274,7 +268,7 @@ pub struct LoraRadioProfile {
 }
 
 impl LoraRadioProfile {
-    /// Current backward-compatible NA915 profile used for legacy snapshots.
+    /// Default NA915 profile used by a newly provisioned configuration.
     pub const DEFAULT: Self = Self {
         frequency_hz: 915_000_000,
         bandwidth_hz: 125_000,
@@ -662,7 +656,7 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Construct an empty configuration using backward-compatible policy defaults.
+    /// Construct an empty configuration using the product defaults.
     pub const fn empty() -> Self {
         Self {
             wifi_profiles: [None, None, None, None],
@@ -1575,8 +1569,8 @@ fn encode_record(
             }
             OutboundTcpPeerAddress::Dns(hostname) => {
                 record[TCP_PEER_OFFSET + 2] = TCP_ADDRESS_FAMILY_DNS;
-                record[V2_HOSTNAME_LENGTH_OFFSET] = hostname.length;
-                record[V2_HOSTNAME_OFFSET..V2_HOSTNAME_OFFSET + usize::from(hostname.length)]
+                record[HOSTNAME_LENGTH_OFFSET] = hostname.length;
+                record[HOSTNAME_OFFSET..HOSTNAME_OFFSET + usize::from(hostname.length)]
                     .copy_from_slice(hostname.as_bytes());
             }
         }
@@ -1584,36 +1578,36 @@ fn encode_record(
 
     let mut policy_flags = 0_u8;
     if configuration.wifi_transport_enabled {
-        policy_flags |= V2_POLICY_WIFI_TRANSPORT_ENABLED;
+        policy_flags |= POLICY_WIFI_TRANSPORT_ENABLED;
     }
     if configuration.automatic_announces_enabled {
-        policy_flags |= V2_POLICY_AUTOMATIC_ANNOUNCES_ENABLED;
+        policy_flags |= POLICY_AUTOMATIC_ANNOUNCES_ENABLED;
     }
     if configuration.rmap_discovery_enabled {
-        policy_flags |= V2_POLICY_RMAP_DISCOVERY_ENABLED;
+        policy_flags |= POLICY_RMAP_DISCOVERY_ENABLED;
     }
     if configuration.rmap_share_location {
-        policy_flags |= V2_POLICY_RMAP_SHARE_LOCATION;
+        policy_flags |= POLICY_RMAP_SHARE_LOCATION;
     }
-    record[V2_POLICY_FLAGS_OFFSET] = policy_flags;
-    record[V3_LORA_TX_POWER_DBM_OFFSET] = configuration.lora_tx_power().encoded_dbm();
+    record[POLICY_FLAGS_OFFSET] = policy_flags;
+    record[LORA_TX_POWER_DBM_OFFSET] = configuration.lora_tx_power().encoded_dbm();
     put_u32(
         &mut record[..],
-        V4_LORA_FREQUENCY_HZ_OFFSET,
+        LORA_FREQUENCY_HZ_OFFSET,
         configuration.lora_profile.frequency_hz(),
     );
     put_u32(
         &mut record[..],
-        V4_LORA_BANDWIDTH_HZ_OFFSET,
+        LORA_BANDWIDTH_HZ_OFFSET,
         configuration.lora_profile.bandwidth_hz(),
     );
-    record[V4_LORA_SPREADING_FACTOR_OFFSET] = configuration.lora_profile.spreading_factor();
-    record[V4_LORA_CODING_RATE_DENOMINATOR_OFFSET] =
+    record[LORA_SPREADING_FACTOR_OFFSET] = configuration.lora_profile.spreading_factor();
+    record[LORA_CODING_RATE_DENOMINATOR_OFFSET] =
         configuration.lora_profile.coding_rate_denominator();
     if let Some(location) = configuration.phone_location {
-        record[V2_LOCATION_PRESENT_OFFSET] = 1;
-        put_i32(&mut record[..], V2_LATITUDE_OFFSET, location.latitude_e6);
-        put_i32(&mut record[..], V2_LONGITUDE_OFFSET, location.longitude_e6);
+        record[LOCATION_PRESENT_OFFSET] = 1;
+        put_i32(&mut record[..], LATITUDE_OFFSET, location.latitude_e6);
+        put_i32(&mut record[..], LONGITUDE_OFFSET, location.longitude_e6);
     }
 
     let digest = snapshot_digest(&record[..PROTECTED_SIZE]);
@@ -1662,7 +1656,7 @@ where
         ));
     }
     let semantic = read_u16(&record[..], 10);
-    if !(MIN_SUPPORTED_SEMANTIC_FORMAT_VERSION..=SEMANTIC_FORMAT_VERSION).contains(&semantic) {
+    if semantic != SEMANTIC_FORMAT_VERSION {
         return Ok(invalid_status(
             sector,
             InvalidSectorKind::UnsupportedSemantic(semantic),
@@ -1700,7 +1694,7 @@ where
     {
         return Ok(invalid_status(sector, InvalidSectorKind::CommittedCorrupt));
     }
-    let Some(configuration) = decode_configuration(&record[..PROTECTED_SIZE], semantic) else {
+    let Some(configuration) = decode_configuration(&record[..PROTECTED_SIZE]) else {
         return Ok(invalid_status(sector, InvalidSectorKind::CommittedCorrupt));
     };
     let mut digest = [0_u8; DIGEST_SIZE];
@@ -1718,7 +1712,7 @@ where
     }))
 }
 
-fn decode_configuration(protected: &[u8], semantic_version: u16) -> Option<NetworkConfig> {
+fn decode_configuration(protected: &[u8]) -> Option<NetworkConfig> {
     let profile_count = usize::from(protected[13]);
     if profile_count > WIFI_PROFILE_CAPACITY || protected[14] & !HEADER_FLAG_TCP_PEER_PRESENT != 0 {
         return None;
@@ -1761,86 +1755,35 @@ fn decode_configuration(protected: &[u8], semantic_version: u16) -> Option<Netwo
         configuration.insert_wifi_profile(profile).ok()?;
     }
 
-    match semantic_version {
-        1 => decode_v1_extension(protected, &mut configuration)?,
-        2 => decode_v2_extension(protected, &mut configuration)?,
-        3 => decode_v3_extension(protected, &mut configuration)?,
-        4 => decode_v4_extension(protected, &mut configuration)?,
-        _ => return None,
-    }
+    decode_current_extension(protected, &mut configuration)?;
     Some(configuration)
 }
 
-fn decode_v1_extension(protected: &[u8], configuration: &mut NetworkConfig) -> Option<()> {
-    let peer_slot = &protected[TCP_PEER_OFFSET..TCP_PEER_OFFSET + TCP_PEER_SLOT_SIZE];
-    let peer_present = protected[14] & HEADER_FLAG_TCP_PEER_PRESENT != 0;
-    if !peer_present {
-        if peer_slot.iter().any(|byte| *byte != 0) {
-            return None;
-        }
-    } else {
-        if peer_slot[0] != 1
-            || peer_slot[1] > 1
-            || peer_slot[2] != TCP_ADDRESS_FAMILY_IPV4
-            || peer_slot[3] != 0
-            || peer_slot[10..].iter().any(|byte| *byte != 0)
-        {
-            return None;
-        }
-        let mut ipv4 = [0_u8; 4];
-        ipv4.copy_from_slice(&peer_slot[4..8]);
-        let peer = OutboundTcpPeer::new(ipv4, read_u16(peer_slot, 8), peer_slot[1] != 0).ok()?;
-        configuration.set_tcp_peer(Some(peer));
-    }
-    if protected[PAYLOAD_RESERVED_OFFSET..PROTECTED_SIZE]
-        .iter()
-        .any(|byte| *byte != 0)
-    {
-        return None;
-    }
-    Some(())
-}
-
-fn decode_v2_extension(protected: &[u8], configuration: &mut NetworkConfig) -> Option<()> {
-    if protected[V2_EXTENSION_RESERVED_OFFSET] != 0 {
-        return None;
-    }
-    decode_v2_payload(protected, configuration, V2_HOSTNAME_END)
-}
-
-fn decode_v3_extension(protected: &[u8], configuration: &mut NetworkConfig) -> Option<()> {
-    let lora_tx_power =
-        LoraTxPower::try_from_dbm(i32::from(protected[V3_LORA_TX_POWER_DBM_OFFSET])).ok()?;
-    decode_v2_payload(protected, configuration, V2_HOSTNAME_END)?;
-    configuration.set_lora_tx_power(lora_tx_power);
-    Some(())
-}
-
-fn decode_v4_extension(protected: &[u8], configuration: &mut NetworkConfig) -> Option<()> {
+fn decode_current_extension(protected: &[u8], configuration: &mut NetworkConfig) -> Option<()> {
     let tx_power =
-        LoraTxPower::try_from_dbm(i32::from(protected[V3_LORA_TX_POWER_DBM_OFFSET])).ok()?;
+        LoraTxPower::try_from_dbm(i32::from(protected[LORA_TX_POWER_DBM_OFFSET])).ok()?;
     let profile = LoraRadioProfile::new(
-        read_u32(protected, V4_LORA_FREQUENCY_HZ_OFFSET),
-        read_u32(protected, V4_LORA_BANDWIDTH_HZ_OFFSET),
-        protected[V4_LORA_SPREADING_FACTOR_OFFSET],
-        protected[V4_LORA_CODING_RATE_DENOMINATOR_OFFSET],
+        read_u32(protected, LORA_FREQUENCY_HZ_OFFSET),
+        read_u32(protected, LORA_BANDWIDTH_HZ_OFFSET),
+        protected[LORA_SPREADING_FACTOR_OFFSET],
+        protected[LORA_CODING_RATE_DENOMINATOR_OFFSET],
         tx_power,
     )
     .ok()?;
-    decode_v2_payload(protected, configuration, V4_LORA_PROFILE_END)?;
+    decode_current_payload(protected, configuration, LORA_PROFILE_END)?;
     configuration.set_lora_profile(profile);
     Some(())
 }
 
-fn decode_v2_payload(
+fn decode_current_payload(
     protected: &[u8],
     configuration: &mut NetworkConfig,
     extension_end: usize,
 ) -> Option<()> {
-    let policy_flags = protected[V2_POLICY_FLAGS_OFFSET];
-    let location_present = protected[V2_LOCATION_PRESENT_OFFSET];
-    let hostname_length = usize::from(protected[V2_HOSTNAME_LENGTH_OFFSET]);
-    if policy_flags & !V2_POLICY_VALID_MASK != 0
+    let policy_flags = protected[POLICY_FLAGS_OFFSET];
+    let location_present = protected[LOCATION_PRESENT_OFFSET];
+    let hostname_length = usize::from(protected[HOSTNAME_LENGTH_OFFSET]);
+    if policy_flags & !POLICY_VALID_MASK != 0
         || location_present > 1
         || hostname_length > MAX_DNS_HOSTNAME_LENGTH
         || protected[extension_end..PROTECTED_SIZE]
@@ -1849,14 +1792,14 @@ fn decode_v2_payload(
     {
         return None;
     }
-    configuration.set_wifi_transport_enabled(policy_flags & V2_POLICY_WIFI_TRANSPORT_ENABLED != 0);
+    configuration.set_wifi_transport_enabled(policy_flags & POLICY_WIFI_TRANSPORT_ENABLED != 0);
     configuration
-        .set_automatic_announces_enabled(policy_flags & V2_POLICY_AUTOMATIC_ANNOUNCES_ENABLED != 0);
-    configuration.set_rmap_discovery_enabled(policy_flags & V2_POLICY_RMAP_DISCOVERY_ENABLED != 0);
-    configuration.set_rmap_share_location(policy_flags & V2_POLICY_RMAP_SHARE_LOCATION != 0);
+        .set_automatic_announces_enabled(policy_flags & POLICY_AUTOMATIC_ANNOUNCES_ENABLED != 0);
+    configuration.set_rmap_discovery_enabled(policy_flags & POLICY_RMAP_DISCOVERY_ENABLED != 0);
+    configuration.set_rmap_share_location(policy_flags & POLICY_RMAP_SHARE_LOCATION != 0);
 
-    let latitude_e6 = read_i32(protected, V2_LATITUDE_OFFSET);
-    let longitude_e6 = read_i32(protected, V2_LONGITUDE_OFFSET);
+    let latitude_e6 = read_i32(protected, LATITUDE_OFFSET);
+    let longitude_e6 = read_i32(protected, LONGITUDE_OFFSET);
     if location_present == 0 {
         if latitude_e6 != 0 || longitude_e6 != 0 {
             return None;
@@ -1865,7 +1808,7 @@ fn decode_v2_payload(
         configuration.set_phone_location(Some(PhoneLocation::new(latitude_e6, longitude_e6).ok()?));
     }
 
-    let hostname_bytes = &protected[V2_HOSTNAME_OFFSET..V2_HOSTNAME_END];
+    let hostname_bytes = &protected[HOSTNAME_OFFSET..HOSTNAME_END];
     if hostname_bytes[hostname_length..]
         .iter()
         .any(|byte| *byte != 0)

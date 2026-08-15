@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate independent local device-API qualification-session vectors.
+"""Generate independent local device-API session vectors.
 
 This implementation uses only Python's standard-library SHA-256 and HMAC. It
 does not call Rust or import Reticulum/Rete code. The fixed inputs are public
@@ -20,8 +20,8 @@ DEFAULT_OUTPUT = ROOT / "interop" / "vectors" / "device-api-session-v1.json"
 
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 0
-SUITE = 1
-BEARER_USB_SERIAL_JTAG = 1
+SUITE = 3
+BEARER_BLE_GATT = 3
 KIND_CLIENT_HELLO = 0x01
 KIND_SERVER_HELLO = 0x02
 KIND_SERVER_PROOF = 0x03
@@ -82,7 +82,7 @@ def client_hello() -> bytes:
             u16(PROTOCOL_MAJOR),
             u16(PROTOCOL_MINOR),
             u16(SUITE),
-            bytes((BEARER_USB_SERIAL_JTAG, 0)),
+            bytes((BEARER_BLE_GATT, 0)),
             CREDENTIAL_ID,
             CLIENT_NONCE,
         )
@@ -97,7 +97,7 @@ def server_hello() -> bytes:
             u16(PROTOCOL_MAJOR),
             u16(PROTOCOL_MINOR),
             u16(SUITE),
-            bytes((BEARER_USB_SERIAL_JTAG, 0)),
+            bytes((BEARER_BLE_GATT, 0)),
             DEVICE_ID,
             SERVER_NONCE,
             u64(CREDENTIAL_GENERATION),
@@ -268,14 +268,14 @@ def build_vectors() -> dict[str, object]:
     return {
         "schema": 1,
         "protocol": "reticulum-device-api-session",
-        "profile": "usb-serial-jtag-qualification-integrity-only",
+        "profile": "ble-gatt-authenticated-integrity-only",
         "generator": "interop/python/generate_device_api_session_vectors.py",
         "command": "python3 interop/python/generate_device_api_session_vectors.py",
         "inputs": {
             "protocol_major": PROTOCOL_MAJOR,
             "protocol_minor": PROTOCOL_MINOR,
             "suite": SUITE,
-            "bearer": BEARER_USB_SERIAL_JTAG,
+            "bearer": BEARER_BLE_GATT,
             "credential_id_hex": CREDENTIAL_ID.hex(),
             "credential_generation": CREDENTIAL_GENERATION,
             "device_id_hex": DEVICE_ID.hex(),

@@ -95,11 +95,11 @@ pub enum UnrelatedEvent {
     OtherKind(ApplicationEventKind),
 }
 
-/// Complete-message carrier deliberately not admitted by this tranche.
+/// Complete-message carrier without a bounded native ownership path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedCarrier {
     /// Completed Resources need the same Link destination binding, and native
-    /// Resource ingress remains disabled until bounded admission is qualified.
+    /// Resource ingress remains disabled without bounded durable admission.
     ResourceComplete {
         /// Reticulum Link identifier.
         link: [u8; 16],
@@ -123,7 +123,7 @@ pub enum DeferredIngress {
     /// The wire crate supports this complete-message carrier, but its bounded
     /// native ownership path is not enabled. This classification does not
     /// establish LXMF ownership: a global dispatcher must retain or quarantine
-    /// the event until that carrier has a qualified application boundary.
+    /// the event until that carrier has a bounded application owner.
     UnsupportedCarrier(UnsupportedCarrier),
 }
 

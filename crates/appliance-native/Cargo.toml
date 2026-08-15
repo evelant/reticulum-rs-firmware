@@ -12,12 +12,12 @@ getrandom.workspace = true
 hex.workspace = true
 rand_core.workspace = true
 reticulum-device-client = { path = "../device-client" }
-reticulum-device-api = { path = "../device-api", default-features = false, features = ["experimental-lxmf", "experimental-nomad", "experimental-network-config"] }
+reticulum-device-api = { path = "../device-api", default-features = false, features = ["lxmf", "nomad", "network-config"] }
 reticulum-device-api-ble = { path = "../device-api-ble" }
 reticulum-device-api-pairing = { path = "../device-api-pairing", default-features = false }
-reticulum-lxmf-chat-app = { path = "../lxmf-chat-app" }
-reticulum-lxmf-chat-runtime = { path = "../lxmf-chat-runtime" }
-reticulum-device-pairing-client = { path = "../device-pairing-client", default-features = false }
+reticulum-appliance-sync = { path = "../appliance-sync" }
+reticulum-appliance-runtime = { path = "../appliance-runtime" }
+reticulum-device-pairing-client = { path = "../device-pairing-client" }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,7 +28,7 @@ zeroize = { workspace = true, features = ["alloc"] }
 [dev-dependencies]
 reticulum-device-api-framing = { path = "../device-api-framing" }
 reticulum-device-api-session = { path = "../device-api-session" }
-reticulum-lxmf-chat-core = { path = "../lxmf-chat-core" }
+reticulum-appliance-store = { path = "../appliance-store" }
 
 [lib]
 crate-type = ["lib", "staticlib"]

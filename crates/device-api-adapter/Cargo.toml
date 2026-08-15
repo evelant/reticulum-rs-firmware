@@ -9,15 +9,13 @@ publish.workspace = true
 
 [features]
 default = []
-experimental-rns-data = ["reticulum-device-api/experimental-rns-data"]
-experimental-rns-inbox = ["reticulum-device-api/experimental-rns-inbox"]
-experimental-lxmf = ["reticulum-device-api/experimental-lxmf"]
-experimental-nomad = ["reticulum-device-api/experimental-nomad"]
-experimental-network-config = [
-    "experimental-rns-inbox",
-    "experimental-lxmf",
-    "experimental-nomad",
-    "reticulum-device-api/experimental-network-config",
+rns-data = ["reticulum-device-api/rns-data"]
+lxmf = ["reticulum-device-api/lxmf"]
+nomad = ["reticulum-device-api/nomad"]
+network-config = [
+    "lxmf",
+    "nomad",
+    "reticulum-device-api/network-config",
 ]
 
 [dependencies]

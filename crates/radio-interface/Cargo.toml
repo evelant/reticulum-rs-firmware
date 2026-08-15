@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 lora-modulation.workspace = true
-reticulum-rns-conformance = { path = "../rns-conformance" }
 
 [dev-dependencies]
 embassy-sync.workspace = true

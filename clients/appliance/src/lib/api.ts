@@ -7,8 +7,7 @@ type ApplianceClientConstructor = new () => ApplianceClient;
 /**
  * Native builds own their local Rust/SQLite runtime by default. Keeping an
  * explicit HTTP origin preserves the development-server adapter. The native
- * runtime uses foreground BLE by default and opts into its Wi-Fi proof
- * connector through `EXPO_PUBLIC_APPLIANCE_WIFI_ENDPOINT`.
+ * runtime uses the foreground BLE device-API connector.
  */
 export const ApplianceApi: ApplianceClientConstructor =
   configuredApiOrigin().length === 0 ? NativeApplianceClient : HttpApplianceClient;

@@ -15,26 +15,28 @@ function snapshot(connection: HttpConnectionState): HttpApplianceSnapshot {
   };
 }
 
-describe("HTTP-v1 appliance projection", () => {
-  test("maps legacy USB labels into the generic ready connection", () => {
+describe("HTTP appliance projection", () => {
+  test("retains bearer-neutral ready metadata", () => {
     expect(
       applianceSnapshotFromHttp(
         snapshot({
           state: "ready",
-          port: "/dev/cu.usbmodem-test",
-          usb_serial: "ACA704E13E88",
+          transport: "bluetooth_low_energy",
+          endpoint: "peripheral-a",
+          device_label: "ACA704E13E88",
         }),
       ),
     ).toEqual({
       ...snapshot({
         state: "ready",
-        port: "/dev/cu.usbmodem-test",
-        usb_serial: "ACA704E13E88",
+        transport: "bluetooth_low_energy",
+        endpoint: "peripheral-a",
+        device_label: "ACA704E13E88",
       }),
       connection: {
         state: "ready",
-        transport: "usb_serial",
-        endpoint: "/dev/cu.usbmodem-test",
+        transport: "bluetooth_low_energy",
+        endpoint: "peripheral-a",
         device_label: "ACA704E13E88",
       },
     });

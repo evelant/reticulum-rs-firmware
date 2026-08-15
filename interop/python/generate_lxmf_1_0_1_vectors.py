@@ -692,7 +692,7 @@ def build_vectors() -> dict[str, object]:
         "requirements": "interop/python/requirements-lxmf-1.0.1.txt",
         "requirements_sha256": _sha256_file(REQUIREMENTS),
         "command": (
-            "PYTHONPATH=artifacts/phase0/lxmf-1.0.1-python "
+            "PYTHONPATH=target/interop/lxmf-1.0.1 "
             "python3.13 interop/python/generate_lxmf_1_0_1_vectors.py"
         ),
         "python_version": platform.python_version(),

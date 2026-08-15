@@ -27,11 +27,10 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 mod tests;
 
-/// Physical erase extent used by every supported format version.
+/// Physical erase extent used by the store format.
 pub const EXTENT_SIZE: usize = 4096;
 /// Current physical format version.
-pub const PHYSICAL_FORMAT_VERSION: u16 = 2;
-const LEGACY_PHYSICAL_FORMAT_VERSION: u16 = 1;
+pub const PHYSICAL_FORMAT_VERSION: u16 = 3;
 /// Bytes occupied by the repeated header in every extent.
 pub const EXTENT_HEADER_SIZE: usize = 512;
 /// Bytes occupied by the footer in the final extent.
@@ -1562,9 +1561,7 @@ fn encode_header(
     }
     header[HEADER_EXACT_WIRE_DIGEST_OFFSET..HEADER_PADDING_OFFSET]
         .copy_from_slice(exact_wire_digest.as_bytes());
-    if format_version >= 2
-        && let Some(ingress) = metadata.ingress_observation()
-    {
+    if let Some(ingress) = metadata.ingress_observation() {
         header[HEADER_INGRESS_KIND_OFFSET] = 1;
         header[HEADER_INGRESS_INTERFACE_OFFSET] = ingress.interface().get();
         if let Some(signal) = ingress.signal() {
@@ -1590,7 +1587,7 @@ fn decode_header(
         return Err(HeaderDecodeError::Invalid);
     }
     let version = read_u16(header, HEADER_VERSION_OFFSET);
-    if version != LEGACY_PHYSICAL_FORMAT_VERSION && version != PHYSICAL_FORMAT_VERSION {
+    if version != PHYSICAL_FORMAT_VERSION {
         return Err(HeaderDecodeError::UnsupportedVersion(version));
     }
     if read_u16(header, HEADER_SIZE_OFFSET) != EXTENT_HEADER_SIZE as u16 {
@@ -1647,11 +1644,9 @@ fn decode_header(
         read_u32(header, HEADER_LENGTHS_OFFSET + 16) as usize,
     )
     .map_err(|_| HeaderDecodeError::Invalid)?;
-    let ingress = match (version, header[HEADER_INGRESS_KIND_OFFSET]) {
-        (LEGACY_PHYSICAL_FORMAT_VERSION, 0) => None,
-        (LEGACY_PHYSICAL_FORMAT_VERSION, _) => return Err(HeaderDecodeError::Invalid),
-        (_, 0) => None,
-        (_, 1) => {
+    let ingress = match header[HEADER_INGRESS_KIND_OFFSET] {
+        0 => None,
+        1 => {
             let signal = match header[HEADER_INGRESS_SIGNAL_KIND_OFFSET] {
                 0 => None,
                 1 => Some(InboundSignalObservation::new(

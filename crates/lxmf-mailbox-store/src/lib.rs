@@ -18,12 +18,12 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 mod tests;
 
-/// Exact raw-NOR range required by physical format version 1.
+/// Exact raw-NOR range required by the current physical format.
 pub const PARTITION_SIZE: usize = 8_192;
 /// Size of either alternating snapshot sector.
 pub const SECTOR_SIZE: usize = 4_096;
 /// Current on-flash physical format version.
-pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
+pub const PHYSICAL_FORMAT_VERSION: u16 = 2;
 
 const PROTECTED_SIZE: usize = 256;
 const DIGEST_SIZE: usize = 32;
@@ -304,6 +304,13 @@ impl MountedMailboxStore {
 pub enum MailboxStoreFault {
     /// Binding geometry or backend capacity is incompatible.
     InvalidBinding,
+    /// A committed snapshot uses a non-current physical format version.
+    UnsupportedPhysicalVersion {
+        /// Sector containing the snapshot.
+        sector: MailboxStoreSector,
+        /// Version encoded by the snapshot.
+        actual: u16,
+    },
     /// Programmed data is neither a valid snapshot nor a recognizable torn write.
     UnknownProgrammedData {
         /// Damaged sector.
@@ -382,14 +389,9 @@ where
     }
 }
 
-/// Establish the first durable watermark on erased or recognizably torn media.
-///
-/// This is also the migration primitive: callers may baseline the first
-/// snapshot to the latest pre-existing LXMF handle before opening ingress.
-pub fn provision<A>(
-    access: &mut A,
-    acknowledged: Option<MailboxStoreCursor>,
-) -> Result<MountedMailboxStore, MailboxStoreError<A::Error>>
+/// Establish the first empty durable watermark on erased or recognizably torn
+/// media.
+pub fn provision<A>(access: &mut A) -> Result<MountedMailboxStore, MailboxStoreError<A::Error>>
 where
     A: BoundMailboxStoreAccess,
 {
@@ -401,13 +403,7 @@ where
     }
     ensure_erased(access, MailboxStoreSector::A)?;
     let generation = NonZeroU64::MIN;
-    write_snapshot(
-        access,
-        binding,
-        MailboxStoreSector::A,
-        generation,
-        acknowledged,
-    )
+    write_snapshot(access, binding, MailboxStoreSector::A, generation, None)
 }
 
 /// Monotonically advance the durable collection watermark.
@@ -438,31 +434,6 @@ where
         };
     }
     write_successor(current, access, Some(acknowledged))
-}
-
-/// Rebind notification state to the established tail of a new LXMF-store
-/// incarnation.
-///
-/// Unlike [`acknowledge_through`], this operation may move the numeric handle
-/// backwards. Callers must use it only after proving that the mounted
-/// acknowledgement identity is absent or contradictory in the current LXMF
-/// store. The complete identity-bound successor is still committed atomically.
-pub fn rebaseline<A>(
-    current: MountedMailboxStore,
-    access: &mut A,
-    acknowledged: Option<MailboxStoreCursor>,
-) -> Result<MountedMailboxStore, MailboxStoreError<A::Error>>
-where
-    A: BoundMailboxStoreAccess,
-{
-    let binding = validate_write_access(access)?;
-    if binding != current.binding {
-        return Err(MailboxStoreError::Fault(MailboxStoreFault::InvalidBinding));
-    }
-    if acknowledged == current.acknowledged {
-        return Ok(current);
-    }
-    write_successor(current, access, acknowledged)
 }
 
 fn write_successor<A>(
@@ -550,6 +521,19 @@ where
             return Ok(SectorState::Torn);
         }
         return Ok(SectorState::Unknown);
+    }
+    if record[CLAIM_OFFSET..MAGIC_OFFSET] == CLAIM_MARKER
+        && &record[MAGIC_OFFSET..VERSION_OFFSET] == MAGIC
+    {
+        let version = read_u16(&record, VERSION_OFFSET);
+        if version != PHYSICAL_FORMAT_VERSION {
+            return Err(MailboxStoreError::Fault(
+                MailboxStoreFault::UnsupportedPhysicalVersion {
+                    sector,
+                    actual: version,
+                },
+            ));
+        }
     }
     Ok(decode_snapshot(binding, sector, &record)
         .map(SectorState::Valid)
@@ -757,4 +741,8 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("fixed field"))
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().expect("fixed field"))
 }

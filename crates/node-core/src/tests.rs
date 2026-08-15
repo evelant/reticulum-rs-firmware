@@ -1,0 +1,4904 @@
+extern crate std;
+
+use super::*;
+use std::vec::Vec;
+
+#[derive(Default)]
+struct CounterRng(u8);
+
+impl RngCore for CounterRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0; 4];
+        self.fill_bytes(&mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0; 8];
+        self.fill_bytes(&mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, destination: &mut [u8]) {
+        for byte in destination {
+            self.0 = self.0.wrapping_add(1);
+            *byte = self.0;
+        }
+    }
+
+    fn try_fill_bytes(&mut self, destination: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(destination);
+        Ok(())
+    }
+}
+
+impl CryptoRng for CounterRng {}
+
+type TestNode<const PATHS: usize, const BUFFERS: usize> = NodeCore<PATHS, 2, 8, 2, BUFFERS>;
+
+fn identity(tag: u8) -> NodeIdentity {
+    NodeIdentity::from_private_key(&[tag; 64]).unwrap()
+}
+
+fn node<const PATHS: usize, const BUFFERS: usize>(
+    tag: u8,
+    aspect: &str,
+) -> TestNode<PATHS, BUFFERS> {
+    node_with_instance(tag, aspect, tag.wrapping_add(0x80))
+}
+
+fn node_with_instance<const PATHS: usize, const BUFFERS: usize>(
+    tag: u8,
+    aspect: &str,
+    instance_tag: u8,
+) -> TestNode<PATHS, BUFFERS> {
+    TestNode::new(
+        identity(tag),
+        "reticulum",
+        &[aspect],
+        NodeInstanceId::new([instance_tag; 16]),
+        NodeConfig::endpoint(),
+    )
+    .unwrap()
+}
+
+#[test]
+#[allow(
+    unsafe_code,
+    reason = "the successful in-place test value is explicitly dropped after its borrow ends"
+)]
+fn in_place_construction_matches_value_construction() {
+    type Node = TestNode<4, 2>;
+    let instance = NodeInstanceId::new([0xa1; 16]);
+    let by_value = Node::new(
+        identity(51),
+        "reticulum",
+        &["embedded"],
+        instance,
+        NodeConfig::transport(),
+    )
+    .unwrap();
+    let mut destination = MaybeUninit::<Node>::uninit();
+    {
+        let in_place = Node::new_in(
+            &mut destination,
+            identity(51),
+            "reticulum",
+            &["embedded"],
+            instance,
+            NodeConfig::transport(),
+        )
+        .unwrap();
+
+        assert_eq!(in_place.destination_hash(), by_value.destination_hash());
+        assert_eq!(in_place.metrics(), by_value.metrics());
+        assert_eq!(in_place.capacities(), by_value.capacities());
+    }
+
+    // SAFETY: `new_in` returned success above and the resulting reference
+    // no longer exists, so the slot contains exactly one initialized node.
+    unsafe { destination.assume_init_drop() };
+}
+
+#[test]
+#[allow(
+    unsafe_code,
+    reason = "the successful retry value is explicitly dropped after its borrow ends"
+)]
+fn failed_in_place_construction_leaves_destination_reusable() {
+    type Node = TestNode<4, 2>;
+    let mut destination = MaybeUninit::<Node>::uninit();
+    let oversized_name = "x".repeat(130);
+    let failure = Node::new_in(
+        &mut destination,
+        identity(52),
+        &oversized_name,
+        &[],
+        NodeInstanceId::new([0xa2; 16]),
+        NodeConfig::endpoint(),
+    );
+    assert_eq!(
+        failure.err(),
+        Some(NodeConstructionError::InvalidRnsConfiguration)
+    );
+
+    let instance = NodeInstanceId::new([0xa3; 16]);
+    let expected = Node::new(
+        identity(52),
+        "reticulum",
+        &["retry"],
+        instance,
+        NodeConfig::endpoint(),
+    )
+    .unwrap();
+    {
+        let retried = Node::new_in(
+            &mut destination,
+            identity(52),
+            "reticulum",
+            &["retry"],
+            instance,
+            NodeConfig::endpoint(),
+        )
+        .unwrap();
+        assert_eq!(retried.destination_hash(), expected.destination_hash());
+        assert_eq!(retried.metrics(), expected.metrics());
+        assert_eq!(retried.capacities(), expected.capacities());
+    }
+
+    // SAFETY: the failed attempt left the slot uninitialized and the
+    // retry returned success; its resulting reference no longer exists.
+    unsafe { destination.assume_init_drop() };
+}
+
+#[test]
+fn packet_ingress_origin_survives_the_node_to_rns_boundary() {
+    let interface = PacketInterfaceId::new(7);
+    let signal = PacketSignalObservation::new(-91, 4);
+    let remote = PacketIngressObservation::remote(interface, Some(signal));
+    let local = PacketIngressObservation::local_origin(interface);
+
+    assert_eq!(remote.origin(), PacketIngressOrigin::RemoteInterface);
+    assert_eq!(local.origin(), PacketIngressOrigin::LocalOrigin);
+    assert_eq!(
+        PacketIngressObservation::from_rns(remote.into_rns()),
+        remote
+    );
+    assert_eq!(PacketIngressObservation::from_rns(local.into_rns()), local);
+}
+
+#[test]
+fn additional_inbound_destination_and_identity_lookup_remain_narrow_and_bounded() {
+    let mut owner = node_with_instance::<8, 0>(50, "embedded", 0x90);
+    let primary = owner.destination_hash();
+    let delivery = owner
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    assert_ne!(delivery, primary);
+
+    let mut rebuilt = node_with_instance::<8, 0>(50, "embedded", 0x91);
+    assert_eq!(
+        rebuilt
+            .register_inbound_single_destination("lxmf", &["delivery"])
+            .unwrap(),
+        delivery
+    );
+
+    for aspect in ["propagation", "stamp", "control"] {
+        owner
+            .register_inbound_single_destination("lxmf", &[aspect])
+            .unwrap();
+    }
+    assert_eq!(
+        owner.register_inbound_single_destination("lxmf", &["overflow"]),
+        Err(LocalDestinationRegistrationError::LimitReached { limit: 4 })
+    );
+
+    let mut peer = NodeCore::<8, 2, 8, 2, 0>::new(
+        identity(51),
+        "lxmf",
+        &["delivery"],
+        NodeInstanceId::new([0x92; 16]),
+        NodeConfig::endpoint(),
+    )
+    .unwrap();
+    let peer_destination = peer.destination_hash();
+    let peer_probe_destination = peer.register_proof_probe_destination().unwrap();
+    let peer_public_key = identity(51).public_key();
+    assert!(!owner.has_path(&peer_destination));
+    assert_eq!(owner.retained_path_hops(&peer_destination), None);
+    assert_eq!(owner.retained_path_next_hop(&peer_destination), None);
+    owner
+        .register_peer(
+            &identity(51),
+            "lxmf",
+            &["delivery"],
+            MonotonicSeconds::new(1),
+        )
+        .unwrap();
+    assert!(owner.has_path(&peer_destination));
+    assert_eq!(owner.retained_path_hops(&peer_destination), Some(1));
+    assert_eq!(owner.retained_path_next_hop(&peer_destination), None);
+    assert_eq!(
+        owner.recall_identity(&peer_destination),
+        Some(peer_public_key)
+    );
+    assert_eq!(
+        owner.proof_probe_destination_for(&peer_destination),
+        Some(peer_probe_destination)
+    );
+    assert_eq!(
+        owner.recall_identity(&DestinationHash::new([0xee; 16])),
+        None
+    );
+    assert_eq!(
+        owner.proof_probe_destination_for(&DestinationHash::new([0xee; 16])),
+        None
+    );
+}
+
+#[test]
+fn proof_probe_identity_promotion_enables_data_without_fabricating_a_route() {
+    let mut owner = node_with_instance::<8, 1>(52, "embedded", 0x93);
+    let peer_identity = identity(53);
+    let peer = NodeCore::<8, 2, 8, 2, 0>::new(
+        identity(53),
+        "lxmf",
+        &["delivery"],
+        NodeInstanceId::new([0x94; 16]),
+        NodeConfig::endpoint(),
+    )
+    .unwrap();
+    let announced_destination = peer.destination_hash();
+    owner
+        .register_peer(
+            &peer_identity,
+            "lxmf",
+            &["delivery"],
+            MonotonicSeconds::new(1),
+        )
+        .unwrap();
+    let probe_destination = owner
+        .proof_probe_destination_for(&announced_destination)
+        .expect("the authenticated announce identity derives a probe destination");
+    assert!(!owner.has_path(&probe_destination));
+
+    let mut buffer = registered_buffer(&mut owner);
+    let mut rng = CounterRng::default();
+    let failure = match owner.prepare_data_into_slot(
+        &mut buffer,
+        prepare_request(
+            probe_destination,
+            b"probe",
+            2,
+            2_000,
+            3_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("probe DATA prepared before identity promotion"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), SubmitError::UnknownDestination);
+    let buffer = available(failure);
+
+    assert_eq!(
+        owner.prepare_proof_probe_destination_for(&announced_destination),
+        Ok(probe_destination)
+    );
+    assert!(
+        !owner.has_path(&probe_destination),
+        "identity promotion must not invent a direct path"
+    );
+    let job = owner
+        .prepare_data_into_slot(
+            buffer,
+            prepare_request(
+                probe_destination,
+                b"probe",
+                3,
+                3_000,
+                4_000,
+                default_interfaces(),
+            ),
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| {
+            panic!(
+                "promoted probe identity failed DATA preparation: {:?}",
+                failure.reason()
+            )
+        });
+    assert_eq!(job.target(), TxTarget::All);
+    let disposition = owner
+        .complete_tx(
+            job.return_unpermitted().complete(TxCompletionCode::new(0)),
+            owner_time(3_100),
+        )
+        .unwrap_or_else(|failure| {
+            panic!(
+                "unpermitted cleanup lost owner validity: {:?}",
+                failure.reason()
+            )
+        });
+    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+    assert!(!owner.has_path(&probe_destination));
+}
+
+#[test]
+fn basic_lxmf_composition_binds_the_registered_source_inside_the_node_owner() {
+    let mut owner = node_with_instance::<8, 0>(52, "embedded", 0x93);
+    let remote = DestinationHash::new([0xa7; 16]);
+    let mut carrier = [0x55_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+    assert_eq!(
+        owner.prepare_basic_lxmf_into(
+            &remote,
+            1_700_000_000_000,
+            b"title",
+            b"content",
+            &mut carrier,
+        ),
+        Err(PrepareBasicLxmfError::DeliveryDestinationUnavailable)
+    );
+    assert!(carrier.iter().all(|byte| *byte == 0x55));
+
+    let source = owner
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    let prepared = owner
+        .prepare_basic_lxmf_into(
+            &remote,
+            1_700_000_000_000,
+            b"title",
+            b"content",
+            &mut carrier,
+        )
+        .unwrap();
+    assert!(usize::from(prepared.carrier_len()) <= MAX_OPPORTUNISTIC_LXMF_CARRIER);
+    assert_eq!(&carrier[..16], source.as_bytes());
+    assert_ne!(prepared.message_id(), [0; 32]);
+}
+
+#[test]
+fn basic_direct_lxmf_composition_keeps_the_complete_destination_prefixed_wire() {
+    let mut owner = node_with_instance::<8, 0>(53, "embedded", 0x94);
+    let remote = DestinationHash::new([0xa8; 16]);
+    let mut wire = [0x56_u8; MAX_DIRECT_LXMF_WIRE];
+    assert_eq!(
+        owner.prepare_basic_direct_lxmf_into(
+            &remote,
+            1_700_000_000_000,
+            b"title",
+            b"content",
+            &mut wire,
+        ),
+        Err(PrepareBasicLxmfError::DeliveryDestinationUnavailable)
+    );
+    assert!(wire.iter().all(|byte| *byte == 0x56));
+
+    owner
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    let prepared = owner
+        .prepare_basic_direct_lxmf_into(&remote, 1_700_000_000_000, b"title", b"content", &mut wire)
+        .unwrap();
+    let wire_len = usize::from(prepared.wire_len());
+    assert!(wire_len <= MAX_DIRECT_LXMF_WIRE);
+    assert_eq!(&wire[..16], remote.as_bytes());
+    assert_ne!(prepared.message_id(), [0; 32]);
+    assert!(wire[wire_len..].iter().all(|byte| *byte == 0x56));
+}
+
+#[test]
+fn rehydrated_opportunistic_lxmf_uses_the_dedicated_header1_ceiling() {
+    let mut owner = node_with_instance::<8, 1>(54, "embedded", 0x95);
+    owner
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    let recipient = NodeCore::<8, 2, 8, 2, 0>::new(
+        identity(55),
+        "lxmf",
+        &["delivery"],
+        NodeInstanceId::new([0x96; 16]),
+        NodeConfig::endpoint(),
+    )
+    .unwrap();
+    let destination = recipient.destination_hash();
+    owner
+        .register_peer(
+            &identity(55),
+            "lxmf",
+            &["delivery"],
+            MonotonicSeconds::new(1),
+        )
+        .unwrap();
+
+    let mut carrier = [0_u8; MAX_OPPORTUNISTIC_LXMF_CARRIER];
+    let content = [0x6d_u8; reticulum_rns_rete::MAX_OPPORTUNISTIC_LXMF_CONTENT_SIZE];
+    let composed = owner
+        .prepare_basic_lxmf_into(&destination, 1_700_000_000_000, b"", &content, &mut carrier)
+        .unwrap();
+    let carrier = &carrier[..usize::from(composed.carrier_len())];
+    assert!(carrier.len() > MAX_DATA_PAYLOAD);
+    let mut wire = Vec::with_capacity(16 + carrier.len());
+    wire.extend_from_slice(destination.as_bytes());
+    wire.extend_from_slice(carrier);
+
+    let mut buffer = TxPacketBuffer::new();
+    owner.register_packet_buffer(&mut buffer).unwrap();
+    let mut rng = CounterRng::default();
+    let job = owner
+        .prepare_rehydrated_opportunistic_lxmf_into_slot(
+            &mut buffer,
+            PrepareDataRequest {
+                destination,
+                plaintext: &wire,
+                rns_now: MonotonicSeconds::new(2),
+                owner_now: MonotonicMillis::new(2_000),
+                deadline: TxLeaseDeadline::new(MonotonicMillis::new(3_000)),
+                enabled_interfaces: InterfaceSet::from_bits(1 << 1),
+            },
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| {
+            panic!(
+                "dedicated LXMF preparation rejected its Header-1 carrier ceiling: {:?}",
+                failure.reason()
+            )
+        });
+    assert!(job.prepared().packet_len() > 0);
+}
+
+const fn time(seconds: u64) -> MonotonicSeconds {
+    MonotonicSeconds::new(seconds)
+}
+
+const fn announce_time(value: u64) -> AnnounceEmissionTime {
+    match AnnounceEmissionTime::new(value) {
+        Ok(value) => value,
+        Err(_) => panic!("test announce time must fit the wire field"),
+    }
+}
+
+const fn deadline(milliseconds: u64) -> TxLeaseDeadline {
+    TxLeaseDeadline::new(MonotonicMillis::new(milliseconds))
+}
+
+fn prepare_request(
+    destination: DestinationHash,
+    plaintext: &[u8],
+    rns_now: u64,
+    owner_now_ms: u64,
+    deadline_ms: u64,
+    enabled_interfaces: InterfaceSet,
+) -> PrepareDataRequest<'_> {
+    PrepareDataRequest {
+        destination,
+        plaintext,
+        rns_now: time(rns_now),
+        owner_now: owner_time(owner_now_ms),
+        deadline: deadline(deadline_ms),
+        enabled_interfaces,
+    }
+}
+
+const fn owner_time(milliseconds: u64) -> MonotonicMillis {
+    MonotonicMillis::new(milliseconds)
+}
+
+const fn default_interfaces() -> InterfaceSet {
+    InterfaceSet::from_bits(1 << 1)
+}
+
+fn available(failure: PrepareFailure<'_>) -> &mut TxPacketBuffer {
+    match failure.into_buffer() {
+        Ok(buffer) => buffer,
+        Err(_) => panic!("unexpected preparation quarantine"),
+    }
+}
+
+fn reusable(disposition: TxCompletionDisposition<'_>) -> &mut TxPacketBuffer {
+    match disposition {
+        TxCompletionDisposition::Available(buffer)
+        | TxCompletionDisposition::Recovered { buffer, .. } => buffer,
+        TxCompletionDisposition::Next(_) => panic!("rollback advanced fanout"),
+        TxCompletionDisposition::Quarantined(_) => panic!("rollback quarantined buffer"),
+    }
+}
+
+fn interfaces(ids: &[u8]) -> InterfaceSet {
+    let mut set = InterfaceSet::empty();
+    for id in ids {
+        set = set
+            .with(PacketInterfaceId::new(*id))
+            .expect("test interface must fit compact profile");
+    }
+    set
+}
+
+const TEST_PERMIT_RESOURCE: TxPermitResourceId = TxPermitResourceId::new([0x54; 16]);
+
+fn test_permit_requirements() -> TxPermitRequirements {
+    TxPermitRequirements::try_new(TEST_PERMIT_RESOURCE, 1).unwrap()
+}
+
+fn test_permit_reservation() -> TxPermitReservation {
+    TxPermitReservation::try_new(TEST_PERMIT_RESOURCE, 1).unwrap()
+}
+
+struct TestPolicy {
+    decision: TxPolicyDecision,
+    calls: usize,
+    candidate: Option<TxAuthorizationCandidate>,
+}
+
+impl TestPolicy {
+    fn allowing() -> Self {
+        Self {
+            decision: TxPolicyDecision::Authorize(test_permit_reservation()),
+            calls: 0,
+            candidate: None,
+        }
+    }
+
+    const fn denying(reason: TxPolicyDenial) -> Self {
+        Self {
+            decision: TxPolicyDecision::Deny(reason),
+            calls: 0,
+            candidate: None,
+        }
+    }
+}
+
+impl TxAuthorizationPolicy for TestPolicy {
+    fn authorize(&mut self, candidate: TxAuthorizationCandidate) -> TxPolicyDecision {
+        self.calls += 1;
+        self.candidate = Some(candidate);
+        self.decision
+    }
+}
+
+fn register_receiver<const PATHS: usize, const BUFFERS: usize>(
+    sender: &mut TestNode<PATHS, BUFFERS>,
+    tag: u8,
+    aspect: &str,
+) {
+    sender
+        .register_peer(&identity(tag), "reticulum", &[aspect], time(0))
+        .unwrap();
+}
+
+fn registered_buffer<const PATHS: usize, const BUFFERS: usize>(
+    owner: &mut TestNode<PATHS, BUFFERS>,
+) -> TxPacketBuffer {
+    let mut buffer = TxPacketBuffer::new();
+    owner.register_packet_buffer(&mut buffer).unwrap();
+    buffer
+}
+
+fn prepare<'a, const PATHS: usize, const BUFFERS: usize>(
+    sender: &mut TestNode<PATHS, BUFFERS>,
+    buffer: &'a mut TxPacketBuffer,
+    destination: DestinationHash,
+    plaintext: &[u8],
+    now: u64,
+    rng: &mut CounterRng,
+) -> TxJob<'a> {
+    prepare_with_interfaces(
+        sender,
+        buffer,
+        destination,
+        plaintext,
+        now,
+        now * 1_000,
+        now * 1_000 + 500,
+        default_interfaces(),
+        rng,
+    )
+}
+
+fn deliver_prepared<const PATHS: usize, const BUFFERS: usize>(
+    sender: &mut TestNode<PATHS, BUFFERS>,
+    receiver: &mut TestNode<PATHS, BUFFERS>,
+    buffer: &mut TxPacketBuffer,
+    plaintext: &[u8],
+    now: u64,
+    interface: PacketInterfaceId,
+    rng: &mut CounterRng,
+) -> NodeActions {
+    let destination = receiver.destination_hash();
+    deliver_prepared_to(
+        sender,
+        receiver,
+        buffer,
+        destination,
+        plaintext,
+        now,
+        interface,
+        InterfaceSet::from_bits(u64::MAX),
+        rng,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deliver_prepared_to<const PATHS: usize, const BUFFERS: usize>(
+    sender: &mut TestNode<PATHS, BUFFERS>,
+    receiver: &mut TestNode<PATHS, BUFFERS>,
+    buffer: &mut TxPacketBuffer,
+    destination: DestinationHash,
+    plaintext: &[u8],
+    now: u64,
+    interface: PacketInterfaceId,
+    enabled_interfaces: InterfaceSet,
+    rng: &mut CounterRng,
+) -> NodeActions {
+    let job = prepare_with_interfaces(
+        sender,
+        buffer,
+        destination,
+        plaintext,
+        now,
+        now * 1_000,
+        now * 1_000 + 500,
+        enabled_interfaces,
+        rng,
+    );
+    let packet_len = usize::from(job.packet_len());
+    let packet = job.owner.buffer.bytes[..packet_len].to_vec();
+    let received = receiver.ingest(&packet, time(now), interface, rng).unwrap();
+    let disposition = sender
+        .complete_tx(
+            job.return_unpermitted().complete(TxCompletionCode::new(0)),
+            owner_time(now * 1_000 + 100),
+        )
+        .unwrap_or_else(|failure| {
+            panic!(
+                "prepared test packet did not return: {:?}",
+                failure.reason()
+            )
+        });
+    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+    received.actions
+}
+
+fn assert_noncovering_reservation_is_denied(
+    sender_tag: u8,
+    receiver_tag: u8,
+    requirements: TxPermitRequirements,
+    reservation: TxPermitReservation,
+) {
+    let mut sender = node::<2, 1>(sender_tag, "sender");
+    let receiver = node::<2, 1>(receiver_tag, "receiver");
+    register_receiver(&mut sender, receiver_tag, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"reservation rejection",
+        1,
+        &mut rng,
+    );
+    let (pending, request) = job.begin_permit(requirements);
+    let mut policy = TestPolicy {
+        decision: TxPolicyDecision::Authorize(reservation),
+        calls: 0,
+        candidate: None,
+    };
+    let reply = sender
+        .authorize_tx(request, owner_time(1_100), &mut policy)
+        .unwrap_or_else(|failure| panic!("valid request failed: {:?}", failure.reason()));
+
+    assert_eq!(policy.calls, 1);
+    assert_eq!(policy.candidate.unwrap().requirements, requirements);
+    assert!(matches!(
+        &reply,
+        TxPermitReply::Denied(denial)
+            if denial.reason()
+                == TxPermitDenialReason::Policy(TxPolicyDenial::CapacityUnavailable)
+    ));
+    assert_eq!(sender.capacities().dispatches_authorized, 0);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+
+    let unpermitted = match pending.resolve(reply, owner_time(1_101)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("non-covering reservation authorized"),
+        Ok(PermitResolution::Expired(_)) => panic!("non-covering reservation expired"),
+        Err(_) => panic!("matching denial reply was rejected"),
+    };
+    assert!(matches!(
+        sender
+            .complete_tx(
+                unpermitted.complete(TxCompletionCode::new(0x554e)),
+                owner_time(1_102),
+            )
+            .unwrap_or_else(|failure| panic!("denied return failed: {:?}", failure.reason())),
+        TxCompletionDisposition::Available(_)
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_with_interfaces<'a, const PATHS: usize, const BUFFERS: usize>(
+    sender: &mut TestNode<PATHS, BUFFERS>,
+    buffer: &'a mut TxPacketBuffer,
+    destination: DestinationHash,
+    plaintext: &[u8],
+    now: u64,
+    owner_now_ms: u64,
+    deadline_ms: u64,
+    enabled_interfaces: InterfaceSet,
+    rng: &mut CounterRng,
+) -> RoutedTxJob<'a> {
+    match sender.prepare_data_into_slot(
+        buffer,
+        prepare_request(
+            destination,
+            plaintext,
+            now,
+            owner_now_ms,
+            deadline_ms,
+            enabled_interfaces,
+        ),
+        rng,
+    ) {
+        Ok(job) => job,
+        Err(failure) => panic!("preparation failed: {:?}", failure.reason()),
+    }
+}
+
+fn proof_for(receiver_tag: u8, attempt: AttemptToken) -> Vec<u8> {
+    let signature = identity(receiver_tag).0.sign(attempt.as_bytes()).unwrap();
+    let mut proof = std::vec![0u8; 19 + 32 + 64];
+    proof[0] = 0x03;
+    proof[2..18].copy_from_slice(&attempt.as_bytes()[..16]);
+    proof[19..51].copy_from_slice(attempt.as_bytes());
+    proof[51..].copy_from_slice(&signature);
+    proof
+}
+
+fn implicit_proof_for(receiver_tag: u8, attempt: AttemptToken) -> Vec<u8> {
+    let signature = identity(receiver_tag).0.sign(attempt.as_bytes()).unwrap();
+    let mut proof = std::vec![0u8; 19 + 64];
+    proof[0] = 0x03;
+    proof[2..18].copy_from_slice(&attempt.as_bytes()[..16]);
+    proof[19..].copy_from_slice(&signature);
+    proof
+}
+
+fn link_proof_for(receiver_tag: u8, link_id: [u8; 16], attempt: AttemptToken) -> Vec<u8> {
+    let signature = identity(receiver_tag).0.sign(attempt.as_bytes()).unwrap();
+    let mut proof = std::vec![0u8; 19 + 32 + 64];
+    proof[0] = 0x0f;
+    proof[2..18].copy_from_slice(&link_id);
+    proof[19..51].copy_from_slice(attempt.as_bytes());
+    proof[51..].copy_from_slice(&signature);
+    proof
+}
+
+fn establish_lxmf_link<const PATHS: usize, const BUFFERS: usize>(
+    initiator: &mut TestNode<PATHS, BUFFERS>,
+    responder: &mut TestNode<PATHS, BUFFERS>,
+    responder_identity_tag: u8,
+    rng: &mut CounterRng,
+) -> (DestinationHash, LinkHandle) {
+    initiator
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    let destination = responder
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    initiator
+        .register_peer(
+            &identity(responder_identity_tag),
+            "lxmf",
+            &["delivery"],
+            time(99),
+        )
+        .unwrap();
+    responder
+        .set_destination_accepts_links(&destination, true)
+        .unwrap();
+    responder
+        .set_destination_inbound_proof_policy(&destination, InboundProofPolicy::Always)
+        .unwrap();
+
+    let (request, link) = initiator
+        .initiate_link(&destination, time(100), rng)
+        .expect("LINKREQUEST must be retained");
+    assert_eq!(request.packets.len(), 1);
+    assert_eq!(initiator.link_state(link), Some(LinkState::Handshake));
+    let response = responder
+        .ingest(
+            request.packets[0].bytes(),
+            time(100),
+            PacketInterfaceId::new(7),
+            rng,
+        )
+        .unwrap();
+    assert_eq!(response.actions.packets.len(), 1);
+    let established = initiator
+        .ingest(
+            response.actions.packets[0].bytes(),
+            time(101),
+            PacketInterfaceId::new(3),
+            rng,
+        )
+        .unwrap();
+    assert_eq!(established.actions.packets.len(), 1);
+    responder
+        .ingest(
+            established.actions.packets[0].bytes(),
+            time(102),
+            PacketInterfaceId::new(7),
+            rng,
+        )
+        .unwrap();
+    assert_eq!(initiator.link_state(link), Some(LinkState::Active));
+    assert_eq!(
+        responder.link_state(LinkHandle::new(*link.as_bytes())),
+        Some(LinkState::Active)
+    );
+    (destination, link)
+}
+
+fn direct_lxmf_wire<const PATHS: usize, const BUFFERS: usize>(
+    sender: &TestNode<PATHS, BUFFERS>,
+    destination: DestinationHash,
+    content: &[u8],
+) -> Vec<u8> {
+    let mut storage = [0_u8; MAX_DIRECT_LXMF_WIRE];
+    let prepared = sender
+        .prepare_basic_direct_lxmf_into(
+            &destination,
+            1_700_000_000_000,
+            b"node-core direct",
+            content,
+            &mut storage,
+        )
+        .unwrap();
+    storage[..usize::from(prepared.wire_len())].to_vec()
+}
+
+#[test]
+fn delivery_proof_tag_requires_exact_rete_explicit_single_wire_shape() {
+    let mut bytes = [0_u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = index as u8;
+    }
+    let proof = proof_for(77, AttemptToken(bytes));
+    assert_eq!(
+        delivery_proof_correlation_tag(&proof),
+        Some(u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]))
+    );
+
+    assert_eq!(
+        delivery_proof_correlation_tag(&implicit_proof_for(77, AttemptToken(bytes))),
+        None
+    );
+
+    let mut one_byte_short = proof.clone();
+    one_byte_short.pop();
+    assert_eq!(delivery_proof_correlation_tag(&one_byte_short), None);
+
+    let mut one_byte_long = proof.clone();
+    one_byte_long.push(0);
+    assert_eq!(delivery_proof_correlation_tag(&one_byte_long), None);
+
+    let mut wrong_context = proof.clone();
+    wrong_context[18] = 1;
+    assert_eq!(delivery_proof_correlation_tag(&wrong_context), None);
+
+    let mut wrong_destination = proof.clone();
+    wrong_destination[2] ^= 0xff;
+    assert_eq!(delivery_proof_correlation_tag(&wrong_destination), None);
+
+    let mut forwarded = proof.clone();
+    forwarded[1] = 1;
+    assert_eq!(delivery_proof_correlation_tag(&forwarded), None);
+
+    let mut not_a_proof = proof.clone();
+    not_a_proof[0] = 0;
+    assert_eq!(delivery_proof_correlation_tag(&not_a_proof), None);
+}
+
+#[test]
+fn full_rns_packet_hash_is_hop_invariant_and_rejects_invalid_wire() {
+    let proof = proof_for(78, AttemptToken([0x5a; 32]));
+    let direct = rns_packet_hash(&proof).expect("valid proof packet");
+    let mut forwarded = proof;
+    forwarded[1] = 7;
+    assert_eq!(rns_packet_hash(&forwarded), Some(direct));
+    assert_eq!(rns_packet_hash(&[]), None);
+}
+
+#[test]
+fn delivery_proof_tag_accepts_only_exact_responder_link_wire_shape() {
+    let mut bytes = [0_u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_add(0x40);
+    }
+    let attempt = AttemptToken(bytes);
+    let link_id = [0xa5; 16];
+    let proof = link_proof_for(77, link_id, attempt);
+    assert_eq!(
+        delivery_proof_correlation_tag(&proof),
+        Some(u64::from_le_bytes([
+            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+        ]))
+    );
+
+    let mut wrong_packet_shape = proof.clone();
+    wrong_packet_shape[0] = 0x0b;
+    assert_eq!(delivery_proof_correlation_tag(&wrong_packet_shape), None);
+
+    let mut header_two = proof.clone();
+    header_two[0] |= 0x40;
+    assert_eq!(delivery_proof_correlation_tag(&header_two), None);
+
+    let mut forwarded = proof.clone();
+    forwarded[1] = 1;
+    assert_eq!(delivery_proof_correlation_tag(&forwarded), None);
+
+    let mut wrong_context = proof.clone();
+    wrong_context[18] = 1;
+    assert_eq!(delivery_proof_correlation_tag(&wrong_context), None);
+
+    let mut implicit = proof.clone();
+    implicit.drain(19..51);
+    assert_eq!(delivery_proof_correlation_tag(&implicit), None);
+}
+
+#[test]
+fn capacity_and_project_routing_types_have_explicit_bounds() {
+    assert!(capacity_profile_is_supported(2, 1, 1, 2));
+    assert!(capacity_profile_is_supported(16, 4, 32, 4));
+    assert!(!capacity_profile_is_supported(3, 1, 1, 2));
+    assert!(!capacity_profile_is_supported(2, 0, 1, 2));
+    assert!(!capacity_profile_is_supported(2, 1, 0, 2));
+    assert!(!capacity_profile_is_supported(2, 1, 1, 3));
+
+    let first = PacketInterfaceId::new(0);
+    let last = PacketInterfaceId::new(63);
+    let outside = PacketInterfaceId::new(64);
+    let set = InterfaceSet::empty()
+        .with(first)
+        .unwrap()
+        .with(last)
+        .unwrap();
+    assert!(set.contains(first));
+    assert!(set.contains(last));
+    assert!(!set.contains(outside));
+    assert_eq!(set.with(outside), None);
+    assert_eq!(InterfaceSet::from_bits(set.bits()), set);
+
+    assert_eq!(TxTarget::from_rns(RnsTxTarget::All), TxTarget::All);
+    assert_eq!(
+        TxTarget::from_rns(RnsTxTarget::Only(RnsInterfaceId(7))),
+        TxTarget::Only(PacketInterfaceId::new(7))
+    );
+    assert_eq!(
+        TxTarget::from_rns(RnsTxTarget::AllExcept(RnsInterfaceId(9))),
+        TxTarget::AllExcept(PacketInterfaceId::new(9))
+    );
+    assert_eq!(deadline(123).instant().get(), 123);
+}
+
+#[test]
+fn announce_wrappers_preserve_bounded_admission_and_action_routing() {
+    let mut owner = node::<2, 0>(80, "announce");
+    let mut rng = CounterRng::default();
+    let oversized = [0u8; MAX_ANNOUNCE_APP_DATA + 1];
+    let primary = owner.destination_hash();
+    let expected_public_key = identity(80).public_key();
+    let delivery = owner
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+
+    assert_eq!(
+        owner.queue_announce(Some(&oversized), announce_time(1), &mut rng),
+        Err(AnnounceAdmissionError::AppDataTooLarge {
+            actual: MAX_ANNOUNCE_APP_DATA + 1,
+            maximum: MAX_ANNOUNCE_APP_DATA,
+        })
+    );
+    owner
+        .queue_announce(None, announce_time(1), &mut rng)
+        .unwrap();
+    owner
+        .queue_announce_for(
+            &delivery,
+            Some(b"product announce"),
+            announce_time(2),
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(
+        owner.queue_announce(None, announce_time(1), &mut rng),
+        Err(AnnounceAdmissionError::QueueFull { limit: 2 })
+    );
+
+    let actions = owner.flush_announces(time(1), &mut rng);
+    assert!(actions.events.is_empty());
+    assert_eq!(actions.unroutable_packets, 0);
+    assert_eq!(actions.packets.len(), 2);
+    assert!(actions.packets.iter().all(|packet| {
+        packet.target() == RnsTxTarget::All
+            && reticulum_rns_rete::parse_announce_packet(packet.bytes())
+                .is_ok_and(|announce| announce.fields.pub_key == expected_public_key)
+    }));
+    let primary_announce = actions
+        .packets
+        .iter()
+        .find_map(|packet| {
+            let announce = reticulum_rns_rete::parse_announce_packet(packet.bytes()).ok()?;
+            (announce.packet.destination_hash == primary.as_bytes()).then_some(announce)
+        })
+        .expect("primary destination announce must be present and valid");
+    assert_eq!(primary_announce.fields.app_data, None);
+    let delivery_announce = actions
+        .packets
+        .iter()
+        .find_map(|packet| {
+            let announce = reticulum_rns_rete::parse_announce_packet(packet.bytes()).ok()?;
+            (announce.packet.destination_hash == delivery.as_bytes()).then_some(announce)
+        })
+        .expect("LXMF delivery announce must be present and valid");
+    assert_eq!(
+        delivery_announce.fields.app_data,
+        Some(b"product announce".as_slice())
+    );
+    assert_eq!(
+        AnnounceAdmissionError::from(RnsAnnounceAdmissionError::NativeRejected),
+        AnnounceAdmissionError::NativeRejected
+    );
+}
+
+#[test]
+fn scoped_point_to_point_announce_is_one_shot_through_node_core() {
+    let mut relay = TestNode::<8, 0>::new(
+        identity(83),
+        "reticulum",
+        &["relay"],
+        NodeInstanceId::new([0xd3; 16]),
+        NodeConfig::transport(),
+    )
+    .unwrap();
+    let mut peer = node::<8, 0>(84, "peer");
+    let mut rng = CounterRng::default();
+    peer.queue_announce(None, announce_time(100), &mut rng)
+        .unwrap();
+    let announce = peer.flush_announces(time(100), &mut rng);
+
+    let report = relay
+        .ingest_at_with_broadcast_scope(
+            announce.packets[0].bytes(),
+            time(100),
+            MonotonicInstant::from_secs(100),
+            PacketInterfaceId::new(6),
+            IngressBroadcastScope::PointToPoint,
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(report.actions.packets.len(), 1);
+    assert_eq!(
+        report.actions.packets[0].target(),
+        RnsTxTarget::AllExcept(RnsInterfaceId(6))
+    );
+
+    let delayed = relay.tick(time(106), &mut rng);
+    assert!(
+        delayed.actions.packets.is_empty(),
+        "point-to-point received announces are temporarily one-shot"
+    );
+}
+
+#[test]
+fn inbound_proof_policy_is_explicit_and_controls_proof_actions() {
+    let mut sender = node::<4, 1>(81, "sender");
+    let mut receiver = node::<4, 1>(82, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+
+    assert_eq!(InboundProofPolicy::default(), InboundProofPolicy::Never);
+    receiver
+        .queue_announce(None, announce_time(1), &mut rng)
+        .unwrap();
+    let announce = receiver.flush_announces(time(1), &mut rng);
+    assert_eq!(announce.packets.len(), 1);
+    sender
+        .ingest(
+            announce.packets[0].bytes(),
+            time(1),
+            PacketInterfaceId::new(4),
+            &mut rng,
+        )
+        .unwrap();
+
+    let default_actions = deliver_prepared(
+        &mut sender,
+        &mut receiver,
+        &mut buffer,
+        b"default proof policy",
+        2,
+        PacketInterfaceId::new(7),
+        &mut rng,
+    );
+    assert!(default_actions.packets.is_empty());
+
+    receiver.set_inbound_proof_policy(InboundProofPolicy::Always);
+    let proof_actions = deliver_prepared(
+        &mut sender,
+        &mut receiver,
+        &mut buffer,
+        b"proof requested",
+        3,
+        PacketInterfaceId::new(7),
+        &mut rng,
+    );
+    assert_eq!(proof_actions.packets.len(), 1);
+    assert_eq!(
+        proof_actions.packets[0].target(),
+        RnsTxTarget::Only(RnsInterfaceId(7))
+    );
+    assert_eq!(
+        reticulum_rns_rete::parse_packet(proof_actions.packets[0].bytes())
+            .unwrap()
+            .packet_type,
+        reticulum_rns_rete::PacketType::Proof
+    );
+
+    receiver.set_inbound_proof_policy(InboundProofPolicy::Never);
+    let disabled_actions = deliver_prepared(
+        &mut sender,
+        &mut receiver,
+        &mut buffer,
+        b"proof disabled",
+        4,
+        PacketInterfaceId::new(7),
+        &mut rng,
+    );
+    assert!(disabled_actions.packets.is_empty());
+}
+
+#[test]
+fn destination_link_policy_rejects_an_unregistered_destination() {
+    let mut receiver = node::<4, 0>(83, "link-policy");
+
+    assert_eq!(
+        receiver.set_destination_accepts_links(&DestinationHash::new([0xee; 16]), true),
+        Err(LocalDestinationLinkPolicyError::DestinationNotRegistered)
+    );
+}
+
+#[test]
+fn destination_link_policy_only_controls_local_link_admission() {
+    let mut sender = node::<8, 1>(85, "sender");
+    let mut receiver = node::<8, 1>(86, "primary");
+    let delivery = receiver
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    receiver
+        .set_destination_inbound_proof_policy(&delivery, InboundProofPolicy::Always)
+        .unwrap();
+    sender
+        .register_peer(&identity(86), "lxmf", &["delivery"], time(0))
+        .unwrap();
+
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let link_destination = RnsDestinationHash::from(*delivery.as_bytes());
+    let (link_request, _) = sender
+        .rns
+        .initiate_link(link_destination, 1, &mut rng)
+        .expect("test LINKREQUEST must construct");
+
+    receiver
+        .set_destination_accepts_links(&delivery, false)
+        .unwrap();
+    let rejected = receiver
+        .ingest(
+            link_request.bytes(),
+            time(1),
+            PacketInterfaceId::new(7),
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(
+        rejected.disposition,
+        IngressDisposition::Rejected(
+            reticulum_rns_rete::IngressDropReason::DestinationDoesNotAcceptLinks,
+        )
+    );
+    assert!(rejected.actions.events.is_empty());
+    assert!(rejected.actions.packets.is_empty());
+
+    let links_disabled_data = deliver_prepared_to(
+        &mut sender,
+        &mut receiver,
+        &mut buffer,
+        delivery,
+        b"DATA while Links are disabled",
+        2,
+        PacketInterfaceId::new(11),
+        default_interfaces(),
+        &mut rng,
+    );
+    assert!(matches!(
+        links_disabled_data.events.as_slice(),
+        [ApplicationEvent::DataReceived {
+            destination,
+            payload,
+            ..
+        }] if *destination == *delivery.as_bytes()
+            && payload == b"DATA while Links are disabled"
+    ));
+    assert_eq!(links_disabled_data.packets.len(), 1);
+    assert_eq!(
+        reticulum_rns_rete::parse_packet(links_disabled_data.packets[0].bytes())
+            .unwrap()
+            .packet_type,
+        PacketType::Proof
+    );
+
+    receiver
+        .set_destination_accepts_links(&delivery, true)
+        .unwrap();
+    let admitted = receiver
+        .ingest(
+            link_request.bytes(),
+            time(3),
+            PacketInterfaceId::new(7),
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(admitted.disposition, IngressDisposition::Processed);
+    assert!(admitted.actions.events.is_empty());
+    assert_eq!(admitted.actions.packets.len(), 1);
+    assert!(admitted.actions.packets[0].protocol_token().is_some());
+    assert_eq!(
+        reticulum_rns_rete::parse_packet(admitted.actions.packets[0].bytes())
+            .unwrap()
+            .packet_type,
+        PacketType::Proof
+    );
+
+    let links_enabled_data = deliver_prepared_to(
+        &mut sender,
+        &mut receiver,
+        &mut buffer,
+        delivery,
+        b"DATA while Links are enabled",
+        4,
+        PacketInterfaceId::new(13),
+        default_interfaces(),
+        &mut rng,
+    );
+    assert!(matches!(
+        links_enabled_data.events.as_slice(),
+        [ApplicationEvent::DataReceived {
+            destination,
+            payload,
+            ..
+        }] if *destination == *delivery.as_bytes()
+            && payload == b"DATA while Links are enabled"
+    ));
+    assert_eq!(links_enabled_data.packets.len(), 1);
+    assert_eq!(
+        reticulum_rns_rete::parse_packet(links_enabled_data.packets[0].bytes())
+            .unwrap()
+            .packet_type,
+        PacketType::Proof
+    );
+}
+
+#[test]
+fn per_destination_retained_proof_moves_through_portable_owners_before_release() {
+    let mut sender = node::<8, 1>(83, "sender");
+    let mut receiver = node::<8, 1>(84, "primary");
+    let primary = receiver.destination_hash();
+    let delivery = receiver
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    receiver.set_inbound_proof_policy(InboundProofPolicy::Always);
+    receiver
+        .set_destination_inbound_proof_policy(&delivery, InboundProofPolicy::Retain)
+        .unwrap();
+
+    assert_eq!(
+        receiver.set_destination_inbound_proof_policy(
+            &DestinationHash::new([0xee; 16]),
+            InboundProofPolicy::Retain,
+        ),
+        Err(LocalDestinationProofPolicyError::DestinationNotRegistered)
+    );
+    assert_eq!(
+        LocalDestinationProofPolicyError::from(
+            RnsInboundProofPolicyError::RetainRequiresInboundSingle,
+        ),
+        LocalDestinationProofPolicyError::RetainRequiresInboundSingle
+    );
+
+    sender
+        .register_peer(&identity(84), "reticulum", &["primary"], time(0))
+        .unwrap();
+    sender
+        .register_peer(&identity(84), "lxmf", &["delivery"], time(0))
+        .unwrap();
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+
+    let primary_source = PacketInterfaceId::new(17);
+    let primary_actions = deliver_prepared_to(
+        &mut sender,
+        &mut receiver,
+        &mut buffer,
+        primary,
+        b"primary immediate",
+        1,
+        primary_source,
+        default_interfaces(),
+        &mut rng,
+    );
+    assert_eq!(primary_actions.packets.len(), 1);
+    assert_eq!(primary_actions.retained_proof_count(), 0);
+    assert_eq!(
+        primary_actions.packets[0].target(),
+        RnsTxTarget::Only(RnsInterfaceId(primary_source.get()))
+    );
+    assert_eq!(
+        reticulum_rns_rete::parse_packet(primary_actions.packets[0].bytes())
+            .unwrap()
+            .packet_type,
+        reticulum_rns_rete::PacketType::Proof
+    );
+
+    let retained_source = PacketInterfaceId::new(23);
+    let retained_actions = deliver_prepared_to(
+        &mut sender,
+        &mut receiver,
+        &mut buffer,
+        delivery,
+        b"durable before proof",
+        2,
+        retained_source,
+        default_interfaces(),
+        &mut rng,
+    );
+    assert!(retained_actions.packets.is_empty());
+    assert_eq!(retained_actions.retained_proof_count(), 1);
+    assert!(matches!(
+        retained_actions.events.as_slice(),
+        [ApplicationEvent::DataReceived {
+            destination,
+            payload,
+            ..
+        }] if *destination == *delivery.as_bytes() && payload == b"durable before proof"
+    ));
+
+    let mut event_slots = [ApplicationEventSlot::new()];
+    let mut event_owner = ApplicationEventOwner::new(&mut event_slots);
+    let offered = event_owner.try_offer_actions(retained_actions).unwrap();
+    assert_eq!(offered.accepted_events(), 1);
+    assert_eq!(offered.accepted_retained_proofs(), 1);
+    let lease = event_owner.lease_next().unwrap();
+    assert!(lease.has_retained_proof());
+
+    let mut proof_slots = [DelayedProofSlot::new()];
+    let mut proof_owner = DelayedProofOwner::new(&mut proof_slots);
+    let committed = lease
+        .try_reserve_delayed(&mut proof_owner)
+        .unwrap()
+        .acknowledge_into_ready();
+    assert_eq!(committed.event().kind(), ApplicationEventKind::DataReceived);
+    assert_eq!(event_owner.capacities().vacant, 1);
+    assert_eq!(proof_owner.capacities().ready, 1);
+
+    let released = proof_owner.lease_next().unwrap().release_actions();
+    assert!(released.events.is_empty());
+    assert_eq!(released.retained_proof_count(), 0);
+    assert_eq!(released.packets.len(), 1);
+    assert_eq!(
+        released.packets[0].target(),
+        RnsTxTarget::Only(RnsInterfaceId(retained_source.get()))
+    );
+    assert_eq!(
+        reticulum_rns_rete::parse_packet(released.packets[0].bytes())
+            .unwrap()
+            .packet_type,
+        reticulum_rns_rete::PacketType::Proof
+    );
+    assert_eq!(proof_owner.capacities().vacant, 1);
+}
+
+#[test]
+fn registration_assigns_stable_unique_slots_exactly_once() {
+    let mut owner = node::<2, 2>(1, "owner");
+    let mut first = TxPacketBuffer::new();
+    let mut second = TxPacketBuffer::new();
+    let mut extra = TxPacketBuffer::new();
+
+    assert_eq!(owner.register_packet_buffer(&mut first).unwrap().get(), 0);
+    assert_eq!(owner.register_packet_buffer(&mut second).unwrap().get(), 1);
+    assert_eq!(
+        owner.register_packet_buffer(&mut first),
+        Err(BufferRegistrationError::AlreadyRegistered)
+    );
+    assert_eq!(
+        owner.register_packet_buffer(&mut extra),
+        Err(BufferRegistrationError::PoolFull { limit: 2 })
+    );
+    assert_eq!(first.slot_id().unwrap().get(), 0);
+    assert_eq!(second.slot_id().unwrap().get(), 1);
+    assert_eq!(extra.slot_id(), None);
+    assert_eq!(owner.capacities().packet_buffers_registered, 2);
+}
+
+#[test]
+fn available_buffer_validation_is_read_only_owner_bound_and_state_exact() {
+    let mut owner = node::<2, 1>(73, "validation-owner");
+    let mut other = node::<2, 1>(74, "validation-other");
+    let receiver = node::<2, 0>(75, "validation-receiver");
+    register_receiver(&mut owner, 75, "validation-receiver");
+    let mut buffer = TxPacketBuffer::new();
+    let mut foreign = TxPacketBuffer::new();
+    let unregistered = TxPacketBuffer::new();
+    let slot = owner.register_packet_buffer(&mut buffer).unwrap();
+    other.register_packet_buffer(&mut foreign).unwrap();
+
+    let before = owner.capacities();
+    assert_eq!(owner.validate_available_buffer(&buffer), Ok(slot));
+    assert_eq!(
+        owner.validate_available_buffer(&unregistered),
+        Err(AvailableBufferError::Unregistered)
+    );
+    assert_eq!(
+        owner.validate_available_buffer(&foreign),
+        Err(AvailableBufferError::ForeignOwner)
+    );
+    assert_eq!(owner.capacities(), before);
+
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut owner,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"validation busy",
+        1,
+        &mut rng,
+    );
+    let busy_before = owner.capacities();
+    assert_eq!(
+        owner.validate_available_buffer(job.owner.buffer),
+        Err(AvailableBufferError::Busy)
+    );
+    assert_eq!(owner.capacities(), busy_before);
+    let disposition = match owner.rollback_queued(job, owner_time(1_100)) {
+        Ok(disposition) => disposition,
+        Err(failure) => panic!("fresh job must roll back: {:?}", failure.reason()),
+    };
+    let buffer = match disposition {
+        TxCompletionDisposition::Available(buffer) => buffer,
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh rollback recovered"),
+        TxCompletionDisposition::Next(_) => panic!("fresh rollback continued fanout"),
+        TxCompletionDisposition::Quarantined(_) => panic!("fresh rollback quarantined"),
+    };
+    assert_eq!(owner.validate_available_buffer(buffer), Ok(slot));
+
+    owner.dispatches[slot.index()].state = DispatchState::Unregistered;
+    let invariant_before = owner.capacities();
+    assert_eq!(
+        owner.validate_available_buffer(buffer),
+        Err(AvailableBufferError::MetadataInvariant)
+    );
+    assert_eq!(owner.capacities(), invariant_before);
+    owner.dispatches[slot.index()].state = DispatchState::Free;
+    assert_eq!(owner.validate_available_buffer(buffer), Ok(slot));
+}
+
+#[test]
+fn zero_capacity_owner_rejects_registration_without_mutating_buffer() {
+    let mut owner = node::<2, 0>(2, "owner");
+    let mut buffer = TxPacketBuffer::new();
+    assert_eq!(
+        owner.register_packet_buffer(&mut buffer),
+        Err(BufferRegistrationError::PoolFull { limit: 0 })
+    );
+    assert_eq!(buffer.slot_id(), None);
+    assert_eq!(owner.capacities().packet_buffers_registered, 0);
+}
+
+#[test]
+fn announce_emission_time_enforces_the_exact_five_byte_wire_range() {
+    assert_eq!(
+        AnnounceEmissionTime::new(AnnounceEmissionTime::MAX)
+            .expect("wire maximum must be accepted")
+            .get(),
+        0x00ff_ffff_ffff
+    );
+    assert_eq!(
+        AnnounceEmissionTime::new(AnnounceEmissionTime::MAX + 1),
+        Err(AnnounceEmissionTimeError::OutsideWireRange)
+    );
+}
+
+#[test]
+fn successful_preparation_is_no_copy_parseable_and_preserves_scalar_metadata() {
+    let mut sender = node::<2, 1>(3, "sender");
+    let receiver = node::<2, 1>(4, "receiver");
+    register_receiver(&mut sender, 4, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let original = core::ptr::from_ref(&buffer);
+    let mut rng = CounterRng::default();
+
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"external packet",
+        1,
+        &mut rng,
+    );
+    assert!(core::ptr::eq(
+        core::ptr::from_ref(job.owner.buffer),
+        original
+    ));
+    assert_eq!(job.slot_id().get(), 0);
+    assert_eq!(job.target(), TxTarget::All);
+    assert_eq!(job.deadline(), deadline(1_500));
+    assert_eq!(job.prepared().slot_id(), job.slot_id());
+
+    let bytes = &job.owner.buffer.bytes[..usize::from(job.packet_len())];
+    let parsed = reticulum_rns_rete::parse_packet(bytes).unwrap();
+    assert_eq!(&parsed.compute_hash(), job.attempt().as_bytes());
+    assert_eq!(
+        job.prepared().encoded_packet_sha256(),
+        EncodedPacketSha256::new(Sha256::digest(bytes).into())
+    );
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+}
+
+#[test]
+fn learned_path_routes_local_data_only_to_its_ingress_interface() {
+    let mut sender = node::<4, 1>(5, "sender");
+    let mut receiver = node::<4, 1>(6, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+
+    receiver
+        .queue_announce(None, announce_time(1), &mut rng)
+        .unwrap();
+    let announce = receiver.flush_announces(time(1), &mut rng);
+    assert_eq!(announce.packets.len(), 1);
+    sender
+        .ingest(
+            announce.packets[0].bytes(),
+            time(1),
+            PacketInterfaceId::new(4),
+            &mut rng,
+        )
+        .unwrap();
+
+    let job = prepare_with_interfaces(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"one learned path",
+        2,
+        2_000,
+        2_500,
+        interfaces(&[1, 4, 7]),
+        &mut rng,
+    );
+    assert_eq!(job.target(), TxTarget::Only(PacketInterfaceId::new(4)));
+    assert_eq!(job.interface(), PacketInterfaceId::new(4));
+
+    let returned = job.return_unpermitted().complete(TxCompletionCode::new(0));
+    let disposition = sender
+        .complete_tx(returned, owner_time(2_100))
+        .unwrap_or_else(|failure| {
+            panic!("learned-path packet did not return: {:?}", failure.reason())
+        });
+    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+}
+
+#[test]
+fn dropping_a_job_quarantines_its_buffer_and_dispatch() {
+    let mut sender = node::<2, 1>(40, "sender");
+    let receiver = node::<2, 1>(41, "receiver");
+    register_receiver(&mut sender, 41, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+
+    let attempt = {
+        let job = prepare(
+            &mut sender,
+            &mut buffer,
+            receiver.destination_hash(),
+            b"lost owner",
+            1,
+            &mut rng,
+        );
+        job.attempt()
+    };
+    let entropy_before = rng.0;
+
+    let failure = match sender.prepare_data_into_slot(
+        &mut buffer,
+        prepare_request(
+            receiver.destination_hash(),
+            b"must not reuse",
+            2,
+            2_000,
+            3_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("a bound buffer was reused after its job was lost"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), SubmitError::PacketBufferBusy);
+    assert_eq!(available(failure).slot_id().unwrap().get(), 0);
+    assert_eq!(rng.0, entropy_before);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert!(matches!(
+        sender.dispatches[0].state,
+        DispatchState::Active(DispatchRecord { prepared, .. })
+            if prepared.receipt().as_bytes() == attempt.as_bytes()
+    ));
+}
+
+#[test]
+fn node_dispatch_slots_do_not_embed_packet_arrays() {
+    let no_dispatch = core::mem::size_of::<TestNode<2, 0>>();
+    let one_dispatch = core::mem::size_of::<TestNode<2, 1>>();
+    let dispatch_metadata = one_dispatch - no_dispatch;
+
+    assert!(core::mem::size_of::<TxPacketBuffer>() >= PACKET_CAPACITY);
+    assert!(
+        dispatch_metadata < PACKET_CAPACITY,
+        "one node dispatch slot unexpectedly embeds packet-sized storage"
+    );
+}
+
+#[test]
+fn unregistered_and_foreign_buffers_reject_before_entropy_or_rns_mutation() {
+    let mut first = node::<2, 1>(5, "sender");
+    let mut second = node::<2, 1>(6, "other");
+    let receiver = node::<2, 1>(7, "receiver");
+    register_receiver(&mut first, 7, "receiver");
+    register_receiver(&mut second, 7, "receiver");
+    let mut unregistered = TxPacketBuffer::new();
+    let mut foreign = registered_buffer(&mut second);
+    let mut rng = CounterRng::default();
+
+    let unregistered_failure = match first.prepare_data_into_slot(
+        &mut unregistered,
+        prepare_request(
+            receiver.destination_hash(),
+            b"no registration",
+            1,
+            1_000,
+            2_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("unregistered buffer was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        unregistered_failure.reason(),
+        SubmitError::UnregisteredPacketBuffer
+    );
+    let unregistered = available(unregistered_failure);
+    assert_eq!(unregistered.slot_id(), None);
+
+    let foreign_failure = match first.prepare_data_into_slot(
+        &mut foreign,
+        prepare_request(
+            receiver.destination_hash(),
+            b"wrong owner",
+            1,
+            1_000,
+            2_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("foreign buffer was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(foreign_failure.reason(), SubmitError::ForeignPacketBuffer);
+    assert_eq!(available(foreign_failure).slot_id().unwrap().get(), 0);
+    assert_eq!(rng.0, 0);
+    assert_eq!(first.capacities().receipts_used, 0);
+    assert_eq!(first.capacities().attempts_used, 0);
+}
+
+#[test]
+fn expired_preparation_rejects_before_entropy_or_state_mutation() {
+    let mut sender = node::<2, 1>(71, "sender");
+    let receiver = node::<2, 1>(72, "receiver");
+    register_receiver(&mut sender, 72, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let pointer = core::ptr::from_ref(&buffer);
+    let mut rng = CounterRng::default();
+
+    let failure = match sender.prepare_data_into_slot(
+        &mut buffer,
+        prepare_request(
+            receiver.destination_hash(),
+            b"already expired",
+            1,
+            1_500,
+            1_500,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("exact-deadline preparation was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.reason(),
+        SubmitError::LeaseDeadlineExpired {
+            now: owner_time(1_500),
+            deadline: deadline(1_500),
+        }
+    );
+    let returned = available(failure);
+    assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+    assert_eq!(rng.0, 0);
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().attempts_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(sender.attempt_generation, 0);
+    assert_eq!(sender.dispatch_generation, 0);
+    assert_eq!(sender.hop_generation, 0);
+}
+
+#[test]
+fn native_preparation_failures_return_the_same_available_buffer() {
+    let mut sender = node::<2, 1>(8, "sender");
+    let receiver = node::<2, 1>(9, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let pointer = core::ptr::from_ref(&buffer);
+    let mut rng = CounterRng::default();
+
+    let unknown = match sender.prepare_data_into_slot(
+        &mut buffer,
+        prepare_request(
+            DestinationHash::new([0xa5; 16]),
+            b"unknown",
+            1,
+            1_000,
+            2_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("unknown destination was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(unknown.reason(), SubmitError::UnknownDestination);
+    let returned = available(unknown);
+    assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+    assert_eq!(rng.0, 0);
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().attempts_used, 0);
+
+    register_receiver(&mut sender, 9, "receiver");
+    let oversized = [0x5a; MAX_DATA_PAYLOAD + 1];
+    let failure = match sender.prepare_data_into_slot(
+        returned,
+        prepare_request(
+            receiver.destination_hash(),
+            &oversized,
+            2,
+            2_000,
+            3_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("oversized payload was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.reason(),
+        SubmitError::PayloadTooLarge {
+            actual: MAX_DATA_PAYLOAD + 1,
+            maximum: MAX_DATA_PAYLOAD,
+        }
+    );
+    let returned = available(failure);
+    assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+    assert_eq!(rng.0, 0);
+
+    let job = prepare(
+        &mut sender,
+        returned,
+        receiver.destination_hash(),
+        b"valid after failures",
+        3,
+        &mut rng,
+    );
+    assert_eq!(job.slot_id().get(), 0);
+}
+
+#[test]
+fn attempt_and_dispatch_exhaustion_reject_before_entropy() {
+    let receiver = node::<2, 3>(11, "receiver");
+
+    let mut attempt_full = node::<2, 3>(10, "sender");
+    register_receiver(&mut attempt_full, 11, "receiver");
+    let mut a = registered_buffer(&mut attempt_full);
+    let mut b = registered_buffer(&mut attempt_full);
+    let mut c = registered_buffer(&mut attempt_full);
+    let mut rng = CounterRng::default();
+    let first = prepare(
+        &mut attempt_full,
+        &mut a,
+        receiver.destination_hash(),
+        b"a",
+        1,
+        &mut rng,
+    );
+    let second = prepare(
+        &mut attempt_full,
+        &mut b,
+        receiver.destination_hash(),
+        b"b",
+        2,
+        &mut rng,
+    );
+    let rng_before = rng.0;
+    let failure = match attempt_full.prepare_data_into_slot(
+        &mut c,
+        prepare_request(
+            receiver.destination_hash(),
+            b"c",
+            3,
+            3_000,
+            4_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("full ledger accepted another attempt"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.reason(),
+        SubmitError::AttemptLedgerFull { limit: 2 }
+    );
+    assert_eq!(rng.0, rng_before);
+    assert_eq!(attempt_full.capacities().dispatches_queued, 2);
+    let _ = (first, second);
+
+    let mut exhausted = node::<2, 1>(12, "sender");
+    register_receiver(&mut exhausted, 11, "receiver");
+    let mut buffer = registered_buffer(&mut exhausted);
+    exhausted.dispatch_generation = u64::MAX;
+    let mut rng = CounterRng::default();
+    let failure = match exhausted.prepare_data_into_slot(
+        &mut buffer,
+        prepare_request(
+            receiver.destination_hash(),
+            b"no dispatch id",
+            1,
+            1_000,
+            2_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("exhausted dispatch generation was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), SubmitError::DispatchIdentifierExhausted);
+    assert_eq!(rng.0, 0);
+    assert_eq!(exhausted.capacities().dispatches_used, 0);
+}
+
+#[test]
+fn receipt_hash_collision_rolls_back_only_the_rejected_transaction() {
+    let mut sender = node::<2, 2>(13, "sender");
+    let receiver = node::<2, 2>(14, "receiver");
+    register_receiver(&mut sender, 14, "receiver");
+    let mut first_buffer = registered_buffer(&mut sender);
+    let mut second_buffer = registered_buffer(&mut sender);
+    let mut first_rng = CounterRng::default();
+    let first = prepare(
+        &mut sender,
+        &mut first_buffer,
+        receiver.destination_hash(),
+        b"repeat",
+        1,
+        &mut first_rng,
+    );
+    let mut repeated_rng = CounterRng::default();
+
+    let failure = match sender.prepare_data_into_slot(
+        &mut second_buffer,
+        prepare_request(
+            receiver.destination_hash(),
+            b"repeat",
+            1,
+            1_000,
+            1_500,
+            default_interfaces(),
+        ),
+        &mut repeated_rng,
+    ) {
+        Ok(_) => panic!("duplicate receipt hash was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), SubmitError::ReceiptHashAlreadyTracked);
+    let returned = available(failure);
+    assert_eq!(returned.slot_id().unwrap().get(), 1);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(first.slot_id().get(), 0);
+}
+
+#[test]
+fn queue_handoff_failure_rolls_back_exact_receipt_and_reuses_same_buffer() {
+    let mut sender = node::<2, 1>(15, "sender");
+    let receiver = node::<2, 1>(16, "receiver");
+    register_receiver(&mut sender, 16, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let pointer = core::ptr::from_ref(&buffer);
+    let mut rng = CounterRng::default();
+
+    let first = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"queue full",
+        1,
+        &mut rng,
+    );
+    let old_handle = first.attempt_handle();
+    let returned = match sender.rollback_queued(first, owner_time(1_100)) {
+        Ok(disposition) => reusable(disposition),
+        Err(failure) => panic!("rollback failed: {:?}", failure.reason()),
+    };
+    assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().attempts_used, 1);
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(
+        sender.acknowledge_terminal(old_handle).unwrap().outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback)
+    );
+    assert_eq!(sender.capacities().attempts_used, 0);
+
+    let second = prepare(
+        &mut sender,
+        returned,
+        receiver.destination_hash(),
+        b"reused",
+        2,
+        &mut rng,
+    );
+    assert_eq!(second.slot_id().get(), 0);
+    assert_ne!(second.attempt_handle(), old_handle);
+}
+
+#[test]
+fn late_queue_rollback_reports_recovery_before_reuse() {
+    let mut sender = node::<2, 1>(80, "sender");
+    let receiver = node::<2, 1>(81, "receiver");
+    register_receiver(&mut sender, 81, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"late queue rejection",
+        1,
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+
+    let disposition = sender
+        .rollback_queued(job, owner_time(1_500))
+        .unwrap_or_else(|failure| panic!("late rollback failed: {:?}", failure.reason()));
+    let (returned, observation) = match disposition {
+        TxCompletionDisposition::Recovered {
+            buffer,
+            observation,
+        } => (buffer, observation),
+        TxCompletionDisposition::Available(_) => panic!("late rollback hid recovery"),
+        TxCompletionDisposition::Next(_) => panic!("late rollback advanced fanout"),
+        TxCompletionDisposition::Quarantined(_) => panic!("matching rollback quarantined"),
+    };
+    let record = observation.record();
+    assert_eq!(observation.attempt_handle(), handle);
+    assert_eq!(observation.attempt(), attempt);
+    assert_eq!(returned.slot_id().unwrap().get(), 0);
+    assert_eq!(record.instance(), sender.instance_id());
+    assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
+    assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Unpermitted);
+    assert!(!record.may_have_transmitted());
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(sender.capacities().attempts_used, 1);
+    assert_eq!(
+        sender.acknowledge_terminal(handle).unwrap().outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PermitDeadlineExpired)
+    );
+
+    let second = prepare(
+        &mut sender,
+        returned,
+        receiver.destination_hash(),
+        b"maintenance won the deadline race",
+        2,
+        &mut rng,
+    );
+    assert_eq!(
+        sender.maintain_tx(owner_time(2_500)),
+        TxMaintenanceReport {
+            newly_recovery_required: 1,
+        }
+    );
+    let disposition = sender
+        .rollback_queued(second, owner_time(2_500))
+        .unwrap_or_else(|failure| {
+            panic!("maintained late rollback failed: {:?}", failure.reason())
+        });
+    assert!(matches!(
+        disposition,
+        TxCompletionDisposition::Recovered {
+            observation,
+            ..
+        } if observation.record().reason() == TxRecoveryReason::DeadlineExpired
+            && observation.record().prior_phase() == TxRecoveryPriorPhase::Unpermitted
+            && !observation.record().may_have_transmitted()
+    ));
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(sender.capacities().attempts_used, 1);
+}
+
+#[test]
+fn rollback_cannot_cancel_after_an_earlier_route_was_authorized() {
+    let mut sender = node::<2, 1>(73, "sender");
+    let receiver = node::<2, 1>(74, "receiver");
+    register_receiver(&mut sender, 74, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let route = interfaces(&[2, 5]);
+    let first = prepare_with_interfaces(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"authorized before next queue",
+        2,
+        2_000,
+        3_000,
+        route,
+        &mut rng,
+    );
+    let (pending, request) = first.begin_permit(test_permit_requirements());
+    let reply = sender
+        .authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+    let first = match pending.resolve(reply, owner_time(2_100)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Unpermitted(_)) => panic!("first route was denied"),
+        Ok(PermitResolution::Expired(_)) => panic!("first route expired"),
+        Err(_) => panic!("first permit reply mismatched"),
+    };
+    let next = match sender
+        .complete_tx(first.complete(TxCompletionCode::new(40)), owner_time(2_150))
+        .unwrap_or_else(|failure| panic!("first completion failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Next(next) => next,
+        TxCompletionDisposition::Available(_) => panic!("fanout stopped early"),
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh fanout recovered"),
+        TxCompletionDisposition::Quarantined(_) => panic!("valid fanout quarantined"),
+    };
+
+    let failure = match sender.rollback_queued(next, owner_time(2_200)) {
+        Ok(_) => panic!("rollback cancelled a possibly transmitted attempt"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), RollbackErrorKind::PriorAuthorization);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+    let next = failure.into_job();
+    assert!(matches!(
+        sender
+            .complete_tx(
+                next.return_unpermitted()
+                    .complete(TxCompletionCode::new(41)),
+                owner_time(2_200),
+            )
+            .unwrap_or_else(|failure| panic!("final return failed: {:?}", failure.reason())),
+        TxCompletionDisposition::Available(_)
+    ));
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+}
+
+#[test]
+fn missing_rollback_receipt_retains_the_bound_unique_job() {
+    let mut sender = node::<2, 1>(17, "sender");
+    let receiver = node::<2, 1>(18, "receiver");
+    register_receiver(&mut sender, 18, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"invariant",
+        1,
+        &mut rng,
+    );
+    let attempt = job.attempt();
+    let DispatchState::Active(DispatchRecord { prepared, .. }) = sender.dispatches[0].state else {
+        panic!("expected queued dispatch")
+    };
+    assert!(sender.cancel_prepared_receipt(prepared));
+
+    let failure = match sender.rollback_queued(job, owner_time(1_100)) {
+        Ok(_) => panic!("missing receipt was hidden"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.reason(),
+        RollbackErrorKind::ReceiptMissing { attempt }
+    );
+    let job = failure.into_job();
+    assert_eq!(job.attempt(), attempt);
+    assert!(matches!(
+        job.owner.buffer.binding,
+        BufferBinding::Bound { .. }
+    ));
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+}
+
+#[test]
+fn cross_incarnation_rollback_returns_job_to_the_correct_owner() {
+    let receiver = node::<2, 1>(20, "receiver");
+    let mut first = node_with_instance::<2, 1>(19, "sender", 1);
+    let mut reconstructed = node_with_instance::<2, 1>(19, "sender", 2);
+    register_receiver(&mut first, 20, "receiver");
+    register_receiver(&mut reconstructed, 20, "receiver");
+    let mut buffer = registered_buffer(&mut first);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut first,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"owned by first",
+        1,
+        &mut rng,
+    );
+
+    let failure = match reconstructed.rollback_queued(job, owner_time(1_100)) {
+        Ok(_) => panic!("cross-incarnation job was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), RollbackErrorKind::StaleOrUnknown);
+    let job = failure.into_job();
+    assert_eq!(first.capacities().dispatches_queued, 1);
+    assert_eq!(reconstructed.capacities().dispatches_used, 0);
+    assert!(first.rollback_queued(job, owner_time(1_100)).is_ok());
+}
+
+#[test]
+fn exact_link_attempt_occupancy_covers_active_and_unacknowledged_terminal_states() {
+    let mut owner = node::<4, 0>(40, "link-attempt-occupancy");
+    let target = LinkHandle::new([0xa1; 16]);
+    let other = LinkHandle::new([0xa2; 16]);
+    let target_token = AttemptToken([0x31; 32]);
+
+    assert!(!owner.link_has_unacknowledged_attempt(target));
+
+    owner.attempts[0].state = AttemptState::Reserved { generation: 10 };
+    owner.attempts[1].state = AttemptState::Active {
+        generation: 11,
+        token: AttemptToken([0x32; 32]),
+        kind: DataReceiptKind::DestinationData,
+        link: None,
+    };
+    owner.attempts[2].state = AttemptState::Active {
+        generation: 12,
+        token: AttemptToken([0x33; 32]),
+        kind: DataReceiptKind::LinkData,
+        link: Some(other),
+    };
+    assert!(!owner.link_has_unacknowledged_attempt(target));
+    assert!(owner.link_has_unacknowledged_attempt(other));
+
+    owner.attempts[3].state = AttemptState::Active {
+        generation: 13,
+        token: target_token,
+        kind: DataReceiptKind::LinkData,
+        link: Some(target),
+    };
+    assert!(owner.link_has_unacknowledged_attempt(target));
+
+    owner.attempts[3].state = AttemptState::Terminal {
+        generation: 13,
+        token: target_token,
+        kind: DataReceiptKind::LinkData,
+        link: Some(target),
+        outcome: AttemptOutcome::Delivered,
+        ingress: None,
+    };
+    assert!(owner.link_has_unacknowledged_attempt(target));
+
+    let handle = owner.handle_for(AttemptRef {
+        slot: 3,
+        generation: 13,
+    });
+    owner.acknowledge_terminal(handle).unwrap();
+    assert!(!owner.link_has_unacknowledged_attempt(target));
+    assert!(owner.link_has_unacknowledged_attempt(other));
+}
+
+#[test]
+fn terminal_token_mismatch_retains_the_bound_job() {
+    let mut sender = node::<2, 1>(42, "sender");
+    let receiver = node::<2, 1>(43, "receiver");
+    register_receiver(&mut sender, 43, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"terminal invariant",
+        1,
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    sender
+        .ingest(
+            &proof_for(43, job.attempt()),
+            time(2),
+            PacketInterfaceId::new(2),
+            &mut rng,
+        )
+        .unwrap();
+    sender.attempts[handle.slot].state = AttemptState::Terminal {
+        generation: handle.generation,
+        token: AttemptToken([0xa5; 32]),
+        kind: DataReceiptKind::DestinationData,
+        link: None,
+        outcome: AttemptOutcome::Delivered,
+        ingress: None,
+    };
+
+    let failure = match sender.rollback_queued(job, owner_time(1_100)) {
+        Ok(_) => panic!("a mismatched terminal token released the packet buffer"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), RollbackErrorKind::Invariant);
+    let job = failure.into_job();
+    assert_eq!(job.attempt_handle(), handle);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+    assert_eq!(sender.capacities().attempts_terminal, 1);
+}
+
+#[test]
+fn valid_proof_commits_terminal_while_job_ownership_remains_bound() {
+    let mut sender = node::<2, 1>(21, "sender");
+    let receiver = node::<2, 1>(22, "receiver");
+    register_receiver(&mut sender, 22, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"proof race",
+        1,
+        &mut rng,
+    );
+    let scalar = job.prepared();
+    let proof = proof_for(22, job.attempt());
+    let ingress = PacketIngressObservation::remote(
+        PacketInterfaceId::new(2),
+        Some(PacketSignalObservation::new(-89, 5)),
+    );
+
+    sender
+        .ingest_observed(&proof, time(2), ingress, &mut rng)
+        .unwrap();
+    let terminal = sender.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.handle(), scalar.handle());
+    assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
+    assert_eq!(terminal.ingress(), Some(ingress));
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+    assert_eq!(
+        sender.acknowledge_terminal(scalar.handle()),
+        Err(AcknowledgeError::PacketStillBound)
+    );
+
+    let returned = reusable(
+        sender
+            .rollback_queued(job, owner_time(1_100))
+            .unwrap_or_else(|failure| panic!("terminal rollback failed: {:?}", failure.reason())),
+    );
+    assert_eq!(returned.slot_id().unwrap(), scalar.slot_id());
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.acknowledge_terminal(scalar.handle()), Ok(terminal));
+}
+
+#[test]
+fn parked_receipt_cannot_timeout_while_job_ownership_remains_bound() {
+    let mut sender = node::<2, 1>(23, "sender");
+    let receiver = node::<2, 1>(24, "receiver");
+    register_receiver(&mut sender, 24, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"timeout race",
+        100,
+        &mut rng,
+    );
+    let scalar = job.prepared();
+
+    let report = sender.tick(time(132), &mut rng);
+    assert_eq!(report.timed_out_attempts, 0);
+    assert_eq!(report.timed_out_attempt_tag, None);
+    assert!(report.timed_out_attempt_tags_consistent);
+    assert_eq!(report.correlation_fault, None);
+    assert!(sender.terminal_attempts().next().is_none());
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+
+    let returned = reusable(
+        sender
+            .rollback_queued(job, owner_time(100_100))
+            .unwrap_or_else(|failure| panic!("terminal rollback failed: {:?}", failure.reason())),
+    );
+    assert_eq!(returned.slot_id().unwrap(), scalar.slot_id());
+    assert_eq!(sender.capacities().receipts_used, 0);
+    let terminal = sender.terminal_attempts().next().unwrap();
+    assert_eq!(
+        terminal.outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::QueueRollback)
+    );
+    assert_eq!(terminal.ingress(), None);
+    assert_eq!(sender.acknowledge_terminal(scalar.handle()), Ok(terminal));
+}
+
+#[test]
+fn terminal_tombstones_backpressure_until_exact_acknowledgement() {
+    let mut sender = node::<2, 2>(44, "sender");
+    let receiver = node::<2, 2>(45, "receiver");
+    register_receiver(&mut sender, 45, "receiver");
+    let mut first_buffer = registered_buffer(&mut sender);
+    let mut second_buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+
+    let first = prepare(
+        &mut sender,
+        &mut first_buffer,
+        receiver.destination_hash(),
+        b"first tombstone",
+        1,
+        &mut rng,
+    );
+    let first_scalar = first.prepared();
+    sender
+        .ingest(
+            &proof_for(45, first.attempt()),
+            time(2),
+            PacketInterfaceId::new(2),
+            &mut rng,
+        )
+        .unwrap();
+    let first_buffer = reusable(
+        sender
+            .rollback_queued(first, owner_time(1_100))
+            .unwrap_or_else(|failure| {
+                panic!("first terminal return failed: {:?}", failure.reason())
+            }),
+    );
+
+    let second = prepare(
+        &mut sender,
+        &mut second_buffer,
+        receiver.destination_hash(),
+        b"second tombstone",
+        3,
+        &mut rng,
+    );
+    sender
+        .ingest(
+            &proof_for(45, second.attempt()),
+            time(4),
+            PacketInterfaceId::new(2),
+            &mut rng,
+        )
+        .unwrap();
+    let _second_buffer = reusable(
+        sender
+            .rollback_queued(second, owner_time(3_100))
+            .unwrap_or_else(|failure| {
+                panic!("second terminal return failed: {:?}", failure.reason())
+            }),
+    );
+    assert_eq!(sender.capacities().attempts_terminal, 2);
+
+    let entropy_before = rng.0;
+    let failure = match sender.prepare_data_into_slot(
+        first_buffer,
+        prepare_request(
+            receiver.destination_hash(),
+            b"blocked by tombstones",
+            5,
+            5_000,
+            6_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("terminal tombstones did not backpressure preparation"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.reason(),
+        SubmitError::AttemptLedgerFull { limit: 2 }
+    );
+    assert_eq!(rng.0, entropy_before);
+    let first_buffer = available(failure);
+
+    let first_terminal = sender
+        .terminal_attempts()
+        .find(|terminal| terminal.handle() == first_scalar.handle())
+        .unwrap();
+    assert_eq!(
+        sender.acknowledge_terminal(first_scalar.handle()),
+        Ok(first_terminal)
+    );
+    assert_eq!(
+        sender.acknowledge_terminal(first_scalar.handle()),
+        Err(AcknowledgeError::StaleOrUnknown)
+    );
+
+    let replacement = prepare(
+        &mut sender,
+        first_buffer,
+        receiver.destination_hash(),
+        b"after exact acknowledgement",
+        6,
+        &mut rng,
+    );
+    assert_ne!(replacement.attempt_handle(), first_scalar.handle());
+    assert_eq!(sender.capacities().attempts_active, 1);
+    assert_eq!(sender.capacities().attempts_terminal, 1);
+}
+
+#[test]
+fn invalid_proof_can_retry_without_releasing_job_or_receipt() {
+    let mut sender = node::<2, 1>(25, "sender");
+    let receiver = node::<2, 1>(26, "receiver");
+    register_receiver(&mut sender, 26, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"proof retry",
+        10,
+        &mut rng,
+    );
+    let proof = proof_for(26, job.attempt());
+    let mut invalid = proof.clone();
+    *invalid.last_mut().unwrap() ^= 0xff;
+
+    sender
+        .ingest(&invalid, time(11), PacketInterfaceId::new(2), &mut rng)
+        .unwrap();
+    assert_eq!(sender.capacities().attempts_active, 1);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+
+    sender
+        .ingest(&proof, time(12), PacketInterfaceId::new(2), &mut rng)
+        .unwrap();
+    assert_eq!(
+        sender.terminal_attempts().next().unwrap().outcome(),
+        AttemptOutcome::Delivered
+    );
+    assert!(sender.rollback_queued(job, owner_time(10_100)).is_ok());
+}
+
+#[test]
+fn repeated_full_hash_selects_new_active_attempt_over_old_tombstone() {
+    let mut sender = node::<2, 1>(27, "sender");
+    let receiver = node::<2, 1>(28, "receiver");
+    register_receiver(&mut sender, 28, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut first_rng = CounterRng::default();
+    let first = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"repeat after proof",
+        1,
+        &mut first_rng,
+    );
+    let first_scalar = first.prepared();
+    sender
+        .ingest(
+            &proof_for(28, first.attempt()),
+            time(2),
+            PacketInterfaceId::new(2),
+            &mut first_rng,
+        )
+        .unwrap();
+    let buffer = reusable(
+        sender
+            .rollback_queued(first, owner_time(1_100))
+            .unwrap_or_else(|failure| {
+                panic!("first terminal return failed: {:?}", failure.reason())
+            }),
+    );
+
+    let mut repeated_rng = CounterRng::default();
+    let repeated = prepare(
+        &mut sender,
+        buffer,
+        receiver.destination_hash(),
+        b"repeat after proof",
+        1,
+        &mut repeated_rng,
+    );
+    assert_eq!(repeated.attempt(), first_scalar.attempt());
+    assert_ne!(repeated.attempt_handle(), first_scalar.handle());
+    sender
+        .ingest(
+            &implicit_proof_for(28, repeated.attempt()),
+            time(3),
+            PacketInterfaceId::new(2),
+            &mut repeated_rng,
+        )
+        .unwrap();
+
+    let terminals = sender.terminal_attempts().collect::<std::vec::Vec<_>>();
+    assert_eq!(terminals.len(), 2);
+    assert!(
+        terminals
+            .iter()
+            .any(|item| item.handle() == first_scalar.handle())
+    );
+    assert!(
+        terminals
+            .iter()
+            .any(|item| item.handle() == repeated.attempt_handle())
+    );
+    assert!(
+        terminals
+            .iter()
+            .all(|item| item.outcome() == AttemptOutcome::Delivered)
+    );
+}
+
+#[test]
+fn unknown_and_already_terminal_receipts_are_explicit_faults() {
+    let receiver = node::<2, 1>(30, "receiver");
+
+    let mut unknown = node::<2, 1>(29, "unknown");
+    register_receiver(&mut unknown, 30, "receiver");
+    let mut unknown_buffer = registered_buffer(&mut unknown);
+    let mut rng = CounterRng::default();
+    let unknown_job = prepare(
+        &mut unknown,
+        &mut unknown_buffer,
+        receiver.destination_hash(),
+        b"orphan",
+        1,
+        &mut rng,
+    );
+    unknown.attempts[unknown_job.attempt_handle().slot].state = AttemptState::Free;
+    assert_eq!(
+        unknown
+            .ingest(
+                &proof_for(30, unknown_job.attempt()),
+                time(2),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap_err(),
+        ReceiptCorrelationError::UnknownData {
+            attempt: unknown_job.attempt(),
+        }
+    );
+    assert_eq!(unknown.capacities().receipts_used, 1);
+
+    let mut terminal = node::<2, 1>(31, "terminal");
+    register_receiver(&mut terminal, 30, "receiver");
+    let mut terminal_buffer = registered_buffer(&mut terminal);
+    let terminal_job = prepare(
+        &mut terminal,
+        &mut terminal_buffer,
+        receiver.destination_hash(),
+        b"premature",
+        1,
+        &mut rng,
+    );
+    let handle = terminal_job.attempt_handle();
+    terminal.attempts[handle.slot].state = AttemptState::Terminal {
+        generation: handle.generation,
+        token: terminal_job.attempt(),
+        kind: DataReceiptKind::DestinationData,
+        link: None,
+        outcome: AttemptOutcome::Delivered,
+        ingress: None,
+    };
+    assert_eq!(
+        terminal
+            .ingest(
+                &proof_for(30, terminal_job.attempt()),
+                time(2),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap_err(),
+        ReceiptCorrelationError::AlreadyTerminal {
+            attempt: terminal_job.attempt(),
+        }
+    );
+    assert_eq!(terminal.capacities().receipts_used, 1);
+}
+
+#[test]
+fn attempt_generation_exhaustion_rejects_before_any_transaction_mutation() {
+    let mut sender = node::<2, 1>(34, "sender");
+    let receiver = node::<2, 1>(35, "receiver");
+    register_receiver(&mut sender, 35, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    sender.attempt_generation = u64::MAX;
+    let mut rng = CounterRng::default();
+
+    let failure = match sender.prepare_data_into_slot(
+        &mut buffer,
+        prepare_request(
+            receiver.destination_hash(),
+            b"no attempt identifier",
+            1,
+            1_000,
+            2_000,
+            default_interfaces(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("exhausted attempt generation was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.reason(), SubmitError::AttemptIdentifierExhausted);
+    assert_eq!(available(failure).slot_id().unwrap().get(), 0);
+    assert_eq!(rng.0, 0);
+    assert_eq!(sender.dispatch_generation, 0);
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().attempts_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 0);
+}
+
+#[test]
+fn unknown_timeout_preserves_native_receipt_and_returns_tick_actions() {
+    let mut sender = node::<2, 1>(36, "sender");
+    let receiver = node::<2, 1>(37, "receiver");
+    register_receiver(&mut sender, 37, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"orphan timeout",
+        100,
+        &mut rng,
+    );
+    let destination_data = match sender.dispatches[job.slot_id().index()].state {
+        DispatchState::Active(record) => match record.prepared {
+            PreparedReceiptPacket::DestinationData(prepared) => prepared,
+            PreparedReceiptPacket::LinkData(_) => {
+                panic!("generic DATA preparation registered a Link receipt")
+            }
+        },
+        _ => panic!("prepared DATA dispatch was not active"),
+    };
+    assert!(sender.rns.rearm_data_receipt(destination_data, 100));
+    sender.attempts[job.attempt_handle().slot].state = AttemptState::Free;
+
+    let report = sender.tick(time(132), &mut rng);
+    assert_eq!(report.timed_out_attempts, 0);
+    assert_eq!(report.timed_out_attempt_tag, None);
+    assert!(report.timed_out_attempt_tags_consistent);
+    assert_eq!(
+        report.correlation_fault,
+        Some(ReceiptCorrelationError::UnknownData {
+            attempt: job.attempt(),
+        })
+    );
+    assert_eq!(report.actions.events.len(), 1);
+    assert!(report.actions.packets.is_empty());
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().dispatches_queued, 1);
+}
+
+#[test]
+fn outbound_protocol_confirmation_delegates_the_exact_interface_and_interval() {
+    let mut initiator = node::<4, 0>(40, "protocol-confirm-initiator");
+    let mut responder = node::<4, 0>(41, "protocol-confirm-responder");
+    let responder_destination = responder.rns.destination_hash();
+    assert!(
+        responder
+            .rns
+            .set_accepts_links(&responder_destination, true)
+    );
+    let mut rng = CounterRng::default();
+    let (request, _) = initiator
+        .rns
+        .initiate_link(responder_destination, 100, &mut rng)
+        .expect("test LINKREQUEST must construct");
+    let report = responder
+        .ingest_at(
+            request.bytes(),
+            time(100),
+            MonotonicInstant::from_micros(100_062_500),
+            PacketInterfaceId::new(7),
+            &mut rng,
+        )
+        .expect("test LINKREQUEST must not hit receipt correlation");
+    let token = report.actions.packets[0]
+        .protocol_token()
+        .expect("LRPROOF must carry a protocol timing token");
+    let interval = OutboundDispatchInterval::new(
+        MonotonicInstant::from_micros(100_125_000),
+        MonotonicInstant::from_micros(100_250_000),
+    )
+    .unwrap();
+
+    assert!(responder.confirm_outbound_protocol(token, PacketInterfaceId::new(7), interval));
+    assert!(!responder.confirm_outbound_protocol(token, PacketInterfaceId::new(7), interval));
+}
+
+#[test]
+fn initiated_link_handle_tracks_state_and_aborts_only_before_establishment() {
+    let mut initiator = node::<4, 0>(90, "link-handle-initiator");
+    let mut responder = node::<4, 0>(91, "link-handle-responder");
+    let destination = responder
+        .register_inbound_single_destination("lxmf", &["delivery"])
+        .unwrap();
+    initiator
+        .register_peer(&identity(91), "lxmf", &["delivery"], time(1))
+        .unwrap();
+    let mut rng = CounterRng::default();
+
+    assert!(initiator.can_initiate_link());
+    let (actions, link) = initiator
+        .initiate_link(&destination, time(2), &mut rng)
+        .unwrap();
+    assert_eq!(actions.packets.len(), 1);
+    assert!(actions.packets[0].protocol_token().is_some());
+    assert_eq!(
+        LinkHandle::new(*link.as_bytes()),
+        link,
+        "event bytes must reconstruct the same lookup handle"
+    );
+    assert_eq!(initiator.link_state(link), Some(LinkState::Handshake));
+    assert!(initiator.abort_unestablished_link(link));
+    assert_eq!(initiator.link_state(link), None);
+    assert!(initiator.can_initiate_link());
+    assert!(!initiator.abort_unestablished_link(link));
+}
+
+#[test]
+fn anonymous_request_actions_start_timeout_only_on_exact_first_dispatch() {
+    let mut initiator = node::<4, 0>(98, "request-bridge-initiator");
+    let mut responder = node::<4, 0>(99, "request-bridge-responder");
+    let mut rng = CounterRng::default();
+    let (_, link) = establish_lxmf_link(&mut initiator, &mut responder, 99, &mut rng);
+
+    let prepared = initiator
+        .prepare_anonymous_request(link, "/page/index.mu", 1_700_000_000.125, &mut rng)
+        .expect("anonymous request must prepare");
+    assert_eq!(prepared.actions().packets.len(), 1);
+    assert!(prepared.actions().events.is_empty());
+    assert_eq!(prepared.handle().link(), link.as_bytes());
+    let (actions, handle) = prepared.into_parts();
+    let packet = reticulum_rns_rete::parse_packet(actions.packets[0].bytes())
+        .expect("prepared request packet must parse");
+    assert_eq!(packet.packet_type, PacketType::Data);
+    assert_eq!(packet.destination_hash, handle.link());
+
+    assert_eq!(
+        initiator.confirm_request_dispatch(handle, time(20_000), false),
+        Ok(RequestDispatchConfirmation::NotFirstDispatch)
+    );
+    let before_dispatch = initiator.tick_at(
+        time(u64::MAX - 1),
+        MonotonicInstant::from_secs(103),
+        &mut rng,
+    );
+    assert!(!before_dispatch.actions.events.iter().any(|event| matches!(
+        event,
+        ApplicationEvent::RequestFailed { request, .. } if request == handle.request()
+    )));
+
+    assert_eq!(
+        initiator.confirm_request_dispatch(handle, time(20_000), true),
+        Ok(RequestDispatchConfirmation::Confirmed)
+    );
+    assert_eq!(
+        initiator.confirm_request_dispatch(handle, time(20_001), true),
+        Err(RequestDispatchError::NotPrepared)
+    );
+    let timed_out = initiator.tick_at(
+        time(u64::MAX - 1),
+        MonotonicInstant::from_secs(103),
+        &mut rng,
+    );
+    assert!(timed_out.actions.events.iter().any(|event| matches!(
+        event,
+        ApplicationEvent::RequestFailed {
+            link: event_link,
+            request,
+            reason: ApplicationRequestFailReason::Timeout,
+        } if event_link == handle.link() && request == handle.request()
+    )));
+    assert_eq!(
+        initiator.cancel_confirmed_request(handle),
+        Err(RequestDispatchError::NotTracked)
+    );
+}
+
+#[test]
+fn request_dispatch_reconciliation_maps_exact_native_cleanup() {
+    let mut initiator = node::<4, 0>(100, "request-reconcile-initiator");
+    let mut responder = node::<4, 0>(101, "request-reconcile-responder");
+    let mut rng = CounterRng::default();
+    let (_, link) = establish_lxmf_link(&mut initiator, &mut responder, 101, &mut rng);
+
+    let prepared = initiator
+        .prepare_anonymous_request(link, "/page/prepared.mu", 1_700_000_001.0, &mut rng)
+        .expect("prepared request must construct")
+        .handle();
+    assert_eq!(
+        initiator.reconcile_request_dispatch(prepared),
+        RequestDispatchReconciliation::ReclaimedPrepared
+    );
+    assert_eq!(
+        initiator.reconcile_request_dispatch(prepared),
+        RequestDispatchReconciliation::Absent
+    );
+
+    let confirmed = initiator
+        .prepare_anonymous_request(link, "/page/confirmed.mu", 1_700_000_002.0, &mut rng)
+        .expect("confirmed request must construct")
+        .handle();
+    assert_eq!(
+        initiator.confirm_request_dispatch(confirmed, time(20_000), true),
+        Ok(RequestDispatchConfirmation::Confirmed)
+    );
+    assert_eq!(
+        initiator.reconcile_request_dispatch(confirmed),
+        RequestDispatchReconciliation::ReclaimedConfirmed
+    );
+    assert_eq!(
+        initiator.reconcile_request_dispatch(confirmed),
+        RequestDispatchReconciliation::Absent
+    );
+}
+
+#[test]
+fn response_actions_preserve_request_provenance_and_one_exact_packet_owner() {
+    let mut initiator = node::<4, 0>(102, "response-bridge-initiator");
+    let mut responder = node::<4, 0>(103, "response-bridge-responder");
+    let mut rng = CounterRng::default();
+    let (destination, link) = establish_lxmf_link(&mut initiator, &mut responder, 103, &mut rng);
+
+    let prepared = initiator
+        .prepare_anonymous_request(link, "/page/index.mu", 1_700_000_000.125, &mut rng)
+        .expect("anonymous request must prepare");
+    let (request_actions, handle) = prepared.into_parts();
+    assert_eq!(
+        initiator.confirm_request_dispatch(handle, time(103), true),
+        Ok(RequestDispatchConfirmation::Confirmed)
+    );
+    let inbound = responder
+        .ingest(
+            request_actions.packets[0].bytes(),
+            time(103),
+            PacketInterfaceId::new(7),
+            &mut rng,
+        )
+        .unwrap();
+    let [
+        ApplicationEvent::RequestValueReceived {
+            binding, request, ..
+        },
+    ] = inbound.actions.events.as_slice()
+    else {
+        panic!("anonymous request must retain exact responder provenance")
+    };
+    assert_eq!(binding.link(), link.as_bytes());
+    assert_eq!(binding.destination(), destination.as_bytes());
+    assert_eq!(binding.role(), ApplicationLinkRole::Responder);
+    assert_eq!(request, handle.request());
+
+    let oversized = [0x44; 410];
+    let entropy_before = rng.0;
+    assert!(matches!(
+        responder.prepare_response_actions(binding, request, &oversized, time(109), &mut rng,),
+        Err(PrepareResponseError::ResponseTooLarge {
+            actual: 410,
+            maximum: 409,
+        })
+    ));
+    assert_eq!(rng.0, entropy_before);
+
+    let response_body = [0x5a; 400];
+    let response_actions = responder
+        .prepare_response_actions(binding, request, &response_body, time(110), &mut rng)
+        .expect("bounded response must prepare");
+    assert!(response_actions.events.is_empty());
+    assert_eq!(response_actions.packets.len(), 1);
+    assert_eq!(response_actions.unroutable_packets, 0);
+    assert_eq!(
+        response_actions.packets[0].target(),
+        RnsTxTarget::Only(RnsInterfaceId(7))
+    );
+    assert_eq!(response_actions.packets[0].protocol_token(), None);
+
+    let received = initiator
+        .ingest(
+            response_actions.packets[0].bytes(),
+            time(110),
+            PacketInterfaceId::new(3),
+            &mut rng,
+        )
+        .unwrap();
+    assert!(matches!(
+        received.actions.events.as_slice(),
+        [ApplicationEvent::ResponseReceived {
+            link: event_link,
+            request: event_request,
+            data,
+        }] if event_link == handle.link()
+            && event_request == handle.request()
+            && data.as_slice() == response_body
+    ));
+}
+
+#[test]
+fn exact_request_cancel_preserves_phase_on_strict_mismatch() {
+    let mut initiator = node::<4, 0>(100, "request-cancel-initiator");
+    let mut responder = node::<4, 0>(101, "request-cancel-responder");
+    let mut rng = CounterRng::default();
+    let (_, link) = establish_lxmf_link(&mut initiator, &mut responder, 101, &mut rng);
+
+    let prepared = initiator
+        .prepare_anonymous_request(link, "/page/prepared.mu", 120.0, &mut rng)
+        .expect("prepared-phase request must construct");
+    let prepared_handle = prepared.handle();
+    assert_eq!(
+        initiator.cancel_confirmed_request(prepared_handle),
+        Err(RequestDispatchError::NotConfirmed)
+    );
+    assert_eq!(initiator.cancel_prepared_request(prepared_handle), Ok(()));
+    assert_eq!(
+        initiator.cancel_prepared_request(prepared_handle),
+        Err(RequestDispatchError::NotTracked)
+    );
+
+    let confirmed = initiator
+        .prepare_anonymous_request(link, "/page/confirmed.mu", 121.0, &mut rng)
+        .expect("confirmed-phase request must construct");
+    let confirmed_handle = confirmed.handle();
+    assert_eq!(
+        initiator.confirm_request_dispatch(confirmed_handle, time(122), true),
+        Ok(RequestDispatchConfirmation::Confirmed)
+    );
+    assert_eq!(
+        initiator.cancel_prepared_request(confirmed_handle),
+        Err(RequestDispatchError::NotPrepared)
+    );
+    assert_eq!(initiator.cancel_confirmed_request(confirmed_handle), Ok(()));
+    assert_eq!(
+        initiator.cancel_confirmed_request(confirmed_handle),
+        Err(RequestDispatchError::NotTracked)
+    );
+}
+
+#[test]
+fn rehydrated_direct_lxmf_link_data_completes_with_exact_link_receipt_proof() {
+    let mut initiator = node::<4, 1>(92, "direct-proof-initiator");
+    let mut responder = node::<4, 1>(93, "direct-proof-responder");
+    let mut rng = CounterRng::default();
+    let (destination, link) = establish_lxmf_link(&mut initiator, &mut responder, 93, &mut rng);
+    assert!(!initiator.abort_unestablished_link(link));
+    let wire = direct_lxmf_wire(&initiator, destination, b"proof-correlated payload");
+    let mut buffer = registered_buffer(&mut initiator);
+
+    let job = initiator
+        .prepare_rehydrated_direct_lxmf_into_slot(
+            &mut buffer,
+            link,
+            prepare_request(destination, &wire, 110, 110_000, 111_000, interfaces(&[3])),
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| panic!("direct preparation failed: {:?}", failure.reason()));
+    let attempt = job.attempt();
+    let attempt_handle = job.attempt_handle();
+    assert_eq!(job.prepared().receipt_kind(), DataReceiptKind::LinkData);
+    assert_eq!(job.target(), TxTarget::Only(PacketInterfaceId::new(3)));
+    assert_eq!(initiator.capacities().receipts_used, 0);
+    assert_eq!(initiator.capacities().link_data_receipts_used, 1);
+
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let reply = initiator
+        .authorize_tx(request, owner_time(110_100), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("direct authorization failed: {:?}", failure.reason()));
+    let mut authorized = match pending.resolve(reply, owner_time(110_101)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Expired(_) | PermitResolution::Unpermitted(_)) => {
+            panic!("matching direct-Link permit was not authorized")
+        }
+        Err(_) => panic!("matching direct-Link permit reply was rejected"),
+    };
+    let packet = authorized
+        .frame(owner_time(110_102))
+        .unwrap()
+        .bytes()
+        .to_vec();
+    let disposition = initiator
+        .complete_tx(
+            authorized.complete(TxCompletionCode::new(0)),
+            owner_time(110_103),
+        )
+        .unwrap_or_else(|failure| panic!("direct completion failed: {:?}", failure.reason()));
+    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+
+    let received = responder
+        .ingest(&packet, time(110), PacketInterfaceId::new(7), &mut rng)
+        .unwrap_or_else(|failure| panic!("direct Link DATA ingress failed: {failure:?}"));
+    assert!(received.actions.events.iter().any(|event| {
+        matches!(
+            event,
+            ApplicationEvent::LinkData { binding, data, .. }
+                if binding.link() == link.as_bytes() && data.as_slice() == wire.as_slice()
+        )
+    }));
+    let proof = received
+        .actions
+        .packets
+        .iter()
+        .find(|packet| {
+            reticulum_rns_rete::parse_packet(packet.bytes())
+                .is_ok_and(|packet| packet.packet_type == PacketType::Proof)
+        })
+        .expect("direct Link DATA must generate an explicit proof");
+    initiator
+        .ingest(
+            proof.bytes(),
+            time(111),
+            PacketInterfaceId::new(3),
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| panic!("direct proof ingress failed: {failure:?}"));
+
+    let terminal = initiator.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.handle(), attempt_handle);
+    assert_eq!(terminal.token(), attempt);
+    assert_eq!(terminal.receipt_kind(), DataReceiptKind::LinkData);
+    assert_eq!(terminal.link(), Some(link));
+    assert_eq!(terminal.outcome(), AttemptOutcome::Delivered);
+    assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+    assert_eq!(
+        initiator.acknowledge_terminal(attempt_handle).unwrap(),
+        terminal
+    );
+}
+
+#[test]
+fn direct_lxmf_timeout_commits_a_link_receipt_terminal() {
+    let mut initiator = node::<4, 1>(94, "direct-timeout-initiator");
+    let mut responder = node::<4, 1>(95, "direct-timeout-responder");
+    let mut rng = CounterRng::default();
+    let (destination, link) = establish_lxmf_link(&mut initiator, &mut responder, 95, &mut rng);
+    let wire = direct_lxmf_wire(&initiator, destination, b"timeout payload");
+    let mut buffer = registered_buffer(&mut initiator);
+    let job = initiator
+        .prepare_rehydrated_direct_lxmf_into_slot(
+            &mut buffer,
+            link,
+            prepare_request(destination, &wire, 200, 200_000, 300_000, interfaces(&[3])),
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| {
+            panic!("direct timeout preparation failed: {:?}", failure.reason())
+        });
+    let handle = job.attempt_handle();
+
+    let report = initiator.tick(time(231), &mut rng);
+    assert_eq!(report.timed_out_attempts, 1);
+    assert_eq!(report.correlation_fault, None);
+    assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+    let terminal = initiator.terminal_attempts().next().unwrap();
+    assert_eq!(terminal.handle(), handle);
+    assert_eq!(terminal.receipt_kind(), DataReceiptKind::LinkData);
+    assert_eq!(terminal.link(), Some(link));
+    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+    assert_eq!(initiator.link_state(link), Some(LinkState::Active));
+
+    let disposition = initiator
+        .complete_tx(
+            job.return_unpermitted().complete(TxCompletionCode::new(0)),
+            owner_time(231_000),
+        )
+        .unwrap_or_else(|failure| {
+            panic!("timed-out direct completion failed: {:?}", failure.reason())
+        });
+    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+
+    let close = initiator.close_link(link, &mut rng);
+    assert_eq!(initiator.link_state(link), None);
+    assert_eq!(close.packets.len(), 1);
+    assert_eq!(
+        close.packets[0].target(),
+        RnsTxTarget::Only(RnsInterfaceId(3))
+    );
+    assert!(close.events.iter().any(
+        |event| matches!(event, ApplicationEvent::LinkClosed { link: closed } if closed == link.as_bytes())
+    ));
+    assert_eq!(initiator.terminal_attempts().next(), Some(terminal));
+
+    let remote_close = responder
+        .ingest(
+            close.packets[0].bytes(),
+            time(232),
+            PacketInterfaceId::new(7),
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| panic!("authenticated Link close failed: {failure:?}"));
+    assert!(remote_close.actions.events.iter().any(
+        |event| matches!(event, ApplicationEvent::LinkClosed { link: closed } if closed == link.as_bytes())
+    ));
+    assert_eq!(responder.link_state(link), None);
+    assert_eq!(initiator.acknowledge_terminal(handle).unwrap(), terminal);
+}
+
+#[test]
+fn receipt_sink_rejects_the_right_hash_from_the_wrong_data_table() {
+    let token = AttemptToken([0x5a; 32]);
+    let mut attempts = [AttemptSlot::EMPTY; 2];
+    attempts[0].state = AttemptState::Active {
+        generation: 7,
+        token,
+        kind: DataReceiptKind::LinkData,
+        link: None,
+    };
+    let mut sink = AttemptReceiptSink::new(&mut attempts);
+
+    assert!(
+        sink.try_reserve_data(DataReceiptKind::DestinationData, token)
+            .is_err()
+    );
+    assert_eq!(
+        sink.fault,
+        Some(ReceiptCorrelationError::WrongKind {
+            attempt: token,
+            expected: DataReceiptKind::LinkData,
+            actual: DataReceiptKind::DestinationData,
+        })
+    );
+    assert!(matches!(
+        attempts[0].state,
+        AttemptState::Active {
+            generation: 7,
+            token: retained,
+            kind: DataReceiptKind::LinkData,
+            ..
+        } if retained == token
+    ));
+}
+
+#[test]
+fn direct_lxmf_route_cancellation_and_attempt_backpressure_are_exact() {
+    let mut initiator = node::<2, 3>(96, "direct-pressure-initiator");
+    let mut responder = node::<2, 3>(97, "direct-pressure-responder");
+    let mut rng = CounterRng::default();
+    let (destination, link) = establish_lxmf_link(&mut initiator, &mut responder, 97, &mut rng);
+    let wire = direct_lxmf_wire(&initiator, destination, b"bounded direct payload");
+    let mut first_buffer = registered_buffer(&mut initiator);
+    let mut second_buffer = registered_buffer(&mut initiator);
+    let mut third_buffer = registered_buffer(&mut initiator);
+
+    let no_route = match initiator.prepare_rehydrated_direct_lxmf_into_slot(
+        &mut third_buffer,
+        link,
+        prepare_request(
+            destination,
+            &wire,
+            110,
+            110_000,
+            111_000,
+            InterfaceSet::empty(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("empty direct route was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        no_route.reason(),
+        SubmitError::NoEligibleInterface {
+            target: TxTarget::Only(PacketInterfaceId::new(3)),
+        }
+    );
+    let _ = available(no_route);
+    assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+
+    let first = initiator
+        .prepare_rehydrated_direct_lxmf_into_slot(
+            &mut first_buffer,
+            link,
+            prepare_request(destination, &wire, 111, 111_000, 112_000, interfaces(&[3])),
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| {
+            panic!("first direct preparation failed: {:?}", failure.reason())
+        });
+    let first_handle = first.attempt_handle();
+    let second = initiator
+        .prepare_rehydrated_direct_lxmf_into_slot(
+            &mut second_buffer,
+            link,
+            prepare_request(destination, &wire, 112, 112_000, 113_000, interfaces(&[3])),
+            &mut rng,
+        )
+        .unwrap_or_else(|failure| {
+            panic!("second direct preparation failed: {:?}", failure.reason())
+        });
+    let second_handle = second.attempt_handle();
+    let entropy_before_backpressure = rng.0;
+    let pressure = match initiator.prepare_rehydrated_direct_lxmf_into_slot(
+        &mut third_buffer,
+        link,
+        prepare_request(destination, &wire, 113, 113_000, 114_000, interfaces(&[3])),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("full direct attempt ledger accepted another packet"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        pressure.reason(),
+        SubmitError::AttemptLedgerFull { limit: 2 }
+    );
+    assert_eq!(rng.0, entropy_before_backpressure);
+    let _ = available(pressure);
+    assert_eq!(initiator.capacities().link_data_receipts_used, 2);
+
+    let first_rollback = initiator
+        .rollback_queued(first, owner_time(111_100))
+        .unwrap_or_else(|failure| panic!("first rollback failed: {:?}", failure.reason()));
+    assert!(matches!(
+        first_rollback,
+        TxCompletionDisposition::Available(_)
+    ));
+    let second_rollback = initiator
+        .rollback_queued(second, owner_time(112_100))
+        .unwrap_or_else(|failure| panic!("second rollback failed: {:?}", failure.reason()));
+    assert!(matches!(
+        second_rollback,
+        TxCompletionDisposition::Available(_)
+    ));
+    assert_eq!(initiator.capacities().link_data_receipts_used, 0);
+    assert_eq!(
+        initiator
+            .acknowledge_terminal(first_handle)
+            .unwrap()
+            .receipt_kind(),
+        DataReceiptKind::LinkData
+    );
+    assert_eq!(
+        initiator
+            .acknowledge_terminal(second_handle)
+            .unwrap()
+            .receipt_kind(),
+        DataReceiptKind::LinkData
+    );
+}
+
+#[test]
+fn channel_receipt_candidate_is_an_explicit_unsupported_fault() {
+    let mut initiator = node::<4, 2>(38, "initiator");
+    let mut responder = node::<4, 2>(39, "responder");
+    register_receiver(&mut initiator, 39, "responder");
+    let responder_destination = responder.rns.destination_hash();
+    assert!(
+        responder
+            .rns
+            .set_accepts_links(&responder_destination, true)
+    );
+    let mut rng = CounterRng::default();
+    let (request, link_id) = initiator
+        .rns
+        .initiate_link(responder_destination, 100, &mut rng)
+        .unwrap();
+    let response = responder
+        .rns
+        .ingest(request.bytes(), 100, RnsInterfaceId(1), &mut rng);
+    let established = initiator.rns.ingest(
+        response.actions.packets[0].bytes(),
+        101,
+        RnsInterfaceId(2),
+        &mut rng,
+    );
+    responder.rns.ingest(
+        established.actions.packets[0].bytes(),
+        102,
+        RnsInterfaceId(1),
+        &mut rng,
+    );
+    let message = initiator
+        .rns
+        .send_channel_message(&link_id, 7, b"channel proof", 110, &mut rng)
+        .unwrap();
+    let proof_actions = responder
+        .rns
+        .ingest(message.bytes(), 110, RnsInterfaceId(1), &mut rng);
+    let proof = proof_actions
+        .actions
+        .packets
+        .iter()
+        .find(|packet| {
+            packet
+                .bytes()
+                .first()
+                .is_some_and(|header| header & 0x03 == 0x03)
+        })
+        .unwrap();
+
+    assert_eq!(
+        initiator
+            .ingest(
+                proof.bytes(),
+                time(111),
+                PacketInterfaceId::new(2),
+                &mut rng,
+            )
+            .unwrap_err(),
+        ReceiptCorrelationError::UnsupportedChannel
+    );
+    assert_eq!(initiator.rns.metrics().capacity.channel_receipts.used, 1);
+}
+
+#[test]
+fn full_hash_candidate_selects_the_exact_active_attempt() {
+    let mut sender = node::<2, 1>(32, "sender");
+    let receiver = node::<2, 1>(33, "receiver");
+    register_receiver(&mut sender, 33, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"full hash selection",
+        1,
+        &mut rng,
+    );
+    let original = job.prepared();
+    let generation = original.handle().generation;
+    let mut colliding = original.attempt();
+    colliding.0[31] ^= 0xff;
+    sender.attempts[0].state = AttemptState::Active {
+        generation: generation + 1,
+        token: colliding,
+        kind: DataReceiptKind::DestinationData,
+        link: None,
+    };
+    sender.attempts[1].state = AttemptState::Active {
+        generation,
+        token: original.attempt(),
+        kind: DataReceiptKind::DestinationData,
+        link: None,
+    };
+    let DispatchState::Active(mut record) = sender.dispatches[0].state else {
+        panic!("expected queued dispatch")
+    };
+    let exact = AttemptRef {
+        slot: 1,
+        generation,
+    };
+    record.attempt = exact;
+    sender.dispatches[0].state = DispatchState::Active(record);
+
+    sender
+        .ingest(
+            &proof_for(33, original.attempt()),
+            time(2),
+            PacketInterfaceId::new(2),
+            &mut rng,
+        )
+        .unwrap();
+    assert!(matches!(
+        sender.attempts[0].state,
+        AttemptState::Active { token, .. } if token == colliding
+    ));
+    assert!(matches!(
+        sender.attempts[1].state,
+        AttemptState::Terminal {
+            token,
+            outcome: AttemptOutcome::Delivered,
+            ..
+        } if token == original.attempt()
+    ));
+    let _ = job;
+}
+
+#[test]
+fn route_plans_are_explicit_and_ascending_for_every_target_shape() {
+    let enabled = interfaces(&[63, 5, 1]);
+    let mut all = TxRoutePlan::resolve(TxTarget::All, enabled).unwrap();
+    assert_eq!(all.take_next(), Some(PacketInterfaceId::new(1)));
+    assert_eq!(all.take_next(), Some(PacketInterfaceId::new(5)));
+    assert_eq!(all.take_next(), Some(PacketInterfaceId::new(63)));
+    assert_eq!(all.take_next(), None);
+
+    let mut only =
+        TxRoutePlan::resolve(TxTarget::Only(PacketInterfaceId::new(5)), enabled).unwrap();
+    assert_eq!(only.take_next(), Some(PacketInterfaceId::new(5)));
+    assert_eq!(only.take_next(), None);
+
+    let mut except =
+        TxRoutePlan::resolve(TxTarget::AllExcept(PacketInterfaceId::new(5)), enabled).unwrap();
+    assert_eq!(except.take_next(), Some(PacketInterfaceId::new(1)));
+    assert_eq!(except.take_next(), Some(PacketInterfaceId::new(63)));
+    assert_eq!(except.take_next(), None);
+
+    let selected_interfaces = interfaces(&[5, 7, 63]);
+    let mut selected =
+        TxRoutePlan::resolve(TxTarget::Selected(selected_interfaces), enabled).unwrap();
+    assert_eq!(selected.take_next(), Some(PacketInterfaceId::new(5)));
+    assert_eq!(selected.take_next(), Some(PacketInterfaceId::new(63)));
+    assert_eq!(selected.take_next(), None);
+
+    assert_eq!(
+        TxRoutePlan::resolve(TxTarget::Only(PacketInterfaceId::new(7)), enabled),
+        Err(TxRouteError::NoEligibleInterface {
+            target: TxTarget::Only(PacketInterfaceId::new(7)),
+        })
+    );
+    assert_eq!(
+        TxRoutePlan::resolve(TxTarget::All, InterfaceSet::empty()),
+        Err(TxRouteError::NoEligibleInterface {
+            target: TxTarget::All,
+        })
+    );
+    assert_eq!(
+        TxRoutePlan::resolve(TxTarget::Selected(interfaces(&[7])), enabled),
+        Err(TxRouteError::NoEligibleInterface {
+            target: TxTarget::Selected(interfaces(&[7])),
+        })
+    );
+    assert_eq!(
+        TxRoutePlan::resolve(TxTarget::Only(PacketInterfaceId::new(64)), enabled),
+        Err(TxRouteError::InterfaceOutsideProfile {
+            interface: PacketInterfaceId::new(64),
+        })
+    );
+    assert_eq!(
+        TxRoutePlan::resolve(TxTarget::AllExcept(PacketInterfaceId::new(255)), enabled),
+        Err(TxRouteError::InterfaceOutsideProfile {
+            interface: PacketInterfaceId::new(255),
+        })
+    );
+}
+
+#[test]
+fn empty_route_cancels_exact_receipt_and_returns_same_available_buffer() {
+    let mut sender = node::<2, 1>(50, "sender");
+    let receiver = node::<2, 1>(51, "receiver");
+    register_receiver(&mut sender, 51, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let pointer = core::ptr::from_ref(&buffer);
+    let mut rng = CounterRng::default();
+
+    let failure = match sender.prepare_data_into_slot(
+        &mut buffer,
+        prepare_request(
+            receiver.destination_hash(),
+            b"nowhere to send",
+            1,
+            1_000,
+            1_500,
+            InterfaceSet::empty(),
+        ),
+        &mut rng,
+    ) {
+        Ok(_) => panic!("empty route was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        failure.reason(),
+        SubmitError::NoEligibleInterface {
+            target: TxTarget::All,
+        }
+    );
+    let returned = available(failure);
+    assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+    assert_ne!(rng.0, 0, "native preparation must precede route resolution");
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().attempts_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(sender.attempt_generation, 0);
+    assert_eq!(sender.dispatch_generation, 0);
+    assert_eq!(sender.hop_generation, 0);
+}
+
+#[test]
+fn permit_requirements_and_reservations_are_explicit_and_validated() {
+    let resource = TxPermitResourceId::new([0x42; 16]);
+    assert_eq!(resource.as_bytes(), &[0x42; 16]);
+    assert_eq!(
+        TxPermitRequirements::try_new(resource, 0),
+        Err(TxPermitRequirementsError::ZeroRequiredUnits)
+    );
+    let requirements = TxPermitRequirements::try_new(resource, 987_654).unwrap();
+    assert_eq!(requirements.resource(), resource);
+    assert_eq!(requirements.required_units(), 987_654);
+
+    assert_eq!(
+        TxPermitReservation::try_new(resource, 0),
+        Err(TxPermitReservationError::ZeroReservedUnits)
+    );
+    let reservation = TxPermitReservation::try_new(resource, 1_000_000).unwrap();
+    assert_eq!(reservation.resource(), resource);
+    assert_eq!(reservation.reserved_units(), 1_000_000);
+}
+
+#[test]
+fn authorization_rejects_underreserved_and_mismatched_resource_grants() {
+    let required_resource = TxPermitResourceId::new([0x31; 16]);
+    let requirements = TxPermitRequirements::try_new(required_resource, 500_000).unwrap();
+    assert_noncovering_reservation_is_denied(
+        90,
+        91,
+        requirements,
+        TxPermitReservation::try_new(required_resource, 499_999).unwrap(),
+    );
+    assert_noncovering_reservation_is_denied(
+        92,
+        93,
+        requirements,
+        TxPermitReservation::try_new(TxPermitResourceId::new([0x32; 16]), 500_000).unwrap(),
+    );
+}
+
+#[test]
+fn permit_grant_is_one_shot_and_authorization_keeps_the_receipt_live() {
+    let mut sender = node::<2, 1>(52, "sender");
+    let receiver = node::<2, 1>(53, "receiver");
+    register_receiver(&mut sender, 53, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let pointer = core::ptr::from_ref(&buffer);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"authorized frame",
+        1,
+        &mut rng,
+    );
+    let packet_len = job.packet_len();
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+    let resource = TxPermitResourceId::new([0xa5; 16]);
+    let requirements = TxPermitRequirements::try_new(resource, 123_456).unwrap();
+    let reservation = TxPermitReservation::try_new(resource, 123_500).unwrap();
+    let (pending, request) = job.begin_permit(requirements);
+    let mut policy = TestPolicy {
+        decision: TxPolicyDecision::Authorize(reservation),
+        calls: 0,
+        candidate: None,
+    };
+    let reply = match sender.authorize_tx(request, owner_time(1_001), &mut policy) {
+        Ok(reply) => reply,
+        Err(failure) => panic!("permit validation failed: {:?}", failure.reason()),
+    };
+    assert_eq!(policy.calls, 1);
+    assert_eq!(
+        policy.candidate,
+        Some(TxAuthorizationCandidate {
+            interface: PacketInterfaceId::new(1),
+            packet_len,
+            requirements,
+            now: owner_time(1_001),
+            deadline: deadline(1_500),
+            may_have_transmitted: false,
+        })
+    );
+    assert_eq!(
+        match &reply {
+            TxPermitReply::Granted(grant) => grant.reservation(),
+            TxPermitReply::Denied(_) => panic!("covering reservation was denied"),
+        },
+        reservation
+    );
+    assert_eq!(sender.capacities().dispatches_authorized, 1);
+    assert_eq!(sender.capacities().dispatches_queued, 0);
+    let mut authorized = match pending.resolve(reply, owner_time(1_100)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Unpermitted(_)) => panic!("grant resolved as denial"),
+        Ok(PermitResolution::Expired(_)) => panic!("fresh grant resolved as expired"),
+        Err(_) => panic!("matching grant did not resolve"),
+    };
+    assert_eq!(authorized.reservation(), reservation);
+    {
+        let frame = authorized.frame(owner_time(1_100)).unwrap();
+        assert_eq!(frame.interface(), PacketInterfaceId::new(1));
+        assert_eq!(frame.attempt_handle(), handle);
+        assert_eq!(frame.attempt(), attempt);
+        assert_eq!(frame.bytes().len(), usize::from(packet_len));
+        assert_eq!(
+            reticulum_rns_rete::parse_packet(frame.bytes())
+                .unwrap()
+                .compute_hash(),
+            *attempt.as_bytes()
+        );
+    }
+    assert!(matches!(
+        authorized.frame(owner_time(1_100)),
+        Err(TxFrameError::AlreadyTaken)
+    ));
+
+    let disposition = sender
+        .complete_tx(
+            authorized.complete(TxCompletionCode::new(7)),
+            owner_time(1_100),
+        )
+        .unwrap_or_else(|failure| panic!("authorized completion failed: {:?}", failure.reason()));
+    let returned = match disposition {
+        TxCompletionDisposition::Available(buffer) => buffer,
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh return recovered"),
+        TxCompletionDisposition::Next(_) => panic!("single route fanned out"),
+        TxCompletionDisposition::Quarantined(_) => panic!("valid return quarantined"),
+    };
+    assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+}
+
+#[test]
+fn parked_receipt_survives_queue_delay_then_uses_actual_transmit_time() {
+    let mut sender = node::<2, 1>(108, "sender");
+    let receiver = node::<2, 1>(109, "receiver");
+    register_receiver(&mut sender, 109, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare_with_interfaces(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"full proof budget after physical transmit",
+        100,
+        100_000,
+        160_000,
+        default_interfaces(),
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+
+    let beyond_preparation_deadline = sender.tick(time(131), &mut rng);
+    assert_eq!(beyond_preparation_deadline.timed_out_attempts, 0);
+    assert!(sender.terminal_attempts().next().is_none());
+
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let reply = sender
+        .authorize_tx(request, owner_time(135_000), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+    let mut authorized = match pending.resolve(reply, owner_time(135_000)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Unpermitted(_)) => panic!("delayed permit was denied"),
+        Ok(PermitResolution::Expired(_)) => panic!("delayed permit expired"),
+        Err(_) => panic!("matching delayed permit did not resolve"),
+    };
+    let _frame = authorized.frame(owner_time(135_000)).unwrap();
+    let disposition = sender
+        .complete_tx(
+            authorized.complete_transmitted(TxCompletionCode::new(0x44), owner_time(135_000)),
+            owner_time(145_000),
+        )
+        .unwrap_or_else(|failure| panic!("transmitted completion failed: {:?}", failure.reason()));
+    assert!(matches!(disposition, TxCompletionDisposition::Available(_)));
+
+    let exact_post_transmit_deadline = sender.tick(time(165), &mut rng);
+    assert_eq!(exact_post_transmit_deadline.timed_out_attempts, 0);
+    assert!(sender.terminal_attempts().next().is_none());
+
+    let expired = sender.tick(time(166), &mut rng);
+    assert_eq!(expired.timed_out_attempts, 1);
+    let terminal = sender
+        .terminal_attempts()
+        .next()
+        .expect("receipt must expire only after its restarted proof window");
+    assert_eq!(terminal.handle(), handle);
+    assert_eq!(terminal.outcome(), AttemptOutcome::DeliveryTimeout);
+}
+
+#[test]
+fn each_possibly_transmitted_fanout_hop_refreshes_the_receipt_window() {
+    let mut sender = node::<2, 1>(110, "fanout-sender");
+    let receiver = node::<2, 1>(111, "fanout-receiver");
+    register_receiver(&mut sender, 111, "fanout-receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let first = prepare_with_interfaces(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"each physical fanout gets a proof window",
+        100,
+        100_000,
+        180_000,
+        interfaces(&[1, 2]),
+        &mut rng,
+    );
+    let handle = first.attempt_handle();
+    let (pending, request) = first.begin_permit(test_permit_requirements());
+    let reply = sender
+        .authorize_tx(request, owner_time(105_000), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("first authorization failed: {:?}", failure.reason()));
+    let mut first = match pending.resolve(reply, owner_time(105_000)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        _ => panic!("first fanout permit was not authorized"),
+    };
+    let _ = first.frame(owner_time(105_000)).unwrap();
+    let second = match sender
+        .complete_tx(
+            first.complete_transmitted(TxCompletionCode::new(0x45), owner_time(110_000)),
+            owner_time(110_000),
+        )
+        .unwrap_or_else(|failure| panic!("first completion failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Next(next) => next,
+        _ => panic!("first physical fanout did not advance"),
+    };
+
+    let stalled_between_hops = sender.tick(time(141), &mut rng);
+    assert_eq!(stalled_between_hops.timed_out_attempts, 0);
+    assert!(sender.terminal_attempts().next().is_none());
+
+    let (pending, request) = second.begin_permit(test_permit_requirements());
+    let reply = sender
+        .authorize_tx(request, owner_time(145_000), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("second authorization failed: {:?}", failure.reason()));
+    let mut second = match pending.resolve(reply, owner_time(145_000)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        _ => panic!("second fanout permit was not authorized"),
+    };
+    let _ = second.frame(owner_time(145_000)).unwrap();
+    assert!(matches!(
+        sender
+            .complete_tx(
+                second.complete_transmitted(TxCompletionCode::new(0x46), owner_time(150_000),),
+                owner_time(150_000),
+            )
+            .unwrap_or_else(|failure| {
+                panic!("second completion failed: {:?}", failure.reason())
+            }),
+        TxCompletionDisposition::Available(_)
+    ));
+
+    let exact_second_hop_deadline = sender.tick(time(180), &mut rng);
+    assert_eq!(exact_second_hop_deadline.timed_out_attempts, 0);
+    let expired = sender.tick(time(181), &mut rng);
+    assert_eq!(expired.timed_out_attempts, 1);
+    assert_eq!(sender.terminal_attempts().next().unwrap().handle(), handle);
+}
+
+#[test]
+fn policy_denial_returns_unpermitted_owner_and_cancels_final_receipt() {
+    let mut sender = node::<2, 1>(54, "sender");
+    let receiver = node::<2, 1>(55, "receiver");
+    register_receiver(&mut sender, 55, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let pointer = core::ptr::from_ref(&buffer);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"deny",
+        1,
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let mut policy = TestPolicy::denying(TxPolicyDenial::ResourceUnavailable);
+    let reply = sender
+        .authorize_tx(request, owner_time(1_100), &mut policy)
+        .unwrap_or_else(|failure| panic!("denial failed: {:?}", failure.reason()));
+    let unpermitted = match pending.resolve(reply, owner_time(1_100)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("denial authorized bytes"),
+        Ok(PermitResolution::Expired(_)) => panic!("denial became expired grant"),
+        Err(_) => panic!("matching denial did not resolve"),
+    };
+    assert_eq!(
+        unpermitted.denial(),
+        Some(TxPermitDenialReason::Policy(
+            TxPolicyDenial::ResourceUnavailable
+        ))
+    );
+    let disposition = sender
+        .complete_tx(
+            unpermitted.complete(TxCompletionCode::new(8)),
+            owner_time(1_200),
+        )
+        .unwrap_or_else(|failure| panic!("denied return failed: {:?}", failure.reason()));
+    let returned = match disposition {
+        TxCompletionDisposition::Available(buffer) => buffer,
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh denial recovered"),
+        TxCompletionDisposition::Next(_) => panic!("single route fanned out"),
+        TxCompletionDisposition::Quarantined(_) => panic!("valid denial quarantined"),
+    };
+    assert!(core::ptr::eq(core::ptr::from_ref(returned), pointer));
+    assert_eq!(policy.calls, 1);
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(sender.capacities().attempts_terminal, 1);
+    assert_eq!(
+        sender.acknowledge_terminal(handle).unwrap().outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PolicyDenied(
+            TxPolicyDenial::ResourceUnavailable
+        ))
+    );
+}
+
+#[test]
+fn mismatched_permit_reply_retains_pending_owner_and_reply() {
+    let mut sender = node::<2, 2>(56, "sender");
+    let receiver = node::<2, 2>(57, "receiver");
+    register_receiver(&mut sender, 57, "receiver");
+    let mut first_buffer = registered_buffer(&mut sender);
+    let mut second_buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let first = prepare_with_interfaces(
+        &mut sender,
+        &mut first_buffer,
+        receiver.destination_hash(),
+        b"first permit",
+        1,
+        1_000,
+        3_000,
+        default_interfaces(),
+        &mut rng,
+    );
+    let second = prepare(
+        &mut sender,
+        &mut second_buffer,
+        receiver.destination_hash(),
+        b"second permit",
+        2,
+        &mut rng,
+    );
+    let (first_pending, first_request) = first.begin_permit(test_permit_requirements());
+    let (second_pending, second_request) = second.begin_permit(test_permit_requirements());
+    let first_reply = sender
+        .authorize_tx(
+            first_request,
+            owner_time(1_100),
+            &mut TestPolicy::allowing(),
+        )
+        .unwrap_or_else(|failure| panic!("first permit failed: {:?}", failure.reason()));
+    let second_reply = sender
+        .authorize_tx(
+            second_request,
+            owner_time(2_100),
+            &mut TestPolicy::denying(TxPolicyDenial::PolicyDenied),
+        )
+        .unwrap_or_else(|failure| panic!("second permit failed: {:?}", failure.reason()));
+
+    let mismatch = match first_pending.resolve(second_reply, owner_time(1_100)) {
+        Err(mismatch) => mismatch,
+        Ok(_) => panic!("reply for another slot resolved pending ownership"),
+    };
+    let (first_pending, second_reply) = mismatch.into_parts();
+    let first_authorized = match first_pending.resolve(first_reply, owner_time(1_100)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Unpermitted(_)) => panic!("first grant became denial"),
+        Ok(PermitResolution::Expired(_)) => panic!("first grant expired unexpectedly"),
+        Err(_) => panic!("retained first pending owner did not resolve"),
+    };
+    let second_unpermitted = match second_pending.resolve(second_reply, owner_time(2_100)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("second denial became grant"),
+        Ok(PermitResolution::Expired(_)) => panic!("second denial became expired grant"),
+        Err(_) => panic!("retained second reply did not resolve"),
+    };
+
+    assert!(matches!(
+        sender
+            .complete_tx(
+                first_authorized.complete(TxCompletionCode::new(1)),
+                owner_time(2_200),
+            )
+            .unwrap_or_else(|failure| panic!("first completion: {:?}", failure.reason())),
+        TxCompletionDisposition::Available(_)
+    ));
+    assert!(matches!(
+        sender
+            .complete_tx(
+                second_unpermitted.complete(TxCompletionCode::new(2)),
+                owner_time(2_200),
+            )
+            .unwrap_or_else(|failure| panic!("second completion: {:?}", failure.reason())),
+        TxCompletionDisposition::Available(_)
+    ));
+}
+
+#[test]
+fn terminal_before_permit_denies_and_terminal_after_permit_stops_fanout() {
+    let receiver = node::<2, 1>(59, "receiver");
+    let route = interfaces(&[1, 4]);
+
+    let mut before = node::<2, 1>(58, "before");
+    register_receiver(&mut before, 59, "receiver");
+    let mut before_buffer = registered_buffer(&mut before);
+    let mut rng = CounterRng::default();
+    let before_job = prepare_with_interfaces(
+        &mut before,
+        &mut before_buffer,
+        receiver.destination_hash(),
+        b"terminal first",
+        1,
+        1_000,
+        1_500,
+        route,
+        &mut rng,
+    );
+    let before_attempt = before_job.attempt();
+    let before_handle = before_job.attempt_handle();
+    let (before_pending, before_request) = before_job.begin_permit(test_permit_requirements());
+    before
+        .ingest(
+            &proof_for(59, before_attempt),
+            time(1),
+            PacketInterfaceId::new(1),
+            &mut rng,
+        )
+        .unwrap();
+    let mut policy = TestPolicy::allowing();
+    let before_reply = before
+        .authorize_tx(before_request, owner_time(1_100), &mut policy)
+        .unwrap_or_else(|failure| panic!("terminal denial failed: {:?}", failure.reason()));
+    assert_eq!(policy.calls, 0);
+    let before_unpermitted = match before_pending.resolve(before_reply, owner_time(1_100)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("terminal work was authorized"),
+        Ok(PermitResolution::Expired(_)) => panic!("terminal denial became expired grant"),
+        Err(_) => panic!("terminal denial did not resolve"),
+    };
+    assert!(matches!(
+        before_unpermitted.denial(),
+        Some(TxPermitDenialReason::AttemptTerminal(
+            AttemptOutcome::Delivered
+        ))
+    ));
+    let before_return = before
+        .complete_tx(
+            before_unpermitted.complete(TxCompletionCode::new(3)),
+            owner_time(1_200),
+        )
+        .unwrap_or_else(|failure| panic!("terminal return failed: {:?}", failure.reason()));
+    assert!(matches!(
+        before_return,
+        TxCompletionDisposition::Available(_)
+    ));
+    assert_eq!(
+        before
+            .acknowledge_terminal(before_handle)
+            .unwrap()
+            .outcome(),
+        AttemptOutcome::Delivered
+    );
+
+    let mut after = node::<2, 1>(60, "after");
+    register_receiver(&mut after, 59, "receiver");
+    let mut after_buffer = registered_buffer(&mut after);
+    let after_job = prepare_with_interfaces(
+        &mut after,
+        &mut after_buffer,
+        receiver.destination_hash(),
+        b"permit first",
+        1,
+        1_000,
+        1_500,
+        route,
+        &mut rng,
+    );
+    let after_attempt = after_job.attempt();
+    let after_handle = after_job.attempt_handle();
+    let (after_pending, after_request) = after_job.begin_permit(test_permit_requirements());
+    let after_reply = after
+        .authorize_tx(
+            after_request,
+            owner_time(1_100),
+            &mut TestPolicy::allowing(),
+        )
+        .unwrap_or_else(|failure| panic!("permit failed: {:?}", failure.reason()));
+    let after_authorized = match after_pending.resolve(after_reply, owner_time(1_100)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Unpermitted(_)) => panic!("valid work denied"),
+        Ok(PermitResolution::Expired(_)) => panic!("valid grant expired unexpectedly"),
+        Err(_) => panic!("grant did not resolve"),
+    };
+    after
+        .ingest(
+            &proof_for(59, after_attempt),
+            time(1),
+            PacketInterfaceId::new(1),
+            &mut rng,
+        )
+        .unwrap();
+    let after_return = after
+        .complete_tx(
+            after_authorized.complete(TxCompletionCode::new(4)),
+            owner_time(1_200),
+        )
+        .unwrap_or_else(|failure| panic!("authorized return failed: {:?}", failure.reason()));
+    assert!(matches!(
+        after_return,
+        TxCompletionDisposition::Available(_)
+    ));
+    assert_eq!(
+        after.acknowledge_terminal(after_handle).unwrap().outcome(),
+        AttemptOutcome::Delivered
+    );
+}
+
+#[test]
+fn serialized_fanout_cancels_all_unsent_but_preserves_cumulative_authorization() {
+    let receiver = node::<2, 1>(62, "receiver");
+    let route = interfaces(&[5, 2]);
+    let mut rng = CounterRng::default();
+
+    let mut unsent = node::<2, 1>(61, "unsent");
+    register_receiver(&mut unsent, 62, "receiver");
+    let mut unsent_buffer = registered_buffer(&mut unsent);
+    let first = prepare_with_interfaces(
+        &mut unsent,
+        &mut unsent_buffer,
+        receiver.destination_hash(),
+        b"all unsent",
+        1,
+        1_000,
+        1_500,
+        route,
+        &mut rng,
+    );
+    let unsent_handle = first.attempt_handle();
+    assert_eq!(first.interface(), PacketInterfaceId::new(2));
+    let second = match unsent
+        .complete_tx(
+            first
+                .return_unpermitted()
+                .complete(TxCompletionCode::new(10)),
+            owner_time(1_100),
+        )
+        .unwrap_or_else(|failure| panic!("first unsent return: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Next(next) => next,
+        TxCompletionDisposition::Available(_) => panic!("fanout stopped after first route"),
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh fanout recovered"),
+        TxCompletionDisposition::Quarantined(_) => panic!("valid first return quarantined"),
+    };
+    assert_eq!(second.interface(), PacketInterfaceId::new(5));
+    let returned = match unsent
+        .complete_tx(
+            second
+                .return_unpermitted()
+                .complete(TxCompletionCode::new(11)),
+            owner_time(1_200),
+        )
+        .unwrap_or_else(|failure| panic!("second unsent return: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Available(buffer) => buffer,
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh final return recovered"),
+        TxCompletionDisposition::Next(_) => panic!("route retried an interface"),
+        TxCompletionDisposition::Quarantined(_) => panic!("valid final return quarantined"),
+    };
+    assert_eq!(returned.slot_id().unwrap().get(), 0);
+    assert_eq!(unsent.capacities().receipts_used, 0);
+    assert_eq!(unsent.capacities().attempts_terminal, 1);
+    assert_eq!(
+        unsent
+            .acknowledge_terminal(unsent_handle)
+            .unwrap()
+            .outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::Unpermitted(TxCompletionCode::new(11)))
+    );
+
+    let mut cumulative = node::<2, 1>(63, "cumulative");
+    register_receiver(&mut cumulative, 62, "receiver");
+    let mut cumulative_buffer = registered_buffer(&mut cumulative);
+    let first = prepare_with_interfaces(
+        &mut cumulative,
+        &mut cumulative_buffer,
+        receiver.destination_hash(),
+        b"first authorized",
+        2,
+        2_000,
+        2_500,
+        route,
+        &mut rng,
+    );
+    let (pending, request) = first.begin_permit(test_permit_requirements());
+    let reply = cumulative
+        .authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("first authorization: {:?}", failure.reason()));
+    let first = match pending.resolve(reply, owner_time(2_100)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Unpermitted(_)) => panic!("first hop denied"),
+        Ok(PermitResolution::Expired(_)) => panic!("first hop grant expired"),
+        Err(_) => panic!("first reply mismatch"),
+    };
+    let second = match cumulative
+        .complete_tx(first.complete(TxCompletionCode::new(12)), owner_time(2_150))
+        .unwrap_or_else(|failure| panic!("first authorized return: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Next(next) => next,
+        TxCompletionDisposition::Available(_) => panic!("authorized fanout stopped early"),
+        TxCompletionDisposition::Recovered { .. } => panic!("fresh authorization recovered"),
+        TxCompletionDisposition::Quarantined(_) => panic!("authorized return quarantined"),
+    };
+    assert_eq!(second.interface(), PacketInterfaceId::new(5));
+    let (pending, request) = second.begin_permit(test_permit_requirements());
+    let mut policy = TestPolicy::denying(TxPolicyDenial::CapacityUnavailable);
+    let reply = cumulative
+        .authorize_tx(request, owner_time(2_200), &mut policy)
+        .unwrap_or_else(|failure| panic!("second denial: {:?}", failure.reason()));
+    assert_eq!(
+        policy.candidate,
+        Some(TxAuthorizationCandidate {
+            interface: PacketInterfaceId::new(5),
+            packet_len: policy.candidate.unwrap().packet_len,
+            requirements: test_permit_requirements(),
+            now: owner_time(2_200),
+            deadline: deadline(2_500),
+            may_have_transmitted: true,
+        })
+    );
+    let second = match pending.resolve(reply, owner_time(2_200)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("second denial authorized"),
+        Ok(PermitResolution::Expired(_)) => panic!("second denial became expired grant"),
+        Err(_) => panic!("second reply mismatch"),
+    };
+    assert!(matches!(
+        cumulative
+            .complete_tx(
+                second.complete(TxCompletionCode::new(13)),
+                owner_time(2_300)
+            )
+            .unwrap_or_else(|failure| panic!("second return: {:?}", failure.reason())),
+        TxCompletionDisposition::Available(_)
+    ));
+    assert_eq!(cumulative.capacities().dispatches_used, 0);
+    assert_eq!(cumulative.capacities().receipts_used, 1);
+    assert_eq!(cumulative.capacities().attempts_active, 1);
+}
+
+#[test]
+fn next_tx_deadline_tracks_earliest_live_dispatch_and_excludes_recovery() {
+    let receiver = node::<2, 1>(91, "deadline-schedule-receiver");
+    let mut sender = node::<2, 2>(90, "deadline-schedule-sender");
+    register_receiver(&mut sender, 91, "deadline-schedule-receiver");
+    let mut later_buffer = registered_buffer(&mut sender);
+    let mut earlier_buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+
+    assert_eq!(sender.next_tx_deadline(), None);
+    let later = prepare_with_interfaces(
+        &mut sender,
+        &mut later_buffer,
+        receiver.destination_hash(),
+        b"later routed dispatch",
+        1,
+        1_000,
+        2_500,
+        default_interfaces(),
+        &mut rng,
+    );
+    let earlier = prepare_with_interfaces(
+        &mut sender,
+        &mut earlier_buffer,
+        receiver.destination_hash(),
+        b"earlier authorized dispatch",
+        1,
+        1_000,
+        1_500,
+        default_interfaces(),
+        &mut rng,
+    );
+    let (pending, request) = earlier.begin_permit(test_permit_requirements());
+    let reply = sender
+        .authorize_tx(request, owner_time(1_400), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+    let earlier = match pending.resolve(reply, owner_time(1_400)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Expired(_)) => panic!("fresh grant expired"),
+        Ok(PermitResolution::Unpermitted(_)) => panic!("fresh grant was denied"),
+        Err(_) => panic!("fresh grant mismatched"),
+    };
+
+    assert_eq!(sender.next_tx_deadline(), Some(deadline(1_500)));
+    assert_eq!(
+        sender.maintain_tx(owner_time(1_499)),
+        TxMaintenanceReport {
+            newly_recovery_required: 0,
+        }
+    );
+    assert_eq!(sender.next_tx_deadline(), Some(deadline(1_500)));
+    assert_eq!(
+        sender.maintain_tx(owner_time(1_500)),
+        TxMaintenanceReport {
+            newly_recovery_required: 1,
+        }
+    );
+    assert_eq!(sender.next_tx_deadline(), Some(deadline(2_500)));
+    assert_eq!(
+        sender.maintain_tx(owner_time(2_500)),
+        TxMaintenanceReport {
+            newly_recovery_required: 1,
+        }
+    );
+    assert_eq!(sender.next_tx_deadline(), None);
+
+    assert!(matches!(
+        sender
+            .complete_tx(
+                later
+                    .return_unpermitted()
+                    .complete(TxCompletionCode::new(22)),
+                owner_time(2_501),
+            )
+            .unwrap_or_else(|failure| panic!("routed recovery return: {:?}", failure.reason())),
+        TxCompletionDisposition::Recovered { .. }
+    ));
+    assert!(matches!(
+        sender
+            .complete_tx(
+                earlier.complete(TxCompletionCode::new(23)),
+                owner_time(2_501),
+            )
+            .unwrap_or_else(|failure| panic!("authorized recovery return: {:?}", failure.reason())),
+        TxCompletionDisposition::Recovered { .. }
+    ));
+}
+
+#[test]
+fn exact_deadline_tie_enters_recovery_and_matching_return_reclaims_buffer() {
+    let receiver = node::<2, 1>(65, "receiver");
+    let mut rng = CounterRng::default();
+
+    let mut before_permit = node::<2, 1>(64, "before-permit");
+    register_receiver(&mut before_permit, 65, "receiver");
+    let mut before_buffer = registered_buffer(&mut before_permit);
+    let job = prepare_with_interfaces(
+        &mut before_permit,
+        &mut before_buffer,
+        receiver.destination_hash(),
+        b"deadline before permit",
+        1,
+        1_000,
+        1_500,
+        default_interfaces(),
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let mut policy = TestPolicy::allowing();
+    let reply = before_permit
+        .authorize_tx(request, owner_time(1_500), &mut policy)
+        .unwrap_or_else(|failure| panic!("deadline validation failed: {:?}", failure.reason()));
+    assert_eq!(policy.calls, 0);
+    let unpermitted = match pending.resolve(reply, owner_time(1_500)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("deadline tie authorized TX"),
+        Ok(PermitResolution::Expired(_)) => panic!("deadline denial became grant"),
+        Err(_) => panic!("deadline denial did not resolve"),
+    };
+    assert_eq!(
+        unpermitted.denial(),
+        Some(TxPermitDenialReason::DeadlineExpired)
+    );
+    let observation = before_permit.recovery_records().next().unwrap();
+    let record = observation.record();
+    assert_eq!(observation.attempt_handle(), handle);
+    assert_eq!(observation.attempt(), attempt);
+    assert_eq!(record.instance(), before_permit.instance_id());
+    assert_eq!(record.slot_id().get(), 0);
+    assert_eq!(record.dispatch_generation(), 1);
+    assert_eq!(record.interface(), Some(PacketInterfaceId::new(1)));
+    assert_eq!(record.deadline(), deadline(1_500));
+    assert_eq!(record.observed_at(), owner_time(1_500));
+    assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Unpermitted);
+    assert!(!record.may_have_transmitted());
+    assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
+    let (returned, recovered) = match before_permit
+        .complete_tx(
+            unpermitted.complete(TxCompletionCode::new(20)),
+            owner_time(1_501),
+        )
+        .unwrap_or_else(|failure| panic!("deadline return failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Recovered {
+            buffer,
+            observation,
+        } => (buffer, observation),
+        TxCompletionDisposition::Next(_) => panic!("recovery continued fanout"),
+        TxCompletionDisposition::Available(_) => panic!("late return lost recovery record"),
+        TxCompletionDisposition::Quarantined(_) => panic!("matching late return quarantined"),
+    };
+    assert_eq!(recovered, observation);
+    assert_eq!(returned.slot_id().unwrap().get(), 0);
+    assert_eq!(before_permit.capacities().dispatches_recovery_required, 0);
+    assert_eq!(before_permit.capacities().dispatches_used, 0);
+    assert_eq!(before_permit.capacities().receipts_used, 0);
+
+    let mut after_permit = node::<2, 1>(66, "after-permit");
+    register_receiver(&mut after_permit, 65, "receiver");
+    let mut after_buffer = registered_buffer(&mut after_permit);
+    let job = prepare_with_interfaces(
+        &mut after_permit,
+        &mut after_buffer,
+        receiver.destination_hash(),
+        b"deadline after permit",
+        2,
+        2_000,
+        2_500,
+        default_interfaces(),
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let reply = after_permit
+        .authorize_tx(request, owner_time(2_400), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+    let authorized = match pending.resolve(reply, owner_time(2_400)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Unpermitted(_)) => panic!("pre-deadline permit denied"),
+        Ok(PermitResolution::Expired(_)) => panic!("pre-deadline grant expired"),
+        Err(_) => panic!("grant did not resolve"),
+    };
+    assert_eq!(
+        after_permit.maintain_tx(owner_time(2_499)),
+        TxMaintenanceReport {
+            newly_recovery_required: 0,
+        }
+    );
+    assert_eq!(after_permit.capacities().dispatches_authorized, 1);
+    assert_eq!(
+        after_permit.maintain_tx(owner_time(2_500)),
+        TxMaintenanceReport {
+            newly_recovery_required: 1,
+        }
+    );
+    assert_eq!(
+        after_permit.maintain_tx(owner_time(2_501)),
+        TxMaintenanceReport {
+            newly_recovery_required: 0,
+        }
+    );
+    let observation = after_permit.recovery_records().next().unwrap();
+    let record = observation.record();
+    assert_eq!(observation.attempt_handle(), handle);
+    assert_eq!(observation.attempt(), attempt);
+    assert_eq!(record.instance(), after_permit.instance_id());
+    assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
+    assert!(record.may_have_transmitted());
+    assert_eq!(record.observed_at(), owner_time(2_500));
+    let (returned, recovered) = match after_permit
+        .complete_tx(
+            authorized.complete(TxCompletionCode::new(21)),
+            owner_time(2_600),
+        )
+        .unwrap_or_else(|failure| panic!("authorized recovery return: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Recovered {
+            buffer,
+            observation,
+        } => (buffer, observation),
+        TxCompletionDisposition::Next(_) => panic!("authorized recovery fanned out"),
+        TxCompletionDisposition::Available(_) => panic!("late return lost recovery record"),
+        TxCompletionDisposition::Quarantined(_) => panic!("matching late return quarantined"),
+    };
+    assert_eq!(recovered, observation);
+    assert_eq!(returned.slot_id().unwrap().get(), 0);
+    assert_eq!(after_permit.capacities().dispatches_recovery_required, 0);
+    assert_eq!(after_permit.capacities().dispatches_used, 0);
+    assert_eq!(after_permit.capacities().receipts_used, 1);
+}
+
+#[test]
+fn delayed_grant_and_late_frame_never_expose_bytes_after_deadline() {
+    let receiver = node::<2, 1>(76, "receiver");
+    let mut rng = CounterRng::default();
+
+    let mut delayed = node::<2, 1>(75, "delayed");
+    register_receiver(&mut delayed, 76, "receiver");
+    let mut delayed_buffer = registered_buffer(&mut delayed);
+    let job = prepare_with_interfaces(
+        &mut delayed,
+        &mut delayed_buffer,
+        receiver.destination_hash(),
+        b"delayed grant",
+        1,
+        1_000,
+        1_500,
+        default_interfaces(),
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let reply = delayed
+        .authorize_tx(request, owner_time(1_499), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("grant failed: {:?}", failure.reason()));
+    let expired = match pending.resolve(reply, owner_time(1_500)) {
+        Ok(PermitResolution::Expired(expired)) => expired,
+        Ok(PermitResolution::Authorized(_)) => panic!("delayed grant exposed a frame owner"),
+        Ok(PermitResolution::Unpermitted(_)) => panic!("issued grant became unpermitted"),
+        Err(_) => panic!("delayed matching grant mismatched"),
+    };
+    assert_eq!(expired.deadline(), deadline(1_500));
+    let recovered = delayed
+        .complete_tx(
+            expired.complete(TxCompletionCode::new(50)),
+            owner_time(1_500),
+        )
+        .unwrap_or_else(|failure| panic!("expired return failed: {:?}", failure.reason()));
+    assert!(matches!(
+        recovered,
+        TxCompletionDisposition::Recovered {
+            observation,
+            ..
+        } if observation.attempt_handle() == handle
+            && observation.attempt() == attempt
+            && observation.record().prior_phase() == TxRecoveryPriorPhase::Authorized
+            && observation.record().may_have_transmitted()
+            && observation.record().reason() == TxRecoveryReason::DeadlineExpired
+    ));
+    assert_eq!(delayed.capacities().dispatches_used, 0);
+    assert_eq!(delayed.capacities().receipts_used, 1);
+
+    let mut late_frame = node::<2, 1>(77, "late-frame");
+    register_receiver(&mut late_frame, 76, "receiver");
+    let mut late_buffer = registered_buffer(&mut late_frame);
+    let job = prepare_with_interfaces(
+        &mut late_frame,
+        &mut late_buffer,
+        receiver.destination_hash(),
+        b"late frame",
+        2,
+        2_000,
+        2_500,
+        default_interfaces(),
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let reply = late_frame
+        .authorize_tx(request, owner_time(2_499), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("grant failed: {:?}", failure.reason()));
+    let mut authorized = match pending.resolve(reply, owner_time(2_499)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Expired(_)) => panic!("fresh grant was already expired"),
+        Ok(PermitResolution::Unpermitted(_)) => panic!("fresh grant was denied"),
+        Err(_) => panic!("fresh grant mismatched"),
+    };
+    assert!(matches!(
+        authorized.frame(owner_time(2_500)),
+        Err(TxFrameError::DeadlineExpired { deadline: value })
+            if value == deadline(2_500)
+    ));
+    assert!(matches!(
+        authorized.frame(owner_time(2_499)),
+        Err(TxFrameError::AlreadyTaken)
+    ));
+    assert!(matches!(
+        late_frame
+            .complete_tx(
+                authorized.complete(TxCompletionCode::new(51)),
+                owner_time(2_500),
+            )
+            .unwrap_or_else(|failure| panic!("late frame return: {:?}", failure.reason())),
+        TxCompletionDisposition::Recovered {
+            observation,
+            ..
+        } if observation.attempt_handle() == handle
+            && observation.attempt() == attempt
+            && observation.record().prior_phase() == TxRecoveryPriorPhase::Authorized
+            && observation.record().reason() == TxRecoveryReason::DeadlineExpired
+    ));
+    assert_eq!(late_frame.capacities().dispatches_used, 0);
+    assert_eq!(late_frame.capacities().receipts_used, 1);
+}
+
+#[test]
+fn direct_late_unpermitted_return_stops_fanout_and_recovers_buffer() {
+    let mut sender = node::<2, 1>(78, "sender");
+    let receiver = node::<2, 1>(79, "receiver");
+    register_receiver(&mut sender, 79, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare_with_interfaces(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"late before authorization",
+        1,
+        1_000,
+        1_500,
+        interfaces(&[1, 4]),
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+
+    let disposition = sender
+        .complete_tx(
+            job.return_unpermitted().complete(TxCompletionCode::new(52)),
+            owner_time(1_500),
+        )
+        .unwrap_or_else(|failure| panic!("late return failed: {:?}", failure.reason()));
+    let (returned, observation) = match disposition {
+        TxCompletionDisposition::Recovered {
+            buffer,
+            observation,
+        } => (buffer, observation),
+        TxCompletionDisposition::Next(_) => panic!("late return advanced fanout"),
+        TxCompletionDisposition::Available(_) => panic!("late return hid recovery"),
+        TxCompletionDisposition::Quarantined(_) => panic!("matching late return quarantined"),
+    };
+    let record = observation.record();
+    assert_eq!(observation.attempt_handle(), handle);
+    assert_eq!(observation.attempt(), attempt);
+    assert_eq!(returned.slot_id().unwrap().get(), 0);
+    assert_eq!(record.instance(), sender.instance_id());
+    assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Unpermitted);
+    assert!(!record.may_have_transmitted());
+    assert_eq!(record.reason(), TxRecoveryReason::DeadlineExpired);
+    assert_eq!(sender.capacities().dispatches_used, 0);
+    assert_eq!(sender.capacities().receipts_used, 0);
+    assert_eq!(sender.capacities().attempts_terminal, 1);
+    assert_eq!(
+        sender.acknowledge_terminal(handle).unwrap().outcome(),
+        AttemptOutcome::Unsent(AttemptUnsentReason::PermitDeadlineExpired)
+    );
+}
+
+#[test]
+fn explicit_recovery_fault_supersedes_deadline_without_cancelling_receipt() {
+    let mut sender = node::<2, 1>(82, "sender");
+    let receiver = node::<2, 1>(83, "receiver");
+    register_receiver(&mut sender, 83, "receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare_with_interfaces(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"fault after deadline",
+        1,
+        1_000,
+        1_500,
+        default_interfaces(),
+        &mut rng,
+    );
+    let handle = job.attempt_handle();
+    let attempt = job.attempt();
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let reply = sender
+        .authorize_tx(request, owner_time(1_400), &mut TestPolicy::allowing())
+        .unwrap_or_else(|failure| panic!("authorization failed: {:?}", failure.reason()));
+    let authorized = match pending.resolve(reply, owner_time(1_400)) {
+        Ok(PermitResolution::Authorized(authorized)) => authorized,
+        Ok(PermitResolution::Expired(_)) => panic!("fresh grant expired"),
+        Ok(PermitResolution::Unpermitted(_)) => panic!("fresh grant denied"),
+        Err(_) => panic!("fresh grant mismatched"),
+    };
+    assert_eq!(
+        sender.maintain_tx(owner_time(1_500)),
+        TxMaintenanceReport {
+            newly_recovery_required: 1,
+        }
+    );
+    assert_eq!(
+        sender.recovery_records().next().unwrap().record().reason(),
+        TxRecoveryReason::DeadlineExpired
+    );
+
+    let code = TxCompletionCode::new(0x55aa);
+    let quarantine = match sender
+        .complete_tx(authorized.recovery_fault(code), owner_time(1_600))
+        .unwrap_or_else(|failure| panic!("fault return failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Quarantined(quarantine) => quarantine,
+        TxCompletionDisposition::Available(_) => panic!("fault released buffer"),
+        TxCompletionDisposition::Recovered { .. } => panic!("fault became ordinary recovery"),
+        TxCompletionDisposition::Next(_) => panic!("fault advanced fanout"),
+    };
+    assert_eq!(quarantine.attempt_handle(), handle);
+    assert_eq!(quarantine.attempt(), attempt);
+    let record = quarantine.record();
+    assert_eq!(record.instance(), sender.instance_id());
+    assert_eq!(record.reason(), TxRecoveryReason::CompletionFault(code));
+    assert_eq!(record.observed_at(), owner_time(1_600));
+    assert_eq!(record.prior_phase(), TxRecoveryPriorPhase::Authorized);
+    assert!(record.may_have_transmitted());
+    assert_eq!(
+        sender.recovery_records().next(),
+        Some(quarantine.observation())
+    );
+    assert_eq!(sender.capacities().dispatches_recovery_required, 1);
+    assert_eq!(sender.capacities().receipts_used, 1);
+    assert_eq!(sender.capacities().attempts_active, 1);
+}
+
+#[test]
+fn invariant_quarantine_uses_authoritative_attempt_correlation() {
+    let mut sender = node::<2, 1>(84, "invariant-owner");
+    let receiver = node::<2, 1>(85, "invariant-receiver");
+    register_receiver(&mut sender, 85, "invariant-receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"authoritative quarantine correlation",
+        1,
+        &mut rng,
+    );
+    let authoritative_handle = job.attempt_handle();
+    let authoritative_attempt = job.attempt();
+
+    let tampered_handle = AttemptHandle {
+        generation: authoritative_handle.generation + 1,
+        ..authoritative_handle
+    };
+    let mut tampered_attempt_bytes = *authoritative_attempt.as_bytes();
+    tampered_attempt_bytes[0] ^= 0xff;
+    let tampered_attempt = AttemptToken(tampered_attempt_bytes);
+    let BufferBinding::Bound {
+        dispatch_generation,
+        prepared,
+        hop,
+    } = job.owner.buffer.binding
+    else {
+        panic!("prepared job did not retain a bound buffer")
+    };
+    job.owner.buffer.binding = BufferBinding::Bound {
+        dispatch_generation,
+        prepared: PreparedPacket {
+            handle: tampered_handle,
+            attempt: tampered_attempt,
+            ..prepared
+        },
+        hop,
+    };
+    assert_eq!(job.attempt_handle(), tampered_handle);
+    assert_eq!(job.attempt(), tampered_attempt);
+
+    let quarantine = match sender
+        .complete_tx(
+            job.return_unpermitted().complete(TxCompletionCode::new(41)),
+            owner_time(1_100),
+        )
+        .unwrap_or_else(|failure| panic!("invariant return failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Quarantined(quarantine) => quarantine,
+        TxCompletionDisposition::Available(_) => panic!("invariant released buffer"),
+        TxCompletionDisposition::Recovered { .. } => panic!("invariant became recovery"),
+        TxCompletionDisposition::Next(_) => panic!("invariant continued fanout"),
+    };
+
+    let authoritative_observation = sender
+        .recovery_records()
+        .next()
+        .expect("invariant quarantine must remain in authoritative recovery");
+    assert_eq!(quarantine.observation(), authoritative_observation);
+    assert_eq!(quarantine.attempt_handle(), authoritative_handle);
+    assert_eq!(quarantine.attempt(), authoritative_attempt);
+    assert_eq!(quarantine.record().reason(), TxRecoveryReason::Invariant);
+    assert_ne!(quarantine.attempt_handle(), tampered_handle);
+    assert_ne!(quarantine.attempt(), tampered_attempt);
+    assert_eq!(quarantine.owner.bound().0.handle(), authoritative_handle);
+    assert_eq!(quarantine.owner.bound().0.attempt(), authoritative_attempt);
+}
+
+#[test]
+fn completion_digest_tamper_quarantines_and_restores_authoritative_metadata() {
+    let mut sender = node::<2, 1>(86, "digest-owner");
+    let receiver = node::<2, 1>(87, "digest-receiver");
+    register_receiver(&mut sender, 87, "digest-receiver");
+    let mut buffer = registered_buffer(&mut sender);
+    let mut rng = CounterRng::default();
+    let job = prepare(
+        &mut sender,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"authoritative packet digest",
+        1,
+        &mut rng,
+    );
+    let authoritative = job.prepared();
+    let BufferBinding::Bound {
+        dispatch_generation,
+        prepared,
+        hop,
+    } = job.owner.buffer.binding
+    else {
+        panic!("prepared job did not retain a bound buffer")
+    };
+    let tampered = EncodedPacketSha256::new([0xa5; 32]);
+    assert_ne!(tampered, authoritative.encoded_packet_sha256());
+    job.owner.buffer.binding = BufferBinding::Bound {
+        dispatch_generation,
+        prepared: PreparedPacket {
+            encoded_packet_sha256: tampered,
+            ..prepared
+        },
+        hop,
+    };
+
+    let quarantine = match sender
+        .complete_tx(
+            job.return_unpermitted().complete(TxCompletionCode::new(42)),
+            owner_time(1_100),
+        )
+        .unwrap_or_else(|failure| panic!("digest return failed: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Quarantined(quarantine) => quarantine,
+        TxCompletionDisposition::Available(_) => panic!("digest mismatch released buffer"),
+        TxCompletionDisposition::Recovered { .. } => panic!("digest mismatch became recovery"),
+        TxCompletionDisposition::Next(_) => panic!("digest mismatch continued fanout"),
+    };
+    assert_eq!(quarantine.record().reason(), TxRecoveryReason::Invariant);
+    assert_eq!(
+        quarantine.owner.bound().0.encoded_packet_sha256(),
+        authoritative.encoded_packet_sha256()
+    );
+}
+
+#[test]
+fn recovery_fault_quarantines_and_wrong_owner_or_stale_returns_retain_ownership() {
+    let receiver = node::<2, 1>(68, "receiver");
+    let mut rng = CounterRng::default();
+
+    let mut faulted = node::<2, 1>(67, "faulted");
+    register_receiver(&mut faulted, 68, "receiver");
+    let mut fault_buffer = registered_buffer(&mut faulted);
+    let fault_job = prepare(
+        &mut faulted,
+        &mut fault_buffer,
+        receiver.destination_hash(),
+        b"control fault",
+        1,
+        &mut rng,
+    );
+    let fault_code = TxCompletionCode::new(0x1234);
+    let quarantine = match faulted
+        .complete_tx(fault_job.recovery_fault(fault_code), owner_time(1_100))
+        .unwrap_or_else(|failure| panic!("fault return rejected: {:?}", failure.reason()))
+    {
+        TxCompletionDisposition::Quarantined(quarantine) => quarantine,
+        TxCompletionDisposition::Next(_) => panic!("fault continued fanout"),
+        TxCompletionDisposition::Available(_) => panic!("fault released buffer"),
+        TxCompletionDisposition::Recovered { .. } => panic!("fault was treated as lateness"),
+    };
+    assert_eq!(
+        quarantine.record().reason(),
+        TxRecoveryReason::CompletionFault(fault_code)
+    );
+    assert_eq!(
+        quarantine.record().prior_phase(),
+        TxRecoveryPriorPhase::Unpermitted
+    );
+    assert_eq!(faulted.capacities().dispatches_recovery_required, 1);
+
+    let mut owner = node::<2, 1>(69, "owner");
+    let mut other = node::<2, 1>(70, "other");
+    register_receiver(&mut owner, 68, "receiver");
+    register_receiver(&mut other, 68, "receiver");
+    let mut buffer = registered_buffer(&mut owner);
+    let job = prepare(
+        &mut owner,
+        &mut buffer,
+        receiver.destination_hash(),
+        b"retained return",
+        2,
+        &mut rng,
+    );
+    let (pending, request) = job.begin_permit(test_permit_requirements());
+    let request_failure =
+        match other.authorize_tx(request, owner_time(2_100), &mut TestPolicy::allowing()) {
+            Ok(_) => panic!("foreign owner authorized request"),
+            Err(failure) => failure,
+        };
+    assert_eq!(
+        request_failure.reason(),
+        TxAuthorizationErrorKind::WrongOwner
+    );
+    let reply = owner
+        .authorize_tx(
+            request_failure.into_request(),
+            owner_time(2_100),
+            &mut TestPolicy::denying(TxPolicyDenial::PolicyDenied),
+        )
+        .unwrap_or_else(|failure| panic!("retained request failed: {:?}", failure.reason()));
+    let unpermitted = match pending.resolve(reply, owner_time(2_100)) {
+        Ok(PermitResolution::Unpermitted(unpermitted)) => unpermitted,
+        Ok(PermitResolution::Authorized(_)) => panic!("denial authorized"),
+        Ok(PermitResolution::Expired(_)) => panic!("denial became expired grant"),
+        Err(_) => panic!("retained request reply mismatch"),
+    };
+    let completion = unpermitted.complete(TxCompletionCode::new(30));
+    let wrong_owner = match other.complete_tx(completion, owner_time(2_200)) {
+        Ok(_) => panic!("foreign owner accepted completion"),
+        Err(failure) => failure,
+    };
+    assert_eq!(wrong_owner.reason(), TxCompletionErrorKind::WrongOwner);
+    let completion = wrong_owner.into_completion();
+
+    let original_state = owner.dispatches[0].state;
+    let DispatchState::Active(mut stale_record) = original_state else {
+        panic!("expected active dispatch")
+    };
+    stale_record.generation += 1;
+    owner.dispatches[0].state = DispatchState::Active(stale_record);
+    let stale = match owner.complete_tx(completion, owner_time(2_200)) {
+        Ok(_) => panic!("stale completion was accepted"),
+        Err(failure) => failure,
+    };
+    assert_eq!(stale.reason(), TxCompletionErrorKind::StaleOrUnknown);
+    owner.dispatches[0].state = original_state;
+    assert!(matches!(
+        owner
+            .complete_tx(stale.into_completion(), owner_time(2_200))
+            .unwrap_or_else(|failure| panic!("retained completion: {:?}", failure.reason())),
+        TxCompletionDisposition::Available(_)
+    ));
+    assert_eq!(owner.capacities().dispatches_used, 0);
+}
