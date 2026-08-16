@@ -529,7 +529,7 @@ fn construct_node_or_inert(
         config::RNS_APPLICATION_NAME,
         &config::RNS_PRIMARY_ASPECTS,
         instance,
-        NodeConfig::transport(),
+        NodeConfig::transport().with_shared_medium_interfaces(config::SHARED_MEDIUM_INTERFACES),
     ) {
         Ok(stage) => stage,
         Err(reason) => {

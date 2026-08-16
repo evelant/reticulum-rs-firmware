@@ -210,6 +210,16 @@ pub const TCP_INTERFACE_CONFIG_ID: InterfaceConfigId = InterfaceConfigId::new(0x
 /// Initial relative route cost for a reachable IP peer.
 pub const TCP_INTERFACE_COST: InterfaceCost = InterfaceCost::new(1);
 
+/// Bitmask of RNS interface indices treated as shared-medium for route-table
+/// reservation.
+///
+/// The LoRa interface (index 1, see `main::LORA_INTERFACE`) is the product's
+/// only shared-medium bearer; the TCP uplink (index 2) is point-to-point.
+/// Marking LoRa shared-medium reserves native path-table space for
+/// LoRa-learned routes so sustained public-TCP announce churn cannot evict
+/// them.
+pub const SHARED_MEDIUM_INTERFACES: u64 = 1 << 1;
+
 /// Reclaimed internal SRAM assigned to a BLE-capable global allocator.
 ///
 /// Channels, packet buffers, permit stores, task pools, and IRQ/DMA-visible

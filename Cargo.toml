@@ -80,10 +80,10 @@ zeroize = { version = "=1.9.0", default-features = false }
 # patch it to the `vendor/rete` submodule so core changes are made directly on
 # the fork and versioned by the submodule pointer in this repository. Keep the
 # declared revision in step with the submodule pointer.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "2505dfc3b4af61fcab3081fe808617f554f3e305", default-features = false }
-rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "2505dfc3b4af61fcab3081fe808617f554f3e305", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "2505dfc3b4af61fcab3081fe808617f554f3e305", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "2505dfc3b4af61fcab3081fe808617f554f3e305", default-features = false }
+rete-core = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
+rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
+rete-stack = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
+rete-transport = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
 
 [patch.crates-io]
 # Keep registry consumers of esp-rs support crates on the same source revision

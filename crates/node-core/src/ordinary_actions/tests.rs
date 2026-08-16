@@ -57,6 +57,7 @@ fn node(tag: u8, role: NodeRole) -> TestNode {
     let config = NodeConfig {
         role,
         max_additional_destinations: 4,
+        shared_medium_interfaces: 0,
     };
     TestNode::new(
         identity(tag),

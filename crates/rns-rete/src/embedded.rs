@@ -2373,6 +2373,12 @@ pub struct EmbeddedNodeConfig {
     pub role: NodeRole,
     /// Maximum additional destinations registered after the primary one.
     pub max_additional_destinations: usize,
+    /// Bitmask of interface indices treated as shared-medium.
+    ///
+    /// Shared-medium routes (for example LoRa) are reserved against eviction by
+    /// point-to-point announce churn in the bounded path table. Set one bit per
+    /// shared-medium interface index.
+    pub shared_medium_interfaces: u64,
 }
 
 impl EmbeddedNodeConfig {
@@ -2381,6 +2387,7 @@ impl EmbeddedNodeConfig {
         Self {
             role: NodeRole::Endpoint,
             max_additional_destinations: 4,
+            shared_medium_interfaces: 0,
         }
     }
 
@@ -2389,7 +2396,14 @@ impl EmbeddedNodeConfig {
         Self {
             role: NodeRole::Transport,
             max_additional_destinations: 4,
+            shared_medium_interfaces: 0,
         }
+    }
+
+    /// Mark additional shared-medium interface indices, returning the profile.
+    pub const fn with_shared_medium_interfaces(mut self, mask: u64) -> Self {
+        self.shared_medium_interfaces = mask;
+        self
     }
 }
 
@@ -3517,6 +3531,19 @@ pub struct EmbeddedNode<
 impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, const LINKS: usize>
     EmbeddedNode<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>
 {
+    /// Mark the configured shared-medium interface indices on the inner
+    /// transport so announce learning records the correct media class.
+    fn apply_shared_medium_interfaces(
+        core: &mut NodeCore<HeaplessStorage<PATHS, ANNOUNCES, DEDUPLICATION, LINKS>>,
+        mask: u64,
+    ) {
+        for iface in 0..64u8 {
+            if mask & (1u64 << iface) != 0 {
+                core.transport.mark_interface_shared_medium(iface);
+            }
+        }
+    }
+
     /// Construct an owning node around a persisted or freshly generated
     /// identity. No mutable access to the inner Rete core is exposed.
     pub fn new(
@@ -3529,6 +3556,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         if config.role == NodeRole::Transport {
             core.enable_transport();
         }
+        Self::apply_shared_medium_interfaces(&mut core, config.shared_medium_interfaces);
         Ok(Self {
             core,
             role: config.role,
@@ -3578,6 +3606,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         if config.role == NodeRole::Transport {
             core.enable_transport();
         }
+        Self::apply_shared_medium_interfaces(core, config.shared_medium_interfaces);
 
         // No fallible operation follows native construction. Each write
         // targets one distinct field, and the capacity array is initialized

@@ -1292,6 +1292,11 @@ pub struct NodeConfig {
     pub role: NodeRole,
     /// Maximum destinations registered in addition to the primary one.
     pub max_additional_destinations: usize,
+    /// Bitmask of interface indices treated as shared-medium.
+    ///
+    /// Shared-medium routes (for example LoRa) are reserved against eviction by
+    /// point-to-point announce churn in the bounded native path table.
+    pub shared_medium_interfaces: u64,
 }
 
 impl NodeConfig {
@@ -1300,6 +1305,7 @@ impl NodeConfig {
         Self {
             role: NodeRole::Endpoint,
             max_additional_destinations: 4,
+            shared_medium_interfaces: 0,
         }
     }
 
@@ -1308,7 +1314,14 @@ impl NodeConfig {
         Self {
             role: NodeRole::Transport,
             max_additional_destinations: 4,
+            shared_medium_interfaces: 0,
         }
+    }
+
+    /// Mark shared-medium interface indices, returning the profile.
+    pub const fn with_shared_medium_interfaces(mut self, mask: u64) -> Self {
+        self.shared_medium_interfaces = mask;
+        self
     }
 }
 
@@ -3416,6 +3429,7 @@ impl<
             RnsNodeConfig {
                 role,
                 max_additional_destinations: config.max_additional_destinations,
+                shared_medium_interfaces: config.shared_medium_interfaces,
             },
         )
         .map_err(|_| NodeConstructionError::InvalidRnsConfiguration)?;
@@ -3502,6 +3516,7 @@ impl<
                 RnsNodeConfig {
                     role,
                     max_additional_destinations: config.max_additional_destinations,
+                    shared_medium_interfaces: config.shared_medium_interfaces,
                 },
             )
             .map_err(|_| NodeConstructionError::InvalidRnsConfiguration)?;

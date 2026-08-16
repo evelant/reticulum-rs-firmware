@@ -779,6 +779,20 @@ fn node(tag: u8) -> TestNode {
 }
 
 #[test]
+fn shared_medium_interfaces_are_applied_to_transport() {
+    let node = TestNode::new(
+        identity(60),
+        "reticulum",
+        &["embedded"],
+        EmbeddedNodeConfig::endpoint().with_shared_medium_interfaces(1 << 1),
+    )
+    .unwrap();
+    assert!(node.core.transport.interface_is_shared_medium(1));
+    assert!(!node.core.transport.interface_is_shared_medium(0));
+    assert!(!node.core.transport.interface_is_shared_medium(2));
+}
+
+#[test]
 #[allow(
     unsafe_code,
     reason = "the successful in-place test value is explicitly dropped after its borrow ends"
@@ -5220,6 +5234,7 @@ fn destination_and_receipt_quotas_preflight_growing_native_collections() {
         EmbeddedNodeConfig {
             role: NodeRole::Endpoint,
             max_additional_destinations: 1,
+            shared_medium_interfaces: 0,
         },
     )
     .unwrap();
