@@ -6,31 +6,24 @@ and licensing decisions that are not obvious from those files.
 
 ## Rete
 
-Rete is the Reticulum foundation. All Rete crates move together at one reviewed
-Git revision. The current workspace declares revision
-`dfcaa36b2d45c22d9cba8f0a7eaeb4cf78cabf08` from
-[evelant/rete](https://github.com/evelant/rete) and applies the audited local
-overlay under `vendor/rete-dfcaa36`.
+Rete is the Reticulum foundation. It is consumed as an owned git submodule at
+`vendor/rete`, pointing at the `firmware` branch of
+[evelant/rete](https://github.com/evelant/rete), itself a fork of the dormant
+[s-retlaw/rete](https://github.com/s-retlaw/rete). The four core crates
+(`rete-core`, `rete-transport`, `rete-stack`, `rete-lxmf-core`) are declared as
+git dependencies and patched to that submodule checkout, so in-tree edits take
+effect without fetching the declared revision.
 
-The overlay supplies bounded in-place construction required by the embedded
-composition and aligns path discovery with the Python authority: exact tagged
-request parsing and rebuilding, source-bound `PATH_RESPONSE` emission,
-non-rebroadcast response learning, bounded cached-response coalescing, and
-missing-path recovery from a repeated signed announce. It also rejects invalid
-announce destination types and over-height plain ingress before those packets
-can mutate transport state. The product adapter owns the separate bounded
-15-second table that returns a recursively discovered path only to its original
-requester. The embedded subset does not implement Python's optional per-
-interface ingress/egress path-request frequency controllers; its bounded tag,
-pending-discovery, and response-queue capacities fail closed and are not
-minimum-interval throttles. The exact overlay delta and removal conditions are in
-`vendor/rete-dfcaa36/PATCHES.md`. Do not point a build at an ignored
-`reference/rete` checkout or mix Rete crate revisions.
+Core Rete changes are made directly on the fork as ordinary commits and
+versioned here by the submodule pointer. Upstream `s-retlaw/rete` remains a
+clean merge target: the pinned fork history is a strict descendant of its
+`main`. Clone this repository with `--recursive` (or run
+`git submodule update --init`) so the submodule is present.
 
-Rete declares `MIT OR Apache-2.0` in its package metadata. Its reviewed snapshot
-does not include canonical license files, so a distributable corresponding-
-source bundle must resolve that packaging gap rather than infer a license from
-source code.
+Rete declares `MIT OR Apache-2.0` in its package metadata. The fork supplies
+the canonical `LICENSE-MIT` and `LICENSE-APACHE` files that upstream omitted,
+resolving the corresponding-source packaging gap. Do not point a build at an
+unpinned checkout or mix Rete crate revisions.
 
 ## Espressif platform
 

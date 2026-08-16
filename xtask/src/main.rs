@@ -185,6 +185,12 @@ fn doctor(workspace: &Path) -> Result<(), String> {
             return Err(format!("required workspace file {required} is missing"));
         }
     }
+    if !workspace.join("vendor/rete/Cargo.toml").is_file() {
+        return Err(
+            "the owned Rete submodule is not initialized; run `git submodule update --init`"
+                .to_owned(),
+        );
+    }
     println!("toolchain and workspace layout are ready");
     Ok(())
 }

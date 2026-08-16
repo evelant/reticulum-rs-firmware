@@ -14,7 +14,8 @@ assumption.
 - `clients/appliance/`: the TypeScript/Expo application and native Rust bridge.
 - `interop/`: deterministic compatibility vectors and their generators.
 - `partitions/`: current ESP32 flash layouts.
-- `vendor/`: documented dependency overlays that the active build requires.
+- `vendor/`: the owned Rete git submodule (`vendor/rete`) and the reviewed
+  `lora-phy` source overlay that the active build requires.
 - `xtask/`: small, recurring repository and firmware operations.
 
 The client-side Rust layers are `appliance-store`, `appliance-sync`,
@@ -46,6 +47,10 @@ TypeScript owns presentation and platform integration.
 - Use TypeScript and Bun exclusively for app-side source and scripts.
 - Prefer upstream dependency releases and fixes over vendoring or backports.
   Keep each necessary overlay small and document its removal condition.
+- Rete is owned: it lives in the `evelant/rete` fork (of `s-retlaw/rete`) and is
+  consumed as the `vendor/rete` submodule. Make Rete changes directly on the
+  fork, then bump the submodule pointer here. Clone with `--recursive`; `xtask
+  doctor` checks the submodule is initialized.
 - Alpha API and storage compatibility may change. Make reset or migration
   consequences explicit when persisted formats change.
 - Add or update doc comments where ownership, durability, timing, protocol, or
