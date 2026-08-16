@@ -535,7 +535,7 @@ fn map_runtime_error(error: RuntimeError<FakeNorError>) -> SubmissionPortError {
 }
 
 pub struct LiveNodeSystem {
-    pub supervisor: ProductSupervisor,
+    pub supervisor: &'static mut ProductSupervisor,
     application_events: ApplicationEventOwner<'static>,
     pub dispatcher: ProductDispatcher,
     pub frame_node: AuthorizedFrameNodeHandoff<NoopRawMutex>,
@@ -549,13 +549,19 @@ pub struct LiveNodeSystem {
 impl LiveNodeSystem {
     pub fn new() -> Self {
         let receiver_identity = identity(0x42);
-        let receiver = NodeCore::<
-            { config::PATHS },
-            { config::ANNOUNCES },
-            { config::DEDUPLICATION },
-            { config::LINKS },
-            0,
-        >::new(
+        // Construct the receiver in place in leaked storage: the PATHS-sized
+        // node no longer fits on the host test-thread stack once each path
+        // caches its announce inline.
+        let receiver = NodeCore::new_in(
+            Box::leak(Box::new(core::mem::MaybeUninit::<
+                NodeCore<
+                    { config::PATHS },
+                    { config::ANNOUNCES },
+                    { config::DEDUPLICATION },
+                    { config::LINKS },
+                    0,
+                >,
+            >::uninit())),
             identity(0x42),
             "reticulum",
             &["live-admission-receiver"],
@@ -565,13 +571,10 @@ impl LiveNodeSystem {
         .expect("receiver node constructs");
         let destination = receiver.destination_hash();
 
-        let mut node = NodeCore::<
-            { config::PATHS },
-            { config::ANNOUNCES },
-            { config::DEDUPLICATION },
-            { config::LINKS },
-            { config::DATA_BUFFERS },
-        >::new(
+        let mut stage = ProductSupervisor::begin_node_in(
+            Box::leak(Box::new(
+                core::mem::MaybeUninit::<ProductSupervisor>::uninit(),
+            )),
             identity(0x24),
             config::RNS_APPLICATION_NAME,
             &config::RNS_PRIMARY_ASPECTS,
@@ -579,27 +582,35 @@ impl LiveNodeSystem {
             NodeConfig::transport(),
         )
         .expect("product node constructs");
-        node.register_peer(
-            &receiver_identity,
-            "reticulum",
-            &["live-admission-receiver"],
-            MonotonicSeconds::new(0),
-        )
-        .expect("receiver identity caches");
+        stage
+            .node_mut()
+            .register_peer(
+                &receiver_identity,
+                "reticulum",
+                &["live-admission-receiver"],
+                MonotonicSeconds::new(0),
+            )
+            .expect("receiver identity caches");
 
         let mut data_buffers = Box::leak(Box::new(
             [const { TxPacketBuffer::new() }; config::DATA_BUFFERS],
         ))
         .each_mut();
         for buffer in &mut data_buffers {
-            node.register_packet_buffer(buffer)
+            stage
+                .node_mut()
+                .register_packet_buffer(buffer)
                 .expect("product DATA buffer registers");
         }
-        let data =
-            DataRouterCoordinator::try_new(&node, data_buffers, config::data_router_config())
-                .unwrap_or_else(|failure| panic!("DATA coordinator: {:?}", failure.reason()));
+        let data = DataRouterCoordinator::try_new(
+            stage.node_mut(),
+            data_buffers,
+            config::data_router_config(),
+        )
+        .unwrap_or_else(|failure| panic!("DATA coordinator: {:?}", failure.reason()));
 
-        let mut ordinary_owner = node
+        let mut ordinary_owner = stage
+            .node_mut()
             .take_ordinary_action_owner::<{ config::ORDINARY_BUFFERS }>()
             .expect("ordinary owner is unique");
         let ordinary_buffers = Box::leak(Box::new(
@@ -629,17 +640,9 @@ impl LiveNodeSystem {
             E290_NA915_DEFAULT_PROFILE,
             E290_NA915_DEFAULT_CONFIGURATION_FINGERPRINT,
         );
-        let (mut supervisor, [actor]) = ProductSupervisor::try_new(
-            node,
-            fabric,
-            data,
-            ordinary,
-            [data_pair],
-            [ordinary_pair],
-            policy,
-        )
-        .unwrap_or_else(|failure| panic!("supervisor: {:?}", failure.reason()))
-        .into_parts();
+        let (supervisor, [actor]) = stage
+            .finish(fabric, data, ordinary, [data_pair], [ordinary_pair], policy)
+            .unwrap_or_else(|failure| panic!("supervisor: {failure:?}"));
         let offline = supervisor
             .register_interface(
                 actor.queue_id(),

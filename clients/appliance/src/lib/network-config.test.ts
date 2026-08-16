@@ -47,6 +47,7 @@ function configuration(
 ): NetworkConfigView {
   return {
     automatic_announces_enabled: true,
+    device_name: null,
     lora_profile: loraProfile,
     lora_tx_power_dbm: loraTxPowerDbm,
     revision,

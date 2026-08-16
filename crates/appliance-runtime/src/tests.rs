@@ -914,7 +914,7 @@ impl LxmfSession for NetworkSession {
                 )),
                 None,
             )),
-            reticulum_device_api::RnsDiagnostics::new(9, 2, 1, 0, 4, 1, 0, 0, 0, 0),
+            reticulum_device_api::RnsDiagnostics::new(9, 2, 1, 0, 4, 1, 0, 0, 0, 0, 1),
             3,
             1,
             1,
@@ -2075,7 +2075,8 @@ async fn actor_serializes_network_reads_and_secret_bearing_mutations() {
                 "spreading_factor": 7,
                 "coding_rate_denominator": 5,
                 "tx_power_dbm": 14
-            }
+            },
+            "device_name": null
         })
     );
     assert_eq!(

@@ -44,6 +44,7 @@ import {
   reticulumTcpDiagnostic,
   reticulumTcpStateLabel,
 } from "../lib/tcp-runtime-diagnostics.ts";
+import { BoardNameEditor } from "./BoardNameEditor.tsx";
 import { LoraProfileEditor } from "./LoraProfileEditor.tsx";
 import { RadioRoutesPanel } from "./RadioRoutesPanel.tsx";
 
@@ -583,6 +584,14 @@ export function ConnectivityPanel({
           )}
         </View>
       </View>
+
+      {configuration === null ? null : (
+        <BoardNameEditor
+          disabled={mutating}
+          name={configuration.device_name}
+          onSave={(name) => controller.mutate({ kind: "set_device_name", name })}
+        />
+      )}
 
       {configuration === null ? null : (
         <LoraProfileEditor

@@ -447,6 +447,9 @@ fn semantic_equality_includes_every_policy_location_and_radio_field() {
             .expect("valid radio profile"),
     );
     assert!(!configuration_eq(&left, &right));
+    right.set_lora_profile(left.lora_profile());
+    right.set_device_name(Some(DeviceName::new("Relay").expect("valid name")));
+    assert!(!configuration_eq(&left, &right));
 }
 
 #[test]
@@ -525,6 +528,46 @@ fn semantic_snapshot_rejects_an_unsupported_lora_power_byte() {
             }
         ))
     ));
+}
+
+#[test]
+fn semantic_snapshot_round_trips_and_validates_the_device_name() {
+    assert_eq!(
+        DeviceName::new(""),
+        Err(NetworkConfigModelError::InvalidDeviceNameLength)
+    );
+    assert_eq!(
+        DeviceName::new(&"x".repeat(MAX_DEVICE_NAME_BYTES + 1)),
+        Err(NetworkConfigModelError::InvalidDeviceNameLength)
+    );
+    assert_eq!(
+        DeviceName::new("bad\nname"),
+        Err(NetworkConfigModelError::InvalidDeviceNameCharacter)
+    );
+    assert_eq!(
+        DeviceName::from_bytes(&[0xff, 0xfe]),
+        Err(NetworkConfigModelError::InvalidDeviceNameUtf8)
+    );
+
+    let mut config = first_config();
+    config.set_device_name(Some(DeviceName::new("Field node").expect("valid name")));
+    let mut access = bound(FakeNor::erased());
+    let mounted = provision_erased(&mut access, &config).expect("current provision");
+    assert_eq!(
+        mounted.configuration().device_name(),
+        Some(DeviceName::new("Field node").expect("valid name"))
+    );
+    assert_eq!(
+        usize::from(access.backend().bytes[DEVICE_NAME_LENGTH_OFFSET]),
+        "Field node".len()
+    );
+
+    let cold = mount(&mut access).expect("cold mount");
+    assert!(configuration_eq(cold.configuration(), &config));
+    assert_eq!(
+        cold.configuration().device_name(),
+        Some(DeviceName::new("Field node").expect("valid name"))
+    );
 }
 
 #[test]

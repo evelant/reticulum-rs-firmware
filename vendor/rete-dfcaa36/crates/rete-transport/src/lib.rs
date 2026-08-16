@@ -41,7 +41,7 @@ pub use link::{
     compute_resource_sdu, compute_traffic_timeout_ms, signalling_bytes, Link, LinkRole, LinkState,
     TeardownReason, LINK_MDU, LINK_MTU_SIZE, STALE_GRACE,
 };
-pub use path::{InterfaceMode, Path, PATH_EXPIRES_AP, PATH_EXPIRES_ROAMING};
+pub use path::{AnnounceCache, InterfaceMode, Path, PATH_EXPIRES_AP, PATH_EXPIRES_ROAMING};
 pub use receipt::{
     FixedReceiptTerminalReservation, FixedReceiptTerminalSink, LinkDataReceipt,
     LinkDataReceiptTable, PacketReceipt, ReceiptCandidate, ReceiptKind,

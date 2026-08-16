@@ -187,13 +187,15 @@ impl RouteDiagnosticsEntry {
 
 /// Caller-owned, allocation-free full route-table diagnostics snapshot.
 ///
-/// Entries are sorted lexicographically by complete destination hash. This is
-/// a complete replacement view with no mutation revision: the pinned RNS path
-/// table exposes no revision counter. Consumers must not paginate over live
-/// native iteration. A future paged API must retain one complete snapshot and
-/// assign its own boot incarnation and generation.
+/// Entries are sorted lexicographically by complete destination hash. Each
+/// refresh replaces the complete view and assigns a fresh monotonic
+/// [`generation`](Self::generation). Consumers paginating over a live route
+/// table must read every page from one retained snapshot and treat that
+/// generation as the mutation revision; never paginate over live native
+/// iteration.
 pub struct RouteDiagnosticsSnapshot<const PATHS: usize> {
     captured_at: MonotonicSeconds,
+    generation: u64,
     len: usize,
     entries: [Option<RouteDiagnosticsEntry>; PATHS],
 }
@@ -203,6 +205,7 @@ impl<const PATHS: usize> RouteDiagnosticsSnapshot<PATHS> {
     pub const fn empty() -> Self {
         Self {
             captured_at: MonotonicSeconds::new(0),
+            generation: 0,
             len: 0,
             entries: [None; PATHS],
         }
@@ -213,6 +216,40 @@ impl<const PATHS: usize> RouteDiagnosticsSnapshot<PATHS> {
     /// This timestamp is not a mutation revision.
     pub const fn captured_at(&self) -> MonotonicSeconds {
         self.captured_at
+    }
+
+    /// Monotonic generation assigned to this complete snapshot.
+    ///
+    /// This value is stable across every page projected from one snapshot and
+    /// changes only when the snapshot is refreshed. Consumers paginating over a
+    /// live route table use it as the mutation revision so a churning interface
+    /// cannot present a torn, self-inconsistent view.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Initialize caller-owned uninitialized storage as an empty snapshot.
+    ///
+    /// This exists so a placement owner can construct the snapshot in place
+    /// without materializing the PATHS-sized entry array on the CPU startup
+    /// stack. [`Self::empty`] remains available for ordinary construction.
+    #[allow(
+        unsafe_code,
+        reason = "in-place field-wise init avoids a PATHS-sized stack frame"
+    )]
+    pub fn write_empty(dest: &mut core::mem::MaybeUninit<Self>) {
+        let snapshot = dest.as_mut_ptr();
+        // SAFETY: `dest` is a valid, uniquely owned `MaybeUninit<Self>`. Every
+        // field is written exactly once before the storage is ever read.
+        unsafe {
+            core::ptr::addr_of_mut!((*snapshot).captured_at).write(MonotonicSeconds::new(0));
+            core::ptr::addr_of_mut!((*snapshot).generation).write(0);
+            core::ptr::addr_of_mut!((*snapshot).len).write(0);
+            let entries = core::ptr::addr_of_mut!((*snapshot).entries);
+            for index in 0..PATHS {
+                core::ptr::addr_of_mut!((*entries)[index]).write(None);
+            }
+        }
     }
 
     /// Number of complete retained routes copied into this snapshot.
@@ -2173,6 +2210,7 @@ where
         snapshot: &mut RouteDiagnosticsSnapshot<PATHS>,
     ) {
         snapshot.reset(captured_at);
+        snapshot.generation = snapshot.generation.wrapping_add(1);
         let eligible = self.router.eligible_interfaces().ok();
         let registry = self.router.registry();
         let visited = self.node.visit_retained_routes(|route| {

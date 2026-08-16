@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(reticulum_ble_bond_store::PHYSICAL_FORMAT_VERSION, 1);
         assert_eq!(reticulum_ble_bond_store::SEMANTIC_FORMAT_VERSION, 2);
         assert_eq!(reticulum_network_config_store::PHYSICAL_FORMAT_VERSION, 1);
-        assert_eq!(reticulum_network_config_store::SEMANTIC_FORMAT_VERSION, 5);
+        assert_eq!(reticulum_network_config_store::SEMANTIC_FORMAT_VERSION, 6);
         assert_eq!(reticulum_lxmf_mailbox_store::PHYSICAL_FORMAT_VERSION, 2);
         assert_eq!(reticulum_storage_journal::PHYSICAL_FORMAT_VERSION, 2);
         assert_eq!(reticulum_storage_model::JOURNAL_SCHEMA_VERSION, 4);

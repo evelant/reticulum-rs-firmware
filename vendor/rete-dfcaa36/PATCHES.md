@@ -35,7 +35,11 @@ The local delta adds:
   rejected before deduplication or path state mutation; and
 - path-request dispatch requires the same DATA/PLAIN/path-control-destination
   envelope used by the product adapter. HEADER_2 ownership remains the ordinary
-  transport admission check, and request context is intentionally unrestricted.
+  transport admission check, and request context is intentionally unrestricted; and
+- each path's cached raw announce (`Path::announce_raw`) is retained in an
+  inline, MTU-sized `AnnounceCache` buffer instead of a heap `Vec`, so the
+  announce cache lives in the caller's PSRAM-backed path table rather than the
+  strict internal heap a Wi-Fi/BLE controller needs for receive buffers.
 
 These discovery changes mirror Python Reticulum's tagged request parsing,
 requester attachment, `PATH_RESPONSE`, announce replay, and packet-admission
@@ -47,17 +51,17 @@ rebroadcast, malformed-request admission, and inability to relearn a removed
 path from the same signed announce.
 
 The E290 product uses the construction APIs recursively so its
-64-route/128-dedup node can live in PSRAM without first creating a
+256-route/512-dedup node can live in PSRAM without first creating a
 capacity-sized CPU-stack temporary. Narrow unsafe blocks are limited to audited
 raw field projection and are covered by focused constructor-equivalence tests.
 The final linked firmware remains gated by the compiler-emitted startup stack
 audit before packaging or flashing.
 
 Remove the overlay after one coherent upstream Rete revision supplies the
-in-place construction contract and the request parsing, recursive rebuilding,
+in-place construction contract, the request parsing, recursive rebuilding,
 source-bound/coalesced `PATH_RESPONSE`, non-rebroadcast learning, signed-
-announce replay recovery, and ingress admission behavior listed above, and the
-workspace regression suites pass on that revision.
+announce replay recovery, ingress admission behavior, and inline announce
+cache listed above, and the workspace regression suites pass on that revision.
 
 The upstream tree at this exact revision does not contain a top-level license
 file. Project provenance and the retained upstream license declaration remain

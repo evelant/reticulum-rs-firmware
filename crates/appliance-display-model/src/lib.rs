@@ -290,6 +290,7 @@ impl DisplaySetupState {
 pub struct DisplayHomeSnapshot {
     label: DisplayLabel,
     device_suffix: DisplayLabel,
+    device_name: Option<DisplayLabel>,
     setup: DisplaySetupState,
     lora: DisplayCompositionState,
     ble: DisplayCompositionState,
@@ -312,6 +313,7 @@ impl DisplayHomeSnapshot {
         Self {
             label,
             device_suffix,
+            device_name: None,
             setup,
             lora,
             ble,
@@ -329,6 +331,19 @@ impl DisplayHomeSnapshot {
     /// Exact board suffix shown by discovery clients.
     pub const fn device_suffix(self) -> DisplayLabel {
         self.device_suffix
+    }
+
+    /// Optional configured board display name.
+    pub const fn device_name(self) -> Option<DisplayLabel> {
+        self.device_name
+    }
+
+    /// Return the same snapshot with an updated optional display name.
+    pub const fn with_device_name(self, device_name: Option<DisplayLabel>) -> Self {
+        Self {
+            device_name,
+            ..self
+        }
     }
 
     /// Application-level setup state.

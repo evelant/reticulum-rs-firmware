@@ -428,9 +428,13 @@ mod tests {
             &mut rng,
         )
         .expect("primary announce");
+        let maximum_name = "x".repeat(reticulum_device_api::MAX_DEVICE_NAME_BYTES);
+        let mut lxmf_app_data = [0_u8; config::MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES];
+        let lxmf_app_data_len =
+            config::encode_lxmf_delivery_announce_app_data(&maximum_name, &mut lxmf_app_data);
         node.queue_announce_for(
             &lxmf,
-            Some(&config::LXMF_DELIVERY_ANNOUNCE_APP_DATA),
+            Some(&lxmf_app_data[..lxmf_app_data_len]),
             AnnounceEmissionTime::new(2).expect("LXMF emission"),
             &mut rng,
         )
@@ -451,7 +455,7 @@ mod tests {
             assert!(*length <= config::ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES);
         }
         packet_lengths.sort_unstable();
-        assert_eq!(packet_lengths, [167, 171, 177]);
+        assert_eq!(packet_lengths, [167, 177, 204]);
         assert_eq!(
             packet_lengths[2],
             config::ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES,

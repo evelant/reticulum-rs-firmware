@@ -467,7 +467,8 @@ impl MockPeer {
                     | NetworkConfigMutation::SetGatewayPolicy(_)
                     | NetworkConfigMutation::SetRmapConfig(_)
                     | NetworkConfigMutation::SetLoraTxPower(_)
-                    | NetworkConfigMutation::SetLoraProfile(_) => {
+                    | NetworkConfigMutation::SetLoraProfile(_)
+                    | NetworkConfigMutation::SetDeviceName(_) => {
                         panic!("mock does not expect this network mutation")
                     }
                 });
@@ -616,7 +617,7 @@ fn sample_node_diagnostics() -> NodeDiagnosticsSnapshot {
         12_345,
         [None, None, None, None],
         None,
-        RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
         2,
         4,
         3,

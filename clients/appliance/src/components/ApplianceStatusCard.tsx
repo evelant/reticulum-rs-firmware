@@ -305,6 +305,7 @@ interface ApplianceStatusCardProps {
   readonly busy: boolean;
   readonly canAddAppliance: boolean;
   readonly compact: boolean;
+  readonly deviceName: string | null;
   readonly exactBleTargetRequired: boolean;
   readonly nativeCore: NativeCoreStatus | null;
   readonly onActivateProfile: (profileKey: string) => Promise<boolean>;
@@ -323,6 +324,7 @@ export function ApplianceStatusCard({
   busy,
   canAddAppliance,
   compact,
+  deviceName,
   exactBleTargetRequired,
   nativeCore,
   onActivateProfile,
@@ -359,7 +361,7 @@ export function ApplianceStatusCard({
             selectable
             style={[styles.applianceStatusBoard, compact && styles.applianceStatusBoardCompact]}
           >
-            {activeProfile?.boardLabel ?? presentation.boardLabel}
+            {deviceName ?? activeProfile?.boardLabel ?? presentation.boardLabel}
           </Text>
           <Text
             accessibilityLiveRegion="polite"

@@ -113,7 +113,7 @@ fn mount_gated_activation_registers_only_the_durable_service() {
     let primary = disabled.destination_hash();
     disabled.set_inbound_proof_policy(InboundProofPolicy::Always);
     assert_eq!(
-        activate_lxmf_delivery(&mut disabled, false),
+        activate_lxmf_delivery(&mut disabled, false, &[0x93, 0xc0, 0xc0, 0x90]),
         Ok(LxmfDeliveryActivation::Disabled)
     );
     assert_eq!(disabled.destination_hash(), primary);
@@ -134,7 +134,7 @@ fn mount_gated_activation_registers_only_the_durable_service() {
     .expect("test node");
     active.set_inbound_proof_policy(InboundProofPolicy::Always);
     assert_eq!(
-        activate_lxmf_delivery(&mut active, true),
+        activate_lxmf_delivery(&mut active, true, &[0x93, 0xc0, 0xc0, 0x90]),
         Ok(LxmfDeliveryActivation::Active(expected))
     );
     assert_eq!(active.destination_hash(), primary);

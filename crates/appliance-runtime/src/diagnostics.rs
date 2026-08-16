@@ -11,10 +11,10 @@ use crate::{JsonSafeInteger, MAX_JSON_SAFE_INTEGER, serialize_json_safe_u64};
 
 /// Maximum retained routes returned by one app refresh.
 ///
-/// The initial E290 product retains sixteen routes. This independent host
-/// ceiling keeps later device profiles and malformed authenticated peers from
-/// turning one UI refresh into unbounded allocation or request traffic.
-pub const MAX_RADIO_ROUTE_ENTRIES: usize = 64;
+/// This matches the current E290 product path-table capacity. The independent
+/// host ceiling keeps later device profiles and malformed authenticated peers
+/// from turning one UI refresh into unbounded allocation or request traffic.
+pub const MAX_RADIO_ROUTE_ENTRIES: usize = 256;
 
 const MAX_ROUTE_PAGE_REQUESTS: usize =
     MAX_RADIO_ROUTE_ENTRIES.div_ceil(api::MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES);
@@ -717,7 +717,19 @@ mod tests {
                 )),
                 None,
             )),
-            api::RnsDiagnostics::new(20, 5, 2, 1, 8, revision_learned, revision_expired, 3, 1, 1),
+            api::RnsDiagnostics::new(
+                20,
+                5,
+                2,
+                1,
+                8,
+                revision_learned,
+                revision_expired,
+                3,
+                1,
+                1,
+                revision_learned.saturating_add(revision_expired),
+            ),
             4,
             retained,
             retained,
@@ -990,6 +1002,7 @@ mod tests {
                 u64::MAX,
                 u64::MAX,
                 0,
+                u64::MAX,
                 u64::MAX,
                 u64::MAX,
                 u64::MAX,

@@ -253,6 +253,7 @@ pub fn activate_lxmf_delivery<
 >(
     node: &mut NodeCore<PATHS, ANNOUNCES, DEDUPLICATION, LINKS, PACKET_BUFFERS>,
     store_available: bool,
+    announce_app_data: &[u8],
 ) -> Result<LxmfDeliveryActivation, LxmfDeliveryActivationError> {
     if !store_available {
         return Ok(LxmfDeliveryActivation::Disabled);
@@ -263,11 +264,8 @@ pub fn activate_lxmf_delivery<
             &config::RNS_LXMF_DELIVERY_ASPECTS,
         )
         .map_err(LxmfDeliveryActivationError::Registration)?;
-    node.set_destination_announce_app_data(
-        &destination,
-        Some(&config::LXMF_DELIVERY_ANNOUNCE_APP_DATA),
-    )
-    .map_err(LxmfDeliveryActivationError::AnnounceAppData)?;
+    node.set_destination_announce_app_data(&destination, Some(announce_app_data))
+        .map_err(LxmfDeliveryActivationError::AnnounceAppData)?;
     node.set_destination_accepts_links(&destination, true)
         .map_err(LxmfDeliveryActivationError::LinkPolicy)?;
     node.set_destination_inbound_proof_policy(&destination, InboundProofPolicy::Retain)

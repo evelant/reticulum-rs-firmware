@@ -290,16 +290,24 @@ fn allocate_route_diagnostics_or_inert(
     psram_start_address: usize,
     psram_end_address: usize,
 ) -> &'static mut RouteDiagnosticsSnapshot<{ config::PATHS }> {
-    let routes = match Box::try_new_in(RouteDiagnosticsSnapshot::empty(), ExternalMemory) {
-        Ok(routes) => routes,
-        Err(_) => {
-            error!(
-                "e290-node stage=route-diagnostics status=FAIL reason=external-allocation expected_bytes={}",
-                mem::size_of::<RouteDiagnosticsSnapshot<{ config::PATHS }>>(),
-            );
-            inert_large_construction()
-        }
-    };
+    let routes =
+        match Box::<RouteDiagnosticsSnapshot<{ config::PATHS }>, ExternalMemory>::try_new_uninit_in(
+            ExternalMemory,
+        ) {
+            Ok(mut uninit) => {
+                RouteDiagnosticsSnapshot::write_empty(&mut uninit);
+                // SAFETY: `write_empty` initialized every field of the boxed
+                // snapshot before this consume.
+                unsafe { uninit.assume_init() }
+            }
+            Err(_) => {
+                error!(
+                    "e290-node stage=route-diagnostics status=FAIL reason=external-allocation expected_bytes={}",
+                    mem::size_of::<RouteDiagnosticsSnapshot<{ config::PATHS }>>(),
+                );
+                inert_large_construction()
+            }
+        };
     leak_validated_external_or_inert(
         routes,
         "route-diagnostics",
@@ -1369,6 +1377,7 @@ async fn product_main(spawner: Spawner) -> ! {
         let automatic_announces_enabled = storage_coordinator.automatic_announces_enabled();
         let rmap_discovery_enabled = storage_coordinator.rmap_discovery_enabled();
         let rmap_public_location = storage_coordinator.rmap_public_location();
+        let device_name = storage_coordinator.device_name();
         #[cfg(feature = "gateway")]
         let wifi_tcp_bootstrap = storage_coordinator.wifi_tcp_bootstrap();
         let rmap_publication_policy = {
@@ -1511,7 +1520,38 @@ async fn product_main(spawner: Spawner) -> ! {
             );
             inert_forever().await
         }
-        let lxmf_destination = match activate_lxmf_delivery(node, lxmf_service_available) {
+        let mut lxmf_announce_name_bytes = [0_u8; reticulum_device_api::MAX_DEVICE_NAME_BYTES];
+        let lxmf_announce_name_len = match device_name {
+            Some(name) => {
+                let bytes = name.as_bytes();
+                lxmf_announce_name_bytes[..bytes.len()].copy_from_slice(bytes);
+                bytes.len()
+            }
+            None => {
+                let bytes = rmap_discovery_name(base_mac_eui48);
+                lxmf_announce_name_bytes[..bytes.len()].copy_from_slice(&bytes);
+                bytes.len()
+            }
+        };
+        let lxmf_announce_name =
+            core::str::from_utf8(&lxmf_announce_name_bytes[..lxmf_announce_name_len])
+                .expect("the retained board name is validated UTF-8");
+        let mut lxmf_announce_app_data_box =
+            Box::new([0_u8; config::MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES]);
+        let lxmf_announce_app_data_len = config::encode_lxmf_delivery_announce_app_data(
+            lxmf_announce_name,
+            &mut lxmf_announce_app_data_box,
+        );
+        let lxmf_announce_app_data: &'static [u8] = {
+            let leaked: &'static mut [u8; config::MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES] =
+                Box::leak(lxmf_announce_app_data_box);
+            &leaked[..lxmf_announce_app_data_len]
+        };
+        let lxmf_destination = match activate_lxmf_delivery(
+            node,
+            lxmf_service_available,
+            lxmf_announce_app_data,
+        ) {
             Ok(LxmfDeliveryActivation::Active(destination)) => {
                 info!(
                     "e290-node stage=lxmf-delivery status=ENABLED destination={:02x?} proof_policy=retain durability=required-for-all-carriers accepts_links=true data_profile=opportunistic+responder-direct-link resource_ingress=disabled discovery_announce=periodic interfaces=transport-neutral",
@@ -1696,6 +1736,10 @@ async fn product_main(spawner: Spawner) -> ! {
                 },
                 DisplayCompositionState::Configured,
             )
+            .with_device_name(device_name.map(|name| {
+                DisplayLabel::new(name.as_str())
+                    .expect("the validated board display name fits the display label")
+            }))
             .with_uncollected_messages(
                 storage_coordinator
                     .lxmf_mailbox_status()
@@ -1982,6 +2026,7 @@ async fn product_main(spawner: Spawner) -> ! {
             ),
             offline_descriptor,
             announce_epoch,
+            lxmf_announce_app_data,
             node_rng,
         ) {
             Ok(task) => task,

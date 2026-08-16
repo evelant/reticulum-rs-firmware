@@ -33,20 +33,55 @@ pub const RNS_PRIMARY_ASPECTS: [&str; 1] = [RNS_PRIMARY_ASPECT];
 pub const RNS_LXMF_APPLICATION_NAME: &str = "lxmf";
 /// Complete aspect list of the inbound LXMF delivery destination.
 pub const RNS_LXMF_DELIVERY_ASPECTS: [&str; 1] = ["delivery"];
-/// Canonical LXMF delivery-announce data for an unnamed, stamp-free service
-/// with no advertised optional functionality.
+/// Maximum encoded bytes for one named LXMF delivery announce app data.
 ///
-/// This is MessagePack `[nil, nil, []]`. The explicit empty functionality list
-/// avoids the legacy interpretation that a missing third field implies LXMF
-/// compression support.
-pub const LXMF_DELIVERY_ANNOUNCE_APP_DATA: [u8; 4] = [0x93, 0xc0, 0xc0, 0x90];
+/// The app data is MessagePack `[name, nil, []]`. A 32-byte UTF-8 name uses a
+/// two-byte `str8` header, giving `1 + 2 + 32 + 1 + 1 = 37` bytes. Shorter
+/// names use a one-byte `fixstr` header and stay below this ceiling.
+pub const MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES: usize =
+    1 + 2 + reticulum_device_api::MAX_DEVICE_NAME_BYTES + 1 + 1;
+
+/// Encode the LXMF delivery announce app data `[name, nil, []]`.
+///
+/// The first array item is the human-readable display name decoded by nearby
+/// peers. The explicit empty functionality list avoids the legacy interpretation
+/// that a missing third field implies LXMF compression support.
+///
+/// Returns the number of encoded bytes written to `output`.
+pub fn encode_lxmf_delivery_announce_app_data(
+    name: &str,
+    output: &mut [u8; MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES],
+) -> usize {
+    let bytes = name.as_bytes();
+    let mut cursor = 0;
+    output[cursor] = 0x93;
+    cursor += 1;
+    if bytes.len() <= 31 {
+        output[cursor] = 0xa0 | bytes.len() as u8;
+        cursor += 1;
+    } else {
+        output[cursor] = 0xd9;
+        output[cursor + 1] = bytes.len() as u8;
+        cursor += 2;
+    }
+    output[cursor..cursor + bytes.len()].copy_from_slice(bytes);
+    cursor += bytes.len();
+    output[cursor] = 0xc0;
+    cursor += 1;
+    output[cursor] = 0x90;
+    cursor += 1;
+    cursor
+}
 
 /// Fixed native path-table capacity.
 ///
-/// The production E290 supervisor is allocated in external PSRAM. Keep enough
-/// retained routes for several local LoRa peers plus the announce traffic seen
-/// through an enabled public TCP border interface.
-pub const PATHS: usize = 64;
+/// The production E290 supervisor is allocated in external PSRAM. Retain enough
+/// routes for the local LoRa mesh plus the larger announce surface seen through
+/// an enabled public TCP border interface without letting border churn evict
+/// the local routes the operator is actually using. Each path caches its raw
+/// announce packet inline in PSRAM (not in the strict internal heap), so the
+/// table can grow without starving the Wi-Fi controller's receive buffers.
+pub const PATHS: usize = 256;
 /// Pending local announce capacity.
 pub const ANNOUNCES: usize = 4;
 /// Native packet deduplication capacity.
@@ -54,7 +89,7 @@ pub const ANNOUNCES: usize = 4;
 /// Retain two packet hashes per path so a four-node shared LoRa mesh and a
 /// public TCP interface cannot immediately evict the duplicate evidence needed
 /// to suppress delayed shared-medium copies.
-pub const DEDUPLICATION: usize = 128;
+pub const DEDUPLICATION: usize = 512;
 /// Fixed Rete link-state capacity.
 pub const LINKS: usize = 4;
 /// Statically owned destination-DATA packet buffers.
@@ -467,11 +502,13 @@ pub const ANNOUNCE_NATIVE_RETRANSMIT_SECONDS: u64 =
 pub const ANNOUNCE_MINIMUM_EMISSION_SEPARATION_SECONDS: u64 = 3;
 /// Largest current local bootstrap announce packet in complete RNS bytes.
 ///
-/// This is the 167-byte fixed signed announce plus the ten-byte UTF-8 Nomad
-/// application payload. LXMF's four-byte payload and the primary destination
-/// are smaller. Timing code feeds this exact maximum through the selected
-/// [`LoRaProfile`] rather than classifying profiles by spreading factor.
-pub const ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES: usize = 177;
+/// This is the 167-byte fixed signed announce plus the 37-byte named LXMF
+/// delivery announce app data. The ten-byte UTF-8 Nomad application payload and
+/// the primary destination are smaller. Timing code feeds this exact maximum
+/// through the selected [`LoRaProfile`] rather than classifying profiles by
+/// spreading factor.
+pub const ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES: usize =
+    167 + MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES;
 /// Identity phase buckets before a node's first boot announce cycle.
 pub const ANNOUNCE_BOOTSTRAP_INITIAL_PHASE_SLOTS: u64 = 8;
 /// Primary-destination-derived phase buckets for the first bootstrap retry.
@@ -921,8 +958,8 @@ mod tests {
 
     #[test]
     fn psram_product_retains_border_mesh_scale_routing_state() {
-        assert_eq!(PATHS, 64);
-        assert_eq!(DEDUPLICATION, 128);
+        assert_eq!(PATHS, 256);
+        assert_eq!(DEDUPLICATION, 512);
         assert!(DEDUPLICATION >= PATHS * 2);
     }
 
@@ -948,8 +985,32 @@ mod tests {
     }
 
     #[test]
-    fn lxmf_delivery_announce_explicitly_advertises_no_optional_functionality() {
-        assert_eq!(LXMF_DELIVERY_ANNOUNCE_APP_DATA, [0x93, 0xc0, 0xc0, 0x90]);
+    fn lxmf_delivery_announce_encodes_a_name_and_keeps_an_empty_functionality_list() {
+        let mut short = [0_u8; MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES];
+        let len = encode_lxmf_delivery_announce_app_data("Field node", &mut short);
+        assert_eq!(
+            &short[..len],
+            [
+                0x93, 0xaa, b'F', b'i', b'e', b'l', b'd', b' ', b'n', b'o', b'd', b'e', 0xc0, 0x90
+            ]
+        );
+
+        let name = "x".repeat(reticulum_device_api::MAX_DEVICE_NAME_BYTES);
+        let mut maximum = [0_u8; MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES];
+        let len = encode_lxmf_delivery_announce_app_data(&name, &mut maximum);
+        assert_eq!(len, MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES);
+        assert_eq!(maximum[0], 0x93);
+        assert_eq!(maximum[1], 0xd9);
+        assert_eq!(maximum[2] as usize, name.len());
+        assert_eq!(&maximum[3..3 + name.len()], name.as_bytes());
+        assert_eq!(maximum[len - 2], 0xc0);
+        assert_eq!(maximum[len - 1], 0x90);
+    }
+
+    #[test]
+    fn bootstrap_announce_bound_tracks_the_named_lxmf_announce() {
+        assert_eq!(MAX_LXMF_DELIVERY_ANNOUNCE_APP_DATA_BYTES, 37);
+        assert_eq!(ANNOUNCE_BOOTSTRAP_MAXIMUM_PACKET_BYTES, 204);
     }
 
     #[test]

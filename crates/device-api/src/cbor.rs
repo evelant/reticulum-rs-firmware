@@ -26,19 +26,19 @@ use crate::model::{
 };
 #[cfg(feature = "network-config")]
 use crate::model::{
-    GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm, MAX_RETICULUM_DNS_DHCP_SERVERS,
-    MAX_RETICULUM_DNS_RAW_ATTEMPTS, MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_SSID_BYTES,
-    NetworkConfigMutation, NetworkConfigMutationOutcome, NetworkConfigMutationRequest,
-    NetworkConfigSnapshot, NetworkRuntimeStatus, OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE,
-    OP_NETWORK_STATUS, ReticulumDnsDiagnostics, ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt,
-    ReticulumDnsRawOutcome, ReticulumDnsRawSetupState, ReticulumDnsRawSource,
-    ReticulumDnsResolution, ReticulumDnsResolutionSource, ReticulumTcpFailure,
-    ReticulumTcpPeerConfigSummary, ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate,
-    ReticulumTcpPeerHostname, ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState,
-    ReticulumTcpPeerUpdate, RmapConfig, RmapDeferredReason, RmapEgressConfirmation,
-    RmapInitialTcpGateState, RmapLocation, RmapQueueOutcome, RmapRuntimeStatus, RmapStampPhase,
-    WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate,
-    WifiSsid, WifiStationState,
+    DeviceName, DeviceNameSummary, GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm,
+    MAX_RETICULUM_DNS_DHCP_SERVERS, MAX_RETICULUM_DNS_RAW_ATTEMPTS, MAX_WIFI_NETWORK_PROFILES,
+    MAX_WIFI_SSID_BYTES, NetworkConfigMutation, NetworkConfigMutationOutcome,
+    NetworkConfigMutationRequest, NetworkConfigSnapshot, NetworkRuntimeStatus,
+    OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE, OP_NETWORK_STATUS, ReticulumDnsDiagnostics,
+    ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt, ReticulumDnsRawOutcome,
+    ReticulumDnsRawSetupState, ReticulumDnsRawSource, ReticulumDnsResolution,
+    ReticulumDnsResolutionSource, ReticulumTcpFailure, ReticulumTcpPeerConfigSummary,
+    ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate, ReticulumTcpPeerHostname,
+    ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState, ReticulumTcpPeerUpdate, RmapConfig,
+    RmapDeferredReason, RmapEgressConfirmation, RmapInitialTcpGateState, RmapLocation,
+    RmapQueueOutcome, RmapRuntimeStatus, RmapStampPhase, WifiCredentialUpdate,
+    WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate, WifiSsid, WifiStationState,
 };
 #[cfg(feature = "lxmf")]
 use crate::model::{
@@ -183,6 +183,8 @@ pub enum RequiredField {
     NetworkConfigTcpHostPeer,
     /// Complete LoRa radio profile at network-config body key 9.
     NetworkConfigLoraProfile,
+    /// Optional board display name at network-config body key 10.
+    NetworkConfigDeviceName,
     /// LoRa center frequency at profile key 0.
     LoraProfileFrequencyHz,
     /// LoRa bandwidth at profile key 1.
@@ -521,6 +523,8 @@ pub enum RequiredField {
     DiagnosticRnsLinksClosed,
     /// Failed Reticulum links at RNS key 9.
     DiagnosticRnsLinksFailed,
+    /// Stable route-table generation at RNS key 10.
+    DiagnosticRnsRouteRevision,
     /// Optional exclusive route cursor at request body key 0.
     RouteDiagnosticsAfter,
     /// Route-table revision at response body key 0.
@@ -810,6 +814,9 @@ pub enum DecodeError {
     InvalidLoraTransmitPowerDbm,
     /// A complete LoRa radio profile contained an invalid numeric field.
     InvalidLoraRadioProfile,
+    /// A board display name was empty, too long, or contained an unsupported
+    /// control or separator character.
+    InvalidDeviceName,
     /// A redacted desired-network snapshot violated ordering or revision rules.
     InvalidNetworkConfigSnapshot,
     /// A network mutation outcome carried contradictory state-specific fields.
@@ -1541,6 +1548,9 @@ fn encode_network_config_mutation_request(
         NetworkConfigMutation::SetLoraProfile(_) => {
             put!(encoder.u8(7));
         }
+        NetworkConfigMutation::SetDeviceName(_) => {
+            put!(encoder.u8(8));
+        }
     }
     put!(encoder.u8(1));
     match request.mutation() {
@@ -1583,6 +1593,14 @@ fn encode_network_config_mutation_request(
         NetworkConfigMutation::SetLoraProfile(profile) => {
             encode_lora_radio_profile(encoder, profile)?;
         }
+        NetworkConfigMutation::SetDeviceName(name) => match name {
+            Some(name) => {
+                put!(encoder.str(name.as_str()));
+            }
+            None => {
+                put!(encoder.null());
+            }
+        },
     }
     put!(encoder.u8(2));
     put!(encoder.u64(request.expected_revision()));
@@ -1768,7 +1786,7 @@ fn encode_network_config(
     encoder: &mut SliceEncoder<'_>,
     config: NetworkConfigSnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(10));
+    put!(encoder.map(11));
     put!(encoder.u8(0));
     put!(encoder.u64(config.revision));
     put!(encoder.u8(1));
@@ -1812,6 +1830,15 @@ fn encode_network_config(
     }
     put!(encoder.u8(9));
     encode_lora_radio_profile(encoder, config.lora_profile())?;
+    put!(encoder.u8(10));
+    match config.device_name() {
+        Some(name) => {
+            put!(encoder.str(name.as_str()));
+        }
+        None => {
+            put!(encoder.null());
+        }
+    }
     Ok(())
 }
 
@@ -2470,7 +2497,7 @@ fn encode_rns_diagnostics(
     encoder: &mut SliceEncoder<'_>,
     rns: RnsDiagnostics,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(10));
+    put!(encoder.map(11));
     put!(encoder.u8(0));
     put!(encoder.u64(rns.received()));
     put!(encoder.u8(1));
@@ -2491,6 +2518,8 @@ fn encode_rns_diagnostics(
     put!(encoder.u64(rns.links_closed()));
     put!(encoder.u8(9));
     put!(encoder.u64(rns.links_failed()));
+    put!(encoder.u8(10));
+    put!(encoder.u64(rns.route_revision()));
     Ok(())
 }
 
@@ -3753,6 +3782,21 @@ fn decode_network_config_mutation<'a>(
             finish_body(&decoder, value)?;
             Ok(NetworkConfigMutation::SetLoraProfile(profile))
         }
+        8 => {
+            let mut decoder = Decoder::new(value);
+            let name = if matches!(
+                decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+                Type::Null
+            ) {
+                decoder.null().map_err(|_| DecodeError::Malformed)?;
+                None
+            } else {
+                let raw = decoder.str().map_err(|_| DecodeError::Malformed)?;
+                Some(DeviceName::new(raw).map_err(|_| DecodeError::InvalidDeviceName)?)
+            };
+            finish_body(&decoder, value)?;
+            Ok(NetworkConfigMutation::SetDeviceName(name))
+        }
         other => Err(DecodeError::InvalidValue {
             field: RequiredField::NetworkConfigMutationKind,
             value: u64::from(other),
@@ -4435,6 +4479,8 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
     let mut tcp_host_peer_seen = false;
     let mut tcp_host_peer = None;
     let mut lora_profile = None;
+    let mut device_name_seen = false;
+    let mut device_name = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -4524,6 +4570,21 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
                 )?;
                 lora_profile = Some(decode_lora_radio_profile(&mut decoder)?);
             }
+            10 => {
+                reject_duplicate(device_name_seen, RequiredField::NetworkConfigDeviceName)?;
+                device_name_seen = true;
+                if matches!(
+                    decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+                    Type::Null
+                ) {
+                    decoder.null().map_err(|_| DecodeError::Malformed)?;
+                } else {
+                    let raw = decoder.str().map_err(|_| DecodeError::Malformed)?;
+                    device_name = Some(
+                        DeviceNameSummary::new(raw).map_err(|_| DecodeError::InvalidDeviceName)?,
+                    );
+                }
+            }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
@@ -4541,6 +4602,12 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
     if !rmap_phone_location_seen {
         return Err(DecodeError::MissingField(
             RequiredField::NetworkConfigRmapPhoneLocation,
+        ));
+    }
+    let lora_profile = require(lora_profile, RequiredField::NetworkConfigLoraProfile)?;
+    if !device_name_seen {
+        return Err(DecodeError::MissingField(
+            RequiredField::NetworkConfigDeviceName,
         ));
     }
     NetworkConfigSnapshot::new(
@@ -4569,7 +4636,8 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
             )?,
             rmap_phone_location,
         ),
-        require(lora_profile, RequiredField::NetworkConfigLoraProfile)?,
+        lora_profile,
+        device_name,
     )
     .map_err(|_| DecodeError::InvalidNetworkConfigSnapshot)
 }
@@ -5344,6 +5412,7 @@ fn decode_rns_diagnostics(decoder: &mut Decoder<'_>) -> Result<RnsDiagnostics, D
     let mut links_established = None;
     let mut links_closed = None;
     let mut links_failed = None;
+    let mut route_revision = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -5411,6 +5480,13 @@ fn decode_rns_diagnostics(decoder: &mut Decoder<'_>) -> Result<RnsDiagnostics, D
                 )?;
                 links_failed = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
             }
+            10 => {
+                reject_duplicate(
+                    route_revision.is_some(),
+                    RequiredField::DiagnosticRnsRouteRevision,
+                )?;
+                route_revision = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
             _ => skip_strict(decoder, 0)?,
         }
     }
@@ -5431,6 +5507,7 @@ fn decode_rns_diagnostics(decoder: &mut Decoder<'_>) -> Result<RnsDiagnostics, D
         )?,
         require(links_closed, RequiredField::DiagnosticRnsLinksClosed)?,
         require(links_failed, RequiredField::DiagnosticRnsLinksFailed)?,
+        require(route_revision, RequiredField::DiagnosticRnsRouteRevision)?,
     ))
 }
 

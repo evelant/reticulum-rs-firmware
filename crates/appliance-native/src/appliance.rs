@@ -1126,7 +1126,8 @@ mod tests {
                     "spreading_factor": 7,
                     "coding_rate_denominator": 5,
                     "tx_power_dbm": 14
-                }
+                },
+                "device_name": null
             })
         );
         assert!(!config.to_string().contains(secret));

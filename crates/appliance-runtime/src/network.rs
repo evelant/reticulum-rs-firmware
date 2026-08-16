@@ -229,6 +229,7 @@ pub struct NetworkConfigView {
     #[ts(type = "14 | 17 | 20 | 22")]
     lora_tx_power_dbm: u8,
     lora_profile: LoraRadioProfileView,
+    device_name: Option<String>,
 }
 
 impl NetworkConfigView {
@@ -283,6 +284,11 @@ impl NetworkConfigView {
     pub const fn lora_profile(&self) -> LoraRadioProfileView {
         self.lora_profile
     }
+
+    /// Configured board display name, if any.
+    pub fn device_name(&self) -> Option<&str> {
+        self.device_name.as_deref()
+    }
 }
 
 impl From<device_api::NetworkConfigSnapshot> for NetworkConfigView {
@@ -308,6 +314,7 @@ impl From<device_api::NetworkConfigSnapshot> for NetworkConfigView {
             rmap_phone_location: config.rmap_phone_location().map(RmapPhoneLocation::from),
             lora_tx_power_dbm: config.lora_tx_power_dbm().get(),
             lora_profile: LoraRadioProfileView::from(config.lora_profile()),
+            device_name: config.device_name().map(|name| name.as_str().to_owned()),
         }
     }
 }
@@ -1050,6 +1057,12 @@ pub enum NetworkConfigMutation {
         /// Complete profile saved for the next restart.
         profile: LoraRadioProfileView,
     },
+    /// Replace or clear the board display name shown on the appliance and in
+    /// LXMF delivery announces.
+    SetDeviceName {
+        /// New display name, or `null` to clear the configured name.
+        name: Option<String>,
+    },
 }
 
 /// Compare-and-swap request for one desired-network mutation.
@@ -1178,6 +1191,18 @@ impl NetworkConfigMutationRequest {
                     device_api::IdempotencyKey(idempotency_key),
                 )))
             }
+            NetworkConfigMutation::SetDeviceName { name } => {
+                let name = name
+                    .as_deref()
+                    .map(device_api::DeviceName::new)
+                    .transpose()
+                    .map_err(|_| NetworkRequestError::InvalidDeviceName)?;
+                Ok(invoke(device_api::NetworkConfigMutationRequest::new(
+                    device_api::NetworkConfigMutation::SetDeviceName(name),
+                    self.expected_revision,
+                    device_api::IdempotencyKey(idempotency_key),
+                )))
+            }
         }
     }
 }
@@ -1266,6 +1291,9 @@ pub enum NetworkRequestError {
     InvalidLoraTransmitPower,
     /// LoRa profile contained an unsupported numeric field.
     InvalidLoraRadioProfile,
+    /// Board display name was empty, too long, or contained an unsupported
+    /// control or separator character.
+    InvalidDeviceName,
 }
 
 impl fmt::Display for NetworkRequestError {
@@ -1297,6 +1325,9 @@ impl fmt::Display for NetworkRequestError {
             }
             Self::InvalidLoraRadioProfile => {
                 "LoRa profile must use a nonzero frequency, supported bandwidth, SF7-SF12, and coding rate 4/5-4/8"
+            }
+            Self::InvalidDeviceName => {
+                "board display name must contain between 1 and 32 UTF-8 bytes without control or separator characters"
             }
         })
     }

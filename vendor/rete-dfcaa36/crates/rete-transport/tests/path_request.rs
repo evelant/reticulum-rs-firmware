@@ -4,7 +4,7 @@ use rete_core::{
     CONTEXT_NONE, CONTEXT_PATH_RESPONSE, DestHash, DestType, HeaderType, Identity, IdentityHash,
     MTU, Packet, PacketBuilder, PacketType, TRANSPORT_TYPE_TRANSPORT, TRUNCATED_HASH_LEN,
 };
-use rete_transport::{IngestResult, Path, PendingAnnounce, Transport, PATH_REQUEST_DEST};
+use rete_transport::{AnnounceCache, IngestResult, Path, PendingAnnounce, Transport, PATH_REQUEST_DEST};
 
 /// Small transport suitable for tests.
 type TestTransport = Transport<rete_transport::HeaplessStorage<64, 16, 128, 4>>;
@@ -354,7 +354,7 @@ fn cached_response_is_suppressed_when_requester_is_the_known_next_hop() {
     let next_hop = IdentityHash::from([0x63; TRUNCATED_HASH_LEN]);
     let destination = DestHash::from([0x53; TRUNCATED_HASH_LEN]);
     let mut path = Path::via_repeater(next_hop, 2, 30);
-    path.announce_raw = Some(vec![0x00]);
+    path.announce_raw = AnnounceCache::store(&[0x00]);
     transport.insert_path(destination, path);
     let identity = Identity::from_seed(b"path-next-hop-guard").unwrap();
     let mut rng = rand::thread_rng();
@@ -455,7 +455,7 @@ fn cached_response_flood_coalesces_and_full_queue_rejects_observably() {
     let mut transport = TestTransport::new();
     transport.set_local_identity(relay_id);
     let mut path = Path::direct(60);
-    path.announce_raw = Some(cached.clone());
+    path.announce_raw = AnnounceCache::store(&cached);
     transport.insert_path(destination, path);
     for tag in 0_u8..32 {
         let mut request = tagged_path_request(&destination, None, &[tag], 0);
@@ -481,7 +481,7 @@ fn cached_response_flood_coalesces_and_full_queue_rejects_observably() {
     let mut full = TestTransport::new();
     full.set_local_identity(relay_id);
     let mut path = Path::direct(60);
-    path.announce_raw = Some(cached.clone());
+    path.announce_raw = AnnounceCache::store(&cached);
     full.insert_path(destination, path);
     for tag in 0_u8..16 {
         assert!(full.queue_announce(PendingAnnounce {

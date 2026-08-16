@@ -23,6 +23,7 @@ export const MAX_WIFI_SSID_BYTES = 32 as const;
 export const MIN_WIFI_PASSPHRASE_BYTES = 8 as const;
 export const MAX_WIFI_PASSPHRASE_BYTES = 63 as const;
 export const MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES = 96 as const;
+export const MAX_DEVICE_NAME_BYTES = 32 as const;
 export const DEFAULT_RETICULUM_TCP_PORT = 4242 as const;
 
 /**
@@ -263,7 +264,7 @@ export type LoraRadioProfileView = { frequency_hz: number, bandwidth_hz: number,
 /**
  * Complete board-owned desired network configuration with all secrets redacted.
  */
-export type NetworkConfigView = { revision: JsonSafeInteger, wifi_profiles: Array<WifiNetworkProfileView>, tcp_peer: ReticulumTcpPeerView | null, wifi_transport_enabled: boolean, automatic_announces_enabled: boolean, rmap_discovery_enabled: boolean, rmap_share_location: boolean, rmap_phone_location: RmapPhoneLocation | null, lora_tx_power_dbm: 14 | 17 | 20 | 22, lora_profile: LoraRadioProfileView, };
+export type NetworkConfigView = { revision: JsonSafeInteger, wifi_profiles: Array<WifiNetworkProfileView>, tcp_peer: ReticulumTcpPeerView | null, wifi_transport_enabled: boolean, automatic_announces_enabled: boolean, rmap_discovery_enabled: boolean, rmap_share_location: boolean, rmap_phone_location: RmapPhoneLocation | null, lora_tx_power_dbm: 14 | 17 | 20 | 22, lora_profile: LoraRadioProfileView, device_name: string | null, };
 
 /**
  * Live Wi-Fi station state.
@@ -475,7 +476,11 @@ lora_tx_power_dbm: 14 | 17 | 20 | 22, } | { "kind": "set_lora_profile",
 /**
  * Complete profile saved for the next restart.
  */
-profile: LoraRadioProfileView, };
+profile: LoraRadioProfileView, } | { "kind": "set_device_name",
+/**
+ * New display name, or `null` to clear the configured name.
+ */
+name: string | null, };
 
 /**
  * Compare-and-swap request for one desired-network mutation.

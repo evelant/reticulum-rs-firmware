@@ -61,6 +61,18 @@ fn labels_are_bounded_valid_single_line_utf8() {
 }
 
 #[test]
+fn home_snapshot_retains_an_optional_device_name() {
+    let unnamed = home(DisplaySetupState::Paired);
+    assert_eq!(unnamed.device_name(), None);
+
+    let name = DisplayLabel::new("Field node").expect("fixture name fits");
+    let named = unnamed.with_device_name(Some(name));
+    assert_eq!(named.device_name(), Some(name));
+    assert_eq!(named.device_suffix(), unnamed.device_suffix());
+    assert_eq!(named.label(), unnamed.label());
+}
+
+#[test]
 fn passkeys_require_exactly_six_decimal_digits_and_keep_leading_zeroes() {
     assert_eq!(
         PairingPasskey::from_ascii(b"12345").err(),

@@ -77,7 +77,7 @@ cargo fmt --all -- --check
 RUST_MIN_STACK=16777216 cargo test --locked
 RUST_MIN_STACK=16777216 cargo test --locked -p reticulum-e290-firmware --lib
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked -p reticulum-rns-rete --features conformance --test rns_1_3_8
+RUST_MIN_STACK=16777216 cargo test --locked -p reticulum-rns-rete --features conformance --test rns_1_3_8
 ```
 
 Protocol or wire changes also require the isolated Python authority checks in

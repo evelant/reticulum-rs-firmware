@@ -186,8 +186,8 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                     // responses identify us as the relay, not the upstream node.
                     // Fall back to the original raw bytes when not in transport
                     // mode or when the rebuild failed.
-                    path.announce_raw = Some(
-                        retransmit_raw.clone().unwrap_or_else(|| raw.to_vec()),
+                    path.announce_raw = crate::path::AnnounceCache::store(
+                        retransmit_raw.as_deref().unwrap_or(raw),
                     );
                     path.received_on = Some(iface);
                     let _ = self.insert_path(dh, path);
@@ -287,7 +287,7 @@ impl<S: crate::storage::TransportStorage> Transport<S> {
                 .requester_transport_id
                 .is_some_and(|requester| path.via == Some(requester));
             (!requester_is_next_hop)
-                .then(|| path.announce_raw.clone())
+                .then(|| path.announce_raw.as_ref().map(|raw| raw.to_vec()))
                 .flatten()
         });
         if let Some(cached) = known_response {

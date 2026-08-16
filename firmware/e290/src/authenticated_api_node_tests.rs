@@ -340,7 +340,7 @@ impl NodeDiagnosticsPort for CountingCompletePort {
             0,
             [None; reticulum_device_api::MAX_DIAGNOSTIC_INTERFACES],
             None,
-            RnsDiagnostics::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            RnsDiagnostics::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             0,
             0,
             0,

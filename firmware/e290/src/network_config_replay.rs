@@ -82,6 +82,17 @@ impl NetworkConfigMutationFingerprint {
                     profile.tx_power_dbm().get(),
                 ]);
             }
+            NetworkConfigMutation::SetDeviceName(name) => {
+                hasher.update([8]);
+                match name {
+                    Some(name) => {
+                        let bytes = name.as_str().as_bytes();
+                        hasher.update([1, bytes.len() as u8]);
+                        hasher.update(bytes);
+                    }
+                    None => hasher.update([0]),
+                }
+            }
         }
         // A complete public block displaces any password tail from sha2's
         // internal input buffer before finalization.

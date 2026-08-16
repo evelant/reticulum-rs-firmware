@@ -113,22 +113,37 @@ pub fn render_display_view(
 }
 
 fn draw_home(snapshot: DisplayHomeSnapshot, frame: &mut E290FrameBuffer) -> Result<(), Infallible> {
+    let named = snapshot.device_name().is_some();
+    let suffix_y = match snapshot.device_name() {
+        Some(name) => {
+            draw_centered(
+                name.as_str(),
+                34,
+                MonoTextStyle::new(&FONT_6X10, BinaryColor::On),
+                frame,
+            )?;
+            46
+        }
+        None => 38,
+    };
     draw_centered(
         snapshot.device_suffix().as_str(),
-        38,
+        suffix_y,
         MonoTextStyle::new(&FONT_10X20, BinaryColor::On),
         frame,
     )?;
     draw_uncollected_badge(snapshot.uncollected_messages(), frame)?;
+    let link_y = if named { 70 } else { 67 };
+    let service_y = if named { 86 } else { 83 };
     draw_centered(
         link_configuration(snapshot),
-        67,
+        link_y,
         MonoTextStyle::new(&FONT_6X10, BinaryColor::On),
         frame,
     )?;
     draw_centered(
         service_configuration(snapshot),
-        83,
+        service_y,
         MonoTextStyle::new(&FONT_6X10, BinaryColor::On),
         frame,
     )?;
@@ -420,6 +435,26 @@ mod tests {
         assert_ne!(one.as_bytes(), ninety_nine.as_bytes());
         assert_ne!(ninety_nine.as_bytes(), capped.as_bytes());
         assert_eq!(capped.as_bytes(), still_capped.as_bytes());
+    }
+
+    #[test]
+    fn named_home_renders_a_device_name_line_above_the_suffix() {
+        let unnamed = render(DisplayCommand::ShowHome {
+            snapshot: home(
+                DisplaySetupState::Paired,
+                DisplayCompositionState::Configured,
+            ),
+        });
+        let named = render(DisplayCommand::ShowHome {
+            snapshot: home(
+                DisplaySetupState::Paired,
+                DisplayCompositionState::Configured,
+            )
+            .with_device_name(Some(
+                DisplayLabel::new("Field node").expect("fixture name fits"),
+            )),
+        });
+        assert_ne!(unnamed.as_bytes(), named.as_bytes());
     }
 
     #[test]

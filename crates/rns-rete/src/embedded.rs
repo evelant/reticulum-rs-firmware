@@ -4496,7 +4496,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
                 .core
                 .transport
                 .get_path(&destination)
-                .and_then(|path| path.announce_raw.as_deref())
+                .and_then(|path| path.announce_raw.as_ref().map(|raw| raw.as_slice()))
                 .map(|raw| Sha256::digest(raw).into()),
             _ => None,
         };
@@ -4780,7 +4780,7 @@ impl<const PATHS: usize, const ANNOUNCES: usize, const DEDUPLICATION: usize, con
         let Some(path) = self.core.transport.get_path(&destination) else {
             return;
         };
-        let Some(cached) = path.announce_raw.as_deref() else {
+        let Some(cached) = path.announce_raw.as_ref().map(|raw| raw.as_slice()) else {
             return;
         };
         let cached_fingerprint: [u8; 32] = Sha256::digest(cached).into();

@@ -85,7 +85,7 @@ pub fn node_diagnostics<const PATHS: usize>(
         uptime_ms,
         interfaces,
         Some(lora_diagnostics(uptime_ms, radio)),
-        rns_diagnostics(metrics),
+        rns_diagnostics(metrics, routes.generation()),
         saturating_u32(observed_peer_count),
         retained_route_count,
         usable_route_count,
@@ -453,7 +453,7 @@ fn api_tx_outcome(outcome: RadioTxTerminalOutcome) -> DiagnosticLoraTxOutcome {
     }
 }
 
-fn rns_diagnostics(metrics: EmbeddedNodeMetrics) -> RnsDiagnostics {
+fn rns_diagnostics(metrics: EmbeddedNodeMetrics, route_revision: u64) -> RnsDiagnostics {
     let transport = metrics.transport;
     RnsDiagnostics::new(
         transport.packets_received,
@@ -466,6 +466,7 @@ fn rns_diagnostics(metrics: EmbeddedNodeMetrics) -> RnsDiagnostics {
         transport.links_established,
         transport.links_closed,
         transport.links_failed,
+        route_revision,
     )
 }
 

@@ -1872,6 +1872,13 @@ export default function ApplianceScreen() {
       </View>
     );
 
+  const deviceName =
+    networkState !== null &&
+    networkState.deviceKey === networkDeviceKey &&
+    networkState.loadState === "ready"
+      ? (networkState.configuration?.device_name ?? null)
+      : null;
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <ApplianceTopBar
@@ -1896,6 +1903,7 @@ export default function ApplianceScreen() {
           busy={busy}
           canAddAppliance={canAddAppliance}
           compact={compact}
+          deviceName={deviceName}
           exactBleTargetRequired={exactBleTargetRequired}
           nativeCore={nativeCore}
           onActivateProfile={activateApplianceProfile}

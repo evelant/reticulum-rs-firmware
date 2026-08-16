@@ -27,12 +27,13 @@ use reticulum_board_e290_radio::{E290Na915TxPower, E290RadioConfiguration};
 #[cfg(feature = "gateway")]
 use reticulum_device_api::ReticulumTcpFailure;
 use reticulum_device_api::{
-    CapabilityAvailability, DestinationHash as ApiDestinationHash, DiagnosticInterfaceKind,
-    GatewayPolicy, IdentityHash as ApiIdentityHash, IdentitySummary,
-    IngressObservation as ApiIngressObservation, IngressSignal as ApiIngressSignal,
-    LoraRadioProfile as ApiLoraRadioProfile, LoraTransmitPowerDbm,
-    LxmfDiscoveredPeer as ApiLxmfDiscoveredPeer, LxmfMailboxStatus as ApiLxmfMailboxStatus,
-    LxmfMessageHandle as ApiLxmfMessageHandle, LxmfMessageSummary as ApiLxmfMessageSummary,
+    CapabilityAvailability, DestinationHash as ApiDestinationHash, DeviceName as ApiDeviceName,
+    DeviceNameSummary, DiagnosticInterfaceKind, GatewayPolicy, IdentityHash as ApiIdentityHash,
+    IdentitySummary, IngressObservation as ApiIngressObservation,
+    IngressSignal as ApiIngressSignal, LoraRadioProfile as ApiLoraRadioProfile,
+    LoraTransmitPowerDbm, LxmfDiscoveredPeer as ApiLxmfDiscoveredPeer,
+    LxmfMailboxStatus as ApiLxmfMailboxStatus, LxmfMessageHandle as ApiLxmfMessageHandle,
+    LxmfMessageSummary as ApiLxmfMessageSummary,
     LxmfPeerDiscoveryCursor as ApiLxmfPeerDiscoveryCursor, LxmfPeerDiscoveryIncarnation,
     LxmfPeerDiscoveryPage as ApiLxmfPeerDiscoveryPage, LxmfPeerGeneration as ApiLxmfPeerGeneration,
     LxmfReadChunk as ApiLxmfReadChunk, LxmfReadLength as ApiLxmfReadLength,
@@ -125,12 +126,12 @@ use reticulum_lxmf_store::{
     MountedLxmfStore, mount as mount_lxmf_store,
 };
 use reticulum_network_config_store::{
-    BoundNetworkConfigStore, LoraRadioProfile as StoredLoraRadioProfile, LoraTxPower,
-    MountedNetworkConfigStore, NetworkConfig, NetworkConfigStoreBinding, NetworkConfigStoreError,
-    NetworkConfigStoreFault, OutboundTcpPeer, OutboundTcpPeerAddress, PhoneLocation,
-    RedactedNetworkConfig, WifiProfile, WifiProfileId,
-    commit_successor as commit_network_config_successor, mount as mount_network_config_store,
-    provision_erased as provision_network_config_erased,
+    BoundNetworkConfigStore, DeviceName as StoredDeviceName,
+    LoraRadioProfile as StoredLoraRadioProfile, LoraTxPower, MountedNetworkConfigStore,
+    NetworkConfig, NetworkConfigStoreBinding, NetworkConfigStoreError, NetworkConfigStoreFault,
+    OutboundTcpPeer, OutboundTcpPeerAddress, PhoneLocation, RedactedNetworkConfig, WifiProfile,
+    WifiProfileId, commit_successor as commit_network_config_successor,
+    mount as mount_network_config_store, provision_erased as provision_network_config_erased,
 };
 use reticulum_node_core::{
     ApplicationEventLease, AuthorizedFrameObservation, DelayedProofOwner,
@@ -1393,6 +1394,13 @@ impl ProductStorageCoordinator {
             .map_or(StoredLoraRadioProfile::DEFAULT, NetworkConfig::lora_profile)
     }
 
+    /// Copy the immutable boot-selected board display name, if configured.
+    pub(crate) fn device_name(&self) -> Option<StoredDeviceName> {
+        self.network_config
+            .configuration()
+            .and_then(NetworkConfig::device_name)
+    }
+
     /// Copy the immutable boot-time Wi-Fi decision out of durable authority
     /// before the independent station actor starts.
     #[cfg(feature = "gateway")]
@@ -2374,6 +2382,11 @@ fn api_network_config_snapshot(
         lora_tx_power_dbm,
     )
     .map_err(|_| NetworkConfigPortError::Faulted)?;
+    let device_name = redacted
+        .device_name()
+        .map(|name| DeviceNameSummary::new(name.as_str()))
+        .transpose()
+        .map_err(|_| NetworkConfigPortError::Faulted)?;
     NetworkConfigSnapshot::new(
         revision,
         wifi_profiles,
@@ -2382,6 +2395,7 @@ fn api_network_config_snapshot(
         gateway_policy,
         rmap_config,
         lora_profile,
+        device_name,
     )
     .map_err(|_| NetworkConfigPortError::Invariant)
 }
@@ -2412,6 +2426,14 @@ fn store_tcp_host_peer(
 
 fn store_rmap_location(location: RmapLocation) -> Result<PhoneLocation, NetworkConfigPortError> {
     PhoneLocation::new(location.latitude_e6(), location.longitude_e6())
+        .map_err(|_| NetworkConfigPortError::InvalidRequest)
+}
+
+fn store_device_name(
+    name: Option<ApiDeviceName<'_>>,
+) -> Result<Option<StoredDeviceName>, NetworkConfigPortError> {
+    name.map(|name| StoredDeviceName::new(name.as_str()))
+        .transpose()
         .map_err(|_| NetworkConfigPortError::InvalidRequest)
 }
 
@@ -2534,6 +2556,10 @@ fn network_config_mutation_is_noop(
                     == requested,
             )
         }
+        NetworkConfigMutation::SetDeviceName(name) => {
+            let requested = store_device_name(name)?;
+            Ok(configuration.and_then(NetworkConfig::device_name) == requested)
+        }
     }
 }
 
@@ -2612,6 +2638,10 @@ fn apply_network_config_mutation(
             configuration.set_lora_profile(store_lora_profile(profile)?);
             Ok(())
         }
+        NetworkConfigMutation::SetDeviceName(name) => {
+            configuration.set_device_name(store_device_name(name)?);
+            Ok(())
+        }
     }
 }
 
@@ -2637,6 +2667,7 @@ fn network_configurations_equal(left: &NetworkConfig, right: &NetworkConfig) -> 
         && left.rmap_share_location() == right.rmap_share_location()
         && left.phone_location() == right.phone_location()
         && left.lora_profile() == right.lora_profile()
+        && left.device_name() == right.device_name()
 }
 
 fn map_network_config_store_error(
@@ -2843,16 +2874,12 @@ impl NodeDiagnosticsPort for ProductAuthenticatedApiPort<'_> {
         &mut self,
         request: RouteDiagnosticsRequest,
     ) -> Result<RouteDiagnosticsPage, NodeDiagnosticsPortError> {
-        self.supervisor.snapshot_route_diagnostics(
-            MonotonicSeconds::new(self.announce_now_seconds),
+        project_route_diagnostics_page(
+            self.route_diagnostics.generation(),
+            request,
             self.route_diagnostics,
-        );
-        let transport = self.supervisor.node_metrics().transport;
-        let revision = transport
-            .paths_learned
-            .saturating_add(transport.paths_expired);
-        project_route_diagnostics_page(revision, request, self.route_diagnostics)
-            .map_err(|_| NodeDiagnosticsPortError::Invariant)
+        )
+        .map_err(|_| NodeDiagnosticsPortError::Invariant)
     }
 
     fn radio_trace_page(

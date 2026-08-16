@@ -655,7 +655,7 @@ fn node_diagnostics_snapshot() -> api::NodeDiagnosticsSnapshot {
             None,
         ],
         None,
-        api::RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+        api::RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
         2,
         4,
         3,

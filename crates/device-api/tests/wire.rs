@@ -27,21 +27,21 @@ use reticulum_device_api::{
 };
 #[cfg(feature = "network-config")]
 use reticulum_device_api::{
-    DEFAULT_RETICULUM_TCP_PORT, GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm,
-    MAX_RETICULUM_DNS_DHCP_SERVERS, MAX_RETICULUM_DNS_RAW_ATTEMPTS,
-    MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES, MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_PASSPHRASE_BYTES,
-    MAX_WIFI_SSID_BYTES, MIN_WIFI_PASSPHRASE_BYTES, NetworkConfigMutation,
-    NetworkConfigMutationOutcome, NetworkConfigMutationRequest, NetworkConfigSnapshot,
-    NetworkRuntimeStatus, OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE, OP_NETWORK_STATUS,
-    ReticulumDnsDiagnostics, ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt,
-    ReticulumDnsRawOutcome, ReticulumDnsRawSetupState, ReticulumDnsRawSource,
-    ReticulumDnsResolution, ReticulumDnsResolutionSource, ReticulumTcpFailure,
-    ReticulumTcpPeerConfigSummary, ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate,
-    ReticulumTcpPeerHostname, ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState,
-    ReticulumTcpPeerUpdate, RmapConfig, RmapDeferredReason, RmapEgressConfirmation,
-    RmapInitialTcpGateState, RmapLocation, RmapQueueOutcome, RmapRuntimeStatus, RmapStampPhase,
-    WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate,
-    WifiStationState,
+    DEFAULT_RETICULUM_TCP_PORT, DeviceName, DeviceNameSummary, GatewayPolicy, LoraRadioProfile,
+    LoraTransmitPowerDbm, MAX_DEVICE_NAME_BYTES, MAX_RETICULUM_DNS_DHCP_SERVERS,
+    MAX_RETICULUM_DNS_RAW_ATTEMPTS, MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES,
+    MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_PASSPHRASE_BYTES, MAX_WIFI_SSID_BYTES,
+    MIN_WIFI_PASSPHRASE_BYTES, NetworkConfigMutation, NetworkConfigMutationOutcome,
+    NetworkConfigMutationRequest, NetworkConfigSnapshot, NetworkRuntimeStatus,
+    OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE, OP_NETWORK_STATUS, ReticulumDnsDiagnostics,
+    ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt, ReticulumDnsRawOutcome,
+    ReticulumDnsRawSetupState, ReticulumDnsRawSource, ReticulumDnsResolution,
+    ReticulumDnsResolutionSource, ReticulumTcpFailure, ReticulumTcpPeerConfigSummary,
+    ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate, ReticulumTcpPeerHostname,
+    ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState, ReticulumTcpPeerUpdate, RmapConfig,
+    RmapDeferredReason, RmapEgressConfirmation, RmapInitialTcpGateState, RmapLocation,
+    RmapQueueOutcome, RmapRuntimeStatus, RmapStampPhase, WifiCredentialUpdate,
+    WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate, WifiStationState,
 };
 #[cfg(feature = "lxmf")]
 use reticulum_device_api::{
@@ -818,7 +818,7 @@ fn reticulum_probe_closed_states_and_duplicate_poll_fields_are_rejected() {
 }
 
 fn sample_rns_diagnostics() -> RnsDiagnostics {
-    RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    RnsDiagnostics::new(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13)
 }
 
 fn sample_node_diagnostics() -> NodeDiagnosticsSnapshot {
@@ -855,8 +855,8 @@ fn diagnostics_operations_have_exact_authenticated_read_only_wire_shapes() {
         0xa4, 0x00, 0xa2, 0x00, 0x03, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0e, 0x03,
         0xa6, 0x00, 0x19, 0x03, 0xe8, 0x01, 0x84, 0xa6, 0x00, 0x01, 0x01, 0x00, 0x02, 0x01, 0x03,
         0x02, 0x04, 0x19, 0x01, 0xf4, 0x05, 0x1a, 0x00, 0x01, 0xe8, 0x48, 0xf6, 0xf6, 0xf6, 0x03,
-        0xaa, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x06, 0x07,
-        0x07, 0x08, 0x08, 0x09, 0x09, 0x0a, 0x04, 0x02, 0x05, 0x03, 0x06, 0x01,
+        0xab, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x04, 0x04, 0x05, 0x05, 0x06, 0x06, 0x07,
+        0x07, 0x08, 0x08, 0x09, 0x09, 0x0a, 0x0a, 0x0d, 0x04, 0x02, 0x05, 0x03, 0x06, 0x01,
     ];
     const ROUTE_REQUEST: &[u8] = &[
         0xa4, 0x00, 0xa2, 0x00, 0x03, 0x01, 0x00, 0x01, 0x18, 0x2a, 0x02, 0x19, 0xf0, 0x0f, 0x03,
@@ -956,7 +956,7 @@ fn diagnostics_models_enforce_route_page_order_and_cursor_invariants() {
     assert_eq!(MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES, 4);
     assert_eq!(sample_rns_diagnostics().route_revision(), 13);
     assert_eq!(
-        RnsDiagnostics::new(0, 0, 0, 0, 0, u64::MAX, 1, 0, 0, 0).route_revision(),
+        RnsDiagnostics::new(0, 0, 0, 0, 0, u64::MAX, 1, 0, 0, 0, u64::MAX).route_revision(),
         u64::MAX
     );
     assert!(matches!(
@@ -1407,6 +1407,7 @@ fn maximum_diagnostics_responses_fit_message_and_body_limits() {
                 u64::MAX,
                 u64::MAX,
                 u64::MAX,
+                u64::MAX,
             ),
             u32::MAX,
             u32::MAX,
@@ -1446,7 +1447,7 @@ fn maximum_diagnostics_responses_fit_message_and_body_limits() {
 
     let mut output = [0_u8; MAX_MESSAGE_BYTES];
     for (envelope, expected_body_bytes, expected_message_bytes) in
-        [(node, 415, 437), (routes, 337, 359)]
+        [(node, 425, 447), (routes, 337, 359)]
     {
         let written = encode_response(&envelope, &mut output).unwrap();
         assert_eq!(written, expected_message_bytes);
@@ -1500,7 +1501,7 @@ fn lora_data_tx_evidence_round_trips_and_retained_slot_rejects_ordinary_records(
             10_000,
             [None; MAX_DIAGNOSTIC_INTERFACES],
             Some(lora),
-            RnsDiagnostics::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            RnsDiagnostics::new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             0,
             0,
             0,
@@ -4277,7 +4278,7 @@ fn network_config_read_owns_four_redacted_profiles_and_one_tcp_peer() {
     let mut missing_lora_profile = output[..written].to_vec();
     let body_header = missing_lora_profile
         .windows(3)
-        .position(|window| window == [0x03, 0xaa, 0x00])
+        .position(|window| window == [0x03, 0xab, 0x00])
         .expect("network configuration body map")
         + 1;
     let profile_field = missing_lora_profile
@@ -4742,6 +4743,7 @@ fn network_config_round_trips_gateway_rmap_and_hostname_peer() {
         GatewayPolicy::new(false, false),
         RmapConfig::new(true, true, Some(location)),
         LoraRadioProfile::DEFAULT,
+        None,
     )
     .unwrap();
     let expected = ResponseEnvelope {
@@ -4789,6 +4791,7 @@ fn lora_transmit_power_is_validated_and_round_trips_in_the_atomic_profile() {
         GatewayPolicy::new(false, true),
         RmapConfig::new(false, false, None),
         LoraRadioProfile::DEFAULT.with_tx_power(LoraTransmitPowerDbm::DBM_20),
+        None,
     )
     .unwrap();
     let expected = ResponseEnvelope {
@@ -4821,6 +4824,7 @@ fn lora_transmit_power_is_validated_and_round_trips_in_the_atomic_profile() {
             GatewayPolicy::new(true, true),
             RmapConfig::new(false, false, None),
             LoraRadioProfile::DEFAULT.with_tx_power(LoraTransmitPowerDbm::DBM_17),
+            None,
         )
         .is_err()
     );
@@ -4839,6 +4843,7 @@ fn lora_radio_profile_round_trips_atomically_and_uses_mutation_kind_seven() {
         GatewayPolicy::new(true, true),
         RmapConfig::new(false, false, None),
         profile,
+        None,
     )
     .expect("valid snapshot");
     let response = ResponseEnvelope {
@@ -4904,6 +4909,64 @@ fn lora_transmit_power_mutation_uses_kind_six_and_rejects_unknown_power() {
 
 #[cfg(feature = "network-config")]
 #[test]
+fn device_name_mutation_uses_kind_eight_and_round_trips_a_snapshot_name() {
+    let snapshot = NetworkConfigSnapshot::new(
+        21,
+        [None; MAX_WIFI_NETWORK_PROFILES],
+        None,
+        None,
+        GatewayPolicy::new(true, true),
+        RmapConfig::new(false, false, None),
+        LoraRadioProfile::DEFAULT,
+        Some(DeviceNameSummary::new("Field node").unwrap()),
+    )
+    .unwrap();
+    let response = ResponseEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(88),
+        response: DeviceResponse::NetworkConfig(snapshot),
+    };
+    let mut output = [0_u8; MAX_MESSAGE_BYTES];
+    let written = encode_response(&response, &mut output).unwrap();
+    assert_eq!(decode_response(&output[..written]).unwrap(), response);
+    assert_eq!(snapshot.device_name().unwrap().as_str(), "Field node");
+
+    let set = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(89),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::SetDeviceName(Some(DeviceName::new("Field node").unwrap())),
+            21,
+            IdempotencyKey([0x89; 16]),
+        )),
+    };
+    let written = encode_request(&set, &mut output).unwrap();
+    assert_eq!(decode_request(&output[..written]).unwrap(), set);
+    assert!(
+        output[..written]
+            .windows(3)
+            .any(|window| window == [0x00, 0x08, 0x01])
+    );
+
+    let clear = RequestEnvelope {
+        version: ApiVersion::CURRENT,
+        request_id: RequestId(90),
+        request: DeviceRequest::NetworkConfigMutate(NetworkConfigMutationRequest::new(
+            NetworkConfigMutation::SetDeviceName(None),
+            21,
+            IdempotencyKey([0x90; 16]),
+        )),
+    };
+    let written = encode_request(&clear, &mut output).unwrap();
+    assert_eq!(decode_request(&output[..written]).unwrap(), clear);
+
+    assert!(DeviceName::new("").is_err());
+    assert!(DeviceName::new(&"x".repeat(MAX_DEVICE_NAME_BYTES + 1)).is_err());
+    assert!(DeviceName::new("bad\nname").is_err());
+}
+
+#[cfg(feature = "network-config")]
+#[test]
 fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
     assert_eq!(MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES, 96);
     assert!(ReticulumTcpPeerHostname::new("rmap.world").is_ok());
@@ -4951,6 +5014,7 @@ fn hostname_and_phone_location_are_strictly_bounded_on_model_and_wire() {
             GatewayPolicy::new(true, true),
             RmapConfig::new(false, false, None),
             LoraRadioProfile::DEFAULT,
+            None,
         )
         .is_err()
     );

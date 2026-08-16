@@ -558,6 +558,7 @@ pub async fn run(
     handoffs: NodeHandoffs,
     offline_descriptor: InterfaceDescriptor,
     announce_epoch: BootEpoch,
+    lxmf_delivery_announce_app_data: &'static [u8],
     mut rng: Trng,
 ) {
     let NodeApplicationDestinations {
@@ -1796,7 +1797,7 @@ pub async fn run(
                                 .expect("a non-exhausted announce clock has an emission");
                             match supervisor.queue_announce_for(
                                 &destination,
-                                Some(&config::LXMF_DELIVERY_ANNOUNCE_APP_DATA),
+                                Some(lxmf_delivery_announce_app_data),
                                 emitted_at,
                                 &mut rng,
                             ) {

@@ -40,7 +40,9 @@ pub const SECTOR_SIZE: usize = 4_096;
 /// Current on-flash physical format version.
 pub const PHYSICAL_FORMAT_VERSION: u16 = 1;
 /// Current semantic configuration version written by every mutation.
-pub const SEMANTIC_FORMAT_VERSION: u16 = 5;
+///
+/// Version 6 adds the optional board display name.
+pub const SEMANTIC_FORMAT_VERSION: u16 = 6;
 /// Maximum number of saved WPA2 access-point profiles.
 pub const WIFI_PROFILE_CAPACITY: usize = 4;
 /// Maximum IEEE 802.11 SSID length in bytes.
@@ -61,6 +63,11 @@ pub const MAX_LATITUDE_E6: i32 = 90_000_000;
 pub const MIN_LONGITUDE_E6: i32 = -180_000_000;
 /// Largest accepted longitude in signed millionths of a degree.
 pub const MAX_LONGITUDE_E6: i32 = 180_000_000;
+/// Maximum encoded UTF-8 bytes retained for the board display name.
+///
+/// This matches the appliance display label capacity so one nickname fits both
+/// the e-paper Home line and the LXMF delivery announce app data.
+pub const MAX_DEVICE_NAME_BYTES: usize = 32;
 
 const HEADER_SIZE: usize = 128;
 const WIFI_SLOT_SIZE: usize = 128;
@@ -82,6 +89,9 @@ const LORA_BANDWIDTH_HZ_OFFSET: usize = LORA_FREQUENCY_HZ_OFFSET + 4;
 const LORA_SPREADING_FACTOR_OFFSET: usize = LORA_BANDWIDTH_HZ_OFFSET + 4;
 const LORA_CODING_RATE_DENOMINATOR_OFFSET: usize = LORA_SPREADING_FACTOR_OFFSET + 1;
 const LORA_PROFILE_END: usize = LORA_CODING_RATE_DENOMINATOR_OFFSET + 1;
+const DEVICE_NAME_LENGTH_OFFSET: usize = LORA_PROFILE_END;
+const DEVICE_NAME_OFFSET: usize = DEVICE_NAME_LENGTH_OFFSET + 1;
+const DEVICE_NAME_END: usize = DEVICE_NAME_OFFSET + MAX_DEVICE_NAME_BYTES;
 const PROTECTED_SIZE: usize = 1_024;
 const DIGEST_OFFSET: usize = PROTECTED_SIZE;
 const DIGEST_SIZE: usize = 32;
@@ -121,8 +131,12 @@ const _: () = assert!(LORA_TX_POWER_DBM_OFFSET == 707);
 const _: () = assert!(HOSTNAME_OFFSET == 716);
 const _: () = assert!(HOSTNAME_END == 812);
 const _: () = assert!(LORA_PROFILE_END == 822);
+const _: () = assert!(DEVICE_NAME_LENGTH_OFFSET == 822);
+const _: () = assert!(DEVICE_NAME_OFFSET == 823);
+const _: () = assert!(DEVICE_NAME_END == 855);
 const _: () = assert!(PAYLOAD_RESERVED_OFFSET < PROTECTED_SIZE);
 const _: () = assert!(HOSTNAME_END < PROTECTED_SIZE);
+const _: () = assert!(DEVICE_NAME_END < PROTECTED_SIZE);
 const _: () = assert!(COMMIT_OFFSET + COMMIT_SIZE == RECORD_SIZE);
 const _: () =
     assert!((DIGEST_DOMAIN.len() + PROTECTED_SIZE + DIGEST_FLUSH_TRAILER.len()).is_multiple_of(64));
@@ -193,6 +207,13 @@ pub enum NetworkConfigModelError {
     InvalidLoraSpreadingFactor,
     /// LoRa coding-rate denominator must be between 5 and 8.
     InvalidLoraCodingRate,
+    /// A display name must be between one and 32 UTF-8 bytes.
+    InvalidDeviceNameLength,
+    /// A display name must be valid UTF-8.
+    InvalidDeviceNameUtf8,
+    /// A display name contains a control or separator character unsuitable for
+    /// one display line or an announce app-data field.
+    InvalidDeviceNameCharacter,
 }
 
 /// Bounded LoRa transmit-power selection persisted as whole dBm.
@@ -485,6 +506,52 @@ impl DnsHostname {
     }
 }
 
+/// Bounded UTF-8 board display name shown on the appliance and in announces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceName {
+    bytes: [u8; MAX_DEVICE_NAME_BYTES],
+    length: u8,
+}
+
+impl DeviceName {
+    /// Validate and retain one single-line UTF-8 display name.
+    pub fn new(name: &str) -> Result<Self, NetworkConfigModelError> {
+        let bytes = name.as_bytes();
+        if bytes.is_empty() || bytes.len() > MAX_DEVICE_NAME_BYTES {
+            return Err(NetworkConfigModelError::InvalidDeviceNameLength);
+        }
+        if name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
+        {
+            return Err(NetworkConfigModelError::InvalidDeviceNameCharacter);
+        }
+        let mut retained = [0_u8; MAX_DEVICE_NAME_BYTES];
+        retained[..bytes.len()].copy_from_slice(bytes);
+        Ok(Self {
+            bytes: retained,
+            length: bytes.len() as u8,
+        })
+    }
+
+    /// Validate and retain UTF-8 bytes loaded from a bounded external source.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, NetworkConfigModelError> {
+        let name = core::str::from_utf8(bytes)
+            .map_err(|_| NetworkConfigModelError::InvalidDeviceNameUtf8)?;
+        Self::new(name)
+    }
+
+    /// Exact retained display name bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.length)]
+    }
+
+    /// Borrow the validated display name.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.as_bytes()).expect("DeviceName construction validates UTF-8")
+    }
+}
+
 /// Address of one outbound Reticulum TCP peer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutboundTcpPeerAddress {
@@ -653,6 +720,7 @@ pub struct NetworkConfig {
     rmap_share_location: bool,
     phone_location: Option<PhoneLocation>,
     lora_profile: LoraRadioProfile,
+    device_name: Option<DeviceName>,
 }
 
 impl NetworkConfig {
@@ -667,6 +735,7 @@ impl NetworkConfig {
             rmap_share_location: false,
             phone_location: None,
             lora_profile: LoraRadioProfile::DEFAULT,
+            device_name: None,
         }
     }
 
@@ -809,6 +878,16 @@ impl NetworkConfig {
         self.lora_profile = profile;
     }
 
+    /// Configured board display name, if any.
+    pub const fn device_name(&self) -> Option<DeviceName> {
+        self.device_name
+    }
+
+    /// Replace or clear the board display name.
+    pub fn set_device_name(&mut self, name: Option<DeviceName>) {
+        self.device_name = name;
+    }
+
     /// Produce a copy-safe projection that excludes every passphrase byte.
     pub fn redacted(&self) -> RedactedNetworkConfig {
         let mut profiles = [None; WIFI_PROFILE_CAPACITY];
@@ -824,6 +903,7 @@ impl NetworkConfig {
             rmap_share_location: self.rmap_share_location,
             phone_location: self.phone_location,
             lora_profile: self.lora_profile,
+            device_name: self.device_name,
         }
     }
 }
@@ -894,6 +974,7 @@ pub struct RedactedNetworkConfig {
     rmap_share_location: bool,
     phone_location: Option<PhoneLocation>,
     lora_profile: LoraRadioProfile,
+    device_name: Option<DeviceName>,
 }
 
 impl RedactedNetworkConfig {
@@ -940,6 +1021,11 @@ impl RedactedNetworkConfig {
     /// Complete LoRa profile saved for the next boot.
     pub const fn lora_profile(&self) -> LoraRadioProfile {
         self.lora_profile
+    }
+
+    /// Configured board display name, if any.
+    pub const fn device_name(&self) -> Option<DeviceName> {
+        self.device_name
     }
 }
 
@@ -1609,6 +1695,11 @@ fn encode_record(
         put_i32(&mut record[..], LATITUDE_OFFSET, location.latitude_e6);
         put_i32(&mut record[..], LONGITUDE_OFFSET, location.longitude_e6);
     }
+    if let Some(name) = configuration.device_name {
+        record[DEVICE_NAME_LENGTH_OFFSET] = name.length;
+        record[DEVICE_NAME_OFFSET..DEVICE_NAME_OFFSET + usize::from(name.length)]
+            .copy_from_slice(name.as_bytes());
+    }
 
     let digest = snapshot_digest(&record[..PROTECTED_SIZE]);
     record[DIGEST_OFFSET..COMMIT_OFFSET].copy_from_slice(&digest);
@@ -1770,7 +1861,7 @@ fn decode_current_extension(protected: &[u8], configuration: &mut NetworkConfig)
         tx_power,
     )
     .ok()?;
-    decode_current_payload(protected, configuration, LORA_PROFILE_END)?;
+    decode_current_payload(protected, configuration, DEVICE_NAME_END)?;
     configuration.set_lora_profile(profile);
     Some(())
 }
@@ -1783,15 +1874,29 @@ fn decode_current_payload(
     let policy_flags = protected[POLICY_FLAGS_OFFSET];
     let location_present = protected[LOCATION_PRESENT_OFFSET];
     let hostname_length = usize::from(protected[HOSTNAME_LENGTH_OFFSET]);
+    let device_name_length = usize::from(protected[DEVICE_NAME_LENGTH_OFFSET]);
     if policy_flags & !POLICY_VALID_MASK != 0
         || location_present > 1
         || hostname_length > MAX_DNS_HOSTNAME_LENGTH
+        || device_name_length > MAX_DEVICE_NAME_BYTES
         || protected[extension_end..PROTECTED_SIZE]
             .iter()
             .any(|byte| *byte != 0)
     {
         return None;
     }
+    let device_name_bytes = &protected[DEVICE_NAME_OFFSET..DEVICE_NAME_END];
+    if device_name_bytes[device_name_length..]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return None;
+    }
+    configuration.set_device_name(if device_name_length == 0 {
+        None
+    } else {
+        Some(DeviceName::from_bytes(&device_name_bytes[..device_name_length]).ok()?)
+    });
     configuration.set_wifi_transport_enabled(policy_flags & POLICY_WIFI_TRANSPORT_ENABLED != 0);
     configuration
         .set_automatic_announces_enabled(policy_flags & POLICY_AUTOMATIC_ANNOUNCES_ENABLED != 0);
@@ -2146,6 +2251,7 @@ fn configuration_eq(left: &NetworkConfig, right: &NetworkConfig) -> bool {
         || left.rmap_share_location != right.rmap_share_location
         || left.phone_location != right.phone_location
         || left.lora_profile != right.lora_profile
+        || left.device_name != right.device_name
     {
         return false;
     }
