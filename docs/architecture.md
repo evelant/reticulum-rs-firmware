@@ -47,6 +47,15 @@ outbound TCP client is interface 2. A future Ethernet, USB, BLE, or second-radio
 packet interface joins the router beside those interfaces without changing
 application or storage ownership.
 
+A **control bearer** transports the authenticated device API to a nearby
+client; a **packet interface** carries Reticulum traffic. The two terms name a
+durable boundary. A future USB or RNode host-control bearer replaces only the
+BLE bearer profile (`device-api-ble`) and reuses the portable framing, session,
+and handoff crates, while a future BLE packet interface would be a new actor
+beside LoRa and TCP, distinct from the BLE control bearer. See the
+[crate index](reference/crates.md#control-bearer-vs-packet-interface) for the
+package mapping.
+
 ## Portable and target-specific code
 
 Portable crates contain Reticulum adaptation, LXMF, NomadNet, routing, device

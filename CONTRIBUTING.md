@@ -1,0 +1,72 @@
+# Contributing
+
+The project builds a standalone Reticulum appliance and its universal Expo
+client. Contributions that fit the current architecture are welcome. Read
+[`AGENTS.md`](AGENTS.md) first: it records the repository map, the durable
+architecture invariants, and the working rules that the maintainers and coding
+agents both follow.
+
+## First setup
+
+Clone recursively so the owned Rete submodule is present:
+
+```sh
+git clone --recursive <repository-url>
+cargo run --locked -p xtask -- doctor
+```
+
+`xtask doctor` checks the toolchain and the initialized `vendor/rete` submodule.
+Firmware builds additionally need the Espressif toolchain described in
+[Build and flash E290 firmware](docs/getting-started/firmware-e290.md).
+
+## Making a change
+
+1. Open an issue or comment on an existing one describing the intended change
+   before starting on anything large.
+2. Keep one behavior in its owning package. Prefer a module or test over a new
+   crate; a new crate must represent a durable ownership, portability, or
+   dependency boundary, not a milestone.
+3. Rust is the source of truth for shared API types. When a DTO or native
+   callable changes, regenerate and commit the artifacts described in
+   [`AGENTS.md`](AGENTS.md#generated-code).
+4. Add or update doc comments where ownership, durability, timing, protocol, or
+   hardware behavior is not obvious from the types.
+
+## Verification
+
+Run the smallest relevant gate while iterating, then the full set before
+opening a pull request:
+
+```sh
+cargo fmt --all -- --check
+RUST_MIN_STACK=16777216 cargo test --locked
+RUST_MIN_STACK=16777216 cargo test --locked -p reticulum-e290-firmware --lib
+cargo clippy --locked --all-targets -- -D warnings
+
+cd clients/appliance
+bun install --frozen-lockfile
+bun run verify
+```
+
+Protocol or wire changes also require the isolated Python authority suites in
+[`interop/README.md`](interop/README.md). Firmware changes require the E290
+build and ELF checks in
+[`docs/development/verification.md`](docs/development/verification.md). The
+`host` and `firmware` CI jobs run these gates; make sure the pull request keeps
+both green.
+
+## Ownership of Rete
+
+Rete lives in the `evelant/rete` fork and is consumed as the `vendor/rete`
+submodule. Changes to Rete itself are made on the fork, then versioned here by
+bumping the submodule pointer. Do not edit `vendor/rete` directly as part of an
+unrelated change.
+
+## Pull requests
+
+- Keep commits focused and self-contained.
+- Reference the issue the change addresses.
+- Do not hand-edit generated TypeScript, UniFFI, C++, Kotlin, Objective-C++,
+  CMake, Gradle, podspec, framework, JNI, or embedded web output.
+- The maintainers review changes for fit with the documented architecture and
+  the security and durability invariants, not just for correctness.

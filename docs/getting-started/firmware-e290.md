@@ -18,8 +18,12 @@ device API is exposed over BLE.
 
 ## Toolchains
 
-The host toolchain is pinned by `rust-toolchain.toml`. Install the matching
-Espressif toolchain and espflash:
+The host toolchain is pinned by `rust-toolchain.toml`. The Espressif Xtensa
+fork is pinned separately and is the effective minimum supported Rust version
+for firmware; it tracks upstream with a delay, so the workspace MSRV is lower
+than the host toolchain. See
+[Toolchains](../development/verification.md#toolchains) for the exact numbers
+and why they differ. Install the matching Espressif toolchain and espflash:
 
 ```sh
 cargo install espup --version 0.16.0 --locked

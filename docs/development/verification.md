@@ -4,6 +4,25 @@ Run the smallest relevant check while editing, then run the full host and app
 gates before handing off a change. Hardware behavior still requires a board;
 host tests do not establish radio, BLE, Wi-Fi, flash, or display behavior.
 
+## Toolchains
+
+Three Rust version numbers appear in the workspace, and each names a different
+constraint:
+
+| Number | Where | Meaning |
+| --- | --- | --- |
+| `1.95` | `rust-version` in `Cargo.toml` | Minimum supported Rust version (MSRV) for every crate |
+| `1.97.0` | `rust-toolchain.toml` | The pinned host toolchain used by the `host` CI job and local development |
+| `1.95.0.0` | `espup --toolchain-version` | The Espressif Xtensa fork (based on upstream 1.95) used by the `firmware` CI job |
+
+The Xtensa fork is the binding constraint: it tracks upstream releases with a
+delay, so the MSRV is `1.95` and portable code must compile with the older
+fork. The host toolchain is intentionally newer than the MSRV for better
+diagnostics. The firmware CI job compiles and clips the portable crates with
+the `+esp` toolchain, so firmware code cannot silently drift onto post-1.95
+features; `cargo clippy` on the host alone does not establish MSRV
+compatibility.
+
 ## Host workspace
 
 From the repository root:
