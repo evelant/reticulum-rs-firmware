@@ -37,6 +37,7 @@
     "web": "bun --bun expo start --web"
   },
   "dependencies": {
+    "@expo/vector-icons": "^15.0.2",
     "@maplibre/maplibre-react-native": "11.3.6",
     "@reticulum/appliance-native": "workspace:*",
     "expo": "~57.0.13",

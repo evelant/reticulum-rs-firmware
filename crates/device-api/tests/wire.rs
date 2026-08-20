@@ -1342,7 +1342,7 @@ fn maximum_diagnostics_responses_fit_message_and_body_limits() {
         )),
         Some(DiagnosticInterfaceRecord::new(
             u8::MAX - 1,
-            DiagnosticInterfaceKind::Tcp,
+            DiagnosticInterfaceKind::TcpClient,
             DiagnosticInterfaceState::Offline,
             u64::MAX,
             u16::MAX,
@@ -1358,7 +1358,7 @@ fn maximum_diagnostics_responses_fit_message_and_body_limits() {
         )),
         Some(DiagnosticInterfaceRecord::new(
             u8::MAX - 3,
-            DiagnosticInterfaceKind::Other,
+            DiagnosticInterfaceKind::TcpServer,
             DiagnosticInterfaceState::Online,
             u64::MAX,
             u16::MAX,

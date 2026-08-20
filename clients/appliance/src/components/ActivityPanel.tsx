@@ -1,14 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ViewStyle } from "react-native";
-import {
-  ActivityIndicator,
-  Pressable,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
 import type {
   ContactView,
@@ -16,7 +8,6 @@ import type {
   MessageActivityEventView,
   MessageActivityPageView,
 } from "../generated/api.ts";
-import type { FieldTelemetryControllerState } from "../lib/field-telemetry.ts";
 import {
   buildMessageActivityAliases,
   filterMessageActivity,
@@ -26,7 +17,6 @@ import {
   messageActivityPresentation,
   sortMessageActivityNewestFirst,
 } from "../lib/message-activity.ts";
-import type { MessageLocationPreferenceState } from "../lib/message-location-preference.ts";
 
 export interface ActivityEventRowProps {
   readonly aliases: ReadonlyMap<string, string>;
@@ -120,13 +110,9 @@ export interface ActivityPanelProps {
   readonly conversationPeers: readonly ConversationPeerView[];
   readonly disabled?: boolean;
   readonly error: string | null;
-  readonly fieldTelemetry?: FieldTelemetryControllerState | null;
   readonly loading: boolean;
-  readonly messageLocationPreference?: MessageLocationPreferenceState | null;
   readonly onLoadOlder: () => void;
   readonly onRefresh: () => void;
-  readonly onToggleFieldTelemetry?: (enabled: boolean) => void;
-  readonly onToggleMessageLocationDefault?: (enabled: boolean) => void;
   /**
    * The caller may merge older pages into `events`; the page cursor must always
    * describe the next page after those currently supplied events.
@@ -139,13 +125,9 @@ export function ActivityPanel({
   conversationPeers,
   disabled = false,
   error,
-  fieldTelemetry = null,
   loading,
-  messageLocationPreference = null,
   onLoadOlder,
   onRefresh,
-  onToggleFieldTelemetry,
-  onToggleMessageLocationDefault,
   page,
 }: ActivityPanelProps) {
   const [filter, setFilter] = useState<MessageActivityFilter>("all");
@@ -192,62 +174,6 @@ export function ActivityPanel({
           )}
         </Pressable>
       </View>
-
-      {messageLocationPreference === null || onToggleMessageLocationDefault === undefined ? null : (
-        <View style={styles.messageLocationCard}>
-          <View style={styles.telemetryCopy}>
-            <Text style={styles.messageLocationTitle}>Attach location to new messages</Text>
-            <Text style={styles.help}>
-              Set the initial state of each new composer&apos;s location toggle. When enabled for a
-              message, the app requests a fresh high-accuracy foreground phone fix while queueing
-              and includes it in the LXMF message for its recipient. Each draft can override this
-              default without changing the saved setting.
-            </Text>
-            <Text style={styles.messageLocationState}>
-              {messageLocationPreferenceLabel(messageLocationPreference)}
-            </Text>
-            <Text style={styles.telemetryCaveat}>
-              This is sender-attached phone location, not board GNSS, route position, or the exact
-              location of an RF emission. It is separate from private field telemetry below.
-            </Text>
-          </View>
-          <Switch
-            accessibilityLabel="Attach location to new messages by default"
-            disabled={
-              disabled || messageLocationPreference.loading || messageLocationPreference.saving
-            }
-            onValueChange={onToggleMessageLocationDefault}
-            trackColor={{ false: colors.line, true: "#496d8f" }}
-            value={messageLocationPreference.attachByDefault}
-          />
-        </View>
-      )}
-
-      {fieldTelemetry === null || onToggleFieldTelemetry === undefined ? null : (
-        <View style={styles.telemetryCard}>
-          <View style={styles.telemetryCopy}>
-            <Text style={styles.telemetryTitle}>Field location telemetry</Text>
-            <Text style={styles.help}>
-              Record the phone&apos;s high-accuracy foreground position with every new send and
-              retry. Coordinates stay in this profile&apos;s local activity database and are not
-              added to the message or RMAP. This phone remembers the setting across app restarts and
-              appliance switches until you turn it off.
-            </Text>
-            <Text style={styles.telemetryState}>{fieldTelemetryLabel(fieldTelemetry)}</Text>
-            <Text style={styles.telemetryCaveat}>
-              A stamp is the phone position when the attempt was queued, not exact RF emission or
-              board GNSS.
-            </Text>
-          </View>
-          <Switch
-            accessibilityLabel="Record private field telemetry"
-            disabled={disabled || fieldTelemetry.runState === "starting"}
-            onValueChange={onToggleFieldTelemetry}
-            trackColor={{ false: colors.line, true: "#39764a" }}
-            value={fieldTelemetry.enabled}
-          />
-        </View>
-      )}
 
       {page?.history_incomplete ? (
         <View accessibilityLiveRegion="polite" style={styles.incompleteNotice}>
@@ -358,35 +284,6 @@ const colors = {
   warning: "#e5cf8f",
 };
 
-function fieldTelemetryLabel(state: FieldTelemetryControllerState): string {
-  if (state.error !== null) return `Location error: ${state.error}`;
-  if (!state.enabled && state.runState === "starting") {
-    return "Loading saved location preference…";
-  }
-  if (!state.enabled) return "Off · future attempts record that telemetry was disabled";
-  if (state.runState === "starting") return "Starting foreground location…";
-  if (state.runState === "inactive") return "Paused while the app is not in the foreground";
-  const observation = state.observation;
-  if (observation === null) return "Waiting for local runtime state…";
-  if (observation.state === "unavailable") {
-    return `Location unavailable · ${observation.reason.replaceAll("_", " ")}`;
-  }
-  const accuracy =
-    observation.horizontal_accuracy_mm === null
-      ? "accuracy unknown"
-      : `±${(observation.horizontal_accuracy_mm / 1_000).toFixed(1)} m`;
-  return `${(observation.latitude_e6 / 1_000_000).toFixed(6)}, ${(observation.longitude_e6 / 1_000_000).toFixed(6)} · ${accuracy}`;
-}
-
-function messageLocationPreferenceLabel(state: MessageLocationPreferenceState): string {
-  if (state.error !== null) return `Preference error: ${state.error}`;
-  if (state.loading) return "Loading saved message-location preference…";
-  if (state.saving) return "Saving default…";
-  return state.attachByDefault
-    ? "On · new composers start with location enabled"
-    : "Off · new composers start without location";
-}
-
 const styles = StyleSheet.create({
   panel: {
     padding: 12,
@@ -401,32 +298,6 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     gap: 9,
   },
-  telemetryCard: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
-    padding: 10,
-    borderColor: "#436c4c",
-    borderWidth: 1,
-    borderRadius: 9,
-    backgroundColor: "#142018",
-  },
-  messageLocationCard: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
-    padding: 10,
-    borderColor: "#506b88",
-    borderWidth: 1,
-    borderRadius: 9,
-    backgroundColor: "#151e27",
-  },
-  telemetryCopy: { flex: 1, minWidth: 0, gap: 3 },
-  telemetryTitle: { color: colors.text, fontSize: 11, fontWeight: "800" },
-  messageLocationTitle: { color: "#b5d9fa", fontSize: 11, fontWeight: "800" },
-  messageLocationState: { color: "#9ac9f4", fontSize: 9, fontWeight: "700", lineHeight: 14 },
-  telemetryState: { color: colors.green, fontSize: 9, fontWeight: "700", lineHeight: 14 },
-  telemetryCaveat: { color: colors.muted, fontSize: 8, lineHeight: 12 },
   headingCopy: { flex: 1, minWidth: 0, gap: 2 },
   eyebrow: { color: colors.green, fontSize: 9, fontWeight: "800", letterSpacing: 1.2 },
   panelTitle: { color: colors.text, fontSize: 16, fontWeight: "800" },

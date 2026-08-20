@@ -137,7 +137,7 @@ export type NearbyPeerView = { destination: string, associated_nomad_destination
 /**
  * Stable transport family for one configured interface.
  */
-export type DiagnosticInterfaceKindView = "lora" | "tcp" | "other";
+export type DiagnosticInterfaceKindView = "lora" | "tcp_client" | "other" | "tcp_server";
 
 /**
  * Current local state of one configured interface.

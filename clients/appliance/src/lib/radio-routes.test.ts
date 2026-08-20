@@ -231,7 +231,7 @@ describe("retainedRouteFamily", () => {
         },
         {
           id: 2,
-          kind: "tcp",
+          kind: "tcp_client",
           state: "online",
           generation: 1,
           logical_mtu: 1480,
@@ -245,11 +245,20 @@ describe("retainedRouteFamily", () => {
           logical_mtu: 500,
           bitrate: null,
         },
+        {
+          id: 4,
+          kind: "tcp_server",
+          state: "online",
+          generation: 1,
+          logical_mtu: 1480,
+          bitrate: 1_000_000,
+        },
       ],
     };
     expect(retainedRouteFamily(route(1), view)).toBe("lora");
     expect(retainedRouteFamily(route(2), view)).toBe("tcp");
     expect(retainedRouteFamily(route(3), view)).toBe("other");
+    expect(retainedRouteFamily(route(4), view)).toBe("tcp");
   });
 
   test("treats broadcast fallback and unresolved interfaces as other", () => {

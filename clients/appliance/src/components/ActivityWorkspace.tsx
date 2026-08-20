@@ -7,8 +7,6 @@ import type {
   MessageActivityPageView,
   RadioTracePageView,
 } from "../generated/api.ts";
-import type { FieldTelemetryControllerState } from "../lib/field-telemetry.ts";
-import type { MessageLocationPreferenceState } from "../lib/message-location-preference.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { APPLIANCE_KEYBOARD_LAYOUT } from "./appliance-screen-layout.ts";
 import { styles } from "./appliance-screen-styles.ts";
@@ -28,12 +26,8 @@ export interface ActivityWorkspaceProps {
   readonly activityError: string | null;
   readonly activityLoading: boolean;
   readonly activityPage: MessageActivityPageView | null;
-  readonly fieldTelemetry: FieldTelemetryControllerState | null;
-  readonly messageLocationPreference: MessageLocationPreferenceState;
   readonly onLoadOlderActivity: () => void;
   readonly onRefreshActivity: () => void;
-  readonly onToggleFieldTelemetry?: (enabled: boolean) => void;
-  readonly onToggleMessageLocationDefault?: (enabled: boolean) => void;
   readonly radioTraceAvailable: boolean;
   readonly radioTraceError: string | null;
   readonly radioTraceExportError: string | null;
@@ -57,12 +51,8 @@ export function ActivityWorkspace({
   activityError,
   activityLoading,
   activityPage,
-  fieldTelemetry,
-  messageLocationPreference,
   onLoadOlderActivity,
   onRefreshActivity,
-  onToggleFieldTelemetry,
-  onToggleMessageLocationDefault,
   radioTraceAvailable,
   radioTraceError,
   radioTraceExportError,
@@ -94,13 +84,9 @@ export function ActivityWorkspace({
         conversationPeers={conversationPeers}
         disabled={disabled}
         error={activityError}
-        fieldTelemetry={fieldTelemetry}
         loading={activityLoading}
-        messageLocationPreference={messageLocationPreference}
         onLoadOlder={onLoadOlderActivity}
         onRefresh={onRefreshActivity}
-        onToggleFieldTelemetry={onToggleFieldTelemetry}
-        onToggleMessageLocationDefault={onToggleMessageLocationDefault}
         page={activityPage}
       />,
     );
@@ -135,13 +121,9 @@ export function ActivityWorkspace({
             conversationPeers={conversationPeers}
             disabled={disabled}
             error={activityError}
-            fieldTelemetry={fieldTelemetry}
             loading={activityLoading}
-            messageLocationPreference={messageLocationPreference}
             onLoadOlder={onLoadOlderActivity}
             onRefresh={onRefreshActivity}
-            onToggleFieldTelemetry={onToggleFieldTelemetry}
-            onToggleMessageLocationDefault={onToggleMessageLocationDefault}
             page={activityPage}
           />
         ) : (

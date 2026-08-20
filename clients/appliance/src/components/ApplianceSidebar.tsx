@@ -248,6 +248,7 @@ interface ApplianceSidebarProps {
   readonly contacts: ContactView[];
   readonly conversations: ConversationPeerView[];
   readonly foreground: boolean;
+  readonly inline?: boolean;
   readonly onBrowseNomad: (destination: string) => void;
   readonly onClose: () => void;
   readonly onRefreshNearby: (() => Promise<NearbyPeerView[]>) | null;
@@ -268,6 +269,7 @@ export function ApplianceSidebar({
   contacts,
   conversations,
   foreground,
+  inline = false,
   onBrowseNomad,
   onClose,
   onRefreshNearby,
@@ -462,9 +464,19 @@ export function ApplianceSidebar({
     resetContactForm();
   };
 
+  const peerPreview = (peer: ConversationPeerView): string => {
+    const lastMessage = peer.last_message;
+    return lastMessage === null
+      ? `${peer.message_count} stored message${peer.message_count === 1 ? "" : "s"}`
+      : `${lastMessage.direction === "inbound" ? "Received" : "Sent"} · ${
+          bytesText(lastMessage.content) || "Empty message"
+        }`;
+  };
+
   const contactRows = contacts.map((contact) => {
     const nomadDestination = associatedNomadDestinationForLxmf(nearbyPeers, contact.destination);
     const displayName = contact.name || "Unnamed contact";
+    const peer = conversations.find((candidate) => candidate.destination === contact.destination);
     return (
       <View
         key={contact.destination}
@@ -476,9 +488,21 @@ export function ApplianceSidebar({
           onPress={() => selectContact(contact.destination)}
           style={({ pressed }) => [styles.contactSelection, pressed && styles.contactPressed]}
         >
-          <Text numberOfLines={1} style={styles.contactName}>
-            {displayName}
-          </Text>
+          <View style={styles.contactNameRow}>
+            <Text numberOfLines={1} style={styles.contactName}>
+              {displayName}
+            </Text>
+            {nomadDestination === null ? null : (
+              <View style={styles.relevanceChip}>
+                <Text style={styles.relevanceChipText}>Nomad</Text>
+              </View>
+            )}
+          </View>
+          {peer === undefined || peer.last_message === null ? null : (
+            <Text numberOfLines={1} style={styles.messageRequestPreview}>
+              {peerPreview(peer)}
+            </Text>
+          )}
           <Text selectable style={styles.monospace}>
             {contact.destination}
           </Text>
@@ -521,13 +545,7 @@ export function ApplianceSidebar({
 
   const unsavedPeerRow = (peer: ConversationPeerView, inboundRequest: boolean) => {
     const displayName = conversationPeerLabel(peer);
-    const lastMessage = peer.last_message;
-    const preview =
-      lastMessage === null
-        ? `${peer.message_count} stored message${peer.message_count === 1 ? "" : "s"}`
-        : `${lastMessage.direction === "inbound" ? "Received" : "Sent"} · ${
-            bytesText(lastMessage.content) || "Empty message"
-          }`;
+    const preview = peerPreview(peer);
     return (
       <View
         key={peer.destination}
@@ -602,6 +620,24 @@ export function ApplianceSidebar({
         </View>
       )}
       <View style={styles.contacts}>{contactRows}</View>
+      {showNearby ? (
+        <NearbyPanel
+          active={foreground && visible}
+          busy={busy}
+          compact={compact}
+          connected={readyConnection !== undefined}
+          contacts={contacts}
+          loadError={nearbyLoadError}
+          loaded={nearbyLoaded}
+          loading={nearbyLoading}
+          onBrowseNomad={onBrowseNomad}
+          onRefresh={onRefreshNearby === null ? null : refreshNearby}
+          onSelect={selectContact}
+          onUpsert={upsertContact}
+          peers={nearbyPeers}
+          snapshotFetchedAtMs={nearbySnapshotFetchedAtMs}
+        />
+      ) : null}
     </>
   );
 
@@ -631,24 +667,6 @@ export function ApplianceSidebar({
           </Pressable>
         </View>
       </View>
-      {showNearby ? (
-        <NearbyPanel
-          active={foreground && visible}
-          busy={busy}
-          compact={compact}
-          connected={readyConnection !== undefined}
-          contacts={contacts}
-          loadError={nearbyLoadError}
-          loaded={nearbyLoaded}
-          loading={nearbyLoading}
-          onBrowseNomad={onBrowseNomad}
-          onRefresh={onRefreshNearby === null ? null : refreshNearby}
-          onSelect={selectContact}
-          onUpsert={upsertContact}
-          peers={nearbyPeers}
-          snapshotFetchedAtMs={nearbySnapshotFetchedAtMs}
-        />
-      ) : null}
       {showForm ? (
         <View style={styles.contactForm}>
           <Text style={styles.contactName}>
@@ -721,7 +739,7 @@ export function ApplianceSidebar({
     </>
   );
 
-  if (compact) {
+  if (compact && !inline) {
     return (
       <Modal animationType="slide" onRequestClose={onClose} transparent visible={visible}>
         <KeyboardAvoidingView
@@ -756,6 +774,23 @@ export function ApplianceSidebar({
           </SafeAreaView>
         </KeyboardAvoidingView>
       </Modal>
+    );
+  }
+
+  if (compact) {
+    return (
+      <View style={styles.sidebarInline}>
+        <ScrollView
+          automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+          contentContainerStyle={styles.sidebarCompactContent}
+          keyboardDismissMode={KEYBOARD_LAYOUT.dismissMode}
+          keyboardShouldPersistTaps="handled"
+          ref={drawerScroller}
+          style={styles.sidebarCompactScroller}
+        >
+          {sidebarContents}
+        </ScrollView>
+      </View>
     );
   }
 

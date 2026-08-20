@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -20,6 +20,7 @@ import {
   type RmapPhoneLocation,
   type WifiNetworkProfileView,
 } from "../generated/api.ts";
+import type { NetworkSubtopic } from "../lib/navigation.ts";
 import type {
   NetworkConfigController,
   NetworkConfigControllerState,
@@ -31,6 +32,7 @@ import {
   tcpPeerInputError,
   wifiPassphraseError,
 } from "../lib/network-config-input.ts";
+import { buildNodeInterfaces } from "../lib/node-interfaces.ts";
 import { captureForegroundPhoneLocation } from "../lib/phone-location.ts";
 import {
   isPublicReticulumEndpointSelected,
@@ -39,21 +41,19 @@ import {
 import type { RadioRoutesControllerState } from "../lib/radio-routes.ts";
 import { randomHex } from "../lib/random.ts";
 import { rmapRuntimePresentation } from "../lib/rmap-runtime-diagnostics.ts";
-import {
-  reticulumDnsDiagnosticDetails,
-  reticulumTcpDiagnostic,
-  reticulumTcpStateLabel,
-} from "../lib/tcp-runtime-diagnostics.ts";
-import { BoardNameEditor } from "./BoardNameEditor.tsx";
+import { styles as shared } from "./appliance-screen-styles.ts";
 import { LoraProfileEditor } from "./LoraProfileEditor.tsx";
+import { NodeInterfacesPanel } from "./NodeInterfacesPanel.tsx";
 import { RadioRoutesPanel } from "./RadioRoutesPanel.tsx";
 
 interface ConnectivityPanelProps {
   readonly announceNow?: () => Promise<"already_pending" | "queued">;
   readonly controller: NetworkConfigController;
   readonly onRefreshRadioRoutes?: () => void;
+  readonly onSubtopicHintConsumed?: () => void;
   readonly radioRoutesState?: RadioRoutesControllerState | null;
   readonly state: NetworkConfigControllerState;
+  readonly subtopicHint?: NetworkSubtopic | null;
 }
 
 interface WifiEditor {
@@ -77,6 +77,16 @@ type AnnounceState =
   | { readonly state: "running" }
   | { readonly message: string; readonly state: "success" }
   | { readonly message: string; readonly state: "error" };
+
+type ConnectivitySubtopic = NetworkSubtopic;
+
+const SUBTOPICS = [
+  { label: "Overview", value: "overview" },
+  { label: "Radio", value: "radio" },
+  { label: "Routes", value: "routes" },
+  { label: "Peers", value: "peers" },
+  { label: "Discovery", value: "discovery" },
+] as const;
 
 interface SmallButtonProps {
   readonly destructive?: boolean;
@@ -117,20 +127,6 @@ function SmallButton({
       </Text>
     </Pressable>
   );
-}
-
-function wifiStateLabel(state: NetworkConfigControllerState["runtime"]): string {
-  if (state === null) return "Unknown";
-  switch (state.wifi_state) {
-    case "disabled":
-      return "Disabled";
-    case "disconnected":
-      return "Disconnected";
-    case "connecting":
-      return "Connecting";
-    case "connected":
-      return "Connected";
-  }
 }
 
 function profileEditor(profile: WifiNetworkProfileView): WifiEditor {
@@ -246,22 +242,35 @@ export function ConnectivityPanel({
   announceNow,
   controller,
   onRefreshRadioRoutes,
+  onSubtopicHintConsumed,
   radioRoutesState = null,
   state,
+  subtopicHint = null,
 }: ConnectivityPanelProps) {
+  const [subtopic, setSubtopic] = useState<ConnectivitySubtopic>("overview");
   const [announceState, setAnnounceState] = useState<AnnounceState>({ state: "idle" });
   const [formError, setFormError] = useState<string | null>(null);
   const [locationCaptureRunning, setLocationCaptureRunning] = useState(false);
   const [tcpForm, setTcpForm] = useState<TcpEditor | null>(null);
   const [wifiForm, setWifiForm] = useState<WifiEditor | null>(null);
   const mutating = state.mutation.state === "running";
+
+  useEffect(() => {
+    if (subtopicHint === null || onSubtopicHintConsumed === undefined) return;
+    setSubtopic(subtopicHint);
+    onSubtopicHintConsumed();
+  }, [onSubtopicHintConsumed, subtopicHint]);
+
   const configuration = state.configuration;
-  const tcpDiagnostic = reticulumTcpDiagnostic(state.runtime);
-  const dnsDetails = reticulumDnsDiagnosticDetails(state.runtime);
   const rmapRuntime = rmapRuntimePresentation(
     state.runtime,
     configuration?.rmap_discovery_enabled ?? false,
   );
+  const nodeInterfaces = buildNodeInterfaces({
+    config: configuration,
+    runtime: state.runtime,
+    radioRoutes: radioRoutesState?.snapshot ?? null,
+  });
 
   const saveWifi = async () => {
     if (wifiForm === null) return;
@@ -437,649 +446,618 @@ export function ConnectivityPanel({
     }
   };
 
-  return (
-    <ScrollView
-      contentContainerStyle={styles.content}
-      keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-      keyboardShouldPersistTaps="handled"
-      style={styles.scroller}
-    >
-      <View style={styles.heading}>
-        <View style={styles.headingCopy}>
-          <Text style={styles.eyebrow}>CONNECTIVITY</Text>
-          <Text style={styles.title}>Gateway and discovery</Text>
-          <Text style={styles.secondary}>
-            Bridge LoRa over one optional Wi-Fi/IP peer, or remain an ad-hoc radio-only node.
-          </Text>
-        </View>
-        <SmallButton
-          disabled={mutating || state.loadState === "loading"}
-          label="Refresh"
-          onPress={() => void controller.refresh()}
-        />
-      </View>
-
-      {state.rebootRequired ? (
-        <View accessibilityLiveRegion="polite" style={styles.rebootBanner}>
-          <Text style={styles.rebootTitle}>Restart appliance to apply changes</Text>
-          <Text style={styles.rebootText}>
-            Configured revision{" "}
-            {state.runtime?.configured_revision ?? configuration?.revision ?? "—"} · applied
-            revision {state.runtime?.applied_revision ?? "—"}
-          </Text>
-        </View>
-      ) : null}
-
-      {mutationNotice(controller, state, mutating)}
-      {formError === null ? null : (
-        <View accessibilityLiveRegion="assertive" style={[styles.notice, styles.noticeError]}>
-          <Text style={styles.errorText}>{formError}</Text>
-        </View>
-      )}
-      {state.loadError === null ? null : (
-        <View accessibilityLiveRegion="assertive" style={[styles.notice, styles.noticeError]}>
-          <Text style={styles.errorText}>Configuration could not be read: {state.loadError}</Text>
-        </View>
-      )}
-      {state.statusError === null ? null : (
-        <Text accessibilityLiveRegion="polite" style={styles.inlineError}>
-          Live status unavailable: {state.statusError}
+  const heading = (
+    <View style={styles.heading}>
+      <View style={styles.headingCopy}>
+        <Text style={styles.eyebrow}>CONNECTIVITY</Text>
+        <Text style={styles.title}>Gateway and discovery</Text>
+        <Text style={styles.secondary}>
+          Bridge LoRa over one optional Wi-Fi/IP peer, or remain an ad-hoc radio-only node.
         </Text>
-      )}
-
-      {state.loadState === "loading" && configuration === null ? (
-        <View style={styles.loading}>
-          <ActivityIndicator color={colors.green} />
-          <Text style={styles.secondary}>Reading board-owned configuration…</Text>
-        </View>
-      ) : null}
-
-      <View style={styles.statusGrid}>
-        <View style={styles.statusCard}>
-          <Text style={styles.cardEyebrow}>WI-FI STATION</Text>
-          <Text style={styles.statusValue}>{wifiStateLabel(state.runtime)}</Text>
-          <Text style={styles.meta}>
-            {state.runtime?.connected_ssid === null || state.runtime?.connected_ssid === undefined
-              ? "No associated SSID"
-              : networkBytesText(state.runtime.connected_ssid)}
-          </Text>
-          <Text style={styles.meta}>
-            {state.runtime?.ipv4_address ?? "No DHCP address"}
-            {state.runtime?.rssi_dbm === null || state.runtime?.rssi_dbm === undefined
-              ? ""
-              : ` · ${state.runtime.rssi_dbm} dBm`}
-          </Text>
-          {configuration === null ? null : (
-            <View style={styles.statusCardControl}>
-              <View style={styles.switchCopy}>
-                <Text style={styles.label}>Wi-Fi radio after restart</Text>
-                <Text style={styles.help}>
-                  Turn off Wi-Fi and TCP without deleting saved networks or the peer.
-                </Text>
-              </View>
-              <Switch
-                accessibilityLabel="Wi-Fi radio after restart"
-                disabled={mutating}
-                onValueChange={(enabled) =>
-                  void applyGatewayPolicy(enabled, configuration.automatic_announces_enabled)
-                }
-                trackColor={{ false: colors.line, true: colors.greenDark }}
-                value={configuration.wifi_transport_enabled}
-              />
-            </View>
-          )}
-        </View>
-        <View style={styles.statusCard}>
-          <Text style={styles.cardEyebrow}>RETICULUM TCP</Text>
-          <Text style={styles.statusValue}>
-            {reticulumTcpStateLabel(state.runtime?.tcp_peer_state ?? null)}
-          </Text>
-          <Text style={styles.meta}>
-            {configuration?.tcp_peer === null || configuration?.tcp_peer === undefined
-              ? "No outbound peer"
-              : `${tcpPeerAddress(configuration.tcp_peer)}:${configuration.tcp_peer.port}`}
-          </Text>
-          <Text style={styles.meta}>
-            Desired revision {configuration?.revision ?? "—"} · active{" "}
-            {state.runtime?.applied_revision ?? "—"}
-          </Text>
-          {tcpDiagnostic === null ? null : (
-            <Text
-              accessibilityLiveRegion={
-                state.runtime?.tcp_peer_state === "backoff" ? "polite" : "none"
-              }
-              style={styles.inlineError}
-            >
-              {tcpDiagnostic}
-            </Text>
-          )}
-          {dnsDetails === null ? null : (
-            <View style={styles.dnsDetails}>
-              <Text style={styles.dnsHeading}>DNS RESOLUTION</Text>
-              {dnsDetails.rows.map((row) => (
-                <View key={row.key} style={styles.dnsRow}>
-                  <Text selectable style={styles.dnsResolver}>
-                    {row.label}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.dnsOutcome,
-                      row.tone === "failure" && styles.dnsOutcomeFailure,
-                      row.tone === "success" && styles.dnsOutcomeSuccess,
-                    ]}
-                  >
-                    {row.outcome}
-                  </Text>
-                </View>
-              ))}
-              <Text selectable style={styles.dnsContext}>
-                {dnsDetails.context}
-              </Text>
-              {dnsDetails.resolution === null ? null : (
-                <Text selectable style={styles.dnsResolution}>
-                  {dnsDetails.resolution}
-                </Text>
-              )}
-            </View>
-          )}
-        </View>
       </View>
+      <SmallButton
+        disabled={mutating || state.loadState === "loading"}
+        label="Refresh"
+        onPress={() => void controller.refresh()}
+      />
+    </View>
+  );
+
+  const overviewSection = (
+    <>
+      <NodeInterfacesPanel interfaces={nodeInterfaces} />
 
       {configuration === null ? null : (
-        <BoardNameEditor
-          disabled={mutating}
-          name={configuration.device_name}
-          onSave={(name) => controller.mutate({ kind: "set_device_name", name })}
-        />
-      )}
-
-      {configuration === null ? null : (
-        <LoraProfileEditor
-          desiredProfile={configuration.lora_profile}
-          disabled={mutating}
-          key={state.deviceKey ?? "inactive"}
-          onSave={(profile) => controller.mutate({ kind: "set_lora_profile", profile })}
-          rebootRequired={state.rebootRequired}
-          runningProfile={radioRoutesState?.snapshot?.lora ?? null}
-        />
-      )}
-
-      {radioRoutesState === null || onRefreshRadioRoutes === undefined ? null : (
-        <RadioRoutesPanel
-          disabled={mutating}
-          onRefresh={onRefreshRadioRoutes}
-          state={radioRoutesState}
-        />
-      )}
-
-      {configuration === null ? null : (
-        <>
-          <View style={styles.section}>
-            <View style={styles.sectionHeading}>
-              <View style={styles.sectionHeadingCopy}>
-                <Text style={styles.sectionTitle}>Service announces</Text>
-                <Text style={styles.secondary}>
-                  Manual announces always remain available. Changes apply after an appliance
-                  restart.
-                </Text>
-              </View>
-              <SmallButton
-                disabled={
-                  announceNow === undefined ||
-                  announceState.state === "running" ||
-                  state.loadState !== "ready"
-                }
-                label={announceState.state === "running" ? "Queuing…" : "Announce now"}
-                onPress={() => void runAnnounce()}
-                primary
-              />
-            </View>
-            {announceState.state === "success" || announceState.state === "error" ? (
-              <Text
-                accessibilityLiveRegion={announceState.state === "error" ? "assertive" : "polite"}
-                style={announceState.state === "error" ? styles.inlineError : styles.inlineSuccess}
-              >
-                {announceState.message}
+        <View style={styles.section}>
+          <View style={styles.sectionHeading}>
+            <View>
+              <Text style={styles.sectionTitle}>Known Wi-Fi networks</Text>
+              <Text style={styles.secondary}>
+                {configuration.wifi_profiles.length}/{MAX_WIFI_NETWORK_PROFILES} saved · larger
+                priority values are preferred
               </Text>
-            ) : null}
-            {announceNow === undefined ? (
+            </View>
+            <SmallButton
+              disabled={mutating || configuration.wifi_profiles.length >= MAX_WIFI_NETWORK_PROFILES}
+              label="Add network"
+              onPress={() => {
+                setFormError(null);
+                setWifiForm(newProfileEditor());
+              }}
+              primary
+            />
+          </View>
+          <View style={styles.switchRow}>
+            <View style={styles.switchCopy}>
+              <Text style={styles.label}>Wi-Fi radio after restart</Text>
               <Text style={styles.help}>
-                This client build does not expose the appliance&apos;s manual announce operation.
+                Turn off Wi-Fi and TCP without deleting saved networks or the peer.
               </Text>
-            ) : null}
-            <View style={styles.compactSwitchList}>
-              <View style={styles.switchRow}>
-                <View style={styles.switchCopy}>
-                  <Text style={styles.label}>Automatic service announces</Text>
-                  <Text style={styles.help}>
-                    Periodically announce this appliance&apos;s primary, LXMF, and NomadNet
-                    destinations. RMAP publication is controlled separately.
-                  </Text>
-                </View>
-                <Switch
-                  accessibilityLabel="Automatic service announces enabled"
-                  disabled={mutating}
-                  onValueChange={(enabled) =>
-                    void applyGatewayPolicy(configuration.wifi_transport_enabled, enabled)
-                  }
-                  trackColor={{ false: colors.line, true: colors.greenDark }}
-                  value={configuration.automatic_announces_enabled}
-                />
-              </View>
             </View>
+            <Switch
+              accessibilityLabel="Wi-Fi radio after restart"
+              disabled={mutating}
+              onValueChange={(enabled) =>
+                void applyGatewayPolicy(enabled, configuration.automatic_announces_enabled)
+              }
+              trackColor={{ false: colors.line, true: colors.greenDark }}
+              value={configuration.wifi_transport_enabled}
+            />
           </View>
 
-          <View style={styles.section}>
-            <View style={styles.sectionHeadingCopy}>
-              <Text style={styles.sectionTitle}>Public Reticulum IP peer</Text>
-              <Text style={styles.secondary}>
-                Choose one community TCP endpoint. This replaces the current peer; hostnames are
-                resolved again on reconnect.
-              </Text>
-            </View>
-            <View style={styles.endpointList}>
-              {PUBLIC_RETICULUM_TCP_ENDPOINTS.map((endpoint) => {
-                const active = isPublicReticulumEndpointSelected(configuration.tcp_peer, endpoint);
+          {configuration.wifi_profiles.length === 0 ? (
+            <Text style={styles.emptyText}>No Wi-Fi networks are saved on this appliance.</Text>
+          ) : (
+            <View style={styles.list}>
+              {configuration.wifi_profiles.map((profile) => {
+                const active = state.runtime?.active_wifi_profile === profile.profile_id;
                 return (
-                  <View key={endpoint.id} style={styles.endpointRow}>
-                    <View style={styles.endpointCopy}>
-                      <Text style={styles.endpointTitle}>{endpoint.label}</Text>
-                      <Text selectable style={styles.meta}>
-                        {endpoint.hostname}:{endpoint.port}
-                      </Text>
-                      <Text selectable style={styles.endpointIdentity}>
-                        ID seen {endpoint.expectedTransportId} · verified {endpoint.verifiedOn}
-                      </Text>
+                  <View
+                    key={profile.profile_id}
+                    style={[styles.profileCard, active && styles.profileCardActive]}
+                  >
+                    <View style={styles.profileHeading}>
+                      <View style={styles.profileCopy}>
+                        <Text selectable style={styles.profileSsid}>
+                          {networkBytesText(profile.ssid)}
+                        </Text>
+                        <Text style={styles.meta}>
+                          Priority {profile.priority} · {profile.enabled ? "enabled" : "disabled"} ·{" "}
+                          {profile.credential_configured ? "password saved" : "no password"}
+                        </Text>
+                        <Text selectable style={styles.profileId}>
+                          {profile.profile_id}
+                        </Text>
+                      </View>
+                      {active ? <Text style={styles.activeBadge}>ACTIVE</Text> : null}
                     </View>
-                    <SmallButton
-                      disabled={mutating || active}
-                      label={active ? "Selected" : "Use"}
-                      onPress={() => void selectPublicEndpoint(endpoint)}
-                      primary={!active}
-                    />
+                    <View style={styles.actionRow}>
+                      <SmallButton
+                        disabled={mutating}
+                        label="Edit"
+                        onPress={() => {
+                          setFormError(null);
+                          setWifiForm(profileEditor(profile));
+                        }}
+                      />
+                      <SmallButton
+                        destructive
+                        disabled={mutating}
+                        label="Remove"
+                        onPress={() => void removeWifi(profile.profile_id)}
+                      />
+                    </View>
                   </View>
                 );
               })}
             </View>
-            <Text style={styles.privacyText}>
-              Public operators are untrusted carriers: Reticulum protects message contents, but an
-              operator can observe this appliance&apos;s IP address, timing and traffic volume, or
-              drop traffic. Advertised transport IDs above are diagnostics, not security pins.
-            </Text>
-          </View>
+          )}
 
-          <View style={styles.section}>
-            <View style={styles.sectionHeadingCopy}>
-              <Text style={styles.sectionTitle}>RMAP World discovery</Text>
-              <Text style={styles.secondary}>
-                Opt in to a signed public marker for this appliance&apos;s LoRa interface. RMAP
-                targets the configured public TCP interface once it is ready, or available Reticulum
-                interfaces on a radio-only node. Its six-hour cadence begins only after a
-                publication is accepted.
+          {wifiForm === null ? null : (
+            <View style={styles.editor}>
+              <Text style={styles.editorTitle}>
+                {wifiForm.credentialConfigured ? "Edit Wi-Fi network" : "Add Wi-Fi network"}
               </Text>
-            </View>
-            <View accessibilityLiveRegion="polite" style={styles.rmapStatus}>
-              <Text style={styles.rmapStatusEyebrow}>CURRENT STATUS</Text>
-              <Text
-                style={[
-                  styles.rmapStatusHeadline,
-                  rmapRuntime.tone === "error" && styles.rmapStatusError,
-                  rmapRuntime.tone === "success" && styles.rmapStatusSuccess,
-                  rmapRuntime.tone === "warning" && styles.rmapStatusWarning,
-                ]}
-              >
-                {rmapRuntime.headline}
+              <Text style={styles.label}>SSID</Text>
+              <TextInput
+                accessibilityLabel="Wi-Fi SSID"
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!mutating}
+                onChangeText={(ssid) => setWifiForm({ ...wifiForm, ssid })}
+                placeholder="Network name or hex:…"
+                placeholderTextColor={colors.muted}
+                style={styles.input}
+                value={wifiForm.ssid}
+              />
+              <Text style={styles.help}>
+                UTF-8 text is used as entered. Existing binary SSIDs remain exact as hex:…
               </Text>
-              {rmapRuntime.rows.map((row) => (
-                <Text key={row} selectable style={styles.rmapStatusRow}>
-                  {row}
-                </Text>
-              ))}
-            </View>
-            <View style={styles.compactSwitchList}>
+              <Text style={styles.label}>Priority (larger wins)</Text>
+              <TextInput
+                accessibilityLabel="Wi-Fi priority"
+                editable={!mutating}
+                keyboardType="number-pad"
+                onChangeText={(priority) => setWifiForm({ ...wifiForm, priority })}
+                style={styles.input}
+                value={wifiForm.priority}
+              />
               <View style={styles.switchRow}>
                 <View style={styles.switchCopy}>
-                  <Text style={styles.label}>Publish on RMAP World</Text>
-                  <Text style={styles.help}>Name and LoRa parameters become public.</Text>
+                  <Text style={styles.label}>Enabled</Text>
+                  <Text style={styles.help}>Allow station selection after restart.</Text>
                 </View>
                 <Switch
-                  accessibilityLabel="RMAP World discovery enabled"
+                  accessibilityLabel="Wi-Fi network enabled"
+                  disabled={mutating}
+                  onValueChange={(enabled) => setWifiForm({ ...wifiForm, enabled })}
+                  trackColor={{ false: colors.line, true: colors.greenDark }}
+                  value={wifiForm.enabled}
+                />
+              </View>
+              <Text style={styles.label}>WPA2 password</Text>
+              <TextInput
+                accessibilityLabel="Wi-Fi password"
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!mutating}
+                onChangeText={(passphrase) => setWifiForm({ ...wifiForm, passphrase })}
+                placeholder={
+                  wifiForm.credentialConfigured ? "Leave blank to keep saved password" : "Required"
+                }
+                placeholderTextColor={colors.muted}
+                secureTextEntry
+                style={styles.input}
+                value={wifiForm.passphrase}
+              />
+              <Text style={styles.help}>
+                The password is sent once to this board and is never stored by the app.
+              </Text>
+              <View style={styles.actionRow}>
+                <SmallButton
+                  disabled={mutating}
+                  label="Save network"
+                  onPress={() => void saveWifi()}
+                  primary
+                />
+                <SmallButton
+                  disabled={mutating}
+                  label="Cancel"
+                  onPress={() => {
+                    setFormError(null);
+                    setWifiForm(null);
+                  }}
+                />
+              </View>
+            </View>
+          )}
+        </View>
+      )}
+    </>
+  );
+
+  const radioSection =
+    configuration === null ? null : (
+      <LoraProfileEditor
+        desiredProfile={configuration.lora_profile}
+        disabled={mutating}
+        key={state.deviceKey ?? "inactive"}
+        onSave={(profile) => controller.mutate({ kind: "set_lora_profile", profile })}
+        rebootRequired={state.rebootRequired}
+        runningProfile={radioRoutesState?.snapshot?.lora ?? null}
+      />
+    );
+
+  const routesSection =
+    radioRoutesState === null || onRefreshRadioRoutes === undefined ? null : (
+      <RadioRoutesPanel
+        disabled={mutating}
+        onRefresh={onRefreshRadioRoutes}
+        state={radioRoutesState}
+      />
+    );
+
+  const peersSection =
+    configuration === null ? null : (
+      <>
+        <View style={styles.section}>
+          <View style={styles.sectionHeadingCopy}>
+            <Text style={styles.sectionTitle}>Public Reticulum IP peer</Text>
+            <Text style={styles.secondary}>
+              Choose one community TCP endpoint. This replaces the current peer; hostnames are
+              resolved again on reconnect.
+            </Text>
+          </View>
+          <View style={styles.endpointList}>
+            {PUBLIC_RETICULUM_TCP_ENDPOINTS.map((endpoint) => {
+              const active = isPublicReticulumEndpointSelected(configuration.tcp_peer, endpoint);
+              return (
+                <View key={endpoint.id} style={styles.endpointRow}>
+                  <View style={styles.endpointCopy}>
+                    <Text style={styles.endpointTitle}>{endpoint.label}</Text>
+                    <Text selectable style={styles.meta}>
+                      {endpoint.hostname}:{endpoint.port}
+                    </Text>
+                    <Text selectable style={styles.endpointIdentity}>
+                      ID seen {endpoint.expectedTransportId} · verified {endpoint.verifiedOn}
+                    </Text>
+                  </View>
+                  <SmallButton
+                    disabled={mutating || active}
+                    label={active ? "Selected" : "Use"}
+                    onPress={() => void selectPublicEndpoint(endpoint)}
+                    primary={!active}
+                  />
+                </View>
+              );
+            })}
+          </View>
+          <Text style={styles.privacyText}>
+            Public operators are untrusted carriers: Reticulum protects message contents, but an
+            operator can observe this appliance&apos;s IP address, timing and traffic volume, or
+            drop traffic. Advertised transport IDs above are diagnostics, not security pins.
+          </Text>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeading}>
+            <View style={styles.sectionHeadingCopy}>
+              <Text style={styles.sectionTitle}>Custom outbound TCP peer</Text>
+              <Text style={styles.secondary}>
+                Exactly one hostname or IPv4 peer can be active. Saving replaces any preset.
+              </Text>
+            </View>
+            <SmallButton
+              disabled={mutating}
+              label={configuration.tcp_peer === null ? "Configure" : "Edit"}
+              onPress={() => {
+                setFormError(null);
+                setTcpForm(tcpEditor(configuration.tcp_peer));
+              }}
+              primary
+            />
+          </View>
+
+          {configuration.tcp_peer === null ? (
+            <Text style={styles.emptyText}>No TCP peer is configured.</Text>
+          ) : (
+            <View style={styles.profileCard}>
+              <Text selectable style={styles.profileSsid}>
+                {tcpPeerAddress(configuration.tcp_peer)}:{configuration.tcp_peer.port}
+              </Text>
+              <Text style={styles.meta}>
+                {"hostname" in configuration.tcp_peer ? "Hostname" : "IPv4"} ·{" "}
+                {configuration.tcp_peer.enabled ? "enabled" : "disabled"}
+              </Text>
+              <SmallButton
+                destructive
+                disabled={mutating}
+                label="Clear peer"
+                onPress={() => void clearTcpPeer()}
+              />
+            </View>
+          )}
+
+          {tcpForm === null ? null : (
+            <View style={styles.editor}>
+              <Text style={styles.editorTitle}>Configure outbound peer</Text>
+              <View style={styles.segmentedRow}>
+                <SmallButton
+                  disabled={mutating}
+                  label="Hostname"
+                  onPress={() => setTcpForm({ ...tcpForm, address: "", kind: "hostname" })}
+                  primary={tcpForm.kind === "hostname"}
+                />
+                <SmallButton
+                  disabled={mutating}
+                  label="IPv4"
+                  onPress={() => setTcpForm({ ...tcpForm, address: "", kind: "ipv4" })}
+                  primary={tcpForm.kind === "ipv4"}
+                />
+              </View>
+              <Text style={styles.label}>
+                {tcpForm.kind === "hostname" ? "DNS hostname" : "IPv4 address"}
+              </Text>
+              <TextInput
+                accessibilityLabel={
+                  tcpForm.kind === "hostname" ? "TCP peer DNS hostname" : "TCP peer IPv4 address"
+                }
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!mutating}
+                keyboardType={tcpForm.kind === "hostname" ? "url" : "numbers-and-punctuation"}
+                onChangeText={(address) => setTcpForm({ ...tcpForm, address })}
+                placeholder={tcpForm.kind === "hostname" ? "node.example.org" : "192.0.2.10"}
+                placeholderTextColor={colors.muted}
+                style={styles.input}
+                value={tcpForm.address}
+              />
+              <Text style={styles.label}>Port</Text>
+              <TextInput
+                accessibilityLabel="TCP peer port"
+                editable={!mutating}
+                keyboardType="number-pad"
+                onChangeText={(port) => setTcpForm({ ...tcpForm, port })}
+                style={styles.input}
+                value={tcpForm.port}
+              />
+              <View style={styles.switchRow}>
+                <View style={styles.switchCopy}>
+                  <Text style={styles.label}>Enabled</Text>
+                  <Text style={styles.help}>Connect after Wi-Fi has an address.</Text>
+                </View>
+                <Switch
+                  accessibilityLabel="TCP peer enabled"
+                  disabled={mutating}
+                  onValueChange={(enabled) => setTcpForm({ ...tcpForm, enabled })}
+                  trackColor={{ false: colors.line, true: colors.greenDark }}
+                  value={tcpForm.enabled}
+                />
+              </View>
+              <View style={styles.actionRow}>
+                <SmallButton
+                  disabled={mutating}
+                  label="Save peer"
+                  onPress={() => void saveTcpPeer()}
+                  primary
+                />
+                <SmallButton
+                  disabled={mutating}
+                  label="Cancel"
+                  onPress={() => {
+                    setFormError(null);
+                    setTcpForm(null);
+                  }}
+                />
+              </View>
+            </View>
+          )}
+        </View>
+      </>
+    );
+
+  const discoverySection =
+    configuration === null ? null : (
+      <>
+        <View style={styles.section}>
+          <View style={styles.sectionHeading}>
+            <View style={styles.sectionHeadingCopy}>
+              <Text style={styles.sectionTitle}>Service announces</Text>
+              <Text style={styles.secondary}>
+                Manual announces always remain available. Changes apply after an appliance restart.
+              </Text>
+            </View>
+            <SmallButton
+              disabled={
+                announceNow === undefined ||
+                announceState.state === "running" ||
+                state.loadState !== "ready"
+              }
+              label={announceState.state === "running" ? "Queuing…" : "Announce now"}
+              onPress={() => void runAnnounce()}
+              primary
+            />
+          </View>
+          {announceState.state === "success" || announceState.state === "error" ? (
+            <Text
+              accessibilityLiveRegion={announceState.state === "error" ? "assertive" : "polite"}
+              style={announceState.state === "error" ? styles.inlineError : styles.inlineSuccess}
+            >
+              {announceState.message}
+            </Text>
+          ) : null}
+          {announceNow === undefined ? (
+            <Text style={styles.help}>
+              This client build does not expose the appliance&apos;s manual announce operation.
+            </Text>
+          ) : null}
+          <View style={styles.compactSwitchList}>
+            <View style={styles.switchRow}>
+              <View style={styles.switchCopy}>
+                <Text style={styles.label}>Automatic service announces</Text>
+                <Text style={styles.help}>
+                  Periodically announce this appliance&apos;s primary, LXMF, and NomadNet
+                  destinations. RMAP publication is controlled separately.
+                </Text>
+              </View>
+              <Switch
+                accessibilityLabel="Automatic service announces enabled"
+                disabled={mutating}
+                onValueChange={(enabled) =>
+                  void applyGatewayPolicy(configuration.wifi_transport_enabled, enabled)
+                }
+                trackColor={{ false: colors.line, true: colors.greenDark }}
+                value={configuration.automatic_announces_enabled}
+              />
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeadingCopy}>
+            <Text style={styles.sectionTitle}>RMAP World discovery</Text>
+            <Text style={styles.secondary}>
+              Opt in to a signed public marker for this appliance&apos;s LoRa interface. RMAP
+              targets the configured public TCP interface once it is ready, or available Reticulum
+              interfaces on a radio-only node. Its six-hour cadence begins only after a publication
+              is accepted.
+            </Text>
+          </View>
+          <View accessibilityLiveRegion="polite" style={styles.rmapStatus}>
+            <Text style={styles.rmapStatusEyebrow}>CURRENT STATUS</Text>
+            <Text
+              style={[
+                styles.rmapStatusHeadline,
+                rmapRuntime.tone === "error" && styles.rmapStatusError,
+                rmapRuntime.tone === "success" && styles.rmapStatusSuccess,
+                rmapRuntime.tone === "warning" && styles.rmapStatusWarning,
+              ]}
+            >
+              {rmapRuntime.headline}
+            </Text>
+            {rmapRuntime.rows.map((row) => (
+              <Text key={row} selectable style={styles.rmapStatusRow}>
+                {row}
+              </Text>
+            ))}
+          </View>
+          <View style={styles.compactSwitchList}>
+            <View style={styles.switchRow}>
+              <View style={styles.switchCopy}>
+                <Text style={styles.label}>Publish on RMAP World</Text>
+                <Text style={styles.help}>Name and LoRa parameters become public.</Text>
+              </View>
+              <Switch
+                accessibilityLabel="RMAP World discovery enabled"
+                disabled={mutating || locationCaptureRunning}
+                onValueChange={(enabled) =>
+                  void applyRmapConfig(
+                    enabled,
+                    configuration.rmap_share_location,
+                    configuration.rmap_phone_location,
+                  )
+                }
+                trackColor={{ false: colors.line, true: colors.greenDark }}
+                value={configuration.rmap_discovery_enabled}
+              />
+            </View>
+            {configuration.rmap_phone_location === null ? null : (
+              <View style={styles.switchRow}>
+                <View style={styles.switchCopy}>
+                  <Text style={styles.label}>Include saved phone location</Text>
+                  <Text selectable style={styles.help}>
+                    Approximate position {rmapLocationLabel(configuration.rmap_phone_location)}
+                  </Text>
+                </View>
+                <Switch
+                  accessibilityLabel="Share saved phone location on RMAP World"
                   disabled={mutating || locationCaptureRunning}
                   onValueChange={(enabled) =>
                     void applyRmapConfig(
+                      configuration.rmap_discovery_enabled,
                       enabled,
-                      configuration.rmap_share_location,
                       configuration.rmap_phone_location,
                     )
                   }
                   trackColor={{ false: colors.line, true: colors.greenDark }}
-                  value={configuration.rmap_discovery_enabled}
+                  value={configuration.rmap_share_location}
                 />
               </View>
-              {configuration.rmap_phone_location === null ? null : (
-                <View style={styles.switchRow}>
-                  <View style={styles.switchCopy}>
-                    <Text style={styles.label}>Include saved phone location</Text>
-                    <Text selectable style={styles.help}>
-                      Approximate position {rmapLocationLabel(configuration.rmap_phone_location)}
-                    </Text>
-                  </View>
-                  <Switch
-                    accessibilityLabel="Share saved phone location on RMAP World"
-                    disabled={mutating || locationCaptureRunning}
-                    onValueChange={(enabled) =>
-                      void applyRmapConfig(
-                        configuration.rmap_discovery_enabled,
-                        enabled,
-                        configuration.rmap_phone_location,
-                      )
-                    }
-                    trackColor={{ false: colors.line, true: colors.greenDark }}
-                    value={configuration.rmap_share_location}
-                  />
-                </View>
-              )}
-            </View>
-            <View style={styles.actionRow}>
+            )}
+          </View>
+          <View style={styles.actionRow}>
+            <SmallButton
+              disabled={mutating || locationCaptureRunning}
+              label={
+                locationCaptureRunning
+                  ? "Getting location…"
+                  : configuration.rmap_phone_location === null
+                    ? "Use phone location (~100 m)"
+                    : "Update phone location"
+              }
+              onPress={() => void captureLocation()}
+              primary={configuration.rmap_phone_location === null}
+            />
+            {configuration.rmap_phone_location === null ? null : (
               <SmallButton
                 disabled={mutating || locationCaptureRunning}
-                label={
-                  locationCaptureRunning
-                    ? "Getting location…"
-                    : configuration.rmap_phone_location === null
-                      ? "Use phone location (~100 m)"
-                      : "Update phone location"
+                label="Remove location"
+                onPress={() =>
+                  void applyRmapConfig(configuration.rmap_discovery_enabled, false, null)
                 }
-                onPress={() => void captureLocation()}
-                primary={configuration.rmap_phone_location === null}
               />
-              {configuration.rmap_phone_location === null ? null : (
-                <SmallButton
-                  disabled={mutating || locationCaptureRunning}
-                  label="Remove location"
-                  onPress={() =>
-                    void applyRmapConfig(configuration.rmap_discovery_enabled, false, null)
-                  }
-                />
-              )}
-            </View>
-            <Text style={styles.privacyText}>
-              Location is requested once in the foreground, rounded to roughly 100 metres, and
-              stored on the appliance; there is no background tracking. Published name, radio
-              details and location can remain visible on RMAP World for up to seven days after
-              sharing is disabled.
+            )}
+          </View>
+          <Text style={styles.privacyText}>
+            Location is requested once in the foreground, rounded to roughly 100 metres, and stored
+            on the appliance; there is no background tracking. Published name, radio details and
+            location can remain visible on RMAP World for up to seven days after sharing is
+            disabled.
+          </Text>
+        </View>
+      </>
+    );
+
+  const section =
+    subtopic === "overview"
+      ? overviewSection
+      : subtopic === "radio"
+        ? radioSection
+        : subtopic === "routes"
+          ? routesSection
+          : subtopic === "peers"
+            ? peersSection
+            : discoverySection;
+
+  return (
+    <View style={styles.screen}>
+      <View style={styles.chrome}>
+        {heading}
+        {state.rebootRequired ? (
+          <View accessibilityLiveRegion="polite" style={styles.rebootBanner}>
+            <Text style={styles.rebootTitle}>Restart appliance to apply changes</Text>
+            <Text style={styles.rebootText}>
+              Configured revision{" "}
+              {state.runtime?.configured_revision ?? configuration?.revision ?? "—"} · applied
+              revision {state.runtime?.applied_revision ?? "—"}
             </Text>
           </View>
-
-          <View style={styles.section}>
-            <View style={styles.sectionHeading}>
-              <View>
-                <Text style={styles.sectionTitle}>Known Wi-Fi networks</Text>
-                <Text style={styles.secondary}>
-                  {configuration.wifi_profiles.length}/{MAX_WIFI_NETWORK_PROFILES} saved · larger
-                  priority values are preferred
-                </Text>
-              </View>
-              <SmallButton
-                disabled={
-                  mutating || configuration.wifi_profiles.length >= MAX_WIFI_NETWORK_PROFILES
-                }
-                label="Add network"
-                onPress={() => {
-                  setFormError(null);
-                  setWifiForm(newProfileEditor());
-                }}
-                primary
-              />
-            </View>
-
-            {configuration.wifi_profiles.length === 0 ? (
-              <Text style={styles.emptyText}>No Wi-Fi networks are saved on this appliance.</Text>
-            ) : (
-              <View style={styles.list}>
-                {configuration.wifi_profiles.map((profile) => {
-                  const active = state.runtime?.active_wifi_profile === profile.profile_id;
-                  return (
-                    <View
-                      key={profile.profile_id}
-                      style={[styles.profileCard, active && styles.profileCardActive]}
-                    >
-                      <View style={styles.profileHeading}>
-                        <View style={styles.profileCopy}>
-                          <Text selectable style={styles.profileSsid}>
-                            {networkBytesText(profile.ssid)}
-                          </Text>
-                          <Text style={styles.meta}>
-                            Priority {profile.priority} · {profile.enabled ? "enabled" : "disabled"}{" "}
-                            · {profile.credential_configured ? "password saved" : "no password"}
-                          </Text>
-                          <Text selectable style={styles.profileId}>
-                            {profile.profile_id}
-                          </Text>
-                        </View>
-                        {active ? <Text style={styles.activeBadge}>ACTIVE</Text> : null}
-                      </View>
-                      <View style={styles.actionRow}>
-                        <SmallButton
-                          disabled={mutating}
-                          label="Edit"
-                          onPress={() => {
-                            setFormError(null);
-                            setWifiForm(profileEditor(profile));
-                          }}
-                        />
-                        <SmallButton
-                          destructive
-                          disabled={mutating}
-                          label="Remove"
-                          onPress={() => void removeWifi(profile.profile_id)}
-                        />
-                      </View>
-                    </View>
-                  );
-                })}
-              </View>
-            )}
-
-            {wifiForm === null ? null : (
-              <View style={styles.editor}>
-                <Text style={styles.editorTitle}>
-                  {wifiForm.credentialConfigured ? "Edit Wi-Fi network" : "Add Wi-Fi network"}
-                </Text>
-                <Text style={styles.label}>SSID</Text>
-                <TextInput
-                  accessibilityLabel="Wi-Fi SSID"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  editable={!mutating}
-                  onChangeText={(ssid) => setWifiForm({ ...wifiForm, ssid })}
-                  placeholder="Network name or hex:…"
-                  placeholderTextColor={colors.muted}
-                  style={styles.input}
-                  value={wifiForm.ssid}
-                />
-                <Text style={styles.help}>
-                  UTF-8 text is used as entered. Existing binary SSIDs remain exact as hex:…
-                </Text>
-                <Text style={styles.label}>Priority (larger wins)</Text>
-                <TextInput
-                  accessibilityLabel="Wi-Fi priority"
-                  editable={!mutating}
-                  keyboardType="number-pad"
-                  onChangeText={(priority) => setWifiForm({ ...wifiForm, priority })}
-                  style={styles.input}
-                  value={wifiForm.priority}
-                />
-                <View style={styles.switchRow}>
-                  <View style={styles.switchCopy}>
-                    <Text style={styles.label}>Enabled</Text>
-                    <Text style={styles.help}>Allow station selection after restart.</Text>
-                  </View>
-                  <Switch
-                    accessibilityLabel="Wi-Fi network enabled"
-                    disabled={mutating}
-                    onValueChange={(enabled) => setWifiForm({ ...wifiForm, enabled })}
-                    trackColor={{ false: colors.line, true: colors.greenDark }}
-                    value={wifiForm.enabled}
-                  />
-                </View>
-                <Text style={styles.label}>WPA2 password</Text>
-                <TextInput
-                  accessibilityLabel="Wi-Fi password"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  editable={!mutating}
-                  onChangeText={(passphrase) => setWifiForm({ ...wifiForm, passphrase })}
-                  placeholder={
-                    wifiForm.credentialConfigured
-                      ? "Leave blank to keep saved password"
-                      : "Required"
-                  }
-                  placeholderTextColor={colors.muted}
-                  secureTextEntry
-                  style={styles.input}
-                  value={wifiForm.passphrase}
-                />
-                <Text style={styles.help}>
-                  The password is sent once to this board and is never stored by the app.
-                </Text>
-                <View style={styles.actionRow}>
-                  <SmallButton
-                    disabled={mutating}
-                    label="Save network"
-                    onPress={() => void saveWifi()}
-                    primary
-                  />
-                  <SmallButton
-                    disabled={mutating}
-                    label="Cancel"
-                    onPress={() => {
-                      setFormError(null);
-                      setWifiForm(null);
-                    }}
-                  />
-                </View>
-              </View>
-            )}
+        ) : null}
+        {mutationNotice(controller, state, mutating)}
+        {formError === null ? null : (
+          <View accessibilityLiveRegion="assertive" style={[styles.notice, styles.noticeError]}>
+            <Text style={styles.errorText}>{formError}</Text>
           </View>
-
-          <View style={styles.section}>
-            <View style={styles.sectionHeading}>
-              <View style={styles.sectionHeadingCopy}>
-                <Text style={styles.sectionTitle}>Custom outbound TCP peer</Text>
-                <Text style={styles.secondary}>
-                  Exactly one hostname or IPv4 peer can be active. Saving replaces any preset.
-                </Text>
-              </View>
-              <SmallButton
-                disabled={mutating}
-                label={configuration.tcp_peer === null ? "Configure" : "Edit"}
-                onPress={() => {
-                  setFormError(null);
-                  setTcpForm(tcpEditor(configuration.tcp_peer));
-                }}
-                primary
-              />
-            </View>
-
-            {configuration.tcp_peer === null ? (
-              <Text style={styles.emptyText}>No TCP peer is configured.</Text>
-            ) : (
-              <View style={styles.profileCard}>
-                <Text selectable style={styles.profileSsid}>
-                  {tcpPeerAddress(configuration.tcp_peer)}:{configuration.tcp_peer.port}
-                </Text>
-                <Text style={styles.meta}>
-                  {"hostname" in configuration.tcp_peer ? "Hostname" : "IPv4"} ·{" "}
-                  {configuration.tcp_peer.enabled ? "enabled" : "disabled"}
-                </Text>
-                <SmallButton
-                  destructive
-                  disabled={mutating}
-                  label="Clear peer"
-                  onPress={() => void clearTcpPeer()}
-                />
-              </View>
-            )}
-
-            {tcpForm === null ? null : (
-              <View style={styles.editor}>
-                <Text style={styles.editorTitle}>Configure outbound peer</Text>
-                <View style={styles.segmentedRow}>
-                  <SmallButton
-                    disabled={mutating}
-                    label="Hostname"
-                    onPress={() => setTcpForm({ ...tcpForm, address: "", kind: "hostname" })}
-                    primary={tcpForm.kind === "hostname"}
-                  />
-                  <SmallButton
-                    disabled={mutating}
-                    label="IPv4"
-                    onPress={() => setTcpForm({ ...tcpForm, address: "", kind: "ipv4" })}
-                    primary={tcpForm.kind === "ipv4"}
-                  />
-                </View>
-                <Text style={styles.label}>
-                  {tcpForm.kind === "hostname" ? "DNS hostname" : "IPv4 address"}
-                </Text>
-                <TextInput
-                  accessibilityLabel={
-                    tcpForm.kind === "hostname" ? "TCP peer DNS hostname" : "TCP peer IPv4 address"
-                  }
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  editable={!mutating}
-                  keyboardType={tcpForm.kind === "hostname" ? "url" : "numbers-and-punctuation"}
-                  onChangeText={(address) => setTcpForm({ ...tcpForm, address })}
-                  placeholder={tcpForm.kind === "hostname" ? "node.example.org" : "192.0.2.10"}
-                  placeholderTextColor={colors.muted}
-                  style={styles.input}
-                  value={tcpForm.address}
-                />
-                <Text style={styles.label}>Port</Text>
-                <TextInput
-                  accessibilityLabel="TCP peer port"
-                  editable={!mutating}
-                  keyboardType="number-pad"
-                  onChangeText={(port) => setTcpForm({ ...tcpForm, port })}
-                  style={styles.input}
-                  value={tcpForm.port}
-                />
-                <View style={styles.switchRow}>
-                  <View style={styles.switchCopy}>
-                    <Text style={styles.label}>Enabled</Text>
-                    <Text style={styles.help}>Connect after Wi-Fi has an address.</Text>
-                  </View>
-                  <Switch
-                    accessibilityLabel="TCP peer enabled"
-                    disabled={mutating}
-                    onValueChange={(enabled) => setTcpForm({ ...tcpForm, enabled })}
-                    trackColor={{ false: colors.line, true: colors.greenDark }}
-                    value={tcpForm.enabled}
-                  />
-                </View>
-                <View style={styles.actionRow}>
-                  <SmallButton
-                    disabled={mutating}
-                    label="Save peer"
-                    onPress={() => void saveTcpPeer()}
-                    primary
-                  />
-                  <SmallButton
-                    disabled={mutating}
-                    label="Cancel"
-                    onPress={() => {
-                      setFormError(null);
-                      setTcpForm(null);
-                    }}
-                  />
-                </View>
-              </View>
-            )}
+        )}
+        {state.loadError === null ? null : (
+          <View accessibilityLiveRegion="assertive" style={[styles.notice, styles.noticeError]}>
+            <Text style={styles.errorText}>Configuration could not be read: {state.loadError}</Text>
           </View>
-        </>
-      )}
-    </ScrollView>
+        )}
+        {state.statusError === null ? null : (
+          <Text accessibilityLiveRegion="polite" style={styles.inlineError}>
+            Live status unavailable: {state.statusError}
+          </Text>
+        )}
+        {state.loadState === "loading" && configuration === null ? (
+          <View style={styles.loading}>
+            <ActivityIndicator color={colors.green} />
+            <Text style={styles.secondary}>Reading board-owned configuration…</Text>
+          </View>
+        ) : null}
+        <View accessibilityRole="tablist" style={shared.workspaceSwitcher}>
+          <ScrollView
+            contentContainerStyle={shared.workspaceSwitcherContent}
+            horizontal
+            keyboardShouldPersistTaps="handled"
+            showsHorizontalScrollIndicator={false}
+          >
+            {SUBTOPICS.map((option) => {
+              const selected = subtopic === option.value;
+              return (
+                <Pressable
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected }}
+                  key={option.value}
+                  onPress={() => setSubtopic(option.value)}
+                  style={[shared.workspaceTab, selected && shared.workspaceTabActive]}
+                >
+                  <Text style={shared.workspaceTabText}>{option.label}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </View>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+        keyboardShouldPersistTaps="handled"
+        style={styles.scroller}
+      >
+        {section}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -1096,6 +1074,15 @@ const colors = {
 } as const;
 
 const styles = StyleSheet.create({
+  screen: { flex: 1, minHeight: 0, backgroundColor: colors.background },
+  chrome: {
+    width: "100%",
+    maxWidth: 820,
+    alignSelf: "center",
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    gap: 10,
+  },
   scroller: { flex: 1, minHeight: 0, backgroundColor: colors.background },
   content: {
     width: "100%",
@@ -1115,57 +1102,7 @@ const styles = StyleSheet.create({
   eyebrow: { color: colors.green, fontSize: 10, fontWeight: "800", letterSpacing: 1.5 },
   title: { color: colors.text, fontSize: 20, fontWeight: "800" },
   secondary: { color: colors.muted, fontSize: 12, lineHeight: 18 },
-  statusGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  statusCard: {
-    flexGrow: 1,
-    flexBasis: 260,
-    minWidth: 0,
-    padding: 13,
-    gap: 4,
-    borderColor: colors.line,
-    borderWidth: 1,
-    borderRadius: 10,
-    backgroundColor: colors.panel,
-  },
-  statusCardControl: {
-    marginTop: 5,
-    paddingTop: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    borderTopColor: colors.line,
-    borderTopWidth: 1,
-  },
-  cardEyebrow: { color: colors.muted, fontSize: 9, fontWeight: "800", letterSpacing: 1.1 },
-  statusValue: { color: colors.text, fontSize: 17, fontWeight: "800" },
   meta: { color: colors.muted, fontSize: 11, lineHeight: 16 },
-  dnsDetails: {
-    marginTop: 2,
-    paddingTop: 5,
-    gap: 2,
-    borderTopColor: colors.line,
-    borderTopWidth: 1,
-  },
-  dnsHeading: { color: colors.muted, fontSize: 8, fontWeight: "800", letterSpacing: 1 },
-  dnsRow: {
-    minWidth: 0,
-    flexDirection: "row",
-    alignItems: "baseline",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-  dnsResolver: {
-    flexShrink: 1,
-    color: colors.text,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
-    fontSize: 9,
-  },
-  dnsOutcome: { flexShrink: 0, color: colors.muted, fontSize: 9, textAlign: "right" },
-  dnsOutcomeFailure: { color: colors.red },
-  dnsOutcomeSuccess: { color: colors.green },
-  dnsContext: { color: colors.muted, fontSize: 8, lineHeight: 12 },
-  dnsResolution: { color: colors.green, fontSize: 9, lineHeight: 13 },
   section: {
     padding: 12,
     gap: 10,

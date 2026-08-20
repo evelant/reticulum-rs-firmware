@@ -26,18 +26,21 @@ const MAX_ROUTE_SNAPSHOT_ATTEMPTS: usize = 2;
 pub enum DiagnosticInterfaceKindView {
     /// LoRa packet radio.
     Lora,
-    /// Reticulum TCP client or server.
-    Tcp,
+    /// Outbound Reticulum TCP client.
+    TcpClient,
     /// Another transport without a stable app category yet.
     Other,
+    /// Inbound Reticulum TCP server.
+    TcpServer,
 }
 
 impl From<api::DiagnosticInterfaceKind> for DiagnosticInterfaceKindView {
     fn from(kind: api::DiagnosticInterfaceKind) -> Self {
         match kind {
             api::DiagnosticInterfaceKind::LoRa => Self::Lora,
-            api::DiagnosticInterfaceKind::Tcp => Self::Tcp,
+            api::DiagnosticInterfaceKind::TcpClient => Self::TcpClient,
             api::DiagnosticInterfaceKind::Other => Self::Other,
+            api::DiagnosticInterfaceKind::TcpServer => Self::TcpServer,
         }
     }
 }

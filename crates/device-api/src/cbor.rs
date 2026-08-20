@@ -5038,8 +5038,9 @@ fn decode_diagnostic_interface(
 fn decode_diagnostic_interface_kind(value: u8) -> Result<DiagnosticInterfaceKind, DecodeError> {
     match value {
         0 => Ok(DiagnosticInterfaceKind::LoRa),
-        1 => Ok(DiagnosticInterfaceKind::Tcp),
+        1 => Ok(DiagnosticInterfaceKind::TcpClient),
         2 => Ok(DiagnosticInterfaceKind::Other),
+        3 => Ok(DiagnosticInterfaceKind::TcpServer),
         other => Err(DecodeError::InvalidValue {
             field: RequiredField::DiagnosticInterfaceKind,
             value: u64::from(other),

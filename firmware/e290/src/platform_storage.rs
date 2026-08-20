@@ -2850,7 +2850,7 @@ impl NodeDiagnosticsPort for ProductAuthenticatedApiPort<'_> {
         #[cfg(feature = "gateway")]
         {
             interfaces[1] = diagnostic_interface_record(
-                DiagnosticInterfaceKind::Tcp,
+                DiagnosticInterfaceKind::TcpClient,
                 registry.descriptor(PacketInterfaceId::new(2)),
                 matches!(self.wifi_tcp_status.snapshot().phase, WifiTcpPhase::Faulted),
             );

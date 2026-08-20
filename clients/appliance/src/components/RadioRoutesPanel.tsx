@@ -42,8 +42,10 @@ function interfaceKindLabel(kind: DiagnosticInterfaceView["kind"]): string {
   switch (kind) {
     case "lora":
       return "LoRa";
-    case "tcp":
-      return "Reticulum TCP";
+    case "tcp_client":
+      return "Reticulum TCP client";
+    case "tcp_server":
+      return "Reticulum TCP server";
     case "other":
       return "Other";
   }

@@ -76,17 +76,29 @@ interface InlinedBundle {
   readonly source: string;
 }
 
+const INLINED_ASSET_MIME: Readonly<Record<string, string>> = {
+  ".eot": "application/vnd.ms-fontobject",
+  ".otf": "font/otf",
+  ".png": "image/png",
+  ".ttf": "font/ttf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
 async function inlineMetroAssets(
   bundle: string,
   exportDirectory: string,
   exportedFiles: readonly string[],
 ): Promise<InlinedBundle> {
-  const assetUrls = [...new Set(bundle.match(/\/assets\/[A-Za-z0-9_./@+-]+\.png/g) ?? [])].sort();
+  const assetUrls = [
+    ...new Set(bundle.match(/\/assets\/[A-Za-z0-9_./@+-]+\.(?:png|ttf|otf|woff2?|eot)/g) ?? []),
+  ].sort();
   const assetPaths: string[] = [];
   let result = bundle;
   for (const url of assetUrls) {
     const extension = extname(url).toLowerCase();
-    if (extension !== ".png") {
+    const mimeType = INLINED_ASSET_MIME[extension];
+    if (mimeType === undefined) {
       throw new Error(`unsupported Metro runtime asset in web bundle: ${url}`);
     }
     const logicalPath = url.slice(1);
@@ -110,7 +122,7 @@ async function inlineMetroAssets(
       throw new Error(`Metro runtime asset escaped the export root: ${url}`);
     }
     const bytes = await readFile(path);
-    const dataUrl = `data:image/png;base64,${bytes.toString("base64")}`;
+    const dataUrl = `data:${mimeType};base64,${bytes.toString("base64")}`;
     result = result.replaceAll(url, dataUrl);
     assetPaths.push(exportedPath);
   }

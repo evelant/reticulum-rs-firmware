@@ -1,31 +1,21 @@
 import type { NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter } from "expo-router";
 import {
-  ActivityIndicator,
-  AppState,
-  Keyboard,
-  KeyboardAvoidingView,
-  Linking,
-  Text,
-  useWindowDimensions,
-  View,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { AppState, Keyboard, Linking, useWindowDimensions } from "react-native";
 
-import { ActivityWorkspace } from "../components/ActivityWorkspace.tsx";
-import { ActionButton } from "../components/AppliancePrimitives.tsx";
-import { ApplianceSidebar } from "../components/ApplianceSidebar.tsx";
-import { ApplianceStatusCard, type ProfileOperation } from "../components/ApplianceStatusCard.tsx";
-import { ApplianceTopBar, type ApplianceWorkspace } from "../components/ApplianceTopBar.tsx";
+import type { ProfileOperation } from "../components/ApplianceStatusCard.tsx";
 import { APPLIANCE_KEYBOARD_LAYOUT } from "../components/appliance-screen-layout.ts";
-import { styles } from "../components/appliance-screen-styles.ts";
-import { applianceScreenColors as colors } from "../components/appliance-screen-theme.ts";
-import { ConnectivityPanel } from "../components/ConnectivityPanel.tsx";
-import { ConversationPanel, type QueueMessageResult } from "../components/ConversationPanel.tsx";
-import { NomadPanel } from "../components/NomadPanel.tsx";
-import { OnboardingPanel } from "../components/OnboardingPanel.tsx";
+import type { QueueMessageResult } from "../components/ConversationPanel.tsx";
 import type { RadioTraceExportFormat } from "../components/RadioTracePanel.tsx";
-import { TransmissionMapPanel } from "../components/TransmissionMapPanel.tsx";
 import type {
   ApplianceSnapshot,
   ContactView,
@@ -39,35 +29,34 @@ import type {
   SendRequest,
   TimelineView,
 } from "../generated/api.ts";
-import { ApplianceApi } from "../lib/api";
-import { errorText } from "../lib/app-error.ts";
-import { applianceProfilesPresentation } from "../lib/appliance-profiles.ts";
-import { applianceStatusPresentation } from "../lib/appliance-status.ts";
-import { bleBondRepairProgressMessage } from "../lib/ble-bond-repair.ts";
-import type { BleCandidate, BleScanOptions } from "../lib/ble-central-types.ts";
-import { ensureDraftIdentity } from "../lib/draft.ts";
-import { deliverExportArtifact } from "../lib/export-artifact";
+import { ApplianceApi } from "./api";
+import { errorText } from "./app-error.ts";
+import { applianceProfilesPresentation } from "./appliance-profiles.ts";
+import { applianceStatusPresentation } from "./appliance-status.ts";
+import { bleBondRepairProgressMessage } from "./ble-bond-repair.ts";
+import type { BleCandidate, BleScanOptions } from "./ble-central-types.ts";
+import { ensureDraftIdentity } from "./draft.ts";
+import { deliverExportArtifact } from "./export-artifact";
 import {
   type FieldTelemetryClient,
   FieldTelemetryController,
   type FieldTelemetryControllerState,
-} from "../lib/field-telemetry.ts";
-import { createFieldTelemetryPreferenceStore } from "../lib/field-telemetry-preference";
+} from "./field-telemetry.ts";
+import { createFieldTelemetryPreferenceStore } from "./field-telemetry-preference";
 import {
   ensureForegroundConnection,
   ForegroundReconnect,
   type ForegroundReconnectProgress,
-  foregroundReconnectMessage,
-} from "../lib/foreground-reconnect.ts";
-import { LatestRequest } from "../lib/latest-request.ts";
-import { retryMessageCacheKey, retryMessageRequest } from "../lib/message-actions.ts";
-import { buildMessageActivityAliases, messageActivityPeerLabel } from "../lib/message-activity.ts";
-import { captureForegroundMessageLocation } from "../lib/message-location.ts";
-import { type DraftSubmission, prepareDraftSubmission } from "../lib/message-location-draft.ts";
+} from "./foreground-reconnect.ts";
+import { LatestRequest } from "./latest-request.ts";
+import { retryMessageCacheKey, retryMessageRequest } from "./message-actions.ts";
+import { buildMessageActivityAliases, messageActivityPeerLabel } from "./message-activity.ts";
+import { captureForegroundMessageLocation } from "./message-location.ts";
+import { type DraftSubmission, prepareDraftSubmission } from "./message-location-draft.ts";
 import {
   createMessageLocationPreferenceStore,
   type MessageLocationPreferenceState,
-} from "../lib/message-location-preference";
+} from "./message-location-preference";
 import {
   consumeInitialMessageNotificationTarget,
   createMessageNotificationLedgerStore,
@@ -76,7 +65,7 @@ import {
   presentInboundMessageNotification,
   requestMessageNotificationPermission,
   subscribeMessageNotificationTargets,
-} from "../lib/message-notification-platform.ts";
+} from "./message-notification-platform.ts";
 import {
   enqueueMessageNotificationTarget,
   MESSAGE_NOTIFICATION_PAGE_SIZE,
@@ -84,50 +73,211 @@ import {
   type MessageNotificationTarget,
   SupersededMessageNotificationReconciliation,
   shouldPresentInboundMessageNotification,
-} from "../lib/message-notifications.ts";
-import { localMessageAcceptance } from "../lib/message-submit-ui.ts";
-import { readNativeCoreStatus } from "../lib/native-core";
-import type { NativeCoreStatus } from "../lib/native-core-types.ts";
+} from "./message-notifications.ts";
+import { localMessageAcceptance } from "./message-submit-ui.ts";
+import { readNativeCoreStatus } from "./native-core";
+import type { NativeCoreStatus } from "./native-core-types.ts";
+import type { ApplianceWorkspace, MessagePane, NetworkSubtopic } from "./navigation.ts";
+import { pathForWorkspace, workspaceFromPathname } from "./navigation.ts";
+import type { NearbyPeerView } from "./nearby-peers.ts";
 import {
   NetworkConfigController,
   type NetworkConfigControllerState,
   type NetworkConfigurationClient,
-} from "../lib/network-config.ts";
-import { NomadBrowserController, type NomadBrowserState } from "../lib/nomad-browser.ts";
-import { onboardingPresentation } from "../lib/onboarding.ts";
+} from "./network-config.ts";
+import { NomadBrowserController, type NomadBrowserState } from "./nomad-browser.ts";
+import { onboardingPresentation } from "./onboarding.ts";
 import {
   type RadioRoutesClient,
   RadioRoutesController,
   type RadioRoutesControllerState,
-} from "../lib/radio-routes.ts";
+} from "./radio-routes.ts";
 import {
   collectCompleteRadioTrace,
   createRadioTraceExportDocument,
   radioTraceCsvArtifact,
   radioTraceJsonArtifact,
-} from "../lib/radio-trace-export.ts";
-import { randomHex } from "../lib/random.ts";
-import { ReticulumProbeController, type ReticulumProbeState } from "../lib/reticulum-probe.ts";
-import { SettledPoll } from "../lib/settled-poll.ts";
+} from "./radio-trace-export.ts";
+import { randomHex } from "./random.ts";
+import { ReticulumProbeController, type ReticulumProbeState } from "./reticulum-probe.ts";
+import { SettledPoll } from "./settled-poll.ts";
 import {
   buildTransmissionMapScene,
   type LocatedTimeline,
   type TransmissionMapFeatureDetails,
-} from "../lib/transmission-map.ts";
+} from "./transmission-map.ts";
 
 const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
 const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
 const MESSAGE_ACTIVITY_PAGE_SIZE = 50;
 const RADIO_TRACE_PAGE_SIZE = 50;
 const KEYBOARD_LAYOUT = APPLIANCE_KEYBOARD_LAYOUT;
+
 interface MapFeatureEvidence {
   readonly events: readonly RadioTraceEventView[];
   readonly historyIncomplete: boolean;
   readonly profileKey: string;
   readonly timelineSequence: number;
 }
-export default function ApplianceScreen() {
+
+export interface ApplianceContextValue {
+  readonly compact: boolean;
+  readonly showSidebar: boolean;
+  readonly workspace: ApplianceWorkspace;
+  readonly keyboardVisible: boolean;
+  readonly messagePane: MessagePane;
+  readonly selectMessagePane: (pane: MessagePane) => void;
+  readonly navigate: (workspace: ApplianceWorkspace) => void;
+  readonly browseNomad: (destination: string) => void;
+
+  readonly busy: boolean;
+  readonly ready: boolean;
+  readonly displayedError: string | null | undefined;
+  readonly snapshot: ApplianceSnapshot | null;
+  readonly nativeCore: NativeCoreStatus | null;
+  readonly onboarding: OnboardingView;
+  readonly profiles: NativeProfileStoreSnapshot | null;
+  readonly deviceName: string | null;
+  readonly canManageProfiles: boolean;
+  readonly hasSavedProfiles: boolean;
+  readonly canAddAppliance: boolean;
+  readonly canForgetProfile: boolean;
+  readonly canRepairBond: boolean;
+  readonly exactBleTargetRequired: boolean;
+  readonly connectivityAvailable: boolean;
+  readonly foreground: boolean;
+
+  readonly profileOperation: ProfileOperation;
+  readonly messageNotificationPermission: MessageNotificationPermission;
+  readonly messageNotificationError: string | null;
+  readonly reconnectProgress: ForegroundReconnectProgress | null;
+  readonly enableMessageNotifications: () => Promise<void>;
+
+  readonly activateApplianceProfile: (profileKey: string) => Promise<boolean>;
+  readonly beginAddAppliance: () => void;
+  readonly reconnectActiveProfile: () => Promise<boolean>;
+  readonly repairActiveBleBond: () => Promise<boolean>;
+  readonly forgetInactiveProfile: (profileKey: string) => Promise<boolean>;
+  readonly clearProfileOperation: () => void;
+  readonly sync: () => void;
+
+  readonly addingAppliance: boolean;
+  readonly cancelOnboarding: (() => Promise<void>) | null;
+  readonly onboardingMutation: (
+    action: "start" | "continue" | "refresh" | RecoveryRequest["action"],
+    candidate: BleCandidate | null,
+  ) => void;
+  readonly bleCandidateScanner:
+    | ((options?: BleScanOptions) => Promise<readonly BleCandidate[]>)
+    | null;
+  readonly switchToKnownProfile: (profileKey: string) => void;
+
+  readonly contacts: ContactView[];
+  readonly conversations: ConversationPeerView[];
+  readonly selected: string | null;
+  readonly selectedConversation: ConversationPeerView | undefined;
+  readonly timeline: TimelineView[];
+  readonly chooseContact: (destination: string) => void;
+  readonly upsertContact: (
+    destination: string,
+    name: string,
+    selectAfterSave?: boolean,
+  ) => Promise<boolean>;
+  readonly send: (
+    title: string,
+    content: string,
+    attachLocation: boolean,
+  ) => Promise<QueueMessageResult>;
+  readonly retryMessage: (entry: TimelineView) => Promise<boolean>;
+  readonly loadMessageActivity: (
+    timelineSequence: number,
+    beforeEventId: number | null,
+  ) => Promise<MessageActivityPageView>;
+  readonly loadMessageRadioTrace: (
+    timelineSequence: number,
+    beforeEventId: number | null,
+  ) => Promise<RadioTracePageView>;
+  readonly exportRadioTrace: (
+    timelineSequence: number | null,
+    format: RadioTraceExportFormat,
+  ) => Promise<void>;
+  readonly onMeasurePath: (destination: string) => Promise<void>;
+  readonly onAbandonRetainedProbe: () => void;
+  readonly clearDraft: () => void;
+  readonly reticulumProbeState: ReticulumProbeState;
+  readonly messageLocationPreference: MessageLocationPreferenceState;
+  readonly nearbyReader: (() => Promise<NearbyPeerView[]>) | null;
+
+  readonly activityError: string | null;
+  readonly activityLoading: boolean;
+  readonly activityPage: MessageActivityPageView | null;
+  readonly loadActivity: (older?: boolean) => Promise<void>;
+  readonly radioTraceAvailable: boolean;
+  readonly radioTraceError: string | null;
+  readonly radioTraceLoading: boolean;
+  readonly radioTracePage: RadioTracePageView | null;
+  readonly radioTraceExportError: string | null;
+  readonly radioTraceExporting: RadioTraceExportFormat | null;
+  readonly loadRadioTrace: (older?: boolean) => Promise<void>;
+  readonly exportCompleteRadioTrace: (format: RadioTraceExportFormat) => Promise<void>;
+  readonly fieldTelemetryState: FieldTelemetryControllerState | null;
+  readonly onToggleFieldTelemetry: ((enabled: boolean) => void) | undefined;
+  readonly setMessageLocationDefault: (enabled: boolean) => Promise<void>;
+
+  readonly transmissionMapScene: ReturnType<typeof buildTransmissionMapScene>;
+  readonly mapFeatureEvidenceError: string | null;
+  readonly mapFeatureEvidenceLoading: boolean;
+  readonly selectMapFeature: (details: TransmissionMapFeatureDetails | null) => void;
+
+  readonly nomadBrowser: NomadBrowserController;
+  readonly nomadState: NomadBrowserState;
+  readonly nomadDestinationHint: string | null;
+  readonly consumeNomadDestinationHint: () => void;
+  readonly nomadConnected: boolean;
+
+  readonly networkController: NetworkConfigController | null;
+  readonly networkState: NetworkConfigControllerState | null;
+  readonly networkDeviceKey: string | null;
+  readonly manualServiceAnnounce: (() => Promise<"already_pending" | "queued">) | undefined;
+  readonly radioRoutesController: RadioRoutesController | null;
+  readonly radioRoutesState: RadioRoutesControllerState | null;
+  readonly onRefreshRadioRoutes: (() => void) | undefined;
+  readonly networkSubtopicHint: NetworkSubtopic | null;
+  readonly openNetworkSubtopic: (subtopic: NetworkSubtopic) => void;
+  readonly consumeNetworkSubtopicHint: () => void;
+}
+
+const ApplianceContext = createContext<ApplianceContextValue | null>(null);
+
+export function useAppliance(): ApplianceContextValue {
+  const value = useContext(ApplianceContext);
+  if (value === null) {
+    throw new Error("useAppliance must be used within ApplianceProvider");
+  }
+  return value;
+}
+
+export function ApplianceProvider({ children }: { readonly children: ReactNode }) {
   const api = useMemo(() => new ApplianceApi(), []);
+  const router = useRouter();
+  const pathname = usePathname();
+  const { height, width } = useWindowDimensions();
+  const compact = width < 760 || height < 640;
+  const showSidebar = width >= 1024 && height >= 640;
+
+  const tabWorkspace = useMemo(() => workspaceFromPathname(pathname), [pathname]);
+  const previousWorkspaceRef = useRef<ApplianceWorkspace>("lxmf");
+  if (tabWorkspace !== null) previousWorkspaceRef.current = tabWorkspace;
+  const workspace = tabWorkspace ?? previousWorkspaceRef.current;
+
+  const navigate = useCallback(
+    (nextWorkspace: ApplianceWorkspace) => {
+      if (nextWorkspace !== "lxmf") setMessagePane("chats");
+      router.replace(pathForWorkspace(nextWorkspace));
+    },
+    [router],
+  );
+
   const manualServiceAnnounce = useMemo(() => {
     const announce = api.manualServiceAnnounce;
     return announce === undefined ? undefined : () => announce.call(api);
@@ -204,8 +354,7 @@ export default function ApplianceScreen() {
       }),
     [api],
   );
-  const { height, width } = useWindowDimensions();
-  const compact = width < 760 || height < 640;
+
   const [bootstrapped, setBootstrapped] = useState(false);
   const [nativeCore, setNativeCore] = useState<NativeCoreStatus | null>(null);
   const [snapshot, setSnapshot] = useState<ApplianceSnapshot | null>(null);
@@ -237,8 +386,8 @@ export default function ApplianceScreen() {
   );
   const [selected, setSelected] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineView[]>([]);
-  const [workspace, setWorkspace] = useState<ApplianceWorkspace>("lxmf");
-  const [mobileSidebarVisible, setMobileSidebarVisible] = useState(false);
+  const [messagePane, setMessagePane] = useState<MessagePane>("chats");
+  const [networkSubtopicHint, setNetworkSubtopicHint] = useState<NetworkSubtopic | null>(null);
   const [nomadDestinationHint, setNomadDestinationHint] = useState<string | null>(null);
   const [nomadState, setNomadState] = useState<NomadBrowserState>(nomadBrowser.state);
   const [reticulumProbeState, setReticulumProbeState] = useState<ReticulumProbeState>(
@@ -295,7 +444,7 @@ export default function ApplianceScreen() {
   );
   const notificationChooseContact = useRef<(destination: string) => void>(() => undefined);
   const foregroundRef = useRef(foreground);
-  const mobileSidebarVisibleRef = useRef(mobileSidebarVisible);
+  const messagePaneRef = useRef(messagePane);
   const workspaceRef = useRef(workspace);
   const messageNotificationReconciler = useMemo(
     () => new MessageNotificationReconciler(createMessageNotificationLedgerStore()),
@@ -310,12 +459,10 @@ export default function ApplianceScreen() {
     [],
   );
   foregroundRef.current = foreground;
-  mobileSidebarVisibleRef.current = mobileSidebarVisible;
+  messagePaneRef.current = messagePane;
   workspaceRef.current = workspace;
 
   const ready = onboardingPresentation(onboarding).ready;
-  // Missing credentials can make the dormant connector report an expected
-  // local error. The onboarding panel owns that state until setup is ready.
   const displayedError =
     error ??
     (ready && (reconnectProgress === null || snapshot?.connection.state === "faulted")
@@ -810,17 +957,15 @@ export default function ApplianceScreen() {
   }, [bootstrapped, fieldTelemetryController, foreground, networkDeviceKey]);
 
   useEffect(() => {
-    if (workspace === "connectivity" && !connectivityAvailable) setWorkspace("lxmf");
-  }, [connectivityAvailable, workspace]);
+    if (workspace === "connectivity" && !connectivityAvailable) navigate("lxmf");
+  }, [connectivityAvailable, navigate, workspace]);
 
   useEffect(() => {
-    // A boot-scoped probe identifier must never survive an appliance switch.
     void networkDeviceKey;
     reticulumProbe.reset();
   }, [networkDeviceKey, reticulumProbe]);
 
   useEffect(() => {
-    // Selection evidence is profile-local and must not survive an appliance switch.
     void networkDeviceKey;
     mapFeatureEvidenceRequests.current.invalidate();
     setMapFeatureEvidence(null);
@@ -901,10 +1046,6 @@ export default function ApplianceScreen() {
         return;
       }
 
-      // Queue all ready-state local reads in one foreground burst. The native
-      // actor drains already-queued commands before beginning another blocking
-      // BLE exchange; staging timeline as a later wave could add a complete
-      // device-request timeout to an otherwise local UI refresh.
       const selectedDestination = selectedRef.current;
       const timelineRequest =
         selectedDestination === null ? null : timelineRequests.current.begin();
@@ -1026,7 +1167,7 @@ export default function ApplianceScreen() {
           if (
             !shouldPresentInboundMessageNotification(notification.peer, {
               foreground: foregroundRef.current,
-              navigationOverlayVisible: mobileSidebarVisibleRef.current,
+              navigationOverlayVisible: messagePaneRef.current === "contacts",
               selectedDestination: selectedRef.current,
               workspace: workspaceRef.current,
             })
@@ -1337,7 +1478,7 @@ export default function ApplianceScreen() {
 
     automaticReconnect.allow();
     automaticReconnect.suspend();
-    setWorkspace("lxmf");
+    navigate("lxmf");
     setReconnectProgress(null);
     refreshRequests.current.invalidate();
     timelineRequests.current.invalidate();
@@ -1442,7 +1583,7 @@ export default function ApplianceScreen() {
     messageNotificationProfileEpoch.current += 1;
     automaticReconnect.allow();
     automaticReconnect.suspend();
-    setWorkspace("lxmf");
+    navigate("lxmf");
     setReconnectProgress(null);
     refreshRequests.current.invalidate();
     timelineRequests.current.invalidate();
@@ -1586,9 +1727,6 @@ export default function ApplianceScreen() {
       const response = await api.send(request);
       if (draft.current === submission) draft.current = null;
 
-      // The successful response is the durable SQLite acceptance boundary.
-      // Reconcile the exact sequence/status in the background without keeping
-      // the composer or global navigation busy.
       if (selectedRef.current === destination) {
         const timelineRequest = timelineRequests.current.begin();
         sendTimelineRefreshesInFlight.current += 1;
@@ -1620,8 +1758,6 @@ export default function ApplianceScreen() {
         queued: true,
       };
     } catch (nextError) {
-      // draft.current intentionally retains an ambiguous request's exact
-      // identity and captured location for the next explicit retry.
       return { acceptance: null, error: errorText(nextError), queued: false };
     } finally {
       mutationInFlight.current = false;
@@ -1715,8 +1851,8 @@ export default function ApplianceScreen() {
             throw new Error("the appliance attached to this notification could not be activated");
           }
         }
-        setMobileSidebarVisible(false);
-        setWorkspace("lxmf");
+        setMessagePane("chats");
+        navigate("lxmf");
         notificationChooseContact.current(target.destination);
       } catch (nextError) {
         setError(`Could not open the message notification: ${errorText(nextError)}`);
@@ -1725,283 +1861,160 @@ export default function ApplianceScreen() {
         setMessageNotificationTargets((queue) => (queue[0] === target ? queue.slice(1) : queue));
       }
     })();
-  }, [bootstrapped, busy, messageNotificationTarget, profiles?.activeProfileKey, ready]);
+  }, [bootstrapped, busy, messageNotificationTarget, navigate, profiles?.activeProfileKey, ready]);
 
-  const browseNomad = useCallback((destination: string) => {
-    setMobileSidebarVisible(false);
-    setNomadDestinationHint(destination);
-    setWorkspace("nomad");
-  }, []);
+  const browseNomad = useCallback(
+    (destination: string) => {
+      setMessagePane("chats");
+      setNomadDestinationHint(destination);
+      navigate("nomad");
+    },
+    [navigate],
+  );
   const consumeNomadDestinationHint = useCallback(() => {
     setNomadDestinationHint(null);
   }, []);
 
-  const applianceShell = (
-    <View style={[styles.shell, compact && styles.shellCompact]}>
-      <ApplianceSidebar
-        busy={busy}
-        compact={compact}
-        contacts={contacts}
-        conversations={conversations}
-        foreground={foreground}
-        onBrowseNomad={browseNomad}
-        onClose={() => setMobileSidebarVisible(false)}
-        onRefreshNearby={nearbyReader}
-        onSelect={chooseContact}
-        onUpsert={upsertContact}
-        selected={selected}
-        snapshot={snapshot}
-        visible={!compact || mobileSidebarVisible}
-      />
-      <ConversationPanel
-        busy={busy}
-        canMeasurePath={snapshot?.connection.state === "ready"}
-        compact={compact}
-        key={selectedConversation?.destination ?? "empty"}
-        messageLocationDefaultEnabled={messageLocationPreference.attachByDefault}
-        messageLocationPreferenceLoaded={!messageLocationPreference.loading}
-        onAbandonRetainedProbe={() => reticulumProbe.abandonRetainedProbe()}
-        onDraftChanged={() => {
-          draft.current = null;
-        }}
-        onSend={send}
-        onRetryMessage={retryMessage}
-        onLoadMessageActivity={loadMessageActivity}
-        onLoadRadioTrace={loadMessageRadioTrace}
-        onExportRadioTrace={(timelineSequence, format) =>
-          exportRadioTrace(timelineSequence, format)
-        }
-        onMeasurePath={(destination) => reticulumProbe.measure(destination)}
-        peer={selectedConversation}
-        probeState={reticulumProbeState}
-        timeline={timeline}
-      />
-    </View>
+  const openNetworkSubtopic = useCallback(
+    (subtopic: NetworkSubtopic) => {
+      setNetworkSubtopicHint(subtopic);
+      navigate("connectivity");
+    },
+    [navigate],
   );
-  const activityShell = (
-    <ActivityWorkspace
-      contacts={contacts}
-      conversationPeers={conversations}
-      disabled={!ready}
-      activityError={activityError}
-      activityLoading={activityLoading}
-      activityPage={activityPage}
-      fieldTelemetry={fieldTelemetryState}
-      messageLocationPreference={messageLocationPreference}
-      onLoadOlderActivity={() => void loadActivity(true)}
-      onRefreshActivity={() => void loadActivity(false)}
-      onToggleFieldTelemetry={
-        fieldTelemetryController === null
-          ? undefined
-          : (enabled) => {
-              void fieldTelemetryController.setEnabled(enabled);
-            }
-      }
-      onToggleMessageLocationDefault={(enabled) => {
-        void setMessageLocationDefault(enabled);
-      }}
-      radioTraceAvailable={api.radioTrace !== undefined}
-      radioTraceError={radioTraceError}
-      radioTraceExportError={radioTraceExportError}
-      radioTraceExporting={radioTraceExporting}
-      radioTraceLoading={radioTraceLoading}
-      radioTracePage={radioTracePage}
-      onExportRadioTrace={(format) => void exportCompleteRadioTrace(format)}
-      onLoadOlderRadioTrace={() => void loadRadioTrace(true)}
-      onRefreshRadioTrace={() => void loadRadioTrace(false)}
-    />
-  );
-  const mapDataError = [activityError, radioTraceError]
-    .filter((message): message is string => message !== null)
-    .join(" · ");
-  const mapShell = (
-    <TransmissionMapPanel
-      compact={compact}
-      disabled={!ready}
-      evidenceError={mapFeatureEvidenceError}
-      evidenceLoading={mapFeatureEvidenceLoading}
-      error={mapDataError.length === 0 ? null : mapDataError}
-      hasOlder={
-        (activityPage?.next_before_event_id !== null &&
-          activityPage?.next_before_event_id !== undefined) ||
-        (radioTracePage?.next_before_event_id !== null &&
-          radioTracePage?.next_before_event_id !== undefined)
-      }
-      loading={activityLoading || radioTraceLoading}
-      onLoadOlder={() => {
-        void Promise.all([loadActivity(true), loadRadioTrace(true)]);
-      }}
-      onRefresh={() => {
-        void Promise.all([loadActivity(false), loadRadioTrace(false)]);
-      }}
-      onSelectFeature={selectMapFeature}
-      scene={transmissionMapScene}
-    />
-  );
-  const nomadShell = (
-    <NomadPanel
-      connected={snapshot?.connection.state === "ready"}
-      controller={nomadBrowser}
-      destinationHint={nomadDestinationHint}
-      onDestinationHintConsumed={consumeNomadDestinationHint}
-      state={nomadState}
-    />
-  );
-  const connectivityShell =
-    networkController === null ||
-    networkState === null ||
-    networkDeviceKey === null ? null : networkState.deviceKey === networkDeviceKey ? (
-      <ConnectivityPanel
-        announceNow={manualServiceAnnounce}
-        controller={networkController}
-        key={networkDeviceKey}
-        onRefreshRadioRoutes={
-          radioRoutesController === null
-            ? undefined
-            : () => {
-                void radioRoutesController.refresh();
-              }
-        }
-        radioRoutesState={radioRoutesState}
-        state={networkState}
-      />
-    ) : (
-      <View style={styles.connectivityLoading}>
-        <ActivityIndicator color={colors.green} />
-        <Text style={styles.secondaryText}>Loading this appliance&apos;s network settings…</Text>
-      </View>
-    );
+  const consumeNetworkSubtopicHint = useCallback(() => {
+    setNetworkSubtopicHint(null);
+  }, []);
 
-  const deviceName =
-    networkState !== null &&
-    networkState.deviceKey === networkDeviceKey &&
-    networkState.loadState === "ready"
-      ? (networkState.configuration?.device_name ?? null)
-      : null;
-
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <ApplianceTopBar
-        busy={busy}
-        compact={compact}
-        connectivityAvailable={connectivityAvailable}
-        mobileSidebarVisible={mobileSidebarVisible}
-        onOpenContacts={() => setMobileSidebarVisible(true)}
-        onReconnect={() => void reconnectActiveProfile()}
-        onSelectWorkspace={(nextWorkspace) => {
-          if (nextWorkspace !== "lxmf") setMobileSidebarVisible(false);
-          setWorkspace(nextWorkspace);
-        }}
-        onSync={() => void run(() => api.sync())}
-        ready={ready}
-        snapshot={snapshot}
-        workspace={workspace}
-      />
-      {(ready || (canManageProfiles && hasSavedProfiles)) &&
-      !(compact && workspace === "lxmf" && keyboardVisible) ? (
-        <ApplianceStatusCard
-          busy={busy}
-          canAddAppliance={canAddAppliance}
-          compact={compact}
-          deviceName={deviceName}
-          exactBleTargetRequired={exactBleTargetRequired}
-          nativeCore={nativeCore}
-          onActivateProfile={activateApplianceProfile}
-          onAddAppliance={beginAddAppliance}
-          onClearProfileOperation={() => setProfileOperation({ state: "idle" })}
-          onForgetProfile={api.forgetProfile === undefined ? null : forgetInactiveProfile}
-          onReconnect={reconnectActiveProfile}
-          onRepairBleBond={api.repairBleBond === undefined ? null : repairActiveBleBond}
-          onSync={() => void run(() => api.sync())}
-          profileOperation={profileOperation}
-          profiles={canManageProfiles ? profiles : null}
-          snapshot={snapshot}
-        />
-      ) : null}
-      {displayedError === null || displayedError === undefined ? null : (
-        <View accessibilityLiveRegion="assertive" style={styles.errorBanner}>
-          <Text style={styles.errorText}>{displayedError}</Text>
-        </View>
-      )}
-      {ready &&
-      (messageNotificationPermission.state === "disabled" ||
-        messageNotificationPermission.state === "error") ? (
-        <View accessibilityLiveRegion="polite" style={styles.notificationPermissionBanner}>
-          <Text style={styles.notificationPermissionText}>
-            {messageNotificationPermission.state === "error"
-              ? `Phone notification setup failed: ${messageNotificationPermission.message}`
-              : messageNotificationPermission.reason === "android_channel"
-                ? "The Android LXMF notification channel is disabled in system settings."
-                : messageNotificationPermission.canAskAgain
-                  ? "Enable phone alerts for newly collected LXMF messages."
-                  : "Phone alerts are disabled in system settings."}
-          </Text>
-          <ActionButton
-            label={
-              messageNotificationPermission.state === "disabled" &&
-              !messageNotificationPermission.canAskAgain
-                ? "Open settings"
-                : "Enable"
-            }
-            onPress={() => void enableMessageNotifications()}
-            secondary
-          />
-        </View>
-      ) : null}
-      {messageNotificationError === null ? null : (
-        <View accessibilityLiveRegion="assertive" style={styles.errorBanner}>
-          <Text style={styles.errorText}>{messageNotificationError}</Text>
-        </View>
-      )}
-      {profileOperation.state === "idle" ? null : (
-        <View
-          accessibilityLiveRegion={profileOperation.state === "error" ? "assertive" : "polite"}
-          style={[
-            styles.profileOperationBanner,
-            profileOperation.state === "error" && styles.errorBanner,
-            profileOperation.state === "success" && styles.reconnectBanner,
-          ]}
-        >
-          <Text
-            style={[styles.reconnectText, profileOperation.state === "error" && styles.errorText]}
-          >
-            {profileOperation.message}
-          </Text>
-        </View>
-      )}
-      {reconnectProgress === null ? null : (
-        <View accessibilityLiveRegion="polite" style={styles.reconnectBanner}>
-          <Text style={styles.reconnectText}>{foregroundReconnectMessage(reconnectProgress)}</Text>
-        </View>
-      )}
-      {busy ? <ActivityIndicator color="#91e6a7" style={styles.activity} /> : null}
-      <OnboardingPanel
-        addingAppliance={addingAppliance}
-        busy={busy}
-        knownProfiles={profiles}
-        onboarding={onboarding}
-        onCancel={cancelOnboarding}
-        onMutation={onboardingMutation}
-        onScanBleCandidates={bleCandidateScanner}
-        onSwitchKnownProfile={switchToKnownProfile}
-      />
-      {ready ? (
-        <KeyboardAvoidingView
-          behavior={KEYBOARD_LAYOUT.avoidingBehavior}
-          enabled={KEYBOARD_LAYOUT.avoidingEnabled}
-          style={styles.keyboardAvoiding}
-        >
-          {workspace === "nomad"
-            ? nomadShell
-            : workspace === "activity"
-              ? activityShell
-              : workspace === "map"
-                ? mapShell
-                : workspace === "connectivity"
-                  ? connectivityShell
-                  : applianceShell}
-        </KeyboardAvoidingView>
-      ) : null}
-    </SafeAreaView>
+  const onMeasurePath = useCallback(
+    (destination: string) => reticulumProbe.measure(destination),
+    [reticulumProbe],
   );
+  const onAbandonRetainedProbe = useCallback(() => {
+    reticulumProbe.abandonRetainedProbe();
+  }, [reticulumProbe]);
+
+  const value: ApplianceContextValue = {
+    compact,
+    showSidebar,
+    workspace,
+    keyboardVisible,
+    messagePane,
+    selectMessagePane: (pane) => setMessagePane(pane),
+    navigate,
+    browseNomad,
+
+    busy,
+    ready,
+    displayedError,
+    snapshot,
+    nativeCore,
+    onboarding,
+    profiles,
+    deviceName:
+      networkState !== null &&
+      networkState.deviceKey === networkDeviceKey &&
+      networkState.loadState === "ready"
+        ? (networkState.configuration?.device_name ?? null)
+        : null,
+    canManageProfiles,
+    hasSavedProfiles,
+    canAddAppliance,
+    canForgetProfile: api.forgetProfile !== undefined,
+    canRepairBond: api.repairBleBond !== undefined,
+    exactBleTargetRequired,
+    connectivityAvailable,
+    foreground,
+
+    profileOperation,
+    messageNotificationPermission,
+    messageNotificationError,
+    reconnectProgress,
+    enableMessageNotifications,
+
+    activateApplianceProfile,
+    beginAddAppliance,
+    reconnectActiveProfile,
+    repairActiveBleBond,
+    forgetInactiveProfile,
+    clearProfileOperation: () => setProfileOperation({ state: "idle" }),
+    sync: () => void run(() => api.sync()),
+
+    addingAppliance,
+    cancelOnboarding,
+    onboardingMutation,
+    bleCandidateScanner,
+    switchToKnownProfile,
+
+    contacts,
+    conversations,
+    selected,
+    selectedConversation,
+    timeline,
+    chooseContact,
+    upsertContact,
+    send,
+    retryMessage,
+    loadMessageActivity,
+    loadMessageRadioTrace,
+    exportRadioTrace,
+    onMeasurePath,
+    onAbandonRetainedProbe,
+    clearDraft: () => {
+      draft.current = null;
+    },
+    reticulumProbeState,
+    messageLocationPreference,
+    nearbyReader,
+
+    activityError,
+    activityLoading,
+    activityPage,
+    loadActivity,
+    radioTraceAvailable: api.radioTrace !== undefined,
+    radioTraceError,
+    radioTraceLoading,
+    radioTracePage,
+    radioTraceExportError,
+    radioTraceExporting,
+    loadRadioTrace,
+    exportCompleteRadioTrace,
+    fieldTelemetryState,
+    onToggleFieldTelemetry:
+      fieldTelemetryController === null
+        ? undefined
+        : (enabled) => {
+            void fieldTelemetryController.setEnabled(enabled);
+          },
+    setMessageLocationDefault,
+
+    transmissionMapScene,
+    mapFeatureEvidenceError,
+    mapFeatureEvidenceLoading,
+    selectMapFeature,
+
+    nomadBrowser,
+    nomadState,
+    nomadDestinationHint,
+    consumeNomadDestinationHint,
+    nomadConnected: snapshot?.connection.state === "ready",
+
+    networkController,
+    networkState,
+    networkDeviceKey,
+    manualServiceAnnounce,
+    radioRoutesController,
+    radioRoutesState,
+    onRefreshRadioRoutes:
+      radioRoutesController === null
+        ? undefined
+        : () => {
+            void radioRoutesController.refresh();
+          },
+    networkSubtopicHint,
+    openNetworkSubtopic,
+    consumeNetworkSubtopicHint,
+  };
+
+  return <ApplianceContext.Provider value={value}>{children}</ApplianceContext.Provider>;
 }

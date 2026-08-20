@@ -149,10 +149,12 @@ impl IdentityHash {
 pub enum DiagnosticInterfaceKind {
     /// A LoRa packet-radio interface.
     LoRa,
-    /// A Reticulum TCP client or server interface.
-    Tcp,
+    /// An outbound Reticulum TCP client interface.
+    TcpClient,
     /// Another transport family not yet represented by a stable category.
     Other,
+    /// An inbound Reticulum TCP server interface.
+    TcpServer,
 }
 
 impl DiagnosticInterfaceKind {
@@ -160,8 +162,9 @@ impl DiagnosticInterfaceKind {
     pub const fn wire_code(self) -> u8 {
         match self {
             Self::LoRa => 0,
-            Self::Tcp => 1,
+            Self::TcpClient => 1,
             Self::Other => 2,
+            Self::TcpServer => 3,
         }
     }
 }

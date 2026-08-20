@@ -87,7 +87,8 @@ export function retainedRouteFamily(
   switch (record?.kind) {
     case "lora":
       return "lora";
-    case "tcp":
+    case "tcp_client":
+    case "tcp_server":
       return "tcp";
     default:
       return "other";
