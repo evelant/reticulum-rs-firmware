@@ -12,6 +12,7 @@ active direction.
 ## Understand the project
 
 - [Architecture](architecture.md)
+- [Over-the-air firmware updates](ota-updates.md) (plan)
 - [Current capabilities and roadmap](roadmap.md)
 - [Crate index](reference/crates.md)
 - [E290 hardware](hardware/e290.md)

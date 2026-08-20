@@ -34,6 +34,9 @@ absent.
    multi-user policy.
 7. Add other boards and packet interfaces through the existing portable
    boundaries.
+8. Add over-the-air firmware updates, starting with the BLE foundation and the
+   Reticulum identity-allow-listed delivery path; see the
+   [OTA plan](ota-updates.md).
 
 ## Important limitations
 
