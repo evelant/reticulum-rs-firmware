@@ -20,9 +20,8 @@ use reticulum_appliance_display_model::{DisplayCommand, DisplayState};
 use reticulum_e290_firmware::{
     display_coordinator::{DisplayCoordinatorOutput, E290DisplayCoordinator},
     display_handoff::{
-        DisplayBootClearOutcome, DisplayCompletion, DisplayHomeTelemetry, DisplayReceiver,
-        DisplayRenderOutcome, DisplayRequest, DisplayTelemetryReceiver,
-        overlay_observed_home_telemetry,
+        DisplayCompletion, DisplayHomeTelemetry, DisplayReceiver, DisplayRenderOutcome,
+        DisplayRequest, DisplayTelemetryReceiver, overlay_observed_home_telemetry,
     },
     display_render::render_display_view,
 };
@@ -79,22 +78,6 @@ fn coordinate_request(
         DisplayCommand::ShowBooting { label } => coordinator.as_mut().map_or(
             DisplayCoordinatorOutput::Publish(DisplayCommand::ShowBooting { label }),
             |owner| owner.show_booting(label),
-        ),
-        DisplayCommand::ShowPairing {
-            label,
-            passkey,
-            expires_after_seconds,
-        } => match coordinator.as_mut() {
-            Some(owner) => owner.show_pairing(label, passkey, expires_after_seconds),
-            None => DisplayCoordinatorOutput::Publish(DisplayCommand::ShowPairing {
-                label,
-                passkey,
-                expires_after_seconds,
-            }),
-        },
-        DisplayCommand::ClearPairingSecret { label, reason } => coordinator.as_mut().map_or(
-            DisplayCoordinatorOutput::Publish(DisplayCommand::ClearPairingSecret { label, reason }),
-            |owner| owner.clear_pairing_secret(label, reason),
         ),
     }
 }
@@ -196,13 +179,11 @@ pub(crate) async fn run(
         .await
         .is_err()
     {
-        receiver.report_boot_clear(DisplayBootClearOutcome::Faulted);
         error!(
-            "e290-node stage=display-boot-clear status=FAIL action=disable-display-dependent-fresh-pairing lora_routing=continue"
+            "e290-node stage=display-boot-clear status=FAIL action=disable-display lora_routing=continue"
         );
         disable_forever(&mut display_power, &mut receiver).await
     }
-    receiver.report_boot_clear(DisplayBootClearOutcome::Ready);
     info!("e290-node stage=display-boot-clear status=PASS physical_blank=true display_power=low");
 
     let mut state = DisplayState::new();
@@ -241,7 +222,11 @@ pub(crate) async fn run(
             if polling {
                 owner.poll(now_ms)
             } else {
-                owner.set_uncollected_messages(telemetry.uncollected_messages(), now_ms)
+                owner.set_home_telemetry(
+                    telemetry.appliance_label(),
+                    telemetry.uncollected_messages(),
+                    now_ms,
+                )
             }
         } else {
             DisplayCoordinatorOutput::Unchanged
@@ -262,7 +247,11 @@ pub(crate) async fn run(
             telemetry = Some(newer);
         }
         if let (Some(owner), Some(telemetry)) = (coordinator.as_mut(), telemetry) {
-            let output = owner.set_uncollected_messages(telemetry.uncollected_messages(), now_ms);
+            let output = owner.set_home_telemetry(
+                telemetry.appliance_label(),
+                telemetry.uncollected_messages(),
+                now_ms,
+            );
             poll_at_ms = retain_poll_deadline(&output, poll_at_ms, false);
             if let Some(newer) = output.into_command() {
                 command = newer;
@@ -278,7 +267,7 @@ pub(crate) async fn run(
                 ));
             }
             error!(
-                "e290-node stage=display-refresh status=FAIL phase=initialize action=disable-display-dependent-fresh-pairing lora_routing=continue"
+                "e290-node stage=display-refresh status=FAIL phase=initialize action=disable-display lora_routing=continue"
             );
             disable_forever(&mut display_power, &mut receiver).await
         }
@@ -298,8 +287,11 @@ pub(crate) async fn run(
                 telemetry = Some(newer);
             }
             if let (Some(owner), Some(telemetry)) = (coordinator.as_mut(), telemetry) {
-                let output =
-                    owner.set_uncollected_messages(telemetry.uncollected_messages(), now_ms);
+                let output = owner.set_home_telemetry(
+                    telemetry.appliance_label(),
+                    telemetry.uncollected_messages(),
+                    now_ms,
+                );
                 poll_at_ms = retain_poll_deadline(&output, poll_at_ms, false);
                 if let Some(newer_command) = output.into_command() {
                     command = newer_command;
@@ -356,13 +348,13 @@ pub(crate) async fn run(
             DisplayRenderOutcome::Faulted => {
                 if let Some((request_id, requested_view)) = requested_completion {
                     error!(
-                        "e290-node stage=display-refresh status=FAIL phase=refresh-or-shutdown request={} view={:?} action=disable-display-dependent-fresh-pairing lora_routing=continue",
+                        "e290-node stage=display-refresh status=FAIL phase=refresh-or-shutdown request={} view={:?} action=disable-display lora_routing=continue",
                         request_id.sequence(),
                         requested_view,
                     );
                 } else {
                     error!(
-                        "e290-node stage=display-refresh status=FAIL phase=refresh-or-shutdown source=home-telemetry action=disable-display-dependent-fresh-pairing lora_routing=continue"
+                        "e290-node stage=display-refresh status=FAIL phase=refresh-or-shutdown source=home-telemetry action=disable-display lora_routing=continue"
                     );
                 }
                 disable_forever(&mut display_power, &mut receiver).await

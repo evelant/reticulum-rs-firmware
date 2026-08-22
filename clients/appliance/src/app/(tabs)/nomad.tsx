@@ -4,6 +4,7 @@ import { useAppliance } from "../../lib/appliance-context.tsx";
 export default function NomadScreen() {
   const {
     consumeNomadDestinationHint,
+    nomadAvailable,
     nomadBrowser,
     nomadConnected,
     nomadDestinationHint,
@@ -12,6 +13,7 @@ export default function NomadScreen() {
 
   return (
     <NomadPanel
+      available={nomadAvailable}
       connected={nomadConnected}
       controller={nomadBrowser}
       destinationHint={nomadDestinationHint}

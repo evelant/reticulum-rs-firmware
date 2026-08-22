@@ -3,9 +3,9 @@ import { ScrollView } from "react-native";
 
 import { useAppliance } from "../lib/appliance-context.tsx";
 import { buildNodeInterfaces } from "../lib/node-interfaces.ts";
+import { ApplianceLabelEditor } from "./ApplianceLabelEditor.tsx";
 import { ApplianceStatusCard } from "./ApplianceStatusCard.tsx";
 import { styles } from "./appliance-screen-styles.ts";
-import { BoardNameEditor } from "./BoardNameEditor.tsx";
 import { NodeInterfacesPanel } from "./NodeInterfacesPanel.tsx";
 
 export function AppliancesPanel() {
@@ -15,13 +15,12 @@ export function AppliancesPanel() {
     busy,
     canAddAppliance,
     canForgetProfile,
-    canRepairBond,
     clearProfileOperation,
-    deviceName,
-    exactBleTargetRequired,
+    applianceLabel,
+    applianceLabelReady,
     forgetInactiveProfile,
     nativeCore,
-    networkController,
+    mutateApplianceLabel,
     networkDeviceKey,
     networkState,
     openNetworkSubtopic,
@@ -29,7 +28,6 @@ export function AppliancesPanel() {
     profiles,
     radioRoutesState,
     reconnectActiveProfile,
-    repairActiveBleBond,
     snapshot,
     sync,
   } = useAppliance();
@@ -50,12 +48,7 @@ export function AppliancesPanel() {
     [networkDeviceKey, networkState, radioRoutesState?.snapshot],
   );
 
-  const nameEditorReady =
-    networkController !== null &&
-    networkState !== null &&
-    networkState.deviceKey === networkDeviceKey &&
-    networkState.loadState === "ready";
-  const mutating = networkState?.mutation.state === "running";
+  const labelEditorReady = applianceLabelReady && mutateApplianceLabel !== null;
 
   return (
     <ScrollView
@@ -67,27 +60,21 @@ export function AppliancesPanel() {
         busy={busy}
         canAddAppliance={canAddAppliance}
         compact={false}
-        deviceName={deviceName}
-        exactBleTargetRequired={exactBleTargetRequired}
+        applianceLabel={applianceLabel}
         nativeCore={nativeCore}
         onActivateProfile={activateApplianceProfile}
         onAddAppliance={beginAddAppliance}
         onClearProfileOperation={clearProfileOperation}
         onForgetProfile={canForgetProfile ? forgetInactiveProfile : null}
         onReconnect={reconnectActiveProfile}
-        onRepairBleBond={canRepairBond ? repairActiveBleBond : null}
         onSync={sync}
         profileOperation={profileOperation}
         profiles={profiles}
         snapshot={snapshot}
       />
       <NodeInterfacesPanel interfaces={interfaces} onConfigure={openNetworkSubtopic} />
-      {nameEditorReady && networkController !== null ? (
-        <BoardNameEditor
-          disabled={mutating}
-          name={deviceName}
-          onSave={(name) => networkController.mutate({ kind: "set_device_name", name })}
-        />
+      {labelEditorReady && mutateApplianceLabel !== null ? (
+        <ApplianceLabelEditor name={applianceLabel} onSave={mutateApplianceLabel} />
       ) : null}
     </ScrollView>
   );

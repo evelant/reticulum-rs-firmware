@@ -1,65 +1,77 @@
 # Roadmap
 
-The project has a usable alpha appliance: pair a phone over BLE, exchange and
-retain LXMF over LoRa, inspect network evidence, browse the bounded Nomad page,
-configure Wi-Fi, and connect the node to an upstream Reticulum TCP peer. The
-firmware continues receiving, routing, retrying, and storing while the app is
-absent.
+The current development image is composed around PRNS with one generic,
+allocation-free Embassy accepted-announce observer. The source contains the
+PRNS E290 node, product applications, generic storage arena, native client node,
+host web gateway, and bounded OTA transfer. The legacy alpha graph and custom
+control bearer have been removed. It is not yet a qualified release: mobile,
+network, and rollback claims require powered evidence.
 
-## Working now
+## Implemented architecture
 
-| Area | Current capability |
+| Area | Current implementation |
 | --- | --- |
-| Hardware | E290-HF with 16 MiB flash, 8 MiB mapped PSRAM, SX1262 LoRa, and e-paper |
-| Reticulum | Announces, routing, path discovery, DATA/proofs, forwarding, responder Links, and bounded initiator Links |
-| LXMF | Durable opportunistic and direct delivery, board-owned retry, message requests, contacts, and optional sender location |
-| Diagnostics | Interfaces, routes, LoRa counters, first-arrival RSSI/SNR, probes, and packet-correlated traces |
-| Local access | Authenticated BLE, fileless onboarding, persistent bond, board-only bond recovery, and multiple app profiles |
-| Internet uplink | Managed Wi-Fi station and one outbound Reticulum TCP peer |
-| Discovery | Nearby LXMF announces, manual/automatic service announces, and opt-in RMAP publication |
-| NomadNet | Discovery and one bounded static Micron page request/response |
-| Client | One Expo/TypeScript application for iOS, Android, and web with native Rust state ownership |
-| Display | Readiness, pairing, identity, service state, and durable new-message indication |
+| Hardware | E290-HF with 16 MiB flash, mapped PSRAM, SX1262 LoRa, and e-paper composition |
+| Reticulum | Exact PRNS revision owns routing, proofs, Links, requests, Resources, persistence, and interfaces; the generic Embassy observer reports already accepted announces without changing admission |
+| Interfaces | PRNS LoRa, Bluetooth Auto, and optional outbound TCP lanes in the product recipe |
+| Applications | Shared management/OTA, `lxmf.delivery`, `nomadnetwork.node`, and opt-in announce-only RMAP destinations |
+| Management | Identified-Link request authorization and physical-presence enrollment backed by a durable identity allow-list |
+| LXMF | Python-compatible parsing and signature states, durable inbound store, persist-before-accept outbound journal, and board-owned retry |
+| Client | Persisted native/host PRNS nodes feeding the existing Rust SQLite and sync actors |
+| OTA | A/B layout, bounded PRNS Resource chunks, flash readback, complete digest/image validation, activation, native staging UI, and explicit reboot |
+| Storage | One generic `product_state` arena plus independent PRNS persistence; no physical partition per application |
 
-## Near-term priorities
+This table describes code present in the migration worktree, not powered proof
+or a release claim.
 
-1. Validate sustained multi-hop routing and both directions of LoRa/TCP border
-   traffic under disconnect and reconnect.
-2. Improve RF range through controlled antenna, power, placement, modulation,
+## Migration completion priorities
+
+1. Pass formatting, workspace tests, clippy, app verification, Python RNS/LXMF
+   interop, and both E290 profiles from a clean clone.
+2. Continue powered qualification of PRNS's native SX126x and Bluetooth Auto
+   paths on the E290, including recovery and sustained traffic.
+3. Exercise iOS, Android, and host Bluetooth Auto enrollment, reconnect,
+   process death, sync, and explicit foreground/background behavior.
+4. Qualify LoRa/Internal and TCP/Boundary routing, multi-hop behavior,
+   reconnect, route/ratchet restore, and app-absent operation.
+5. Complete OTA health projection and live native transfer progress, then
+   qualify the packaged rollback-enabled
+   bootloader and 30-second application confirmation on powered hardware. Prove
+   valid, malformed, interrupted, unauthorized, flash-failure, startup-failure,
+   and pre-confirmation reset cases over Bluetooth Auto, LoRa, and TCP.
+
+## Product priorities after migration
+
+1. Add storage retention, compaction, export, and reset/recovery UX within the
+   generic application registry.
+2. Complete native background notification lifecycles on iOS and Android.
+3. Expand NomadNet beyond the bounded static page subset.
+4. Add management revocation, multi-user policy, secure backup, and at-rest
+   protection.
+5. Improve RF range through controlled antenna, power, placement, modulation,
    and packet-trace testing.
-3. Add storage retention, compaction, export, and reset/recovery UX.
-4. Complete native background notification lifecycles on iOS and Android.
-5. Expand NomadNet beyond the static one-packet page subset.
-6. Harden credential management, revocation, encrypted local storage, and
-   multi-user policy.
-7. Add other boards and packet interfaces through the existing portable
-   boundaries.
-8. Add over-the-air firmware updates, starting with the BLE foundation and the
-   Reticulum identity-allow-listed delivery path; see the
-   [OTA plan](ota-updates.md).
+6. Add other boards and applications through PRNS public boundaries without
+   application-combination partition schemes.
 
 ## Important limitations
 
-- The firmware and app are alpha and can require coordinated reprovisioning
-  after protocol or storage changes.
-- LXMF storage is bounded and append-oriented; long-term retention and
-  compaction are not complete.
-- One outbound TCP peer is supported. Public endpoint presets are convenience
+- The migration is an alpha reset: earlier board and app state is discarded.
+- PRNS immediate proof can precede durable LXMF persistence; the documented
+  crash window is intentionally not hidden by a deferred-proof extension.
+- Direct LXMF Link delivery remains open until it is implemented through
+  unmodified PRNS public APIs or a genuinely generic attribution gap is proven.
+- The packaged bootloader and application confirmation implement ESP-IDF's
+  rollback state machine, but they are not an anti-brick claim until a powered
+  candidate failure selects the previous image without USB intervention.
+- One outbound TCP peer is supported. Endpoint presets are convenience
   metadata, not trust anchors or availability guarantees.
-- Wi-Fi/BLE coexistence consumes scarce internal RAM even when ample PSRAM is
-  available.
-- Nearby observations and retained routes are evidence, not connected-peer or
+- Nearby announces and retained routes are evidence, not connected-peer or
   delivery guarantees.
-- Receiver RSSI/SNR describes the final hop into that appliance, not every hop
-  or the complete end-to-end path.
-- The Reticulum probe tests path-and-proof reachability, not LXMF service,
-  throughput, or remote request signal.
-- RMAP publication is public and disabling it does not immediately retract
-  already propagated data.
-- Locked-phone notifications, full Android/iOS background recovery, storage
-  encryption, and multi-phone authorization are incomplete.
+- Receiver RSSI/SNR describes the final hop into that appliance, not complete
+  end-to-end history.
+- Product and PRNS state are not encrypted at rest in the alpha image.
 - The E290 exposes requested SX1262 output power, not calibrated conducted
-  power or antenna EIRP. Range depends heavily on antenna quality, placement,
-  power integrity, terrain, and matching radio profiles.
+  power or antenna EIRP.
 
-Add roadmap items only when they remain actionable in the current architecture.
+Add roadmap work only when it fits the PRNS/product ownership boundary and has
+an evidence-backed acceptance test.

@@ -12,19 +12,14 @@ const fn identity_hash(tag: u8) -> IdentityHash {
     IdentityHash::new([tag; IDENTITY_HASH_LENGTH])
 }
 
-const fn public_key(tag: u8) -> IdentityPublicKey {
-    IdentityPublicKey::new([tag; IDENTITY_PUBLIC_KEY_LENGTH])
-}
-
 fn observation(tag: u8, app_data: &[u8], observed_at: u64) -> AuthenticatedAnnounceObservation<'_> {
     AuthenticatedAnnounceObservation::new(
         destination(tag),
         identity_hash(tag.wrapping_add(1)),
-        public_key(tag.wrapping_add(2)),
         app_data,
         ObservationMetadata::new(
             tag,
-            ObservedInterfaceId::new(tag.wrapping_add(3)),
+            ObservedInterfaceId::new([tag.wrapping_add(3); INTERFACE_ID_LENGTH]),
             SignalObservations::new(Some(-100 + i16::from(tag)), Some(i16::from(tag))),
             MonotonicMillis::new(observed_at),
         ),
@@ -33,15 +28,17 @@ fn observation(tag: u8, app_data: &[u8], observed_at: u64) -> AuthenticatedAnnou
 
 #[test]
 fn zero_peer_capacity_is_an_explicit_construction_error() {
+    let mut slots = [];
     assert!(matches!(
-        DiscoveredPeers::<0, 8>::try_new(),
+        DiscoveredPeers::<8>::try_new(&mut slots),
         Err(DiscoveryCapacityError::ZeroPeerCapacity)
     ));
 }
 
 #[test]
 fn insertion_copies_bounded_authenticated_evidence() {
-    let mut table = DiscoveredPeers::<2, 8>::try_new().unwrap();
+    let mut slots = [None; 2];
+    let mut table = DiscoveredPeers::<8>::try_new(&mut slots).unwrap();
     let mut source = *b"peer";
     let outcome = table.observe(observation(1, &source, 10)).unwrap();
     source.fill(0);
@@ -54,9 +51,11 @@ fn insertion_copies_bounded_authenticated_evidence() {
     let peer = table.get(destination(1)).unwrap();
     assert_eq!(peer.app_data(), b"peer");
     assert_eq!(peer.identity_hash(), identity_hash(2));
-    assert_eq!(peer.public_key(), public_key(3));
     assert_eq!(peer.hops(), 1);
-    assert_eq!(peer.interface(), ObservedInterfaceId::new(4));
+    assert_eq!(
+        peer.interface(),
+        ObservedInterfaceId::new([4; INTERFACE_ID_LENGTH])
+    );
     assert_eq!(peer.signal().rssi_dbm(), Some(-99));
     assert_eq!(peer.signal().snr_db(), Some(1));
     assert_eq!(peer.observed_at(), MonotonicMillis::new(10));
@@ -65,16 +64,16 @@ fn insertion_copies_bounded_authenticated_evidence() {
 
 #[test]
 fn matching_destination_updates_in_place_with_a_new_generation() {
-    let mut table = DiscoveredPeers::<2, 8>::try_new().unwrap();
+    let mut slots = [None; 2];
+    let mut table = DiscoveredPeers::<8>::try_new(&mut slots).unwrap();
     table.observe(observation(1, b"old", 10)).unwrap();
     let replacement = AuthenticatedAnnounceObservation::new(
         destination(1),
         identity_hash(9),
-        public_key(10),
         b"new-data",
         ObservationMetadata::new(
             7,
-            ObservedInterfaceId::new(8),
+            ObservedInterfaceId::new([8; INTERFACE_ID_LENGTH]),
             SignalObservations::UNKNOWN,
             MonotonicMillis::new(11),
         ),
@@ -86,16 +85,19 @@ fn matching_destination_updates_in_place_with_a_new_generation() {
     assert_eq!(table.len(), 1);
     let peer = table.get(destination(1)).unwrap();
     assert_eq!(peer.identity_hash(), identity_hash(9));
-    assert_eq!(peer.public_key(), public_key(10));
     assert_eq!(peer.app_data(), b"new-data");
     assert_eq!(peer.hops(), 7);
-    assert_eq!(peer.interface(), ObservedInterfaceId::new(8));
+    assert_eq!(
+        peer.interface(),
+        ObservedInterfaceId::new([8; INTERFACE_ID_LENGTH])
+    );
     assert_eq!(peer.signal(), SignalObservations::UNKNOWN);
 }
 
 #[test]
 fn full_table_evicts_oldest_latest_observation_deterministically() {
-    let mut table = DiscoveredPeers::<2, 1>::try_new().unwrap();
+    let mut slots = [None; 2];
+    let mut table = DiscoveredPeers::<1>::try_new(&mut slots).unwrap();
     table.observe(observation(1, b"a", 10)).unwrap();
     table.observe(observation(2, b"b", 10)).unwrap();
     table.observe(observation(1, b"c", 10)).unwrap();
@@ -116,7 +118,8 @@ fn full_table_evicts_oldest_latest_observation_deterministically() {
 
 #[test]
 fn oversize_rejection_is_explicit_and_atomic() {
-    let mut table = DiscoveredPeers::<1, 3>::try_new().unwrap();
+    let mut slots = [None; 1];
+    let mut table = DiscoveredPeers::<3>::try_new(&mut slots).unwrap();
     table.observe(observation(1, b"ok", 10)).unwrap();
 
     assert_eq!(
@@ -134,7 +137,8 @@ fn oversize_rejection_is_explicit_and_atomic() {
 
 #[test]
 fn global_time_regression_is_explicit_and_atomic_but_equal_time_is_valid() {
-    let mut table = DiscoveredPeers::<2, 1>::try_new().unwrap();
+    let mut slots = [None; 2];
+    let mut table = DiscoveredPeers::<1>::try_new(&mut slots).unwrap();
     table.observe(observation(1, b"a", 10)).unwrap();
 
     assert_eq!(
@@ -153,7 +157,8 @@ fn global_time_regression_is_explicit_and_atomic_but_equal_time_is_valid() {
 
 #[test]
 fn generation_exhaustion_is_explicit_and_atomic() {
-    let mut table = DiscoveredPeers::<1, 1>::try_new().unwrap();
+    let mut slots = [None; 1];
+    let mut table = DiscoveredPeers::<1>::try_new(&mut slots).unwrap();
     table.latest_generation = u64::MAX;
 
     assert_eq!(
@@ -166,7 +171,8 @@ fn generation_exhaustion_is_explicit_and_atomic() {
 
 #[test]
 fn one_record_pages_follow_generation_and_report_projection_gaps() {
-    let mut table = DiscoveredPeers::<2, 1>::try_new().unwrap();
+    let mut slots = [None; 2];
+    let mut table = DiscoveredPeers::<1>::try_new(&mut slots).unwrap();
     table.observe(observation(1, b"a", 10)).unwrap();
     table.observe(observation(2, b"b", 11)).unwrap();
     table.observe(observation(1, b"c", 12)).unwrap();
@@ -200,14 +206,15 @@ fn one_record_pages_follow_generation_and_report_projection_gaps() {
 }
 
 #[test]
-fn debug_output_redacts_public_key_and_application_data() {
+fn debug_output_redacts_application_data() {
     let observation = observation(171, &[177; 8], 10);
     let observation_debug = format!("{observation:?}");
     assert!(observation_debug.contains("<redacted>"));
     assert!(!observation_debug.contains("173, 173"));
     assert!(!observation_debug.contains("177, 177"));
 
-    let mut table = DiscoveredPeers::<1, 8>::try_new().unwrap();
+    let mut slots = [None; 1];
+    let mut table = DiscoveredPeers::<8>::try_new(&mut slots).unwrap();
     table.observe(observation).unwrap();
     let peer = table.get(destination(171)).unwrap();
     let peer_debug = format!("{peer:?}");

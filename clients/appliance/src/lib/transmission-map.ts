@@ -16,6 +16,7 @@ import {
   messageActivityPeerLabel,
   messageActivityStatusLabel,
 } from "./message-activity.ts";
+import { reticulumInterfaceIdHex } from "./reticulum-interface-id.ts";
 
 export type TransmissionMapFeatureKind =
   | "attempt"
@@ -344,7 +345,7 @@ function attemptDetailRows(
       { label: "Destination", value: route.event.destination },
       {
         label: "Selected route",
-        value: `${route.event.hops} hop${route.event.hops === 1 ? "" : "s"} · interface ${route.event.interface_id} · ${route.event.resolution.replaceAll("_", " ")}`,
+        value: `${route.event.hops} hop${route.event.hops === 1 ? "" : "s"} · interface ${reticulumInterfaceIdHex(route.event.interface_id)} · ${route.event.resolution.replaceAll("_", " ")}`,
       },
     );
   }
@@ -425,7 +426,7 @@ function messageLocationRows(
   }
   rows.push({
     label: "Received via",
-    value: `Interface ${ingress.interface_id}`,
+    value: `Interface ${reticulumInterfaceIdHex(ingress.interface_id)}`,
   });
   rows.push({
     label: "Receiver-local signal",
@@ -479,7 +480,10 @@ function inboundActivityMessageRows(
     });
     return rows;
   }
-  rows.push({ label: "Received via", value: `Interface ${ingress.interface_id}` });
+  rows.push({
+    label: "Received via",
+    value: `Interface ${reticulumInterfaceIdHex(ingress.interface_id)}`,
+  });
   rows.push({
     label: "Receiver-local signal",
     value:
@@ -569,7 +573,10 @@ function receptionRows(
     },
   ];
   if (ingress !== null) {
-    rows.push({ label: "Received via", value: `Interface ${ingress.interface_id}` });
+    rows.push({
+      label: "Received via",
+      value: `Interface ${reticulumInterfaceIdHex(ingress.interface_id)}`,
+    });
     rows.push({
       label: "Receiver-local final-hop signal",
       value:

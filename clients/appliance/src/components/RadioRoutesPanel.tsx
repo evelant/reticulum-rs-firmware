@@ -16,6 +16,12 @@ import {
   retainedRouteFamily,
   routeExpiryLabel,
 } from "../lib/radio-routes.ts";
+import {
+  reticulumInterfaceFamily,
+  reticulumInterfaceIdHex,
+  reticulumInterfaceKindName,
+  sameReticulumInterfaceId,
+} from "../lib/reticulum-interface-id.ts";
 
 const COLLAPSED_ROUTE_LIMIT = 4;
 
@@ -25,7 +31,8 @@ const ROUTE_FAMILY_TABS: readonly {
 }[] = [
   { label: "LoRa", value: "lora" },
   { label: "TCP", value: "tcp" },
-  { label: "Fallback & other", value: "other" },
+  { label: "Bluetooth", value: "bluetooth" },
+  { label: "Other", value: "other" },
 ];
 
 interface RadioRoutesPanelProps {
@@ -38,53 +45,35 @@ function countLabel(value: number): string {
   return new Intl.NumberFormat().format(value);
 }
 
-function interfaceKindLabel(kind: DiagnosticInterfaceView["kind"]): string {
-  switch (kind) {
-    case "lora":
-      return "LoRa";
-    case "tcp_client":
-      return "Reticulum TCP client";
-    case "tcp_server":
-      return "Reticulum TCP server";
-    case "other":
-      return "Other";
-  }
-}
-
 function interfaceStateLabel(state: DiagnosticInterfaceView["state"]): string {
   switch (state) {
-    case "online":
-      return "Online";
-    case "offline":
-      return "Offline";
-    case "faulted":
-      return "Faulted";
-  }
-}
-
-function routeResolutionLabel(resolution: RetainedRouteView["resolution"]): string {
-  switch (resolution) {
-    case "exact_ready":
-      return "Exact interface ready";
-    case "exact_offline":
-      return "Exact interface offline";
-    case "exact_missing":
-      return "Exact interface missing";
-    case "broadcast_ready":
-      return "Broadcast fallback ready";
-    case "broadcast_unavailable":
-      return "Broadcast fallback unavailable";
+    case "initializing":
+      return "Initializing";
+    case "connected":
+      return "Connected";
+    case "degraded":
+      return "Degraded";
+    case "reconnecting":
+      return "Reconnecting";
+    case "failed":
+      return "Failed";
+    case "disconnected":
+      return "Disconnected";
+    case "disabled":
+      return "Disabled";
+    case "unknown":
+      return "Unknown";
   }
 }
 
 function routeInterfaceLabel(route: RetainedRouteView, snapshot: RadioRoutesStatusView): string {
-  if (route.retained_interface_id === null) return "broadcast fallback";
-  const record = snapshot.interfaces.find(
-    (candidate) => candidate.id === route.retained_interface_id,
+  const record = snapshot.interfaces.find((candidate) =>
+    sameReticulumInterfaceId(candidate.id, route.interface_id),
   );
+  const interfaceId = reticulumInterfaceIdHex(route.interface_id);
   return record === undefined
-    ? `interface ${route.retained_interface_id}`
-    : `${interfaceKindLabel(record.kind)} · interface ${record.id}`;
+    ? `${reticulumInterfaceKindName(route.interface_id)} · interface ${interfaceId}`
+    : `${reticulumInterfaceKindName(record.id)} · interface ${interfaceId}`;
 }
 
 function familyEmptyLabel(family: RetainedRouteTransportFamily): string {
@@ -93,22 +82,15 @@ function familyEmptyLabel(family: RetainedRouteTransportFamily): string {
       return "No LoRa routes are currently retained.";
     case "tcp":
       return "No TCP routes are currently retained.";
+    case "bluetooth":
+      return "No Bluetooth routes are currently retained.";
     case "other":
-      return "No fallback or other-interface routes are currently retained.";
+      return "No other-interface routes are currently retained.";
   }
 }
 
 function shortHash(hash: string): string {
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`;
-}
-
-function bitrateLabel(bitsPerSecond: number | null): string {
-  if (bitsPerSecond === null) return "bitrate not advertised";
-  return bitsPerSecond >= 1_000_000
-    ? `${(bitsPerSecond / 1_000_000).toFixed(1)} Mbps`
-    : bitsPerSecond >= 1_000
-      ? `${(bitsPerSecond / 1_000).toFixed(1)} kbps`
-      : `${bitsPerSecond} bps`;
 }
 
 function Metric({ label, value }: { readonly label: string; readonly value: number | string }) {
@@ -129,32 +111,26 @@ function RouteRow({
   readonly route: RetainedRouteView;
   readonly snapshot: RadioRoutesStatusView;
 }) {
-  const unavailable =
-    route.resolution === "exact_offline" ||
-    route.resolution === "exact_missing" ||
-    route.resolution === "broadcast_unavailable";
   return (
     <View style={styles.routeRow}>
       <View style={styles.rowHeading}>
         <Text selectable style={styles.routeHash}>
           {route.destination}
         </Text>
-        <Text style={[styles.routeState, unavailable && styles.routeStateUnavailable]}>
-          {routeResolutionLabel(route.resolution)}
-        </Text>
+        <Text style={styles.routeState}>{route.next_hop.kind === "direct" ? "Direct" : "Via"}</Text>
       </View>
       <Text style={styles.meta}>
         {route.hops === 1 ? "direct · 1 hop" : `${route.hops} hops`} ·{" "}
         {routeInterfaceLabel(route, snapshot)}
       </Text>
       <Text selectable style={styles.meta}>
-        {route.next_hop_identity === null
+        {route.next_hop.kind === "direct"
           ? "Direct next hop"
-          : `Next-hop identity ${shortHash(route.next_hop_identity)}`}
+          : `Next-hop identity ${shortHash(route.next_hop.transport_identity)}`}
       </Text>
       <Text style={styles.meta}>
-        Learned: {elapsedAgeLabel(route.learned_age_ms)} · local LRU use:{" "}
-        {elapsedAgeLabel(route.last_local_use_age_ms)} · {routeExpiryLabel(route.expires_in_ms)}
+        Learned: {elapsedAgeLabel(route.learned_age_ms)} · local route activity:{" "}
+        {elapsedAgeLabel(route.last_activity_age_ms)} · {routeExpiryLabel(route.expires_in_ms)}
       </Text>
     </View>
   );
@@ -170,7 +146,8 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
     if (!expanded) setShowAllRoutes(false);
   }, [expanded]);
 
-  const loraInterface = snapshot?.interfaces.find((record) => record.kind === "lora") ?? null;
+  const loraInterface =
+    snapshot?.interfaces.find((record) => reticulumInterfaceFamily(record.id) === "lora") ?? null;
   const summary =
     snapshot === null
       ? state.loadState === "loading"
@@ -182,8 +159,8 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
             ? null
             : `${snapshot.lora.applied_tx_power_dbm >= 0 ? "+" : ""}${snapshot.lora.applied_tx_power_dbm} dBm applied`,
           `${snapshot.interfaces.length} interface${snapshot.interfaces.length === 1 ? "" : "s"}`,
-          `${snapshot.retained_route_count} retained route${snapshot.retained_route_count === 1 ? "" : "s"}`,
-          `${snapshot.observed_peer_count} observed peer${snapshot.observed_peer_count === 1 ? "" : "s"}`,
+          `${snapshot.route_count} route${snapshot.route_count === 1 ? "" : "s"}`,
+          `${snapshot.link_count} link${snapshot.link_count === 1 ? "" : "s"}`,
         ]
           .filter((part): part is string => part !== null)
           .join(" · ");
@@ -192,6 +169,7 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
     const grouped: Record<RetainedRouteTransportFamily, RetainedRouteView[]> = {
       lora: [],
       tcp: [],
+      bluetooth: [],
       other: [],
     };
     if (snapshot !== null) {
@@ -336,21 +314,27 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
               <Text style={styles.help}>No current interface descriptors.</Text>
             ) : (
               snapshot.interfaces.map((record) => (
-                <View key={record.id} style={styles.interfaceRow}>
+                <View key={reticulumInterfaceIdHex(record.id)} style={styles.interfaceRow}>
                   <View style={styles.headingCopy}>
                     <Text style={styles.interfaceName}>
-                      {interfaceKindLabel(record.kind)} · interface {record.id}
+                      {reticulumInterfaceKindName(record.id)} · interface{" "}
+                      {reticulumInterfaceIdHex(record.id)}
                     </Text>
                     <Text style={styles.meta}>
-                      MTU {record.logical_mtu} · {bitrateLabel(record.bitrate)} · generation{" "}
-                      {record.generation}
+                      {record.mode.replaceAll("_", " ")} mode · RX {countLabel(record.rx_bytes)} B ·
+                      TX {countLabel(record.tx_bytes)} B · {record.destinations} destinations ·{" "}
+                      {record.links} links
                     </Text>
+                    {record.failure_reason === null ? null : (
+                      <Text style={styles.error}>{record.failure_reason}</Text>
+                    )}
                   </View>
                   <Text
                     style={[
                       styles.interfaceState,
-                      record.state === "online" && styles.stateReady,
-                      record.state === "faulted" && styles.stateFaulted,
+                      (record.state === "connected" || record.state === "degraded") &&
+                        styles.stateReady,
+                      record.state === "failed" && styles.stateFaulted,
                     ]}
                   >
                     {interfaceStateLabel(record.state)}
@@ -363,14 +347,14 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
           <View style={styles.subsection}>
             <View style={styles.subsectionHeading}>
               <View style={styles.headingCopy}>
-                <Text style={styles.subsectionTitle}>Retained routes</Text>
+                <Text style={styles.subsectionTitle}>Live routes</Text>
                 <Text style={styles.help}>
-                  A retained route is routing evidence, not a connected-peer or delivery guarantee.
-                  “Local LRU use” is this node&apos;s route-table access, not last-heard time.
+                  A PRNS route is routing state, not a connected-peer or delivery guarantee. Local
+                  route activity is table use, not last-heard time.
                 </Text>
               </View>
               <Text style={styles.routeCount}>
-                {snapshot.usable_route_count}/{snapshot.retained_route_count} usable
+                {snapshot.routes.length}/{snapshot.route_count} shown
               </Text>
             </View>
             <View accessibilityRole="tablist" style={styles.routeTabs}>
@@ -401,7 +385,7 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
             {visibleRoutes.length === 0 ? (
               <Text style={styles.help}>
                 {snapshot.routes.length === 0
-                  ? "The Rete path table currently retains no routes."
+                  ? "The PRNS route table currently retains no routes."
                   : familyEmptyLabel(routeFamily)}
               </Text>
             ) : (
@@ -425,23 +409,12 @@ export function RadioRoutesPanel({ disabled = false, onRefresh, state }: RadioRo
           </View>
 
           <View style={styles.subsection}>
-            <Text style={styles.subsectionTitle}>Reticulum counters</Text>
+            <Text style={styles.subsectionTitle}>PRNS node</Text>
             <View style={styles.metricGrid}>
-              <Metric label="Received" value={snapshot.rns.received} />
-              <Metric label="Forwarded" value={snapshot.rns.forwarded} />
-              <Metric label="Duplicates" value={snapshot.rns.dedup_drops} />
-              <Metric label="Invalid" value={snapshot.rns.invalid_drops} />
-              <Metric label="Announces" value={snapshot.rns.announces_received} />
-              <Metric label="Paths learned" value={snapshot.rns.paths_learned} />
-              <Metric label="Paths expired" value={snapshot.rns.paths_expired} />
-              <Metric label="Links established" value={snapshot.rns.links_established} />
-              <Metric label="Links closed" value={snapshot.rns.links_closed} />
-              <Metric label="Links failed" value={snapshot.rns.links_failed} />
+              <Metric label="Routes" value={snapshot.route_count} />
+              <Metric label="Active links" value={snapshot.link_count} />
             </View>
-            <Text style={styles.help}>
-              Node uptime {compactDurationLabel(snapshot.uptime_ms)} · route-table revision{" "}
-              {snapshot.route_table_revision}
-            </Text>
+            <Text style={styles.help}>Node uptime {compactDurationLabel(snapshot.uptime_ms)}</Text>
           </View>
         </View>
       ) : null}

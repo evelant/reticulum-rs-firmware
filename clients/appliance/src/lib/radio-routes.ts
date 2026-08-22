@@ -3,6 +3,7 @@ import type {
   RadioRoutesStatusView,
   RetainedRouteView,
 } from "../generated/api.ts";
+import { reticulumInterfaceFamily, reticulumInterfaceIdHex } from "./reticulum-interface-id.ts";
 
 /** Normal foreground refresh interval for the bounded radio/routes snapshot. */
 export const RADIO_ROUTES_POLL_INTERVAL_MS = 5_000;
@@ -65,34 +66,21 @@ export function loraDataTxEvidenceLabel(lastTx: DiagnosticLoraLastTxView): strin
   const evidence = lastTx.data_evidence;
   return evidence === null
     ? null
-    : `Interface ${evidence.interface_id} · ${evidence.encoded_packet_len} bytes`;
+    : `Interface ${reticulumInterfaceIdHex(evidence.interface_id)} · ${evidence.encoded_packet_len} bytes`;
 }
 
 /** Transport family used to group retained routes in the diagnostics UI. */
-export type RetainedRouteTransportFamily = "lora" | "tcp" | "other";
+export type RetainedRouteTransportFamily = "bluetooth" | "lora" | "tcp" | "other";
 
 /**
- * Resolve a retained route's transport family through its retained interface
- * record. Broadcast-fallback routes carry no interface and belong to "other":
- * they are not specific to a single packet interface.
+ * Resolve a live route's transport family from PRNS's self-describing
+ * receiving-interface id.
  */
 export function retainedRouteFamily(
   route: RetainedRouteView,
-  snapshot: RadioRoutesStatusView,
+  _snapshot: RadioRoutesStatusView,
 ): RetainedRouteTransportFamily {
-  if (route.retained_interface_id === null) return "other";
-  const record = snapshot.interfaces.find(
-    (candidate) => candidate.id === route.retained_interface_id,
-  );
-  switch (record?.kind) {
-    case "lora":
-      return "lora";
-    case "tcp_client":
-    case "tcp_server":
-      return "tcp";
-    default:
-      return "other";
-  }
+  return reticulumInterfaceFamily(route.interface_id);
 }
 
 function errorText(error: unknown): string {

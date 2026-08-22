@@ -30,9 +30,9 @@ For UI-only development:
 bun run web
 ```
 
-The browser does not connect directly to BLE. On macOS, a functional web
-client uses the supported Rust host gateway, which owns one authenticated BLE
-connection and serves the generated Expo web bundle:
+The browser does not own a Reticulum engine or connect directly to Bluetooth.
+A functional web client uses the Rust host gateway, which owns one persisted
+PRNS node and serves the generated Expo web bundle:
 
 ```sh
 bun run build:web
@@ -41,22 +41,21 @@ cd ../..
 cargo build --locked -p reticulum-appliance-service
 ```
 
-The service requires an activated device credential; first-run pairing belongs
-to the native app. With the credential installed at
-`PROFILE_ROOT/devices/EUI48/credential.rdpkey`, start the service for that
-board and open the complete capability URL it prints:
+Start the service with a private state root and the exact verified management
+destination, then open the URL it prints:
 
 ```sh
 target/debug/reticulum-appliance-service \
-  --eui48 <12-hex-board-eui48> \
-  --profile-root "$HOME/.local/share/reticulum-appliance"
+  --state-root "$HOME/.local/share/reticulum-appliance" \
+  --management-destination <32-hex-destination>
 ```
 
-The profile tree and credential must be owner-private. The app bundle is
-embedded in the host executable, so rebuild the web assets before rebuilding
-the service after TypeScript changes. See the
-[host service README](../../crates/appliance-service/README.md) for explicit
-credential/database paths and optional BLE peripheral selection.
+For first enrollment, open the board's GPIO21 physical-presence window and add
+`--enroll`. The host identifies a normal PRNS Link with its own persisted
+Reticulum identity; no device credential file or custom BLE session exists.
+The state tree must be owner-private. The app bundle is embedded in the host
+executable, so rebuild web assets before rebuilding the service after
+TypeScript changes.
 
 ## iOS
 
@@ -100,8 +99,6 @@ the Rust Android targets used by the generated project:
 cargo install cargo-ndk --locked
 rustup target add --toolchain 1.97.0 \
   aarch64-linux-android \
-  armv7-linux-androideabi \
-  i686-linux-android \
   x86_64-linux-android
 ```
 
@@ -130,7 +127,7 @@ bindings.
   available.
 
 Application-level `ios/` and `android/` directories are disposable generated
-projects. Continue with [appliance pairing](pairing.md) after installing a
+projects. Continue with [appliance enrollment](pairing.md) after installing a
 native build.
 
 ## Reset incompatible app data

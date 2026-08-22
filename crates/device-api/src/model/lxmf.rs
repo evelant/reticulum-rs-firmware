@@ -354,7 +354,7 @@ pub struct LxmfDiscoveredPeer {
     app_data_len: u16,
     app_data: [u8; MAX_LXMF_PEER_APP_DATA_BYTES],
     hops: u8,
-    interface_id: u8,
+    interface_id: ReticulumInterfaceId,
     rssi_dbm: Option<i16>,
     snr_db: Option<i16>,
     observed_age_ms: u64,
@@ -370,7 +370,7 @@ impl LxmfDiscoveredPeer {
         identity_hash: IdentityHash,
         app_data: &[u8],
         hops: u8,
-        interface_id: u8,
+        interface_id: ReticulumInterfaceId,
         rssi_dbm: Option<i16>,
         snr_db: Option<i16>,
         observed_age_ms: u64,
@@ -417,8 +417,8 @@ impl LxmfDiscoveredPeer {
         self.hops
     }
 
-    /// Product-owned scalar identifying the observing interface.
-    pub const fn interface_id(&self) -> u8 {
+    /// Complete opaque identity of the observing Reticulum interface.
+    pub const fn interface_id(&self) -> ReticulumInterfaceId {
         self.interface_id
     }
 

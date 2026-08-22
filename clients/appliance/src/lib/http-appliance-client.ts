@@ -16,11 +16,9 @@ import type {
   NomadFetchPollResponse,
   NomadFetchStartRequest,
   NomadFetchStartResponse,
-  OnboardingView,
   RadioRoutesStatusView,
   RadioTracePageRequest,
   RadioTracePageView,
-  RecoveryRequest,
   ReticulumProbePollRequest,
   ReticulumProbePollResponse,
   ReticulumProbeStartRequest,
@@ -35,6 +33,7 @@ import type {
 import { apiError, capabilityFromUrl, decodeSuccessResponse } from "./api-core.ts";
 import type { ApplianceClient } from "./appliance-client.ts";
 import { applianceSnapshotFromHttp } from "./http-projection.ts";
+import type { OnboardingView } from "./onboarding.ts";
 
 const CLIENT_HEADER = "X-Reticulum-Client";
 const CLIENT_HEADER_VALUE = "web-alpha";
@@ -79,7 +78,7 @@ export class HttpApplianceClient implements ApplianceClient {
   }
 
   onboarding(): Promise<OnboardingView> {
-    return this.#request("/api/v1/onboarding");
+    return Promise.resolve({ available: false, lifecycle: { state: "unavailable" } });
   }
 
   contacts(): Promise<ContactView[]> {
@@ -142,15 +141,7 @@ export class HttpApplianceClient implements ApplianceClient {
   }
 
   startOnboarding(): Promise<NoContent> {
-    return Promise.reject(new Error("The BLE host service does not provide appliance pairing."));
-  }
-
-  refreshOnboarding(): Promise<NoContent> {
-    return Promise.reject(new Error("The BLE host service does not provide appliance pairing."));
-  }
-
-  recoverOnboarding(_request: RecoveryRequest): Promise<NoContent> {
-    return Promise.reject(new Error("The BLE host service does not provide appliance pairing."));
+    return Promise.reject(new Error("The host service does not provide appliance enrollment."));
   }
 
   sync(): Promise<NoContent> {

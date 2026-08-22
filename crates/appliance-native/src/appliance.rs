@@ -1,27 +1,22 @@
 //! Offline-capable native ownership of the durable chat runtime.
 
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use reticulum_appliance_runtime::{
-    ApplianceConfig, ApplianceHandle, ContactRequest, MessageActivityPageRequest,
-    NetworkConfigMutationRequest, NomadFetchPollRequest, NomadFetchStartRequest,
-    PhoneLocationObservationView, RadioTracePageRequest, ReticulumProbePollRequest,
-    ReticulumProbeStartRequest, RetrySendRequest, RetrySendResponse, SendRequest, SendResponse,
-    ServiceError, start_appliance,
+    ApplianceConfig, ApplianceHandle, ApplianceLabelMutationOutcome, ApplianceLabelMutationRequest,
+    ContactRequest, MessageActivityPageRequest, NetworkConfigMutationRequest,
+    NomadFetchPollRequest, NomadFetchStartRequest, PhoneLocationObservationView,
+    RadioTracePageRequest, ReticulumProbePollRequest, ReticulumProbeStartRequest, RetrySendRequest,
+    RetrySendResponse, SendRequest, SendResponse, ServiceError, start_appliance,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
 
-use crate::ble::{
-    BleConnector, BleHub, NativeBleError, NativeBlePlatformCommand, PLATFORM_COMMAND_WAIT,
-};
-use crate::credential::{
-    CredentialImportError, CredentialImportPolicy, NativeCredentialStatus, NativeCredentialSummary,
-};
+use crate::prns_node::NativePrnsNode;
+use crate::prns_session::PrnsConnector;
 use crate::profile::NativeProfileStore;
 
 /// Failure returned through the native bridge.
@@ -32,7 +27,6 @@ pub enum NativeApplianceError {
     Busy,
     Stopped,
     Storage { reason: String },
-    CredentialPublicationUncertain { reason: String },
     Serialization { reason: String },
     Internal { reason: String },
 }
@@ -45,12 +39,6 @@ impl fmt::Display for NativeApplianceError {
             Self::Stopped => formatter.write_str("native appliance has stopped"),
             Self::Storage { reason } => {
                 write!(formatter, "chat storage operation failed: {reason}")
-            }
-            Self::CredentialPublicationUncertain { reason } => {
-                write!(
-                    formatter,
-                    "credential publication completed with uncertain durability: {reason}"
-                )
             }
             Self::Serialization { reason } => {
                 write!(formatter, "chat JSON serialization failed: {reason}")
@@ -72,18 +60,7 @@ impl From<ServiceError> for NativeApplianceError {
     }
 }
 
-impl From<CredentialImportError> for NativeApplianceError {
-    fn from(error: CredentialImportError) -> Self {
-        match error {
-            CredentialImportError::Rejected { reason } => Self::Storage { reason },
-            CredentialImportError::PublicationUncertain { reason } => {
-                Self::CredentialPublicationUncertain { reason }
-            }
-        }
-    }
-}
-
-/// Native owner for one device-keyed profile and its BLE appliance session.
+/// Native owner for one durable profile and its PRNS application session.
 ///
 /// App-facing semantic DTOs remain defined by
 /// `reticulum-appliance-runtime`. Methods exchange canonical JSON so the Expo
@@ -92,132 +69,32 @@ impl From<CredentialImportError> for NativeApplianceError {
 pub struct NativeAppliance {
     handle: Mutex<Option<ApplianceHandle>>,
     close_gate: AsyncMutex<()>,
-    profile_store: Arc<NativeProfileStore>,
-    ble_hub: Arc<BleHub>,
+    profile_store: Option<Arc<NativeProfileStore>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl NativeAppliance {
-    /// Open the active device-keyed profile with the platform-owned BLE GATT
-    /// connector.
+    /// Open the active durable profile through the process-wide PRNS node.
     ///
-    /// Rust resolves both storage paths and retains the profile store for
-    /// secret-free status, import, and future board activation operations.
+    /// Rust resolves the selected management destination and its local SQLite
+    /// path. An empty catalog opens only the clean first-run database while
+    /// PRNS discovery and enrollment select the first profile.
     #[uniffi::constructor]
-    pub fn open_ble_profile(
+    pub fn open_prns_profile(
         profile_store: Arc<NativeProfileStore>,
+        prns_node: Arc<NativePrnsNode>,
     ) -> Result<Arc<Self>, NativeApplianceError> {
         let paths = profile_store.runtime_paths()?;
-        let ble_hub = BleHub::new();
         let handle = start_appliance(
             ApplianceConfig::new(paths.database),
-            BleConnector::new(paths.credential.clone(), Arc::clone(&ble_hub)),
+            PrnsConnector::new(prns_node, paths.management_destination),
         )
         .map_err(NativeApplianceError::from)?;
         Ok(Arc::new(Self {
             handle: Mutex::new(Some(handle)),
             close_gate: AsyncMutex::new(()),
-            profile_store,
-            ble_hub,
+            profile_store: Some(profile_store),
         }))
-    }
-
-    /// Inspect the configured app-private activated credential without
-    /// returning any secret bytes.
-    ///
-    /// This reports storage and credential-format validity. Connector policy
-    /// remains separate: for example, a canonical future-board credential is
-    /// Active even when the current E290 BLE profile cannot derive its exact
-    /// advertising name.
-    pub fn credential_status(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
-        self.profile_store.credential_status()
-    }
-
-    /// Validate one app-private staging file and publish its canonical 96-byte
-    /// Active credential into the configured destination.
-    ///
-    /// This alpha import is create-only: it never replaces an existing path.
-    /// The current BLE connector accepts only an E290 credential from which it
-    /// can derive the exact advertising name before publication.
-    /// The caller remains responsible for deleting its staging copy after this
-    /// method returns.
-    /// A later BLE pairing owner will populate the same storage boundary
-    /// without moving pairing proofs or secret generation into TypeScript.
-    pub fn import_activated_credential(
-        &self,
-        staging_path: String,
-    ) -> Result<NativeCredentialSummary, NativeApplianceError> {
-        let staging_path = PathBuf::from(staging_path);
-        self.profile_store
-            .import_activated_credential(&staging_path, CredentialImportPolicy::E290BleTarget)
-            .map_err(NativeApplianceError::from)
-    }
-
-    /// Register one connected, subscribed GATT peripheral.
-    ///
-    /// A prior generation must first be reported through
-    /// [`Self::ble_disconnected`]; this prevents silently orphaning its GATT
-    /// ownership. `max_write_bytes` must be the platform-reported
-    /// conservative single-write value bound, not the negotiated ATT MTU. The
-    /// bridge validates that the platform supports the mandatory 20-byte ATT
-    /// value, then caps every emitted fragment to the generated profile maximum.
-    pub fn ble_link_connected(
-        &self,
-        peripheral_id: String,
-        max_write_bytes: u32,
-    ) -> Result<u64, NativeBleError> {
-        self.ble_hub.link_connected(peripheral_id, max_write_bytes)
-    }
-
-    /// Append bytes from one confirmed TX characteristic indication.
-    pub fn ble_ingest_indication(
-        &self,
-        generation: u64,
-        bytes: Vec<u8>,
-    ) -> Result<(), NativeBleError> {
-        self.ble_hub.ingest_indication(generation, bytes)
-    }
-
-    /// Await the next write-with-response or disconnect command.
-    ///
-    /// `None` is a normal long-poll timeout. A returned write is delivered only
-    /// once; the caller must report its result through
-    /// [`Self::ble_write_succeeded`] or [`Self::ble_write_failed`].
-    pub async fn ble_next_platform_command(
-        &self,
-        generation: u64,
-    ) -> Result<Option<NativeBlePlatformCommand>, NativeBleError> {
-        let hub = Arc::clone(&self.ble_hub);
-        tokio::task::spawn_blocking(move || {
-            hub.next_platform_command(generation, PLATFORM_COMMAND_WAIT)
-        })
-        .await
-        .map_err(|error| NativeBleError::Internal {
-            reason: format!("BLE command waiter failed: {error}"),
-        })?
-    }
-
-    /// Confirm that one GATT write-with-response completed successfully.
-    pub fn ble_write_succeeded(&self, generation: u64, token: u64) -> Result<(), NativeBleError> {
-        self.ble_hub.write_succeeded(generation, token)
-    }
-
-    /// Report that one GATT write-with-response failed.
-    ///
-    /// Failure closes the generation and schedules an explicit platform
-    /// disconnect command.
-    pub fn ble_write_failed(
-        &self,
-        generation: u64,
-        token: u64,
-        reason: String,
-    ) -> Result<(), NativeBleError> {
-        self.ble_hub.write_failed(generation, token, reason)
-    }
-
-    /// Report that the platform GATT link and subscriptions are gone.
-    pub fn ble_disconnected(&self, generation: u64, reason: String) -> Result<(), NativeBleError> {
-        self.ble_hub.disconnected(generation, reason)
     }
 
     /// Return the authoritative appliance snapshot as canonical JSON.
@@ -236,6 +113,36 @@ impl NativeAppliance {
     pub async fn conversation_peers_json(&self) -> Result<String, NativeApplianceError> {
         let peers = self.active_handle()?.conversation_peers().await?;
         to_json(&peers)
+    }
+
+    /// Return the durable product-owned appliance label and refresh its
+    /// app-private per-profile cache.
+    pub async fn appliance_label_json(&self) -> Result<String, NativeApplianceError> {
+        let label = self.active_handle()?.appliance_label().await?;
+        if let Some(profile_store) = self.profile_store.as_ref() {
+            profile_store.update_active_appliance_label(label.label().map(str::to_owned))?;
+        }
+        to_json(&label)
+    }
+
+    /// Validate and compare-and-swap the product-owned appliance label.
+    pub async fn mutate_appliance_label_json(
+        &self,
+        request_json: String,
+    ) -> Result<String, NativeApplianceError> {
+        let request: ApplianceLabelMutationRequest =
+            from_json(&request_json, "appliance label mutation")?;
+        let requested_label = request.label().map(str::to_owned);
+        let outcome = self
+            .active_handle()?
+            .mutate_appliance_label(request)
+            .await?;
+        if matches!(outcome, ApplianceLabelMutationOutcome::Applied { .. })
+            && let Some(profile_store) = self.profile_store.as_ref()
+        {
+            profile_store.update_active_appliance_label(requested_label)?;
+        }
+        to_json(&outcome)
     }
 
     /// Return the bounded semantic projection of authenticated nearby
@@ -490,7 +397,7 @@ impl NativeAppliance {
         to_json(&response)
     }
 
-    /// Schedule local inbox/outbox work without requiring a ready bearer.
+    /// Schedule local inbox/outbox work without requiring a ready session.
     pub async fn sync_now(&self) -> Result<(), NativeApplianceError> {
         self.active_handle()?.sync_now().await?;
         Ok(())
@@ -498,7 +405,7 @@ impl NativeAppliance {
 
     /// Request a fresh device connection.
     ///
-    /// The BLE owner schedules a fresh connection attempt.
+    /// The PRNS connector schedules a fresh application request session.
     pub async fn reconnect(&self) -> Result<(), NativeApplianceError> {
         let handle = self.active_handle()?;
         handle.reconnect().await?;
@@ -506,11 +413,11 @@ impl NativeAppliance {
     }
 
     /// Ask a configured connector to run now if no authenticated session is
-    /// active, without disrupting an already-ready bearer.
+    /// active, without disrupting an already-ready session.
     ///
-    /// Platform-owned transports call this after registering a physical link.
+    /// Platform adapters call this after relevant Reticulum state changes.
     /// It is deliberately distinct from [`Self::reconnect`], which drops the
-    /// current session and transport lease.
+    /// current session and its ownership guard.
     pub async fn ensure_connected(&self) -> Result<(), NativeApplianceError> {
         let handle = self.active_handle()?;
         handle.ensure_connected().await?;
@@ -520,8 +427,6 @@ impl NativeAppliance {
     /// Idempotently stop the actor and close its SQLite ownership.
     pub async fn close(&self) -> Result<(), NativeApplianceError> {
         let _close_guard = self.close_gate.lock().await;
-        self.ble_hub
-            .request_owner_disconnect("native appliance was closed");
         let handle = self.lock_handle()?.take();
         match handle {
             Some(handle) => handle
@@ -573,6 +478,7 @@ fn to_json<T: Serialize>(value: &T) -> Result<String, NativeApplianceError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -633,15 +539,6 @@ mod tests {
                 std::process::id()
             )))
         }
-
-        fn profile_root(&self) -> PathBuf {
-            self.0.with_extension("profiles")
-        }
-
-        fn profile_store(&self) -> Arc<NativeProfileStore> {
-            NativeProfileStore::open(self.profile_root().to_string_lossy().into_owned())
-                .expect("test profile store opens")
-        }
     }
 
     impl Drop for TestDatabase {
@@ -649,22 +546,7 @@ mod tests {
             let _ = fs::remove_file(&self.0);
             let _ = fs::remove_file(self.0.with_extension("sqlite3-shm"));
             let _ = fs::remove_file(self.0.with_extension("sqlite3-wal"));
-            let _ = fs::remove_dir_all(self.profile_root());
         }
-    }
-
-    fn activated_credential_bytes(
-        device_id: [u8; 16],
-    ) -> [u8; reticulum_device_client::ACTIVATED_CREDENTIAL_STATE_BYTES] {
-        let mut bytes = [0_u8; reticulum_device_client::ACTIVATED_CREDENTIAL_STATE_BYTES];
-        bytes[..8].copy_from_slice(b"RDPKEY1\0");
-        bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
-        bytes[10] = 2;
-        bytes[16..32].copy_from_slice(&device_id);
-        bytes[32..48].fill(0x42);
-        bytes[48..56].copy_from_slice(&7_u64.to_le_bytes());
-        bytes[56..88].fill(0x24);
-        bytes
     }
 
     struct NetworkTestSession;
@@ -678,6 +560,23 @@ mod tests {
                 CoreDestinationHash::new([0x32; 16]),
                 CoreDestinationHash::new([0x33; 16]),
             ))
+        }
+
+        fn appliance_label_get(
+            &mut self,
+        ) -> Result<reticulum_device_api::ApplianceLabelSnapshot, Self::Error> {
+            Ok(reticulum_device_api::ApplianceLabelSnapshot::new(0, None))
+        }
+
+        fn appliance_label_mutate(
+            &mut self,
+            request: reticulum_device_api::ApplianceLabelMutationRequest<'_>,
+        ) -> Result<reticulum_device_api::ApplianceLabelMutationOutcome, Self::Error> {
+            Ok(
+                reticulum_device_api::ApplianceLabelMutationOutcome::Applied {
+                    revision: request.expected_revision.saturating_add(1),
+                },
+            )
         }
 
         fn submit(&mut self, _material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
@@ -859,11 +758,7 @@ mod tests {
             self.connected = true;
             Ok(ConnectedSession::new(
                 NetworkTestSession,
-                ConnectionMetadata::new(
-                    ConnectionTransport::BluetoothLowEnergy,
-                    "test-link",
-                    "test-board",
-                ),
+                ConnectionMetadata::new(ConnectionTransport::Reticulum, "test-link", "test-board"),
             ))
         }
     }
@@ -873,8 +768,8 @@ mod tests {
     impl Connector for OfflineTestConnector {
         fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
             Err(ConnectFailure::unavailable(
-                ConnectionTransport::BluetoothLowEnergy,
-                "BLE is intentionally unavailable in this facade test",
+                ConnectionTransport::Reticulum,
+                "Reticulum is intentionally unavailable in this facade test",
             ))
         }
     }
@@ -883,14 +778,11 @@ mod tests {
         database: &TestDatabase,
         connector: C,
     ) -> Arc<NativeAppliance> {
-        let profile_store = database.profile_store();
-        let ble_hub = BleHub::new();
         let handle = start_appliance(ApplianceConfig::new(database.0.clone()), connector).unwrap();
         Arc::new(NativeAppliance {
             handle: Mutex::new(Some(handle)),
             close_gate: AsyncMutex::new(()),
-            profile_store,
-            ble_hub,
+            profile_store: None,
         })
     }
 
@@ -937,26 +829,6 @@ mod tests {
             "idempotency_key": "66".repeat(16)
         })
         .to_string()
-    }
-
-    #[test]
-    fn only_post_publication_import_failures_cross_the_reconciliation_boundary() {
-        assert_eq!(
-            NativeApplianceError::from(CredentialImportError::Rejected {
-                reason: "exact readback mismatch".to_owned(),
-            }),
-            NativeApplianceError::Storage {
-                reason: "exact readback mismatch".to_owned(),
-            }
-        );
-        assert_eq!(
-            NativeApplianceError::from(CredentialImportError::PublicationUncertain {
-                reason: "directory sync failed".to_owned(),
-            }),
-            NativeApplianceError::CredentialPublicationUncertain {
-                reason: "directory sync failed".to_owned(),
-            }
-        );
     }
 
     #[tokio::test]
@@ -1072,12 +944,12 @@ mod tests {
             snapshot["connection"],
             json!({
                 "state": "unavailable",
-                "transport": "bluetooth_low_energy",
+                "transport": "reticulum",
             })
         );
         assert_eq!(
             snapshot["last_error"],
-            "BLE is intentionally unavailable in this facade test"
+            "Reticulum is intentionally unavailable in this facade test"
         );
 
         appliance.close().await.unwrap();
@@ -1127,7 +999,6 @@ mod tests {
                     "coding_rate_denominator": 5,
                     "tx_power_dbm": 14
                 },
-                "device_name": null
             })
         );
         assert!(!config.to_string().contains(secret));
@@ -1157,6 +1028,23 @@ mod tests {
         assert_eq!(
             appliance.manual_service_announce_json().await.unwrap(),
             r#""queued""#
+        );
+        assert_eq!(
+            appliance.appliance_label_json().await.unwrap(),
+            r#"{"revision":0,"label":null}"#
+        );
+        assert_eq!(
+            appliance
+                .mutate_appliance_label_json(
+                    json!({
+                        "expected_revision": 0,
+                        "label": "North relay"
+                    })
+                    .to_string(),
+                )
+                .await
+                .unwrap(),
+            r#"{"outcome":"applied","revision":1}"#
         );
 
         let response = appliance
@@ -1292,13 +1180,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nearby_read_requires_the_actor_owned_authenticated_session() {
+    async fn nearby_read_reports_when_the_connector_has_no_local_prns_projection() {
         let database = TestDatabase::new("nearby-offline");
         let appliance = open_offline_test_appliance(&database);
         assert!(matches!(
             appliance.nearby_peers_json().await,
             Err(NativeApplianceError::Storage { reason })
-                if reason.contains("no authenticated appliance session")
+                if reason.contains("does not expose app-local LXMF discovery")
         ));
         appliance.close().await.unwrap();
     }
@@ -1366,79 +1254,5 @@ mod tests {
                 if reason.contains("no authenticated appliance session")
         ));
         appliance.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn configured_native_owner_imports_and_inspects_one_credential() {
-        let database = TestDatabase::new("credential-import");
-        let staging = database.0.with_extension("picked.rdpkey");
-        let bytes = activated_credential_bytes(*b"e290-api-1\xac\xa7\x04\xe1\x3e\x88");
-        fs::write(&staging, bytes).expect("selected credential is staged");
-
-        let profile_store = database.profile_store();
-        let appliance = NativeAppliance::open_ble_profile(profile_store).unwrap();
-        assert_eq!(
-            appliance.credential_status().unwrap(),
-            NativeCredentialStatus::Missing
-        );
-
-        let summary = appliance
-            .import_activated_credential(staging.to_string_lossy().into_owned())
-            .expect("native facade imports one credential");
-        assert_eq!(
-            summary.expected_ble_local_name.as_deref(),
-            Some("reticulum-e290-e13e88")
-        );
-        assert_eq!(
-            appliance.credential_status().unwrap(),
-            NativeCredentialStatus::Active {
-                summary: summary.clone()
-            }
-        );
-        assert!(
-            staging.exists(),
-            "the app retains staging cleanup ownership"
-        );
-        assert_eq!(
-            appliance
-                .import_activated_credential(staging.to_string_lossy().into_owned())
-                .expect("an exact profile import is idempotent"),
-            summary
-        );
-
-        appliance.close().await.unwrap();
-        fs::remove_file(staging).expect("staged test credential is removed");
-    }
-
-    #[tokio::test]
-    async fn ble_import_rejects_a_non_e290_target_without_claiming_the_destination() {
-        let database = TestDatabase::new("ble-import-target");
-        let staging = database.0.with_extension("picked.rdpkey");
-        let bytes = activated_credential_bytes(*b"other-api-\x01\x02\x03\x04\x05\x06");
-        fs::write(&staging, bytes).expect("generic credential is staged");
-
-        let profile_store = database.profile_store();
-        let appliance = NativeAppliance::open_ble_profile(Arc::clone(&profile_store)).unwrap();
-        assert!(matches!(
-            appliance.import_activated_credential(staging.to_string_lossy().into_owned()),
-            Err(NativeApplianceError::Storage { reason })
-                if reason.contains("current BLE import requires an E290 credential")
-        ));
-        assert_eq!(
-            appliance.credential_status().unwrap(),
-            NativeCredentialStatus::Missing
-        );
-
-        profile_store
-            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
-            .expect("generic policy can install the same credential");
-        assert!(matches!(
-            appliance.credential_status().unwrap(),
-            NativeCredentialStatus::Active { summary }
-                if summary.expected_ble_local_name.is_none()
-        ));
-
-        appliance.close().await.unwrap();
-        fs::remove_file(staging).expect("staged test credential is removed");
     }
 }

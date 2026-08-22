@@ -1,4 +1,4 @@
-import { runExpo } from "./expo-cli.ts";
+import { runExpoPrebuild } from "./expo-cli.ts";
 import { prepareNativeBindings } from "./native-bindings.ts";
 import { assertExpectedBun } from "./toolchain.ts";
 
@@ -17,4 +17,4 @@ if (
 }
 
 await prepareNativeBindings(requestedPlatform === undefined ? "all" : requestedPlatform);
-await runExpo(["prebuild", ...arguments_]);
+await runExpoPrebuild(arguments_, requestedPlatform);

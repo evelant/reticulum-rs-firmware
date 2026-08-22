@@ -166,6 +166,7 @@ impl From<core::MessageActivityKind> for MessageActivityKindView {
                     }
                     core::SubmissionState::Queued
                     | core::SubmissionState::Preparing
+                    | core::SubmissionState::ApplicationDelivered
                     | core::SubmissionState::Failed(_)
                     | core::SubmissionState::Cancelled => None,
                 };

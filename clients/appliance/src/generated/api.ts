@@ -4,7 +4,7 @@
 // Every JsonSafeInteger is encoded as a JSON number in the inclusive range
 // 0..=Number.MAX_SAFE_INTEGER. Rust validates this contract at the wire boundary.
 
-export const DEVICE_API_VERSION_MAJOR = 3 as const;
+export const DEVICE_API_VERSION_MAJOR = 6 as const;
 export const DEVICE_API_VERSION_MINOR = 0 as const;
 export const MAX_MESSAGE_BYTES = 512 as const;
 export const MAX_LXMF_READ_CHUNK_BYTES = 416 as const;
@@ -23,7 +23,7 @@ export const MAX_WIFI_SSID_BYTES = 32 as const;
 export const MIN_WIFI_PASSPHRASE_BYTES = 8 as const;
 export const MAX_WIFI_PASSPHRASE_BYTES = 63 as const;
 export const MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES = 96 as const;
-export const MAX_DEVICE_NAME_BYTES = 32 as const;
+export const MAX_APPLIANCE_LABEL_BYTES = 32 as const;
 export const DEFAULT_RETICULUM_TCP_PORT = 4242 as const;
 
 /**
@@ -37,28 +37,27 @@ export type JsonSafeInteger = number;
 export type NoContent = undefined;
 
 /**
- * Physical or local-network bearer used for one authenticated session.
+ * Network that owns one authenticated management session.
  *
- * The host service implements [`Self::BluetoothLowEnergy`]. The remaining
- * variants deliberately reserve runtime vocabulary for future local-bearer
- * adapters without implying that they are already available.
+ * PRNS selects the actual packet interface and route. The client runtime does
+ * not model Bluetooth, LoRa, TCP, USB, or Wi-Fi as separate product sessions.
  */
-export type ConnectionTransport = "usb_serial" | "usb_otg" | "bluetooth_low_energy" | "wifi" | { "other": string };
+export type ConnectionTransport = "reticulum";
 
 /**
  * Public connection lifecycle exposed to the UI.
  */
 export type ConnectionState = { "state": "starting" } | { "state": "disconnected" } | { "state": "connecting" } | { "state": "unavailable",
 /**
- * Bearer reserved for a future connector implementation.
+ * Unavailable network.
  */
 transport: ConnectionTransport, } | { "state": "ready",
 /**
- * Bearer used by this authenticated session.
+ * Network used by this authenticated session.
  */
 transport: ConnectionTransport,
 /**
- * Bearer-specific endpoint label.
+ * Management destination label.
  */
 endpoint: string,
 /**
@@ -72,51 +71,22 @@ device_label: string, } | { "state": "backoff" } | { "state": "faulted" } | { "s
 export type DeviceView = { device_id: string, primary_destination: string, lxmf_delivery_destination: string, };
 
 /**
+ * Optional device-backed operations available to the universal application.
+ *
+ * The Reticulum device API handshake is authoritative for product operations
+ * it describes. Embedded radio-trace projections remain false until the
+ * handshake grows an explicit field for that independent diagnostic stream.
+ */
+export type ApplianceCapabilitiesView = { nearby_peers: boolean, manual_service_announce: boolean, network_config: boolean, nomad: boolean, reticulum_probe: boolean, radio_routes: boolean, radio_trace: boolean, };
+
+/**
  * Immutable authoritative appliance state read without touching its actor.
  */
-export type ApplianceSnapshot = { revision: JsonSafeInteger, connection: ConnectionState, device: DeviceView | null, pending_outbox: JsonSafeInteger, contact_count: JsonSafeInteger, imported_this_run: JsonSafeInteger, last_error: string | null, };
+export type ApplianceSnapshot = { revision: JsonSafeInteger, connection: ConnectionState, device: DeviceView | null, capabilities: ApplianceCapabilitiesView, pending_outbox: JsonSafeInteger, contact_count: JsonSafeInteger, imported_this_run: JsonSafeInteger, last_error: string | null, };
 
 export type HttpConnectionState = { "state": "starting" } | { "state": "disconnected" } | { "state": "connecting" } | { "state": "ready", transport: ConnectionTransport, endpoint: string, device_label: string, } | { "state": "backoff" } | { "state": "faulted" } | { "state": "stopped" };
 
-export type HttpApplianceSnapshot = { revision: JsonSafeInteger, connection: HttpConnectionState, device: DeviceView | null, pending_outbox: JsonSafeInteger, contact_count: JsonSafeInteger, imported_this_run: JsonSafeInteger, last_error: string | null, };
-
-/**
- * Secret-free progress stage shown during explicit onboarding.
- */
-export type OnboardingStage = "opening_device" | "waiting_for_ble_security" | "checking_initialization" | "waiting_for_initialization_presence" | "initializing" | "waiting_for_pairing_presence" | "proving" | "activating" | "waiting_for_abort_presence" | "resuming";
-
-/**
- * App-safe onboarding failure category.
- */
-export type OnboardingFault = "invalid_credential_artifact" | "unsupported_device" | "device_unavailable" | "protocol_or_persistence_failure" | "invalid_recovery_action";
-
-/**
- * Browser-safe phase of one appliance's first-run lifecycle.
- */
-export type OnboardingState = { "state": "needs_pairing" } | { "state": "abort_required" } | { "state": "resume_available" } | { "state": "activation_ambiguous" } | { "state": "credential_ready" } | { "state": "working",
-/**
- * Coarse, secret-free operation stage.
- */
-stage: OnboardingStage, } | { "state": "faulted",
-/**
- * App-safe failure category; detailed diagnostics remain local.
- */
-reason: OnboardingFault, } | { "state": "stopped" };
-
-/**
- * Immutable app-safe onboarding projection.
- */
-export type OnboardingSnapshot = { revision: JsonSafeInteger, device_label: string, lifecycle: OnboardingState, };
-
-/**
- * Frontend action owner for first-run credential setup.
- */
-export type OnboardingMethod = "managed_pairing" | "credential_import";
-
-/**
- * Current onboarding availability and optional lifecycle snapshot.
- */
-export type OnboardingView = { available: boolean, method: OnboardingMethod | null, snapshot: OnboardingSnapshot | null, };
+export type HttpApplianceSnapshot = { revision: JsonSafeInteger, connection: HttpConnectionState, device: DeviceView | null, capabilities: ApplianceCapabilitiesView, pending_outbox: JsonSafeInteger, contact_count: JsonSafeInteger, imported_this_run: JsonSafeInteger, last_error: string | null, };
 
 export type ContactView = { destination: string, name: string, };
 
@@ -126,28 +96,33 @@ export type ContactView = { destination: string, name: string, };
 export type ConversationPeerView = { destination: string, name: string | null, message_count: JsonSafeInteger, inbound_message_count: JsonSafeInteger, last_message: TimelineView | null, };
 
 /**
+ * Reticulum node whose accepted announce projection supplied an observation.
+ */
+export type NearbyPeerObserverKind = "phone" | "appliance";
+
+/**
  * Display-safe public facts from one authenticated LXMF delivery announce.
  *
  * The destination and identity hash are complete lowercase hexadecimal
  * values. Announce application bytes, Reticulum public keys, cursors, and
  * protocol parsing never cross the Rust/application boundary.
  */
-export type NearbyPeerView = { destination: string, associated_nomad_destination: string, display_name: string | null, hops: number, identity_hash: string, interface_id: number, interface_name: string | null, observed_age_ms: JsonSafeInteger, rssi_dbm: number | null, snr_db: number | null, };
+export type NearbyPeerView = { destination: string, associated_nomad_destination: string, display_name: string | null, hops: number, identity_hash: string, interface_id: [number, number, number, number, number, number, number, number], interface_name: string | null, observer_kind: NearbyPeerObserverKind, observer_management_destination: string | null, observed_age_ms: JsonSafeInteger, };
 
 /**
- * Stable transport family for one configured interface.
+ * PRNS forwarding mode for one interface.
  */
-export type DiagnosticInterfaceKindView = "lora" | "tcp_client" | "other" | "tcp_server";
+export type DiagnosticInterfaceModeView = "full" | "point_to_point" | "access_point" | "roaming" | "boundary" | "gateway" | "internal";
 
 /**
  * Current local state of one configured interface.
  */
-export type DiagnosticInterfaceStateView = "offline" | "online" | "faulted";
+export type DiagnosticInterfaceStateView = "initializing" | "connected" | "degraded" | "reconnecting" | "failed" | "disconnected" | "disabled" | "unknown";
 
 /**
  * One configured local Reticulum interface.
  */
-export type DiagnosticInterfaceView = { id: number, kind: DiagnosticInterfaceKindView, state: DiagnosticInterfaceStateView, generation: JsonSafeInteger, logical_mtu: number, bitrate: number | null, };
+export type DiagnosticInterfaceView = { id: [number, number, number, number, number, number, number, number], mode: DiagnosticInterfaceModeView, state: DiagnosticInterfaceStateView, failure_reason: string | null, rx_bytes: JsonSafeInteger, tx_bytes: JsonSafeInteger, destinations: number, links: number, transported_links: number, supervisor: [number, number, number, number, number, number, number, number] | null, };
 
 /**
  * Terminal category for the most recent local LoRa transmission job.
@@ -162,7 +137,7 @@ export type DiagnosticLoraTxFamilyView = "data" | "ordinary";
 /**
  * App-correlatable prepared-packet identity for one LoRa DATA dispatch.
  */
-export type DiagnosticLoraDataTxEvidenceView = { interface_id: number, encoded_packet_len: number, encoded_packet_sha256: string, };
+export type DiagnosticLoraDataTxEvidenceView = { interface_id: [number, number, number, number, number, number, number, number], encoded_packet_len: number, encoded_packet_sha256: string, };
 
 /**
  * Most recent local LoRa receive observation.
@@ -180,35 +155,27 @@ export type DiagnosticLoraLastTxView = { age_ms: JsonSafeInteger, outcome: Diagn
 export type LoraDiagnosticsView = { applied_tx_power_dbm: number, frequency_hz: number, bandwidth_hz: number, spreading_factor: number, coding_rate_denominator: number, rx_physical_frames: JsonSafeInteger, rx_packets: JsonSafeInteger, rx_errors: JsonSafeInteger, rx_drops: JsonSafeInteger, tx_terminal_jobs: JsonSafeInteger, tx_successes: JsonSafeInteger, tx_completed_frames: JsonSafeInteger, tx_access_rejects: JsonSafeInteger, tx_failures: JsonSafeInteger, cad_busy: JsonSafeInteger, cad_clear: JsonSafeInteger, last_rx: DiagnosticLoraLastRxView | null, last_tx: DiagnosticLoraLastTxView | null, last_data_tx: DiagnosticLoraLastTxView | null, };
 
 /**
- * Reticulum transport and retained-path counters.
+ * PRNS next-hop decision for one live route.
  */
-export type RnsDiagnosticsView = { received: JsonSafeInteger, forwarded: JsonSafeInteger, dedup_drops: JsonSafeInteger, invalid_drops: JsonSafeInteger, announces_received: JsonSafeInteger, paths_learned: JsonSafeInteger, paths_expired: JsonSafeInteger, links_established: JsonSafeInteger, links_closed: JsonSafeInteger, links_failed: JsonSafeInteger, };
-
+export type RouteNextHopView = { "kind": "direct" } | { "kind": "via",
 /**
- * Current interpretation of one retained route.
- *
- * `BroadcastReady` and `BroadcastUnavailable` describe fallback resolution;
- * they do not mean the destination is a connected or recently heard peer.
+ * Lowercase Reticulum transport identity hash.
  */
-export type RouteDiagnosticResolutionView = "exact_ready" | "exact_offline" | "exact_missing" | "broadcast_ready" | "broadcast_unavailable";
+transport_identity: string, };
 
 /**
  * One retained Reticulum route.
  *
- * `last_local_use_age_ms` is local route-table LRU activity. It is not the
+ * `last_activity_age_ms` is local route-table LRU activity. It is not the
  * time a peer was last heard; recently heard announces remain a separate
  * nearby-peer projection.
  */
-export type RetainedRouteView = { destination: string, next_hop_identity: string | null, hops: number, retained_interface_id: number | null, resolution: RouteDiagnosticResolutionView, learned_age_ms: JsonSafeInteger | null, last_local_use_age_ms: JsonSafeInteger | null, expires_in_ms: JsonSafeInteger | null, };
+export type RetainedRouteView = { destination: string, next_hop: RouteNextHopView, hops: number, interface_id: [number, number, number, number, number, number, number, number], learned_age_ms: JsonSafeInteger, last_activity_age_ms: JsonSafeInteger, expires_in_ms: JsonSafeInteger, };
 
 /**
- * One coherent app-facing node, radio, and retained-route refresh.
- *
- * The route list is bounded and collected only while every page reports the
- * same route-table revision. Retained routes are routing state, not a list of
- * connected or reachable peers.
+ * One bounded app-facing view of PRNS node, interface, and live-route state.
  */
-export type RadioRoutesStatusView = { uptime_ms: JsonSafeInteger, interfaces: Array<DiagnosticInterfaceView>, lora: LoraDiagnosticsView | null, rns: RnsDiagnosticsView, observed_peer_count: number, retained_route_count: number, usable_route_count: number, route_table_revision: JsonSafeInteger, routes: Array<RetainedRouteView>, };
+export type RadioRoutesStatusView = { uptime_ms: JsonSafeInteger, interfaces: Array<DiagnosticInterfaceView>, lora: LoraDiagnosticsView | null, route_count: number, link_count: number, routes: Array<RetainedRouteView>, };
 
 export type BytesEncoding = "utf8" | "hex";
 
@@ -218,6 +185,29 @@ export type BytesView = { encoding: BytesEncoding, value: string, };
  * One saved WPA2-Personal network without its credential bytes.
  */
 export type WifiNetworkProfileView = { profile_id: string, enabled: boolean, priority: number, ssid: BytesView, credential_configured: boolean, };
+
+/**
+ * Current durable appliance-label state.
+ */
+export type ApplianceLabelView = { revision: JsonSafeInteger, label: string | null, };
+
+/**
+ * Compare-and-swap request for the product-owned appliance label.
+ */
+export type ApplianceLabelMutationRequest = { expected_revision: JsonSafeInteger, label: string | null, };
+
+/**
+ * Durable appliance-label mutation outcome.
+ */
+export type ApplianceLabelMutationOutcome = { "outcome": "applied",
+/**
+ * Current durable revision.
+ */
+revision: JsonSafeInteger, } | { "outcome": "revision_conflict",
+/**
+ * Current durable revision to refresh before retrying.
+ */
+current_revision: JsonSafeInteger, };
 
 /**
  * One configured outbound Reticulum TCP peer.
@@ -264,7 +254,7 @@ export type LoraRadioProfileView = { frequency_hz: number, bandwidth_hz: number,
 /**
  * Complete board-owned desired network configuration with all secrets redacted.
  */
-export type NetworkConfigView = { revision: JsonSafeInteger, wifi_profiles: Array<WifiNetworkProfileView>, tcp_peer: ReticulumTcpPeerView | null, wifi_transport_enabled: boolean, automatic_announces_enabled: boolean, rmap_discovery_enabled: boolean, rmap_share_location: boolean, rmap_phone_location: RmapPhoneLocation | null, lora_tx_power_dbm: 14 | 17 | 20 | 22, lora_profile: LoraRadioProfileView, device_name: string | null, };
+export type NetworkConfigView = { revision: JsonSafeInteger, wifi_profiles: Array<WifiNetworkProfileView>, tcp_peer: ReticulumTcpPeerView | null, wifi_transport_enabled: boolean, automatic_announces_enabled: boolean, rmap_discovery_enabled: boolean, rmap_share_location: boolean, rmap_phone_location: RmapPhoneLocation | null, lora_tx_power_dbm: 14 | 17 | 20 | 22, lora_profile: LoraRadioProfileView, };
 
 /**
  * Live Wi-Fi station state.
@@ -476,11 +466,7 @@ lora_tx_power_dbm: 14 | 17 | 20 | 22, } | { "kind": "set_lora_profile",
 /**
  * Complete profile saved for the next restart.
  */
-profile: LoraRadioProfileView, } | { "kind": "set_device_name",
-/**
- * New display name, or `null` to clear the configured name.
- */
-name: string | null, };
+profile: LoraRadioProfileView, };
 
 /**
  * Compare-and-swap request for one desired-network mutation.
@@ -533,7 +519,7 @@ export type MessageSignalObservationView = { rssi_dbm: number, snr_db: number, }
 /**
  * First-arrival interface and optional final-hop signal evidence.
  */
-export type MessageIngressObservationView = { interface_id: number, signal: MessageSignalObservationView | null, };
+export type MessageIngressObservationView = { interface_id: [number, number, number, number, number, number, number, number], signal: MessageSignalObservationView | null, };
 
 /**
  * Sideband-compatible location snapshot carried inside one LXMF message.
@@ -614,14 +600,14 @@ export type RadioTraceTxOutcomeView = "transmitted" | "access_rejected" | "permi
 export type RadioTraceAttemptOutcomeView = "delivered" | "delivery_timeout" | "unsent";
 
 /**
- * Receiver-side durable DATA-to-proof lifecycle stage.
+ * Receiver-side immediate DATA-to-proof lifecycle stage.
  */
-export type RadioTraceInboundProofStageView = "data_logical_rx" | "durable_commit" | "proof_retained" | "proof_staged" | "ordinary_queued" | "physical_tx_done" | "physical_tx_failed";
+export type RadioTraceInboundProofStageView = "data_logical_rx" | "ordinary_queued" | "physical_tx_done" | "physical_tx_failed";
 
 /**
  * Typed event-specific RF trace evidence.
  */
-export type RadioTraceEventKindView = { "kind": "route_selected", submission_id: JsonSafeInteger, destination: string, next_hop_identity: string | null, hops: number, interface_id: number, resolution: RadioTraceRouteResolutionView, packet_evidence: PacketEvidenceView, rns_attempt_token: string, } | { "kind": "data_tx", interface_id: number, packet_evidence: PacketEvidenceView, rns_attempt_token: string, outcome: RadioTraceTxOutcomeView, planned_physical_frames: number, completed_physical_frames: number, frame_0_completed_at_us: JsonSafeInteger | null, frame_1_completed_at_us: JsonSafeInteger | null, authorized_frame_observed: boolean, } | { "kind": "logical_rx", interface_id: number, packet_evidence: PacketEvidenceView, rns_packet_hash: string | null, rssi_dbm: number, snr_db: number, } | { "kind": "attempt_terminal", rns_attempt_token: string, outcome: RadioTraceAttemptOutcomeView, proof_interface_id: number | null, proof_rssi_dbm: number | null, proof_snr_db: number | null, } | { "kind": "inbound_proof", correlation_token: string, stage: RadioTraceInboundProofStageView, message_id: string | null, packet_evidence: PacketEvidenceView | null, interface_id: number | null, rssi_dbm: number | null, snr_db: number | null, dispatch_outcome: RadioTraceTxOutcomeView | null, };
+export type RadioTraceEventKindView = { "kind": "route_selected", submission_id: JsonSafeInteger, destination: string, next_hop_identity: string | null, hops: number, interface_id: [number, number, number, number, number, number, number, number], resolution: RadioTraceRouteResolutionView, packet_evidence: PacketEvidenceView, rns_attempt_token: string, } | { "kind": "data_tx", interface_id: [number, number, number, number, number, number, number, number], packet_evidence: PacketEvidenceView, rns_attempt_token: string, outcome: RadioTraceTxOutcomeView, planned_physical_frames: number, completed_physical_frames: number, frame_0_completed_at_us: JsonSafeInteger | null, frame_1_completed_at_us: JsonSafeInteger | null, authorized_frame_observed: boolean, } | { "kind": "logical_rx", interface_id: [number, number, number, number, number, number, number, number], packet_evidence: PacketEvidenceView, rns_packet_hash: string | null, rssi_dbm: number, snr_db: number, } | { "kind": "attempt_terminal", rns_attempt_token: string, outcome: RadioTraceAttemptOutcomeView, proof_interface_id: [number, number, number, number, number, number, number, number] | null, proof_rssi_dbm: number | null, proof_snr_db: number | null, } | { "kind": "inbound_proof", correlation_token: string, stage: RadioTraceInboundProofStageView, message_id: string | null, packet_evidence: PacketEvidenceView | null, interface_id: [number, number, number, number, number, number, number, number] | null, rssi_dbm: number | null, snr_db: number | null, dispatch_outcome: RadioTraceTxOutcomeView | null, };
 
 /**
  * Durable message-attempt association for a traced RF event.
@@ -644,20 +630,6 @@ export type RadioTracePageRequest = { before_event_id: JsonSafeInteger | null, l
 export type RadioTracePageView = { events: Array<RadioTraceEventView>, next_before_event_id: JsonSafeInteger | null, history_incomplete: boolean, };
 
 export type SessionRequest = { capability: string, };
-
-/**
- * Explicit recovery action for a retained pairing artifact.
- */
-export type RecoveryAction = "resume_known_pending" | "abort_orphan";
-
-/**
- * Request one explicit pairing recovery transition.
- */
-export type RecoveryRequest = {
-/**
- * Operator-selected recovery transition.
- */
-action: RecoveryAction, };
 
 export type ContactRequest = { name: string, };
 
@@ -754,7 +726,7 @@ export type ReticulumProbeSignalView = { rssi_dbm: number, snr_db: number, };
  * proof was relayed, it may describe a relay-to-appliance LoRa hop; it is not
  * the remote destination's RSSI for the original request.
  */
-export type ReticulumProbeIngressView = { interface_id: number, signal: ReticulumProbeSignalView | null, };
+export type ReticulumProbeIngressView = { interface_id: [number, number, number, number, number, number, number, number], signal: ReticulumProbeSignalView | null, };
 
 /**
  * Successful end-to-end proof measurement.

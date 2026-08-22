@@ -37,7 +37,7 @@
     "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17"
   },
   "generator": "interop/python/generate_lxmf_1_0_1_vectors.py",
-  "generator_source_sha256": "0f7927896bfeda46029bd188a5c7ba2bd1a8ffce31762090ab1140b73ef8a56a",
+  "generator_source_sha256": "264e6de7fdd9feb0e75303cc61b667726e88640812a65cf24181ec94bdcca55c",
   "inbound_oracles": [
     {
       "canonical_repack_hex": "94cb41d954fc40000000c4094772656574696e6773c41648656c6c6f2066726f6d20507974686f6e204c584d4680",
@@ -59,11 +59,6 @@
       "source_hash_hex": "20f7e44b55b06cff39719106f2bd1fd2",
       "source_public_key_hex": "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17"
     }
-  ],
-  "known_rete_incompatibilities": [
-    "rete-lxmf-core models fields as u8-to-bytes instead of arbitrary MessagePack values",
-    "rete-lxmf-core models stamps and tickets as two bytes instead of 32 and 16 bytes",
-    "these are documented expectations; this Python corpus does not import or execute Rete"
   ],
   "messages": [
     {

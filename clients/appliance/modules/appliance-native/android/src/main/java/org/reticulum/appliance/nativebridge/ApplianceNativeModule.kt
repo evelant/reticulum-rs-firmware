@@ -9,6 +9,9 @@ import com.facebook.react.turbomodule.core.interfaces.CallInvokerHolder
 class ApplianceNativeModule(reactContext: ReactApplicationContext) :
   NativeApplianceNativeSpec(reactContext) {
 
+  // Product-owned platform half of PRNS's Android Bluetooth Auto interface.
+  private val prnsBluetoothAuto = PrnsBluetoothAuto(reactContext.applicationContext)
+
   override fun getName(): String {
     return NAME
   }
@@ -21,16 +24,26 @@ class ApplianceNativeModule(reactContext: ReactApplicationContext) :
 
   override fun installRustCrate(): Boolean {
     val context = this.reactApplicationContext
-    return nativeInstallRustCrate(
+    val installed = nativeInstallRustCrate(
       context.javaScriptContextHolder!!.get(),
       context.jsCallInvokerHolder!!
     )
+    if (installed) {
+      prnsBluetoothAuto.start()
+    }
+    return installed
   }
 
   override fun cleanupRustCrate(): Boolean {
+    prnsBluetoothAuto.stop()
     return nativeCleanupRustCrate(
       this.reactApplicationContext.javaScriptContextHolder!!.get()
     )
+  }
+
+  override fun invalidate() {
+    prnsBluetoothAuto.stop()
+    super.invalidate()
   }
 
   companion object {

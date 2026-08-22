@@ -83,20 +83,20 @@ describe("foreground reconnect gate", () => {
     expect(scheduled).toHaveLength(3);
   });
 
-  test("presents automatic scan misses as saved pairing with a neutral retry", () => {
+  test("presents unavailable routes as saved authorization with a neutral retry", () => {
     expect(foregroundReconnectMessage({ state: "attempting" })).toBe(
-      "Pairing is saved. Connecting to the node.",
+      "Appliance authorization is saved. Connecting through Reticulum.",
     );
     expect(
       foregroundReconnectMessage({
         state: "waiting_retry",
-        reason: "No BLE appliance was found",
+        reason: "No route to the management destination",
       }),
-    ).toContain("Pairing is saved");
+    ).toContain("Appliance authorization is saved");
     expect(
       foregroundReconnectMessage({
         state: "waiting_retry",
-        reason: "No BLE appliance was found",
+        reason: "No route to the management destination",
       }),
     ).toContain("retrying automatically");
   });
@@ -125,7 +125,7 @@ describe("foreground reconnect gate", () => {
     expect(scheduled).toHaveLength(1);
   });
 
-  test("keeps automatic reconnect inhibited after bond repair until an explicit action allows it", () => {
+  test("keeps automatic reconnect inhibited until an explicit action allows it", () => {
     const scheduled: ScheduledRetry[] = [];
     let retryRequests = 0;
     const reconnect = new ForegroundReconnect(

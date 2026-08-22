@@ -5,10 +5,7 @@ members = [
     "firmware/e290",
     "xtask",
 ]
-exclude = [
-    "vendor/lora-phy-3.0.1",
-    "vendor/rete",
-]
+exclude = ["reference/Prns"]
 default-members = [
     "crates/*",
     "xtask",
@@ -25,6 +22,7 @@ publish = false
 allocator-api2 = { version = "=0.3.1", default-features = false }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 embassy-executor = { version = "=0.10.0", default-features = false }
+embassy-embedded-hal = { version = "=0.6.0", default-features = false }
 embassy-futures = { version = "=0.1.2", default-features = false }
 embassy-sync = { version = "=0.8.0", default-features = false }
 embassy-time = { version = "=0.5.1", default-features = false }
@@ -37,24 +35,22 @@ embedded-hal-bus = { version = "=0.3.0", default-features = false, features = ["
 embedded-graphics = { version = "=0.8.2", default-features = false }
 embedded-graphics-core = { version = "=0.4.1", default-features = false }
 embedded-storage = { version = "=0.3.1", default-features = false }
+embedded-storage-async = { version = "=0.4.1", default-features = false }
 esp-alloc = "=0.10.0"
 esp-backtrace = { version = "=0.19.0", default-features = false }
 esp-bootloader-esp-idf = { version = "=0.5.0", default-features = false }
-# Pin the coherent esp-rs radio/HAL source graph to one exact reviewed upstream
-# revision.
+# Keep the HAL/runtime fixes on one reviewed upstream revision. Bluetooth and
+# Wi-Fi use the released esp-radio generation selected by PRNS's ESP32-S3
+# backend instead of preserving the alpha control bearer's newer beta graph.
 esp-hal = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=1.1.0", default-features = false }
-esp-radio = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=1.0.0-beta.0", default-features = false }
+esp-radio = { version = "=0.18.0", default-features = false }
 esp-println = { version = "=0.17.0", default-features = false }
 esp-storage = { version = "=0.9.0", default-features = false }
+esp-sync = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=0.2.1", default-features = false }
 # This upstream revision provides the corrected CPU0 and CPU1 stack-slice
 # element counts required by the E290 image.
 esp-rtos = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb", version = "=0.3.0", default-features = false }
 log = "=0.4.27"
-# The reviewed local overlay adds the SX126x PA/OCP controls, RF-path hooks, and
-# continuous-RX IRQ handling needed by the E290 radio owner. See PATCHES.md in
-# the vendor directory for the exact delta.
-lora-phy = { version = "=3.0.1", default-features = false }
-lora-modulation = { version = "=0.1.5", default-features = false }
 minicbor = { version = "=2.2.2", default-features = false }
 getrandom = "=0.3.4"
 futures-util = { version = "=0.3.33", default-features = false, features = ["async-await", "std"] }
@@ -64,6 +60,7 @@ rustix = { version = "=1.1.4", default-features = false, features = ["process"] 
 hex = "=0.4.3"
 hkdf = { version = "=0.12.4", default-features = false }
 hmac = { version = "=0.12.1", default-features = false }
+jni = "=0.21.1"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2 = { version = "=0.10.9", default-features = false }
@@ -75,15 +72,12 @@ ts-rs = { version = "=12.0.1", default-features = false, features = ["no-serde-w
 uniffi = { version = "=0.31.0", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false }
 
-# Rete is not published as one coherent crates.io release. Declare the owned
-# fork (evelant/rete, itself forked from s-retlaw/rete) as a git dependency and
-# patch it to the `vendor/rete` submodule so core changes are made directly on
-# the fork and versioned by the submodule pointer in this repository. Keep the
-# declared revision in step with the submodule pointer.
-rete-core = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
-rete-lxmf-core = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
-rete-stack = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
-rete-transport = { git = "https://github.com/evelant/rete.git", rev = "7014efec78d4b4d7416c8f159241268383de081e", default-features = false }
+# One exact Python-compatible PRNS revision is the only Reticulum
+# implementation for new product code. The checkout under `reference/Prns` is
+# review material; Cargo resolves the auditable fork revision directly.
+personal-rns = { git = "https://github.com/evelant/Prns.git", rev = "b763fb5076a965d6eb411923c387e3805f47e40a", default-features = false }
+prns-ffi = { git = "https://github.com/evelant/Prns.git", rev = "b763fb5076a965d6eb411923c387e3805f47e40a", default-features = false }
+prns-interfaces-embassy = { git = "https://github.com/evelant/Prns.git", rev = "b763fb5076a965d6eb411923c387e3805f47e40a", default-features = false }
 
 [patch.crates-io]
 # Keep registry consumers of esp-rs support crates on the same source revision
@@ -94,6 +88,7 @@ esp-backtrace = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0
 esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 esp-config = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 esp-hal = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+esp-hal-procmacros = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 esp-metadata-generated = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 esp-phy = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 esp-radio-rtos-driver = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
@@ -102,19 +97,12 @@ esp-println = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dc
 esp-rom-sys = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 esp-storage = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
 esp-sync = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
-# Force every current and future graph consumer onto the one reviewed local
-# SX126x policy patch rather than allowing a second registry copy.
-lora-phy = { path = "vendor/lora-phy-3.0.1" }
-
-[patch."https://github.com/evelant/rete.git"]
-# In-tree submodule checkout of the owned fork. The four core crates are edited
-# here and versioned by the submodule pointer; the git declaration above only
-# names the external source identity that this local checkout replaces.
-rete-core = { path = "vendor/rete/crates/rete-core" }
-rete-lxmf-core = { path = "vendor/rete/crates/rete-lxmf-core" }
-rete-stack = { path = "vendor/rete/crates/rete-stack" }
-rete-transport = { path = "vendor/rete/crates/rete-transport" }
-
+xtensa-lx-rt = { git = "https://github.com/esp-rs/esp-hal.git", rev = "b50efcb0dcd94b58ec337e511891057aa1f2e8fb" }
+# The reviewed HAL revision names these git sources directly. Patch the
+# released radio crate's registry declarations onto the same packages so the
+# final image cannot link duplicate Wi-Fi globals or PAC interrupt symbols.
+esp-wifi-sys-esp32s3 = { git = "https://github.com/esp-rs/esp-wifi-sys.git", rev = "2ea8e3e" }
+esp32s3 = { git = "https://github.com/esp-rs/esp-pacs", rev = "131062119" }
 [profile.dev]
 opt-level = "s"
 

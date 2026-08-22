@@ -26,7 +26,7 @@ export function AppShell() {
   const [nodesPanelVisible, setNodesPanelVisible] = useState(false);
   const {
     addingAppliance,
-    bleCandidateScanner,
+    reticulumCandidateScanner,
     browseNomad,
     busy,
     cancelOnboarding,
@@ -35,7 +35,7 @@ export function AppShell() {
     connectivityAvailable,
     contacts,
     conversations,
-    deviceName,
+    applianceLabel,
     foreground,
     keyboardVisible,
     navigate,
@@ -55,7 +55,7 @@ export function AppShell() {
   const presentation = applianceStatusPresentation(snapshot);
   const activeProfile =
     profiles === null ? null : applianceProfilesPresentation(profiles).activeProfile;
-  const chipLabel = deviceName ?? activeProfile?.boardLabel ?? presentation.boardLabel;
+  const chipLabel = applianceLabel ?? activeProfile?.boardLabel ?? presentation.boardLabel;
   const onOpenAppliances = showSidebar
     ? () => setNodesPanelVisible((visible) => !visible)
     : () => router.navigate("/appliances");
@@ -93,6 +93,7 @@ export function AppShell() {
             ) : null}
             {showSidebar && peoplePanelVisible ? (
               <ApplianceSidebar
+                applianceLabel={chipLabel}
                 busy={busy}
                 compact={false}
                 contacts={contacts}
@@ -157,7 +158,7 @@ export function AppShell() {
           onboarding={onboarding}
           onCancel={cancelOnboarding}
           onMutation={onboardingMutation}
-          onScanBleCandidates={bleCandidateScanner}
+          onScanCandidates={reticulumCandidateScanner}
           onSwitchKnownProfile={switchToKnownProfile}
         />
       )}

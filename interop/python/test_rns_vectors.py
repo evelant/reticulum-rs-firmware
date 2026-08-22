@@ -9,7 +9,7 @@ import unittest
 import generate_rns_vectors as vectors
 
 
-CORPUS = Path(__file__).parents[1] / "vectors" / "rns-1.3.8.json"
+CORPUS = Path(__file__).parents[1] / "vectors" / "rns-1.4.2.json"
 
 
 class ReleasedRnsVectorTests(unittest.TestCase):
@@ -18,6 +18,10 @@ class ReleasedRnsVectorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.generated = vectors.build_vectors()
+        cls.proof_strategy = cls.generated["proof_strategy"]
+        cls.proof_cases = {
+            case["name"]: case for case in cls.proof_strategy["cases"]
+        }
         cls.lrrtt = cls.generated["lrrtt_messagepack"]
         cls.canonical = {
             case["name"]: case for case in cls.lrrtt["canonical_float64"]
@@ -34,7 +38,37 @@ class ReleasedRnsVectorTests(unittest.TestCase):
     def test_committed_corpus_matches_pinned_generator(self) -> None:
         committed = json.loads(CORPUS.read_text(encoding="utf-8"))
         self.assertEqual(committed, self.generated)
-        self.assertEqual(self.generated["schema"], 2)
+        self.assertEqual(self.generated["schema"], 3)
+
+    def test_released_proof_strategies_are_immediate_and_application_gated(self) -> None:
+        self.assertEqual(
+            self.proof_strategy["constants"],
+            {"prove_none": 0x21, "prove_app": 0x22, "prove_all": 0x23},
+        )
+        self.assertEqual(
+            self.proof_strategy["destination_source_sha256"],
+            "3459a05d228d51b068f4c5893f58f79feb25e9be25416759f63442089935a669",
+        )
+        self.assertEqual(
+            self.proof_strategy["transport_source_sha256"],
+            "24483b3e63769d02770f6df8f4888e510519df3ad4208e9dae0053841b89bdea",
+        )
+        expected_events = {
+            "prove_none": ["delivery"],
+            "prove_all": ["delivery", "proof"],
+            "prove_app_accept": ["delivery", "proof_requested", "proof"],
+            "prove_app_reject": ["delivery", "proof_requested"],
+        }
+        self.assertEqual(set(self.proof_cases), set(expected_events))
+        for name, events in expected_events.items():
+            with self.subTest(name=name):
+                case = self.proof_cases[name]
+                self.assertEqual(case["events"], events)
+                self.assertTrue(case["delivered_from_packed"])
+                self.assertEqual(
+                    bytes.fromhex(case["payload_hex"]),
+                    f"rns-1.4.2-{name}".encode("ascii"),
+                )
 
     def test_vendored_umsgpack_identity_is_frozen(self) -> None:
         self.assertEqual(self.lrrtt["umsgpack_version"], "2.7.1")
@@ -188,7 +222,7 @@ class ReleasedRnsVectorTests(unittest.TestCase):
         self.assertEqual(complete, first)
         self.assertEqual(complete, case["python_unpack"])
 
-        legacy = self.cases["legacy_rete_raw_u32_timestamp"]
+        legacy = self.cases["legacy_raw_u32_timestamp"]
         self.assertEqual(legacy["wire_hex"], "6553f100")
         self.assertEqual(legacy["first_object_wire_hex"], "65")
         self.assertEqual(legacy["trailing_hex"], "53f100")
@@ -234,7 +268,7 @@ class ReleasedRnsVectorTests(unittest.TestCase):
     def test_request_time_samples_straddle_released_send_boundaries(self) -> None:
         self.assertEqual(
             self.lifecycle["link_source_sha256"],
-            "57122235df52704221c8c3645b8609de4c1cffd8b7b18e2de114b4b291d73725",
+            "77a6cb8e988ba6ae0dd3d5325bb85545916005d6a440db7fb2f0d52b45198126",
         )
         self.assertEqual(
             self.lifecycle["packet_source_sha256"],

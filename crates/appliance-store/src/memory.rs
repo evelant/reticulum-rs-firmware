@@ -636,6 +636,7 @@ impl MemoryChatStore {
             OutboxStatus::Device(SubmissionState::Failed(failure)) if failure.is_retryable() => {}
             OutboxStatus::Device(
                 SubmissionState::Delivered(_)
+                | SubmissionState::ApplicationDelivered
                 | SubmissionState::Failed(_)
                 | SubmissionState::Cancelled,
             ) => return Err(ChatStoreError::OutboxNotRetryable(outbox_id)),

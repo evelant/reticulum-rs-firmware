@@ -16,6 +16,7 @@ Gradle, manifest, CMake, XCFramework, and JNI outputs must not be edited by
 hand.
 
 iOS generation builds arm64 device and Apple-Silicon simulator archives.
-Android generation builds the four ABIs selected by the Expo project. The
-application-level `ios/` and `android/` directories are disposable and are
-created by the project wrappers.
+Android generation builds arm64 device and x86_64 emulator archives. PRNS is
+64-bit-only on Android, so the Expo project is configured for those same two
+architectures. The application-level `ios/` and `android/` directories are
+disposable and are created by the project wrappers.

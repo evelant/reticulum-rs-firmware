@@ -2,9 +2,9 @@
 
 This is the universal Expo application for the Reticulum appliance. One
 TypeScript/React Native source tree targets iOS, Android, and web. Native Rust
-owns appliance credentials, authenticated sessions, durable per-appliance
-SQLite data, and message synchronization; TypeScript owns presentation and
-platform integration.
+owns one persisted PRNS node and identity, identified management Links, durable
+per-appliance SQLite data, and message synchronization; TypeScript owns
+presentation and platform integration.
 
 Use the [app build guide](../../docs/getting-started/app.md) for prerequisites
 and installation, and the [pairing guide](../../docs/getting-started/pairing.md)
@@ -59,10 +59,12 @@ scripts/                  Bun/TypeScript build and verification tools
 
 ## Product semantics
 
-Each appliance profile has an isolated credential and database. Contacts are
-phone-local names for authenticated LXMF destinations; receiving from an
-unsaved sender does not require a reciprocal contact. Accepted sends are
-durable on the board, which owns delivery retry while the app is disconnected.
+Each appliance profile is keyed by a verified management destination and has
+an isolated database. One app-owned Reticulum identity can be enrolled with
+multiple appliances. Contacts are phone-local names for LXMF destinations;
+receiving from an unsaved sender does not require a reciprocal contact.
+Accepted sends are durable on the board, which owns delivery retry while the
+app is disconnected.
 
 The Activity, message-details, Network, and Map surfaces project the same
 durable message and radio evidence. Receiver RSSI/SNR is final-hop data and may
@@ -70,6 +72,6 @@ describe a relay. Retained routes are not a live peer list, and map lines join
 phone observations rather than reconstructing RF paths.
 
 The web target uses the local Rust service as its appliance gateway. Browsers
-do not connect directly to BLE. Native builds use the Rust profile/database
-owner and foreground BLE path. Locked-phone BLE collection and notification
-delivery remain future work.
+do not own a PRNS node or connect directly to Bluetooth. Native builds use the
+Rust PRNS/profile/database owner. Locked-phone Bluetooth Auto collection and
+notification delivery remain future work.

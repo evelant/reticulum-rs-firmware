@@ -13,5 +13,6 @@ mod session;
 
 pub use engine::{ChatEngine, EngineError, InboxStep, ReconcileStep};
 pub use session::{
-    DeviceClientSession, DeviceSessionError, InboxCursor, InboxSummary, LxmfSession,
+    DeviceApiRequestSession, DeviceApiRequester, DeviceSessionError, InboxCursor, InboxSummary,
+    LxmfSession,
 };

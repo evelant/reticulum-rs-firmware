@@ -3,7 +3,7 @@
 //! This crate deliberately stops before Reticulum ownership. A sole node
 //! adapter maps [`FetchAction`] values to path discovery, Link establishment,
 //! and one anonymous RNS request, then reports only exactly correlated scalar
-//! observations back to [`NomadClient`]. No Rete state, packet allocation,
+//! observations back to [`NomadClient`]. No network-engine state, packet allocation,
 //! executor, transport, or device API type crosses this boundary.
 //!
 //! The supported response subset accepts the decoded body supplied by the

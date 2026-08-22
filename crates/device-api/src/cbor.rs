@@ -3,42 +3,45 @@
 use minicbor::{Decoder, Encoder, data::Type, encode::write::Cursor};
 
 use crate::model::{
-    API_VERSION_MAJOR, ApiErrorCode, ApiErrorResponse, ApiVersion, CapabilityAvailability,
-    CapabilitySnapshot, DestinationHash, DeviceRequest, DeviceResponse, DiagnosticInterfaceKind,
+    API_VERSION_MAJOR, ApiErrorCode, ApiErrorResponse, ApiVersion, ApplianceLabel,
+    ApplianceLabelMutationOutcome, ApplianceLabelMutationRequest, ApplianceLabelSnapshot,
+    ApplianceLabelSummary, CapabilityAvailability, CapabilitySnapshot, DestinationHash,
+    DeviceRequest, DeviceResponse, DiagnosticInterfaceFailureReason, DiagnosticInterfaceMode,
     DiagnosticInterfaceRecord, DiagnosticInterfaceState, DiagnosticLoraDataTxEvidence,
     DiagnosticLoraLastDataTx, DiagnosticLoraLastRx, DiagnosticLoraLastTx, DiagnosticLoraTxFamily,
     DiagnosticLoraTxOutcome, EncodedPacketSha256, IdempotencyKey, IdentityHash, IdentitySummary,
     IngressObservation, IngressSignal, LoraDiagnostics, MAX_BODY_BYTES, MAX_DIAGNOSTIC_INTERFACES,
     MAX_MESSAGE_BYTES, MAX_RADIO_TRACE_PAGE_ENTRIES, MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES,
-    ManualServiceAnnounceDisposition, NodeDiagnosticsSnapshot, OP_IDENTITY_SUMMARY,
-    OP_MANUAL_SERVICE_ANNOUNCE, OP_NODE_DIAGNOSTICS, OP_RADIO_TRACE_PAGE, OP_RETICULUM_PROBE_POLL,
-    OP_RETICULUM_PROBE_START, OP_ROUTE_DIAGNOSTICS_PAGE, OP_SUBMISSION_STATUS,
-    OP_SYSTEM_CAPABILITIES, PreparedPacketDetails, ProbeFailure, ProbeId, ProbePhase,
-    ProbePollRequest, ProbePollResponse, ProbeStartAccepted, ProbeStartOutcome, ProbeStartRequest,
-    ProbeSuccess, RESPONSE_ERROR, RadioTraceAppliedLoraProfile, RadioTraceAttemptOutcome,
-    RadioTraceAttemptTerminal, RadioTraceAttemptToken, RadioTraceCursor, RadioTraceDataTx,
-    RadioTraceEvent, RadioTraceEventKind, RadioTraceInboundProof, RadioTraceInboundProofPacket,
+    ManualServiceAnnounceDisposition, NodeDiagnosticsSnapshot, OP_APPLIANCE_LABEL_GET,
+    OP_APPLIANCE_LABEL_MUTATE, OP_IDENTITY_SUMMARY, OP_MANUAL_SERVICE_ANNOUNCE,
+    OP_NODE_DIAGNOSTICS, OP_RADIO_TRACE_PAGE, OP_RETICULUM_PROBE_POLL, OP_RETICULUM_PROBE_START,
+    OP_ROUTE_DIAGNOSTICS_PAGE, OP_SUBMISSION_STATUS, OP_SYSTEM_CAPABILITIES, PreparedPacketDetails,
+    ProbeFailure, ProbeId, ProbePhase, ProbePollRequest, ProbePollResponse, ProbeStartAccepted,
+    ProbeStartOutcome, ProbeStartRequest, ProbeSuccess, RESPONSE_ERROR,
+    RadioTraceAppliedLoraProfile, RadioTraceAttemptOutcome, RadioTraceAttemptTerminal,
+    RadioTraceAttemptToken, RadioTraceCursor, RadioTraceDataTx, RadioTraceEvent,
+    RadioTraceEventKind, RadioTraceInboundProof, RadioTraceInboundProofPacket,
     RadioTraceInboundProofStage, RadioTraceLogicalRx, RadioTracePacketEvidence, RadioTracePage,
     RadioTracePageRequest, RadioTraceRouteSelected, RadioTraceTxOutcome, RequestEnvelope,
-    RequestId, ResponseEnvelope, RnsDiagnostics, RouteDiagnosticEntry, RouteDiagnosticResolution,
-    RouteDiagnosticsPage, RouteDiagnosticsRequest, SubmissionFailure, SubmissionId,
-    SubmissionState, SubmissionStatus,
+    RequestId, ResponseEnvelope, ReticulumInterfaceId, RouteDiagnosticEntry,
+    RouteDiagnosticNextHop, RouteDiagnosticResolution, RouteDiagnosticsPage,
+    RouteDiagnosticsRequest, SubmissionFailure, SubmissionId, SubmissionState, SubmissionStatus,
 };
 #[cfg(feature = "network-config")]
 use crate::model::{
-    DeviceName, DeviceNameSummary, GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm,
-    MAX_RETICULUM_DNS_DHCP_SERVERS, MAX_RETICULUM_DNS_RAW_ATTEMPTS, MAX_WIFI_NETWORK_PROFILES,
-    MAX_WIFI_SSID_BYTES, NetworkConfigMutation, NetworkConfigMutationOutcome,
-    NetworkConfigMutationRequest, NetworkConfigSnapshot, NetworkRuntimeStatus,
-    OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE, OP_NETWORK_STATUS, ReticulumDnsDiagnostics,
-    ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt, ReticulumDnsRawOutcome,
-    ReticulumDnsRawSetupState, ReticulumDnsRawSource, ReticulumDnsResolution,
-    ReticulumDnsResolutionSource, ReticulumTcpFailure, ReticulumTcpPeerConfigSummary,
-    ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate, ReticulumTcpPeerHostname,
-    ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState, ReticulumTcpPeerUpdate, RmapConfig,
-    RmapDeferredReason, RmapEgressConfirmation, RmapInitialTcpGateState, RmapLocation,
-    RmapQueueOutcome, RmapRuntimeStatus, RmapStampPhase, WifiCredentialUpdate,
-    WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate, WifiSsid, WifiStationState,
+    GatewayPolicy, LoraRadioProfile, LoraTransmitPowerDbm, MAX_RETICULUM_DNS_DHCP_SERVERS,
+    MAX_RETICULUM_DNS_RAW_ATTEMPTS, MAX_WIFI_NETWORK_PROFILES, MAX_WIFI_SSID_BYTES,
+    NetworkConfigMutation, NetworkConfigMutationOutcome, NetworkConfigMutationRequest,
+    NetworkConfigSnapshot, NetworkRuntimeStatus, OP_NETWORK_CONFIG_GET, OP_NETWORK_CONFIG_MUTATE,
+    OP_NETWORK_STATUS, ReticulumDnsDiagnostics, ReticulumDnsPrimaryOutcome, ReticulumDnsRawAttempt,
+    ReticulumDnsRawOutcome, ReticulumDnsRawSetupState, ReticulumDnsRawSource,
+    ReticulumDnsResolution, ReticulumDnsResolutionSource, ReticulumTcpFailure,
+    ReticulumTcpPeerConfigSummary, ReticulumTcpPeerHostConfigSummary, ReticulumTcpPeerHostUpdate,
+    ReticulumTcpPeerHostname, ReticulumTcpPeerIpv4Address, ReticulumTcpPeerState,
+    ReticulumTcpPeerUpdate, RmapConfig, RmapDeferredReason, RmapEgressConfirmation,
+    RmapInitialTcpGateState, RmapLocation, RmapQueueOutcome, RmapRuntimeStatus, RmapStampPhase,
+    WifiCredentialUpdate, WifiNetworkConfigSummary, WifiNetworkProfileId, WifiNetworkUpdate,
+    WifiSsid, WifiStationState,
 };
 #[cfg(feature = "lxmf")]
 use crate::model::{
@@ -127,6 +130,8 @@ pub enum RequiredField {
     CapabilityManualServiceAnnounce,
     /// Capability Reticulum probe availability at body key 21.
     CapabilityReticulumProbe,
+    /// Capability live PRNS diagnostics availability at body key 22.
+    CapabilityRouteDiagnostics,
     /// Manual service announce admission disposition at body key 0.
     ManualServiceAnnounceDisposition,
     /// Known Reticulum destination at probe-start key 0.
@@ -183,8 +188,6 @@ pub enum RequiredField {
     NetworkConfigTcpHostPeer,
     /// Complete LoRa radio profile at network-config body key 9.
     NetworkConfigLoraProfile,
-    /// Optional board display name at network-config body key 10.
-    NetworkConfigDeviceName,
     /// LoRa center frequency at profile key 0.
     LoraProfileFrequencyHz,
     /// LoRa bandwidth at profile key 1.
@@ -307,6 +310,12 @@ pub enum RequiredField {
     ReticulumDnsResolutionResolver,
     /// Identity summary primary destination hash at body key 0.
     IdentityPrimaryDestination,
+    /// Appliance-label revision at body key 0 or mutation body key 1.
+    ApplianceLabelRevision,
+    /// Optional appliance label at body or mutation key 1.
+    ApplianceLabel,
+    /// Appliance-label mutation disposition at response body key 0.
+    ApplianceLabelMutationOutcome,
     /// Optional identity summary `lxmf.delivery` destination hash at body key 1.
     IdentityLxmfDeliveryDestination,
     /// Optional exclusive LXMF listing cursor at request body key 0.
@@ -449,6 +458,20 @@ pub enum RequiredField {
     DiagnosticInterfaceLogicalMtu,
     /// Optional interface bitrate at interface key 5.
     DiagnosticInterfaceBitrate,
+    /// Bounded PRNS interface failure reason.
+    DiagnosticInterfaceFailure,
+    /// Received bytes for one PRNS interface.
+    DiagnosticInterfaceRxBytes,
+    /// Transmitted bytes for one PRNS interface.
+    DiagnosticInterfaceTxBytes,
+    /// Destinations attributed to one PRNS interface.
+    DiagnosticInterfaceDestinations,
+    /// Links attributed to one PRNS interface.
+    DiagnosticInterfaceLinks,
+    /// Transported links attributed to one PRNS interface.
+    DiagnosticInterfaceTransportedLinks,
+    /// Optional supervisor of one PRNS fleet member.
+    DiagnosticInterfaceSupervisor,
     /// Applied LoRa transmit power at LoRa key 0.
     DiagnosticLoraTxPower,
     /// Applied LoRa frequency at LoRa key 1.
@@ -814,9 +837,8 @@ pub enum DecodeError {
     InvalidLoraTransmitPowerDbm,
     /// A complete LoRa radio profile contained an invalid numeric field.
     InvalidLoraRadioProfile,
-    /// A board display name was empty, too long, or contained an unsupported
-    /// control or separator character.
-    InvalidDeviceName,
+    /// A product-owned appliance label was empty, too long, or contained a control character.
+    InvalidApplianceLabel,
     /// A redacted desired-network snapshot violated ordering or revision rules.
     InvalidNetworkConfigSnapshot,
     /// A network mutation outcome carried contradictory state-specific fields.
@@ -965,6 +987,23 @@ pub fn encode_request(
         }
         DeviceRequest::IdentitySummary => {
             put!(encoder.map(0));
+        }
+        DeviceRequest::ApplianceLabelGet => {
+            put!(encoder.map(0));
+        }
+        DeviceRequest::ApplianceLabelMutate(request) => {
+            put!(encoder.map(2));
+            put!(encoder.u8(0));
+            put!(encoder.u64(request.expected_revision));
+            put!(encoder.u8(1));
+            match request.label {
+                Some(label) => {
+                    put!(encoder.str(label.as_str()));
+                }
+                None => {
+                    put!(encoder.null());
+                }
+            }
         }
         DeviceRequest::SubmissionStatus { id } => {
             put!(encoder.map(1));
@@ -1191,6 +1230,12 @@ pub fn encode_response(
         DeviceResponse::IdentitySummary(summary) => {
             encode_identity_summary(&mut encoder, summary)?;
         }
+        DeviceResponse::ApplianceLabel(snapshot) => {
+            encode_appliance_label_snapshot(&mut encoder, snapshot)?;
+        }
+        DeviceResponse::ApplianceLabelMutation(outcome) => {
+            encode_appliance_label_mutation_outcome(&mut encoder, outcome)?;
+        }
         DeviceResponse::SubmissionStatus(status) => {
             encode_submission_status(&mut encoder, status)?;
         }
@@ -1308,6 +1353,12 @@ pub fn decode_response(input: &[u8]) -> Result<ResponseEnvelope, DecodeError> {
     let response = match kind {
         OP_SYSTEM_CAPABILITIES => DeviceResponse::SystemCapabilities(decode_capabilities(body)?),
         OP_IDENTITY_SUMMARY => DeviceResponse::IdentitySummary(decode_identity_summary(body)?),
+        OP_APPLIANCE_LABEL_GET => {
+            DeviceResponse::ApplianceLabel(decode_appliance_label_snapshot(body)?)
+        }
+        OP_APPLIANCE_LABEL_MUTATE => {
+            DeviceResponse::ApplianceLabelMutation(decode_appliance_label_mutation_outcome(body)?)
+        }
         OP_SUBMISSION_STATUS => DeviceResponse::SubmissionStatus(decode_submission_status(body)?),
         #[cfg(feature = "lxmf")]
         OP_LXMF_NEXT => DeviceResponse::LxmfNext(decode_lxmf_summary(body)?),
@@ -1472,7 +1523,7 @@ fn encode_capabilities(
     encoder: &mut SliceEncoder<'_>,
     capabilities: CapabilitySnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(20));
+    put!(encoder.map(21));
     put!(encoder.u8(0));
     encode_version(encoder, capabilities.api_version)?;
     put!(encoder.u8(1));
@@ -1513,6 +1564,8 @@ fn encode_capabilities(
     put!(encoder.u8(capabilities.manual_service_announce.wire_code()));
     put!(encoder.u8(21));
     put!(encoder.u8(capabilities.reticulum_probe.wire_code()));
+    put!(encoder.u8(22));
+    put!(encoder.u8(capabilities.route_diagnostics.wire_code()));
     Ok(())
 }
 
@@ -1547,9 +1600,6 @@ fn encode_network_config_mutation_request(
         }
         NetworkConfigMutation::SetLoraProfile(_) => {
             put!(encoder.u8(7));
-        }
-        NetworkConfigMutation::SetDeviceName(_) => {
-            put!(encoder.u8(8));
         }
     }
     put!(encoder.u8(1));
@@ -1593,14 +1643,6 @@ fn encode_network_config_mutation_request(
         NetworkConfigMutation::SetLoraProfile(profile) => {
             encode_lora_radio_profile(encoder, profile)?;
         }
-        NetworkConfigMutation::SetDeviceName(name) => match name {
-            Some(name) => {
-                put!(encoder.str(name.as_str()));
-            }
-            None => {
-                put!(encoder.null());
-            }
-        },
     }
     put!(encoder.u8(2));
     put!(encoder.u64(request.expected_revision()));
@@ -1786,7 +1828,7 @@ fn encode_network_config(
     encoder: &mut SliceEncoder<'_>,
     config: NetworkConfigSnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(11));
+    put!(encoder.map(10));
     put!(encoder.u8(0));
     put!(encoder.u64(config.revision));
     put!(encoder.u8(1));
@@ -1830,15 +1872,6 @@ fn encode_network_config(
     }
     put!(encoder.u8(9));
     encode_lora_radio_profile(encoder, config.lora_profile())?;
-    put!(encoder.u8(10));
-    match config.device_name() {
-        Some(name) => {
-            put!(encoder.str(name.as_str()));
-        }
-        None => {
-            put!(encoder.null());
-        }
-    }
     Ok(())
 }
 
@@ -2081,13 +2114,58 @@ fn encode_identity_summary(
     Ok(())
 }
 
+fn encode_appliance_label_snapshot(
+    encoder: &mut SliceEncoder<'_>,
+    snapshot: ApplianceLabelSnapshot,
+) -> Result<(), EncodeError> {
+    put!(encoder.map(2));
+    put!(encoder.u8(0));
+    put!(encoder.u64(snapshot.revision));
+    put!(encoder.u8(1));
+    match snapshot.label {
+        Some(label) => {
+            put!(encoder.str(label.as_str()));
+        }
+        None => {
+            put!(encoder.null());
+        }
+    }
+    Ok(())
+}
+
+fn encode_appliance_label_mutation_outcome(
+    encoder: &mut SliceEncoder<'_>,
+    outcome: ApplianceLabelMutationOutcome,
+) -> Result<(), EncodeError> {
+    put!(encoder.map(2));
+    put!(encoder.u8(0));
+    match outcome {
+        ApplianceLabelMutationOutcome::Applied { .. } => {
+            put!(encoder.u8(0));
+        }
+        ApplianceLabelMutationOutcome::RevisionConflict { .. } => {
+            put!(encoder.u8(1));
+        }
+    }
+    put!(encoder.u8(1));
+    match outcome {
+        ApplianceLabelMutationOutcome::Applied { revision } => {
+            put!(encoder.u64(revision));
+        }
+        ApplianceLabelMutationOutcome::RevisionConflict { current_revision } => {
+            put!(encoder.u64(current_revision));
+        }
+    }
+    Ok(())
+}
+
 fn encode_ingress_observation(
     encoder: &mut SliceEncoder<'_>,
     ingress: IngressObservation,
 ) -> Result<(), EncodeError> {
     put!(encoder.map(1 + 2 * u64::from(ingress.signal().is_some())));
     put!(encoder.u8(0));
-    put!(encoder.u8(ingress.interface_id()));
+    put!(encoder.bytes(ingress.interface_id().as_bytes()));
     if let Some(signal) = ingress.signal() {
         put!(encoder.u8(1));
         put!(encoder.i16(signal.rssi_dbm()));
@@ -2279,7 +2357,7 @@ fn encode_lxmf_discovered_peer(
     put!(encoder.u8(3));
     put!(encoder.u8(peer.hops()));
     put!(encoder.u8(4));
-    put!(encoder.u8(peer.interface_id()));
+    put!(encoder.bytes(peer.interface_id().as_bytes()));
     if let Some(rssi_dbm) = peer.rssi_dbm() {
         put!(encoder.u8(5));
         put!(encoder.i16(rssi_dbm));
@@ -2335,7 +2413,7 @@ fn encode_node_diagnostics(
     encoder: &mut SliceEncoder<'_>,
     snapshot: &NodeDiagnosticsSnapshot,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(6 + u64::from(snapshot.lora().is_some())));
+    put!(encoder.map(4 + u64::from(snapshot.lora().is_some())));
     put!(encoder.u8(0));
     put!(encoder.u64(snapshot.uptime_ms()));
     put!(encoder.u8(1));
@@ -2353,13 +2431,9 @@ fn encode_node_diagnostics(
         encode_lora_diagnostics(encoder, lora)?;
     }
     put!(encoder.u8(3));
-    encode_rns_diagnostics(encoder, snapshot.rns())?;
+    put!(encoder.u32(snapshot.route_count()));
     put!(encoder.u8(4));
-    put!(encoder.u32(snapshot.observed_peer_count()));
-    put!(encoder.u8(5));
-    put!(encoder.u32(snapshot.retained_route_count()));
-    put!(encoder.u8(6));
-    put!(encoder.u32(snapshot.usable_route_count()));
+    put!(encoder.u32(snapshot.link_count()));
     Ok(())
 }
 
@@ -2367,20 +2441,33 @@ fn encode_diagnostic_interface(
     encoder: &mut SliceEncoder<'_>,
     interface: DiagnosticInterfaceRecord,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(5 + u64::from(interface.bitrate().is_some())));
+    put!(encoder.map(
+        8 + u64::from(interface.failure_reason().is_some())
+            + u64::from(interface.supervisor().is_some())
+    ));
     put!(encoder.u8(0));
-    put!(encoder.u8(interface.id()));
+    put!(encoder.bytes(interface.id().as_bytes()));
     put!(encoder.u8(1));
-    put!(encoder.u8(interface.kind().wire_code()));
+    put!(encoder.u8(interface.mode().wire_code()));
     put!(encoder.u8(2));
     put!(encoder.u8(interface.state().wire_code()));
     put!(encoder.u8(3));
-    put!(encoder.u64(interface.generation()));
+    put!(encoder.u64(interface.rx_bytes()));
     put!(encoder.u8(4));
-    put!(encoder.u16(interface.logical_mtu()));
-    if let Some(bitrate) = interface.bitrate() {
-        put!(encoder.u8(5));
-        put!(encoder.u32(bitrate));
+    put!(encoder.u64(interface.tx_bytes()));
+    put!(encoder.u8(5));
+    put!(encoder.u32(interface.destinations()));
+    put!(encoder.u8(6));
+    put!(encoder.u32(interface.links()));
+    put!(encoder.u8(7));
+    put!(encoder.u32(interface.transported_links()));
+    if let Some(reason) = interface.failure_reason() {
+        put!(encoder.u8(8));
+        put!(encoder.str(reason.as_str()));
+    }
+    if let Some(supervisor) = interface.supervisor() {
+        put!(encoder.u8(9));
+        put!(encoder.bytes(supervisor.as_bytes()));
     }
     Ok(())
 }
@@ -2460,7 +2547,7 @@ fn encode_diagnostic_lora_last_data_tx(
     put!(encoder.u8(2));
     put!(encoder.u8(DiagnosticLoraTxFamily::Data.wire_code()));
     put!(encoder.u8(3));
-    put!(encoder.u8(data.interface_id()));
+    put!(encoder.bytes(data.interface_id().as_bytes()));
     put!(encoder.u8(4));
     put!(encoder.u16(data.encoded_packet_len()));
     put!(encoder.u8(5));
@@ -2484,7 +2571,7 @@ fn encode_diagnostic_lora_last_tx(
     }
     if let Some(data) = data {
         put!(encoder.u8(3));
-        put!(encoder.u8(data.interface_id()));
+        put!(encoder.bytes(data.interface_id().as_bytes()));
         put!(encoder.u8(4));
         put!(encoder.u16(data.encoded_packet_len()));
         put!(encoder.u8(5));
@@ -2493,45 +2580,11 @@ fn encode_diagnostic_lora_last_tx(
     Ok(())
 }
 
-fn encode_rns_diagnostics(
-    encoder: &mut SliceEncoder<'_>,
-    rns: RnsDiagnostics,
-) -> Result<(), EncodeError> {
-    put!(encoder.map(11));
-    put!(encoder.u8(0));
-    put!(encoder.u64(rns.received()));
-    put!(encoder.u8(1));
-    put!(encoder.u64(rns.forwarded()));
-    put!(encoder.u8(2));
-    put!(encoder.u64(rns.dedup_drops()));
-    put!(encoder.u8(3));
-    put!(encoder.u64(rns.invalid_drops()));
-    put!(encoder.u8(4));
-    put!(encoder.u64(rns.announces_received()));
-    put!(encoder.u8(5));
-    put!(encoder.u64(rns.paths_learned()));
-    put!(encoder.u8(6));
-    put!(encoder.u64(rns.paths_expired()));
-    put!(encoder.u8(7));
-    put!(encoder.u64(rns.links_established()));
-    put!(encoder.u8(8));
-    put!(encoder.u64(rns.links_closed()));
-    put!(encoder.u8(9));
-    put!(encoder.u64(rns.links_failed()));
-    put!(encoder.u8(10));
-    put!(encoder.u64(rns.route_revision()));
-    Ok(())
-}
-
 fn encode_route_diagnostics_page(
     encoder: &mut SliceEncoder<'_>,
     page: &RouteDiagnosticsPage,
 ) -> Result<(), EncodeError> {
-    put!(encoder.map(3 + u64::from(page.next_cursor().is_some())));
-    put!(encoder.u8(0));
-    put!(encoder.u64(page.revision()));
-    put!(encoder.u8(1));
-    put!(encoder.u32(page.total_count()));
+    put!(encoder.map(1 + u64::from(page.next_cursor().is_some())));
     put!(encoder.u8(2));
     put!(encoder.array(MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES as u64));
     for entry in page.entries() {
@@ -2553,39 +2606,24 @@ fn encode_route_diagnostic_entry(
     encoder: &mut SliceEncoder<'_>,
     entry: RouteDiagnosticEntry,
 ) -> Result<(), EncodeError> {
-    let entries = 3
-        + u64::from(entry.next_hop_identity().is_some())
-        + u64::from(entry.retained_interface().is_some())
-        + u64::from(entry.learned_age_ms().is_some())
-        + u64::from(entry.last_used_age_ms().is_some())
-        + u64::from(entry.expires_in_ms().is_some());
-    put!(encoder.map(entries));
+    put!(encoder.map(7));
     put!(encoder.u8(0));
     put!(encoder.bytes(&entry.destination().0));
-    if let Some(next_hop) = entry.next_hop_identity() {
-        put!(encoder.u8(1));
-        put!(encoder.bytes(next_hop.as_bytes()));
-    }
+    put!(encoder.u8(1));
+    match entry.next_hop() {
+        RouteDiagnosticNextHop::Direct => put!(encoder.null()),
+        RouteDiagnosticNextHop::Via(next_hop) => put!(encoder.bytes(next_hop.as_bytes())),
+    };
     put!(encoder.u8(2));
     put!(encoder.u8(entry.hops()));
-    if let Some(interface) = entry.retained_interface() {
-        put!(encoder.u8(3));
-        put!(encoder.u8(interface));
-    }
-    put!(encoder.u8(4));
-    put!(encoder.u8(entry.resolution().wire_code()));
-    if let Some(age) = entry.learned_age_ms() {
-        put!(encoder.u8(5));
-        put!(encoder.u64(age));
-    }
-    if let Some(age) = entry.last_used_age_ms() {
-        put!(encoder.u8(6));
-        put!(encoder.u64(age));
-    }
-    if let Some(remaining) = entry.expires_in_ms() {
-        put!(encoder.u8(7));
-        put!(encoder.u64(remaining));
-    }
+    put!(encoder.u8(3));
+    put!(encoder.bytes(entry.interface().as_bytes()));
+    put!(encoder.u8(5));
+    put!(encoder.u64(entry.learned_age_ms()));
+    put!(encoder.u8(6));
+    put!(encoder.u64(entry.last_activity_age_ms()));
+    put!(encoder.u8(7));
+    put!(encoder.u64(entry.expires_in_ms()));
     Ok(())
 }
 
@@ -2672,7 +2710,7 @@ fn encode_radio_trace_packet_evidence(
     encoder: &mut SliceEncoder<'_>,
     packet: RadioTracePacketEvidence,
 ) -> Result<(), EncodeError> {
-    put!(encoder.u8(packet.interface_id()));
+    put!(encoder.bytes(packet.interface_id().as_bytes()));
     put!(encoder.u16(packet.packet_len()));
     put!(encoder.bytes(packet.encoded_packet_sha256().as_bytes()));
     match packet.attempt_token() {
@@ -2785,7 +2823,7 @@ fn encode_radio_trace_inbound_proof(
     }
     match proof.interface_id() {
         Some(interface) => {
-            put!(encoder.u8(interface));
+            put!(encoder.bytes(interface.as_bytes()));
         }
         None => {
             put!(encoder.null());
@@ -2817,7 +2855,10 @@ fn encode_submission_status(
     status: SubmissionStatus,
 ) -> Result<(), EncodeError> {
     let entries = match status.state {
-        SubmissionState::Queued | SubmissionState::Preparing | SubmissionState::Cancelled => 2,
+        SubmissionState::Queued
+        | SubmissionState::Preparing
+        | SubmissionState::Cancelled
+        | SubmissionState::ApplicationDelivered => 2,
         SubmissionState::AwaitingDelivery(_) | SubmissionState::Delivered(_) => 4,
         SubmissionState::Failed(_) => 3,
     };
@@ -2837,7 +2878,10 @@ fn encode_submission_status(
             put!(encoder.u8(4));
             put!(encoder.u8(failure.wire_code()));
         }
-        SubmissionState::Queued | SubmissionState::Preparing | SubmissionState::Cancelled => {}
+        SubmissionState::Queued
+        | SubmissionState::Preparing
+        | SubmissionState::Cancelled
+        | SubmissionState::ApplicationDelivered => {}
     }
     Ok(())
 }
@@ -3047,6 +3091,8 @@ fn decode_request_body<'a>(
     match operation {
         OP_SYSTEM_CAPABILITIES => decode_capabilities_request(body),
         OP_IDENTITY_SUMMARY => decode_identity_summary_request(body),
+        OP_APPLIANCE_LABEL_GET => decode_empty_request(body, DeviceRequest::ApplianceLabelGet),
+        OP_APPLIANCE_LABEL_MUTATE => decode_appliance_label_mutation_request(body),
         OP_SUBMISSION_STATUS => decode_status_request(body),
         #[cfg(feature = "rns-data")]
         OP_SUBMIT_RNS_DATA => decode_submit_request(body),
@@ -3782,21 +3828,6 @@ fn decode_network_config_mutation<'a>(
             finish_body(&decoder, value)?;
             Ok(NetworkConfigMutation::SetLoraProfile(profile))
         }
-        8 => {
-            let mut decoder = Decoder::new(value);
-            let name = if matches!(
-                decoder.datatype().map_err(|_| DecodeError::Malformed)?,
-                Type::Null
-            ) {
-                decoder.null().map_err(|_| DecodeError::Malformed)?;
-                None
-            } else {
-                let raw = decoder.str().map_err(|_| DecodeError::Malformed)?;
-                Some(DeviceName::new(raw).map_err(|_| DecodeError::InvalidDeviceName)?)
-            };
-            finish_body(&decoder, value)?;
-            Ok(NetworkConfigMutation::SetDeviceName(name))
-        }
         other => Err(DecodeError::InvalidValue {
             field: RequiredField::NetworkConfigMutationKind,
             value: u64::from(other),
@@ -4157,6 +4188,52 @@ fn decode_identity_summary_request(body: &[u8]) -> Result<DeviceRequest<'_>, Dec
     Ok(DeviceRequest::IdentitySummary)
 }
 
+fn decode_appliance_label_mutation_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut expected_revision = None;
+    let mut label_seen = false;
+    let mut label = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(
+                    expected_revision.is_some(),
+                    RequiredField::ApplianceLabelRevision,
+                )?;
+                expected_revision = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            1 => {
+                reject_duplicate(label_seen, RequiredField::ApplianceLabel)?;
+                label_seen = true;
+                if matches!(
+                    decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+                    Type::Null
+                ) {
+                    decoder.null().map_err(|_| DecodeError::Malformed)?;
+                } else {
+                    label = Some(
+                        ApplianceLabel::new(decoder.str().map_err(|_| DecodeError::Malformed)?)
+                            .map_err(|_| DecodeError::InvalidApplianceLabel)?,
+                    );
+                }
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    if !label_seen {
+        return Err(DecodeError::MissingField(RequiredField::ApplianceLabel));
+    }
+    Ok(DeviceRequest::ApplianceLabelMutate(
+        ApplianceLabelMutationRequest::new(
+            require(expected_revision, RequiredField::ApplianceLabelRevision)?,
+            label,
+        ),
+    ))
+}
+
 fn decode_status_request(body: &[u8]) -> Result<DeviceRequest<'_>, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
@@ -4251,6 +4328,7 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
     let mut network_config = None;
     let mut manual_service_announce = None;
     let mut reticulum_probe = None;
+    let mut route_diagnostics = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -4408,6 +4486,17 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
                     RequiredField::CapabilityReticulumProbe,
                 )?);
             }
+            22 => {
+                reject_duplicate(
+                    route_diagnostics.is_some(),
+                    RequiredField::CapabilityRouteDiagnostics,
+                )?;
+                let value = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+                route_diagnostics = Some(decode_capability_availability(
+                    value,
+                    RequiredField::CapabilityRouteDiagnostics,
+                )?);
+            }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
@@ -4459,6 +4548,7 @@ fn decode_capabilities(body: &[u8]) -> Result<CapabilitySnapshot, DecodeError> {
             RequiredField::CapabilityManualServiceAnnounce,
         )?,
         reticulum_probe: require(reticulum_probe, RequiredField::CapabilityReticulumProbe)?,
+        route_diagnostics: require(route_diagnostics, RequiredField::CapabilityRouteDiagnostics)?,
     })
 }
 
@@ -4479,8 +4569,6 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
     let mut tcp_host_peer_seen = false;
     let mut tcp_host_peer = None;
     let mut lora_profile = None;
-    let mut device_name_seen = false;
-    let mut device_name = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -4570,21 +4658,6 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
                 )?;
                 lora_profile = Some(decode_lora_radio_profile(&mut decoder)?);
             }
-            10 => {
-                reject_duplicate(device_name_seen, RequiredField::NetworkConfigDeviceName)?;
-                device_name_seen = true;
-                if matches!(
-                    decoder.datatype().map_err(|_| DecodeError::Malformed)?,
-                    Type::Null
-                ) {
-                    decoder.null().map_err(|_| DecodeError::Malformed)?;
-                } else {
-                    let raw = decoder.str().map_err(|_| DecodeError::Malformed)?;
-                    device_name = Some(
-                        DeviceNameSummary::new(raw).map_err(|_| DecodeError::InvalidDeviceName)?,
-                    );
-                }
-            }
             _ => skip_strict(&mut decoder, 0)?,
         }
     }
@@ -4605,11 +4678,6 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
         ));
     }
     let lora_profile = require(lora_profile, RequiredField::NetworkConfigLoraProfile)?;
-    if !device_name_seen {
-        return Err(DecodeError::MissingField(
-            RequiredField::NetworkConfigDeviceName,
-        ));
-    }
     NetworkConfigSnapshot::new(
         require(revision, RequiredField::NetworkConfigRevision)?,
         require(wifi_profiles, RequiredField::NetworkConfigWifiProfiles)?,
@@ -4637,7 +4705,6 @@ fn decode_network_config(body: &[u8]) -> Result<NetworkConfigSnapshot, DecodeErr
             rmap_phone_location,
         ),
         lora_profile,
-        device_name,
     )
     .map_err(|_| DecodeError::InvalidNetworkConfigSnapshot)
 }
@@ -4872,10 +4939,8 @@ fn decode_node_diagnostics(body: &[u8]) -> Result<NodeDiagnosticsSnapshot, Decod
     let mut interfaces = None;
     let mut lora_seen = false;
     let mut lora = None;
-    let mut rns = None;
-    let mut observed_peer_count = None;
-    let mut retained_route_count = None;
-    let mut usable_route_count = None;
+    let mut route_count = None;
+    let mut link_count = None;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -4903,29 +4968,18 @@ fn decode_node_diagnostics(body: &[u8]) -> Result<NodeDiagnosticsSnapshot, Decod
                 }
             }
             3 => {
-                reject_duplicate(rns.is_some(), RequiredField::NodeDiagnosticsRns)?;
-                rns = Some(decode_rns_diagnostics(&mut decoder)?);
+                reject_duplicate(
+                    route_count.is_some(),
+                    RequiredField::NodeDiagnosticsRetainedRoutes,
+                )?;
+                route_count = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
             }
             4 => {
                 reject_duplicate(
-                    observed_peer_count.is_some(),
-                    RequiredField::NodeDiagnosticsObservedPeers,
-                )?;
-                observed_peer_count = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
-            }
-            5 => {
-                reject_duplicate(
-                    retained_route_count.is_some(),
-                    RequiredField::NodeDiagnosticsRetainedRoutes,
-                )?;
-                retained_route_count = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
-            }
-            6 => {
-                reject_duplicate(
-                    usable_route_count.is_some(),
+                    link_count.is_some(),
                     RequiredField::NodeDiagnosticsUsableRoutes,
                 )?;
-                usable_route_count = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
+                link_count = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
             }
             _ => skip_strict(&mut decoder, 0)?,
         }
@@ -4935,19 +4989,8 @@ fn decode_node_diagnostics(body: &[u8]) -> Result<NodeDiagnosticsSnapshot, Decod
         require(uptime_ms, RequiredField::NodeDiagnosticsUptime)?,
         require(interfaces, RequiredField::NodeDiagnosticsInterfaces)?,
         lora,
-        require(rns, RequiredField::NodeDiagnosticsRns)?,
-        require(
-            observed_peer_count,
-            RequiredField::NodeDiagnosticsObservedPeers,
-        )?,
-        require(
-            retained_route_count,
-            RequiredField::NodeDiagnosticsRetainedRoutes,
-        )?,
-        require(
-            usable_route_count,
-            RequiredField::NodeDiagnosticsUsableRoutes,
-        )?,
+        require(route_count, RequiredField::NodeDiagnosticsRetainedRoutes)?,
+        require(link_count, RequiredField::NodeDiagnosticsUsableRoutes)?,
     ))
 }
 
@@ -4978,22 +5021,30 @@ fn decode_diagnostic_interface(
 ) -> Result<DiagnosticInterfaceRecord, DecodeError> {
     let entries = decode_map_len(decoder)?;
     let mut id = None;
-    let mut kind = None;
+    let mut mode = None;
     let mut state = None;
-    let mut generation = None;
-    let mut logical_mtu = None;
-    let mut bitrate = None;
-    let mut bitrate_seen = false;
+    let mut failure_reason = None;
+    let mut failure_reason_seen = false;
+    let mut rx_bytes = None;
+    let mut tx_bytes = None;
+    let mut destinations = None;
+    let mut links = None;
+    let mut transported_links = None;
+    let mut supervisor = None;
+    let mut supervisor_seen = false;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
             0 => {
                 reject_duplicate(id.is_some(), RequiredField::DiagnosticInterfaceId)?;
-                id = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+                id = Some(ReticulumInterfaceId::new(decode_fixed_bytes::<8>(
+                    decoder,
+                    RequiredField::DiagnosticInterfaceId,
+                )?));
             }
             1 => {
-                reject_duplicate(kind.is_some(), RequiredField::DiagnosticInterfaceKind)?;
-                kind = Some(decode_diagnostic_interface_kind(
+                reject_duplicate(mode.is_some(), RequiredField::DiagnosticInterfaceKind)?;
+                mode = Some(decode_diagnostic_interface_mode(
                     decoder.u8().map_err(|_| DecodeError::Malformed)?,
                 )?);
             }
@@ -5005,42 +5056,92 @@ fn decode_diagnostic_interface(
             }
             3 => {
                 reject_duplicate(
-                    generation.is_some(),
-                    RequiredField::DiagnosticInterfaceGeneration,
+                    rx_bytes.is_some(),
+                    RequiredField::DiagnosticInterfaceRxBytes,
                 )?;
-                generation = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+                rx_bytes = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
             }
             4 => {
                 reject_duplicate(
-                    logical_mtu.is_some(),
-                    RequiredField::DiagnosticInterfaceLogicalMtu,
+                    tx_bytes.is_some(),
+                    RequiredField::DiagnosticInterfaceTxBytes,
                 )?;
-                logical_mtu = Some(decoder.u16().map_err(|_| DecodeError::Malformed)?);
+                tx_bytes = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
             }
             5 => {
-                reject_duplicate(bitrate_seen, RequiredField::DiagnosticInterfaceBitrate)?;
-                bitrate_seen = true;
-                bitrate = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
+                reject_duplicate(
+                    destinations.is_some(),
+                    RequiredField::DiagnosticInterfaceDestinations,
+                )?;
+                destinations = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
+            }
+            6 => {
+                reject_duplicate(links.is_some(), RequiredField::DiagnosticInterfaceLinks)?;
+                links = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
+            }
+            7 => {
+                reject_duplicate(
+                    transported_links.is_some(),
+                    RequiredField::DiagnosticInterfaceTransportedLinks,
+                )?;
+                transported_links = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
+            }
+            8 => {
+                reject_duplicate(
+                    failure_reason_seen,
+                    RequiredField::DiagnosticInterfaceFailure,
+                )?;
+                failure_reason_seen = true;
+                let reason = decoder.str().map_err(|_| DecodeError::Malformed)?;
+                failure_reason = Some(
+                    DiagnosticInterfaceFailureReason::try_from_str(reason).ok_or(
+                        DecodeError::PayloadTooLarge {
+                            actual: reason.len(),
+                            max: crate::model::MAX_DIAGNOSTIC_FAILURE_REASON_BYTES,
+                        },
+                    )?,
+                );
+            }
+            9 => {
+                reject_duplicate(
+                    supervisor_seen,
+                    RequiredField::DiagnosticInterfaceSupervisor,
+                )?;
+                supervisor_seen = true;
+                supervisor = Some(ReticulumInterfaceId::new(decode_fixed_bytes::<8>(
+                    decoder,
+                    RequiredField::DiagnosticInterfaceSupervisor,
+                )?));
             }
             _ => skip_strict(decoder, 0)?,
         }
     }
     Ok(DiagnosticInterfaceRecord::new(
         require(id, RequiredField::DiagnosticInterfaceId)?,
-        require(kind, RequiredField::DiagnosticInterfaceKind)?,
+        require(mode, RequiredField::DiagnosticInterfaceKind)?,
         require(state, RequiredField::DiagnosticInterfaceState)?,
-        require(generation, RequiredField::DiagnosticInterfaceGeneration)?,
-        require(logical_mtu, RequiredField::DiagnosticInterfaceLogicalMtu)?,
-        bitrate,
+        failure_reason,
+        require(rx_bytes, RequiredField::DiagnosticInterfaceRxBytes)?,
+        require(tx_bytes, RequiredField::DiagnosticInterfaceTxBytes)?,
+        require(destinations, RequiredField::DiagnosticInterfaceDestinations)?,
+        require(links, RequiredField::DiagnosticInterfaceLinks)?,
+        require(
+            transported_links,
+            RequiredField::DiagnosticInterfaceTransportedLinks,
+        )?,
+        supervisor,
     ))
 }
 
-fn decode_diagnostic_interface_kind(value: u8) -> Result<DiagnosticInterfaceKind, DecodeError> {
+fn decode_diagnostic_interface_mode(value: u8) -> Result<DiagnosticInterfaceMode, DecodeError> {
     match value {
-        0 => Ok(DiagnosticInterfaceKind::LoRa),
-        1 => Ok(DiagnosticInterfaceKind::TcpClient),
-        2 => Ok(DiagnosticInterfaceKind::Other),
-        3 => Ok(DiagnosticInterfaceKind::TcpServer),
+        0 => Ok(DiagnosticInterfaceMode::Full),
+        1 => Ok(DiagnosticInterfaceMode::PointToPoint),
+        2 => Ok(DiagnosticInterfaceMode::AccessPoint),
+        3 => Ok(DiagnosticInterfaceMode::Roaming),
+        4 => Ok(DiagnosticInterfaceMode::Boundary),
+        5 => Ok(DiagnosticInterfaceMode::Gateway),
+        6 => Ok(DiagnosticInterfaceMode::Internal),
         other => Err(DecodeError::InvalidValue {
             field: RequiredField::DiagnosticInterfaceKind,
             value: u64::from(other),
@@ -5050,9 +5151,14 @@ fn decode_diagnostic_interface_kind(value: u8) -> Result<DiagnosticInterfaceKind
 
 fn decode_diagnostic_interface_state(value: u8) -> Result<DiagnosticInterfaceState, DecodeError> {
     match value {
-        0 => Ok(DiagnosticInterfaceState::Offline),
-        1 => Ok(DiagnosticInterfaceState::Online),
-        2 => Ok(DiagnosticInterfaceState::Faulted),
+        0 => Ok(DiagnosticInterfaceState::Initializing),
+        1 => Ok(DiagnosticInterfaceState::Connected),
+        2 => Ok(DiagnosticInterfaceState::Degraded),
+        3 => Ok(DiagnosticInterfaceState::Reconnecting),
+        4 => Ok(DiagnosticInterfaceState::Failed),
+        5 => Ok(DiagnosticInterfaceState::Disconnected),
+        6 => Ok(DiagnosticInterfaceState::Disabled),
+        255 => Ok(DiagnosticInterfaceState::Unknown),
         other => Err(DecodeError::InvalidValue {
             field: RequiredField::DiagnosticInterfaceState,
             value: u64::from(other),
@@ -5329,7 +5435,10 @@ fn decode_diagnostic_lora_last_tx(
                     RequiredField::DiagnosticLoraLastTxInterface,
                 )?;
                 interface_id_seen = true;
-                interface_id = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+                interface_id = Some(ReticulumInterfaceId::new(decode_fixed_bytes::<8>(
+                    decoder,
+                    RequiredField::DiagnosticLoraLastTxInterface,
+                )?));
             }
             4 => {
                 reject_duplicate(
@@ -5401,139 +5510,15 @@ fn decode_diagnostic_lora_tx_outcome(value: u8) -> Result<DiagnosticLoraTxOutcom
     }
 }
 
-fn decode_rns_diagnostics(decoder: &mut Decoder<'_>) -> Result<RnsDiagnostics, DecodeError> {
-    let entries = decode_map_len(decoder)?;
-    let mut received = None;
-    let mut forwarded = None;
-    let mut dedup_drops = None;
-    let mut invalid_drops = None;
-    let mut announces_received = None;
-    let mut paths_learned = None;
-    let mut paths_expired = None;
-    let mut links_established = None;
-    let mut links_closed = None;
-    let mut links_failed = None;
-    let mut route_revision = None;
-    for _ in 0..entries {
-        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
-        match key {
-            0 => {
-                reject_duplicate(received.is_some(), RequiredField::DiagnosticRnsReceived)?;
-                received = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            1 => {
-                reject_duplicate(forwarded.is_some(), RequiredField::DiagnosticRnsForwarded)?;
-                forwarded = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            2 => {
-                reject_duplicate(
-                    dedup_drops.is_some(),
-                    RequiredField::DiagnosticRnsDedupDrops,
-                )?;
-                dedup_drops = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            3 => {
-                reject_duplicate(
-                    invalid_drops.is_some(),
-                    RequiredField::DiagnosticRnsInvalidDrops,
-                )?;
-                invalid_drops = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            4 => {
-                reject_duplicate(
-                    announces_received.is_some(),
-                    RequiredField::DiagnosticRnsAnnouncesReceived,
-                )?;
-                announces_received = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            5 => {
-                reject_duplicate(
-                    paths_learned.is_some(),
-                    RequiredField::DiagnosticRnsPathsLearned,
-                )?;
-                paths_learned = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            6 => {
-                reject_duplicate(
-                    paths_expired.is_some(),
-                    RequiredField::DiagnosticRnsPathsExpired,
-                )?;
-                paths_expired = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            7 => {
-                reject_duplicate(
-                    links_established.is_some(),
-                    RequiredField::DiagnosticRnsLinksEstablished,
-                )?;
-                links_established = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            8 => {
-                reject_duplicate(
-                    links_closed.is_some(),
-                    RequiredField::DiagnosticRnsLinksClosed,
-                )?;
-                links_closed = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            9 => {
-                reject_duplicate(
-                    links_failed.is_some(),
-                    RequiredField::DiagnosticRnsLinksFailed,
-                )?;
-                links_failed = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            10 => {
-                reject_duplicate(
-                    route_revision.is_some(),
-                    RequiredField::DiagnosticRnsRouteRevision,
-                )?;
-                route_revision = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            _ => skip_strict(decoder, 0)?,
-        }
-    }
-    Ok(RnsDiagnostics::new(
-        require(received, RequiredField::DiagnosticRnsReceived)?,
-        require(forwarded, RequiredField::DiagnosticRnsForwarded)?,
-        require(dedup_drops, RequiredField::DiagnosticRnsDedupDrops)?,
-        require(invalid_drops, RequiredField::DiagnosticRnsInvalidDrops)?,
-        require(
-            announces_received,
-            RequiredField::DiagnosticRnsAnnouncesReceived,
-        )?,
-        require(paths_learned, RequiredField::DiagnosticRnsPathsLearned)?,
-        require(paths_expired, RequiredField::DiagnosticRnsPathsExpired)?,
-        require(
-            links_established,
-            RequiredField::DiagnosticRnsLinksEstablished,
-        )?,
-        require(links_closed, RequiredField::DiagnosticRnsLinksClosed)?,
-        require(links_failed, RequiredField::DiagnosticRnsLinksFailed)?,
-        require(route_revision, RequiredField::DiagnosticRnsRouteRevision)?,
-    ))
-}
-
 fn decode_route_diagnostics_page(body: &[u8]) -> Result<RouteDiagnosticsPage, DecodeError> {
     let mut decoder = Decoder::new(body);
     let entries = decode_map_len(&mut decoder)?;
-    let mut revision = None;
-    let mut total_count = None;
     let mut route_entries = None;
     let mut next_cursor = None;
     let mut next_cursor_seen = false;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
-            0 => {
-                reject_duplicate(revision.is_some(), RequiredField::RouteDiagnosticsRevision)?;
-                revision = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
-            }
-            1 => {
-                reject_duplicate(
-                    total_count.is_some(),
-                    RequiredField::RouteDiagnosticsTotalCount,
-                )?;
-                total_count = Some(decoder.u32().map_err(|_| DecodeError::Malformed)?);
-            }
             2 => {
                 reject_duplicate(
                     route_entries.is_some(),
@@ -5554,8 +5539,6 @@ fn decode_route_diagnostics_page(body: &[u8]) -> Result<RouteDiagnosticsPage, De
     }
     finish_body(&decoder, body)?;
     RouteDiagnosticsPage::new(
-        require(revision, RequiredField::RouteDiagnosticsRevision)?,
-        require(total_count, RequiredField::RouteDiagnosticsTotalCount)?,
         require(route_entries, RequiredField::RouteDiagnosticsEntries)?,
         next_cursor,
     )
@@ -5589,18 +5572,13 @@ fn decode_route_diagnostic_entry(
 ) -> Result<RouteDiagnosticEntry, DecodeError> {
     let entries = decode_map_len(decoder)?;
     let mut destination = None;
-    let mut next_hop_identity = None;
+    let mut next_hop = None;
     let mut next_hop_seen = false;
     let mut hops = None;
-    let mut retained_interface = None;
-    let mut retained_interface_seen = false;
-    let mut resolution = None;
+    let mut interface = None;
     let mut learned_age_ms = None;
-    let mut learned_age_seen = false;
-    let mut last_used_age_ms = None;
-    let mut last_used_age_seen = false;
+    let mut last_activity_age_ms = None;
     let mut expires_in_ms = None;
-    let mut expires_in_seen = false;
     for _ in 0..entries {
         let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
         match key {
@@ -5617,48 +5595,51 @@ fn decode_route_diagnostic_entry(
             1 => {
                 reject_duplicate(next_hop_seen, RequiredField::RouteDiagnosticNextHop)?;
                 next_hop_seen = true;
-                next_hop_identity = Some(IdentityHash::new(decode_fixed_bytes::<16>(
-                    decoder,
-                    RequiredField::RouteDiagnosticNextHop,
-                )?));
+                next_hop = Some(
+                    if matches!(
+                        decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+                        Type::Null
+                    ) {
+                        decoder.null().map_err(|_| DecodeError::Malformed)?;
+                        RouteDiagnosticNextHop::Direct
+                    } else {
+                        RouteDiagnosticNextHop::Via(IdentityHash::new(decode_fixed_bytes::<16>(
+                            decoder,
+                            RequiredField::RouteDiagnosticNextHop,
+                        )?))
+                    },
+                );
             }
             2 => {
                 reject_duplicate(hops.is_some(), RequiredField::RouteDiagnosticHops)?;
                 hops = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
             }
             3 => {
-                reject_duplicate(
-                    retained_interface_seen,
+                reject_duplicate(interface.is_some(), RequiredField::RouteDiagnosticInterface)?;
+                interface = Some(ReticulumInterfaceId::new(decode_fixed_bytes::<8>(
+                    decoder,
                     RequiredField::RouteDiagnosticInterface,
-                )?;
-                retained_interface_seen = true;
-                retained_interface = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
-            }
-            4 => {
-                reject_duplicate(
-                    resolution.is_some(),
-                    RequiredField::RouteDiagnosticResolution,
-                )?;
-                resolution = Some(decode_route_diagnostic_resolution(
-                    decoder.u8().map_err(|_| DecodeError::Malformed)?,
-                )?);
+                )?));
             }
             5 => {
-                reject_duplicate(learned_age_seen, RequiredField::RouteDiagnosticLearnedAge)?;
-                learned_age_seen = true;
+                reject_duplicate(
+                    learned_age_ms.is_some(),
+                    RequiredField::RouteDiagnosticLearnedAge,
+                )?;
                 learned_age_ms = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
             }
             6 => {
                 reject_duplicate(
-                    last_used_age_seen,
+                    last_activity_age_ms.is_some(),
                     RequiredField::RouteDiagnosticLastUsedAge,
                 )?;
-                last_used_age_seen = true;
-                last_used_age_ms = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+                last_activity_age_ms = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
             }
             7 => {
-                reject_duplicate(expires_in_seen, RequiredField::RouteDiagnosticExpiresIn)?;
-                expires_in_seen = true;
+                reject_duplicate(
+                    expires_in_ms.is_some(),
+                    RequiredField::RouteDiagnosticExpiresIn,
+                )?;
                 expires_in_ms = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
             }
             _ => skip_strict(decoder, 0)?,
@@ -5666,28 +5647,16 @@ fn decode_route_diagnostic_entry(
     }
     Ok(RouteDiagnosticEntry::new(
         require(destination, RequiredField::RouteDiagnosticDestination)?,
-        next_hop_identity,
+        require(next_hop, RequiredField::RouteDiagnosticNextHop)?,
         require(hops, RequiredField::RouteDiagnosticHops)?,
-        retained_interface,
-        require(resolution, RequiredField::RouteDiagnosticResolution)?,
-        learned_age_ms,
-        last_used_age_ms,
-        expires_in_ms,
+        require(interface, RequiredField::RouteDiagnosticInterface)?,
+        require(learned_age_ms, RequiredField::RouteDiagnosticLearnedAge)?,
+        require(
+            last_activity_age_ms,
+            RequiredField::RouteDiagnosticLastUsedAge,
+        )?,
+        require(expires_in_ms, RequiredField::RouteDiagnosticExpiresIn)?,
     ))
-}
-
-fn decode_route_diagnostic_resolution(value: u8) -> Result<RouteDiagnosticResolution, DecodeError> {
-    match value {
-        0 => Ok(RouteDiagnosticResolution::ExactReady),
-        1 => Ok(RouteDiagnosticResolution::ExactOffline),
-        2 => Ok(RouteDiagnosticResolution::ExactMissing),
-        3 => Ok(RouteDiagnosticResolution::BroadcastReady),
-        4 => Ok(RouteDiagnosticResolution::BroadcastUnavailable),
-        other => Err(DecodeError::InvalidValue {
-            field: RequiredField::RouteDiagnosticResolution,
-            value: u64::from(other),
-        }),
-    }
 }
 
 fn decode_radio_trace_cursor_compact(
@@ -5800,7 +5769,10 @@ fn decode_radio_trace_event_compact(
 fn decode_radio_trace_packet_evidence_compact(
     decoder: &mut Decoder<'_>,
 ) -> Result<RadioTracePacketEvidence, DecodeError> {
-    let interface_id = decoder.u8().map_err(|_| DecodeError::Malformed)?;
+    let interface_id = ReticulumInterfaceId::new(decode_fixed_bytes::<8>(
+        decoder,
+        RequiredField::RadioTracePacketInterface,
+    )?);
     let packet_len = decoder.u16().map_err(|_| DecodeError::Malformed)?;
     let sha256 = EncodedPacketSha256::new(decode_fixed_bytes::<32>(
         decoder,
@@ -5957,7 +5929,10 @@ fn decode_radio_trace_inbound_proof_compact(
         decoder.null().map_err(|_| DecodeError::Malformed)?;
         None
     } else {
-        Some(decoder.u8().map_err(|_| DecodeError::Malformed)?)
+        Some(ReticulumInterfaceId::new(decode_fixed_bytes::<8>(
+            decoder,
+            RequiredField::RadioTraceInboundProofInterface,
+        )?))
     };
     let signal = if matches!(
         decoder.datatype().map_err(|_| DecodeError::Malformed)?,
@@ -6000,9 +5975,6 @@ fn decode_radio_trace_inbound_proof_stage(
 ) -> Result<RadioTraceInboundProofStage, DecodeError> {
     match value {
         0 => Ok(RadioTraceInboundProofStage::DataLogicalRx),
-        1 => Ok(RadioTraceInboundProofStage::DurableCommit),
-        2 => Ok(RadioTraceInboundProofStage::ProofRetained),
-        3 => Ok(RadioTraceInboundProofStage::ProofStaged),
         4 => Ok(RadioTraceInboundProofStage::OrdinaryQueued),
         5 => Ok(RadioTraceInboundProofStage::PhysicalTxDone),
         6 => Ok(RadioTraceInboundProofStage::PhysicalTxFailed),
@@ -6876,6 +6848,87 @@ fn decode_identity_summary(body: &[u8]) -> Result<IdentitySummary, DecodeError> 
     })
 }
 
+fn decode_appliance_label_snapshot(body: &[u8]) -> Result<ApplianceLabelSnapshot, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut revision = None;
+    let mut label_seen = false;
+    let mut label = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(revision.is_some(), RequiredField::ApplianceLabelRevision)?;
+                revision = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            1 => {
+                reject_duplicate(label_seen, RequiredField::ApplianceLabel)?;
+                label_seen = true;
+                if matches!(
+                    decoder.datatype().map_err(|_| DecodeError::Malformed)?,
+                    Type::Null
+                ) {
+                    decoder.null().map_err(|_| DecodeError::Malformed)?;
+                } else {
+                    label = Some(
+                        ApplianceLabelSummary::new(
+                            decoder.str().map_err(|_| DecodeError::Malformed)?,
+                        )
+                        .map_err(|_| DecodeError::InvalidApplianceLabel)?,
+                    );
+                }
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    if !label_seen {
+        return Err(DecodeError::MissingField(RequiredField::ApplianceLabel));
+    }
+    Ok(ApplianceLabelSnapshot::new(
+        require(revision, RequiredField::ApplianceLabelRevision)?,
+        label,
+    ))
+}
+
+fn decode_appliance_label_mutation_outcome(
+    body: &[u8],
+) -> Result<ApplianceLabelMutationOutcome, DecodeError> {
+    let mut decoder = Decoder::new(body);
+    let entries = decode_map_len(&mut decoder)?;
+    let mut outcome = None;
+    let mut revision = None;
+    for _ in 0..entries {
+        let key = decoder.u64().map_err(|_| DecodeError::Malformed)?;
+        match key {
+            0 => {
+                reject_duplicate(
+                    outcome.is_some(),
+                    RequiredField::ApplianceLabelMutationOutcome,
+                )?;
+                outcome = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+            }
+            1 => {
+                reject_duplicate(revision.is_some(), RequiredField::ApplianceLabelRevision)?;
+                revision = Some(decoder.u64().map_err(|_| DecodeError::Malformed)?);
+            }
+            _ => skip_strict(&mut decoder, 0)?,
+        }
+    }
+    finish_body(&decoder, body)?;
+    let revision = require(revision, RequiredField::ApplianceLabelRevision)?;
+    match require(outcome, RequiredField::ApplianceLabelMutationOutcome)? {
+        0 => Ok(ApplianceLabelMutationOutcome::Applied { revision }),
+        1 => Ok(ApplianceLabelMutationOutcome::RevisionConflict {
+            current_revision: revision,
+        }),
+        value => Err(DecodeError::InvalidValue {
+            field: RequiredField::ApplianceLabelMutationOutcome,
+            value: u64::from(value),
+        }),
+    }
+}
+
 fn decode_ingress_observation(
     decoder: &mut Decoder<'_>,
     invalid_pair: DecodeError,
@@ -6891,7 +6944,10 @@ fn decode_ingress_observation(
         match key {
             0 => {
                 reject_duplicate(interface.is_some(), RequiredField::IngressInterface)?;
-                interface = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+                interface = Some(decode_fixed_bytes::<8>(
+                    decoder,
+                    RequiredField::IngressInterface,
+                )?);
             }
             1 => {
                 reject_duplicate(rssi_seen, RequiredField::IngressRssi)?;
@@ -6912,7 +6968,7 @@ fn decode_ingress_observation(
         _ => return Err(invalid_pair),
     };
     Ok(IngressObservation::new(
-        require(interface, RequiredField::IngressInterface)?,
+        ReticulumInterfaceId::new(require(interface, RequiredField::IngressInterface)?),
         signal,
     ))
 }
@@ -7333,7 +7389,10 @@ fn decode_lxmf_discovered_peer(
             }
             4 => {
                 reject_duplicate(interface_id.is_some(), RequiredField::LxmfPeerInterfaceId)?;
-                interface_id = Some(decoder.u8().map_err(|_| DecodeError::Malformed)?);
+                interface_id = Some(ReticulumInterfaceId::new(decode_fixed_bytes::<8>(
+                    decoder,
+                    RequiredField::LxmfPeerInterfaceId,
+                )?));
             }
             5 => {
                 reject_duplicate(rssi_seen, RequiredField::LxmfPeerRssiDbm)?;
@@ -7844,7 +7903,8 @@ fn decode_submission_state(
         }
         (4, None, None, Some(failure)) => Ok(SubmissionState::Failed(failure)),
         (5, None, None, None) => Ok(SubmissionState::Cancelled),
-        (0..=5, _, _, _) => Err(DecodeError::InvalidSubmissionStatus),
+        (6, None, None, None) => Ok(SubmissionState::ApplicationDelivered),
+        (0..=6, _, _, _) => Err(DecodeError::InvalidSubmissionStatus),
         (other, _, _, _) => Err(DecodeError::InvalidValue {
             field: RequiredField::SubmissionState,
             value: u64::from(other),

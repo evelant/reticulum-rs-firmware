@@ -119,14 +119,14 @@ pub struct ReticulumProbeSignalView {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[allow(missing_docs)]
 pub struct ReticulumProbeIngressView {
-    interface_id: u8,
+    interface_id: [u8; 8],
     signal: Option<ReticulumProbeSignalView>,
 }
 
 impl From<api::IngressObservation> for ReticulumProbeIngressView {
     fn from(ingress: api::IngressObservation) -> Self {
         Self {
-            interface_id: ingress.interface_id(),
+            interface_id: *ingress.interface_id().as_bytes(),
             signal: ingress.signal().map(|signal| ReticulumProbeSignalView {
                 rssi_dbm: signal.rssi_dbm(),
                 snr_db: signal.snr_db(),
@@ -264,7 +264,10 @@ mod tests {
                 api::ProbePollResponse::Succeeded(api::ProbeSuccess::new(
                     1_234,
                     2,
-                    api::IngressObservation::new(7, Some(api::IngressSignal::new(-91, 7)),),
+                    api::IngressObservation::new(
+                        api::ReticulumInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 7]),
+                        Some(api::IngressSignal::new(-91, 7)),
+                    ),
                 ))
             ))
             .unwrap(),
@@ -274,7 +277,7 @@ mod tests {
                     "round_trip_ms": 1_234,
                     "hops": 2,
                     "ingress_observation": {
-                        "interface_id": 7,
+                        "interface_id": [0, 0, 0, 0, 0, 0, 0, 7],
                         "signal": {
                             "rssi_dbm": -91,
                             "snr_db": 7,

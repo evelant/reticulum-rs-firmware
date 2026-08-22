@@ -1,92 +1,60 @@
-//! App-private, device-keyed mobile profile storage.
+//! App-private mobile profiles keyed by Reticulum management destination.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::appliance::NativeApplianceError;
-use crate::credential::{
-    CredentialImportError, CredentialImportPolicy, NativeCredentialStatus, NativeCredentialSummary,
-    credential_summary_from_bytes, inspect_credential, install_credential, read_credential_bytes,
-    read_import_credential_file,
-};
 
 const PROFILES_DIRECTORY: &str = "profiles";
 const UNCONFIGURED_DIRECTORY: &str = "unconfigured";
-const CREDENTIAL_FILE: &str = "credential.rdpkey";
-const ONBOARDING_CREDENTIAL_FILE: &str = "ble-onboarding.rdpkey";
 const DATABASE_FILE: &str = "chat.sqlite3";
 const DATABASE_WAL_FILE: &str = "chat.sqlite3-wal";
 const DATABASE_SHM_FILE: &str = "chat.sqlite3-shm";
-const ACTIVE_PROFILE_FILE: &str = "active-profile-v1";
-const ACTIVE_PROFILE_MAGIC: &[u8] = b"RETICULUM-APPLIANCE-ACTIVE-PROFILE-1\n";
-const METADATA_STAGING_ATTEMPTS: usize = 16;
-const DEVICE_ID_HEX_BYTES: usize = 32;
+const PROFILE_METADATA_FILE: &str = "reticulum-profile-v1";
+const PROFILE_METADATA_MAGIC_V1: &str = "RETICULUM-APPLIANCE-PROFILE-1";
+const PROFILE_METADATA_MAGIC_V2: &str = "RETICULUM-APPLIANCE-PROFILE-2";
+const ACTIVE_PROFILE_FILE: &str = "active-reticulum-profile-v1";
+const ACTIVE_PROFILE_MAGIC: &str = "RETICULUM-APPLIANCE-ACTIVE-RETICULUM-PROFILE-1\n";
+const DESTINATION_HEX_BYTES: usize = 32;
+const METADATA_MAX_BYTES: u64 = 256;
 
-/// Public, secret-free facts for one stored physical-device profile.
+/// Public facts for one saved appliance management application.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct NativeProfileSummary {
-    /// Canonical lowercase hexadecimal profile key.
+    /// Canonical profile key, equal to the management destination hash.
     pub profile_key: String,
-    /// Public facts decoded from the profile's canonical Active credential.
-    pub credential: NativeCredentialSummary,
+    /// Canonical Reticulum management destination hash.
+    pub management_destination: String,
+    /// Canonical Reticulum LXMF delivery destination hash.
+    pub lxmf_destination: String,
+    /// Last authorized product-owned appliance label read from this node.
+    pub appliance_label: Option<String>,
 }
 
-/// Secret-free projection of the device-keyed profile store.
+/// Secret-free projection of the management-destination profile store.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct NativeProfileStoreSnapshot {
-    /// Canonical key selected for the single active application session.
+    /// Canonical key selected for the active application session.
     pub active_profile_key: Option<String>,
     /// All validated profiles, sorted by canonical key.
     pub profiles: Vec<NativeProfileSummary>,
 }
 
-/// Authoritative result of reconciling app-private BLE onboarding publication.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
-pub struct NativeOnboardingPublicationReconciliation {
-    /// Validated profile selected by the store after reconciliation, if any.
-    pub active_profile: Option<NativeProfileSummary>,
-    /// Whether this call finalized and removed one canonical Active onboarding artifact.
-    pub finalized_active_artifact: bool,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct NativeProfileRuntimePaths {
     pub(crate) database: PathBuf,
-    pub(crate) credential: PathBuf,
+    pub(crate) management_destination: Option<[u8; 16]>,
 }
 
-enum ProfileMetadataError {
-    Rejected { reason: String },
-    PublicationUncertain { reason: String },
-}
-
-impl ProfileMetadataError {
-    fn into_native(self) -> NativeApplianceError {
-        let reason = match self {
-            Self::Rejected { reason } | Self::PublicationUncertain { reason } => reason,
-        };
-        NativeApplianceError::Storage { reason }
-    }
-
-    fn into_import(self) -> CredentialImportError {
-        match self {
-            Self::Rejected { reason } => CredentialImportError::Rejected { reason },
-            Self::PublicationUncertain { reason } => {
-                CredentialImportError::PublicationUncertain { reason }
-            }
-        }
-    }
-}
-
-/// Native owner for device-keyed credential and SQLite profile paths.
+/// Native owner for management-destination keyed SQLite profile paths.
 ///
-/// The generated mobile binding exposes only validated public identity
-/// summaries. Credential bytes remain inside Rust and app-private files.
+/// Enrollment is ordinary Reticulum identified-Link authorization. This store
+/// contains no bearer credential, Bluetooth bond, or duplicate identity.
 #[derive(uniffi::Object)]
 pub struct NativeProfileStore {
     root: PathBuf,
@@ -95,455 +63,225 @@ pub struct NativeProfileStore {
 
 #[uniffi::export]
 impl NativeProfileStore {
-    /// Open or create an app-private device-keyed profile root.
+    /// Open or create an app-private profile root.
     #[uniffi::constructor]
     pub fn open(root_directory: String) -> Result<Arc<Self>, NativeApplianceError> {
         let root = validated_absolute_path(&root_directory, "profile root")?;
-
         create_private_directory(&root, "profile root")?;
         create_private_directory(&root.join(PROFILES_DIRECTORY), "profiles directory")?;
         create_private_directory(
             &root.join(UNCONFIGURED_DIRECTORY),
             "unconfigured profile directory",
         )?;
-
         let store = Arc::new(Self {
             root,
             gate: Mutex::new(()),
         });
         {
             let _guard = store.lock_gate()?;
-            store.validate_active_profile_if_present()?;
+            if let Some(active) = read_active_profile(&store.root)? {
+                store.profile_summary_locked(&active)?;
+            }
         }
         Ok(store)
     }
 
-    /// Return all validated profiles and the currently active profile key.
+    /// Return all validated profiles and the selected profile key.
     pub fn snapshot(&self) -> Result<NativeProfileStoreSnapshot, NativeApplianceError> {
         let _guard = self.lock_gate()?;
         self.snapshot_locked()
     }
 
-    /// Inspect the active profile's credential without returning secret bytes.
+    /// Idempotently remember and select one verified appliance application.
     ///
-    /// An empty store is `Missing`. A malformed active profile is `Invalid` so
-    /// the onboarding recovery boundary remains explicit.
-    pub fn credential_status(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
+    /// Callers invoke this only after the public identity request has matched
+    /// `management_destination` and an identified request has demonstrated
+    /// authorization or completed physical-presence enrollment.
+    pub fn remember_profile(
+        &self,
+        management_destination: String,
+        lxmf_destination: String,
+    ) -> Result<NativeProfileSummary, NativeApplianceError> {
+        let management_destination =
+            validate_destination(&management_destination, "management destination")?;
+        let lxmf_destination = validate_destination(&lxmf_destination, "LXMF destination")?;
+        let summary = NativeProfileSummary {
+            profile_key: management_destination.clone(),
+            management_destination,
+            lxmf_destination,
+            appliance_label: None,
+        };
         let _guard = self.lock_gate()?;
-        self.credential_status_locked()
+        let directory = self.profile_directory(&summary.profile_key);
+        create_private_directory(&directory, "Reticulum profile directory")?;
+        let metadata = directory.join(PROFILE_METADATA_FILE);
+        if metadata.exists() {
+            let existing = read_profile_metadata(&metadata)?;
+            if existing.management_destination != summary.management_destination
+                || existing.lxmf_destination != summary.lxmf_destination
+            {
+                return Err(NativeApplianceError::Storage {
+                    reason: "saved management destination has conflicting application metadata"
+                        .to_owned(),
+                });
+            }
+            write_active_profile(&self.root, &existing.profile_key)?;
+            return Ok(existing);
+        } else {
+            write_profile_metadata(&metadata, &summary)?;
+        }
+        write_active_profile(&self.root, &summary.profile_key)?;
+        Ok(summary)
     }
 
-    /// Select one existing validated profile for the next native appliance.
-    ///
-    /// The Expo client calls this only after closing the current native owner,
-    /// then opens a fresh appliance against the selected profile. Credential
-    /// bytes and filesystem paths remain inside Rust.
+    /// Replace the cached label for the active authorized appliance profile.
+    pub fn update_active_appliance_label(
+        &self,
+        appliance_label: Option<String>,
+    ) -> Result<NativeProfileSummary, NativeApplianceError> {
+        let appliance_label = appliance_label
+            .map(|label| validate_appliance_label(&label).map(str::to_owned))
+            .transpose()?;
+        let _guard = self.lock_gate()?;
+        let profile_key =
+            read_active_profile(&self.root)?.ok_or_else(|| NativeApplianceError::Storage {
+                reason: "no active appliance profile exists for a label update".to_owned(),
+            })?;
+        let mut summary = self.profile_summary_locked(&profile_key)?;
+        if summary.appliance_label != appliance_label {
+            summary.appliance_label = appliance_label;
+            write_profile_metadata(
+                &self
+                    .profile_directory(&profile_key)
+                    .join(PROFILE_METADATA_FILE),
+                &summary,
+            )?;
+        }
+        Ok(summary)
+    }
+
+    /// Select one existing validated Reticulum profile.
     pub fn activate_profile(
         &self,
-        device_id: String,
+        profile_key: String,
     ) -> Result<NativeProfileSummary, NativeApplianceError> {
-        let profile_key = validate_profile_key(&device_id)?;
+        let profile_key = validate_destination(&profile_key, "profile key")?;
         let _guard = self.lock_gate()?;
         let profile = self.profile_summary_locked(&profile_key)?;
-        write_active_profile(&self.root, &profile_key)
-            .map_err(ProfileMetadataError::into_native)?;
+        write_active_profile(&self.root, &profile_key)?;
         Ok(profile)
     }
 
-    /// Reconcile a post-activation BLE onboarding artifact with the profile store.
+    /// Delete one validated inactive profile and its local application data.
     ///
-    /// A canonical Active artifact is installed and selected idempotently,
-    /// exact-read back, and then removed. A different credential can never
-    /// replace an existing device profile. When the artifact is already absent,
-    /// the current validated active profile is returned without mutation so a
-    /// caller can reconcile a failure reported after artifact removal.
-    ///
-    /// Pending, ambiguous, or malformed artifacts fail closed and remain
-    /// untouched.
-    pub fn reconcile_onboarding_publication(
-        &self,
-    ) -> Result<NativeOnboardingPublicationReconciliation, NativeApplianceError> {
-        let _guard = self.lock_gate()?;
-        let onboarding_path = self.onboarding_credential_path();
-        match inspect_credential(&onboarding_path) {
-            NativeCredentialStatus::Missing => Ok(NativeOnboardingPublicationReconciliation {
-                active_profile: self.active_profile_summary_locked()?,
-                finalized_active_artifact: false,
-            }),
-            NativeCredentialStatus::Invalid { reason } => Err(NativeApplianceError::Storage {
-                reason: format!(
-                    "BLE onboarding publication cannot be reconciled from a non-Active artifact: {reason}"
-                ),
-            }),
-            NativeCredentialStatus::Active { summary } => {
-                let bytes = read_credential_bytes(&onboarding_path)
-                    .map_err(|reason| NativeApplianceError::Storage { reason })?;
-                let decoded = credential_summary_from_bytes(
-                    bytes.as_slice(),
-                    CredentialImportPolicy::AnyDevice,
-                )
-                .map_err(NativeApplianceError::from)?;
-                if decoded != summary {
-                    return Err(NativeApplianceError::Storage {
-                        reason:
-                            "BLE onboarding credential changed while publication was being reconciled"
-                                .to_owned(),
-                    });
-                }
-
-                let profile = match self.install_and_activate_profile_locked(
-                    bytes.as_slice(),
-                    &summary,
-                    CredentialImportPolicy::AnyDevice,
-                ) {
-                    Ok(profile) => profile,
-                    Err(CredentialImportError::PublicationUncertain { reason }) => self
-                        .reconcile_exact_profile_publication_locked(
-                            bytes.as_slice(),
-                            &summary,
-                            reason,
-                        )?,
-                    Err(error) => return Err(NativeApplianceError::from(error)),
-                };
-
-                fs::remove_file(&onboarding_path)
-                    .map_err(storage_error("remove reconciled onboarding credential"))?;
-                sync_directory(
-                    onboarding_path
-                        .parent()
-                        .expect("onboarding credential has a directory"),
-                    "unconfigured profile directory",
-                )?;
-
-                let active_profile = self.active_profile_summary_locked()?.ok_or_else(|| {
-                    NativeApplianceError::Storage {
-                        reason: "reconciled BLE onboarding profile is not active".to_owned(),
-                    }
-                })?;
-                if active_profile != profile {
-                    return Err(NativeApplianceError::Storage {
-                        reason:
-                            "reconciled BLE onboarding profile does not match the active profile"
-                                .to_owned(),
-                    });
-                }
-                Ok(NativeOnboardingPublicationReconciliation {
-                    active_profile: Some(active_profile),
-                    finalized_active_artifact: true,
-                })
-            }
-        }
-    }
-
-    /// Delete one validated inactive profile and return the authoritative catalog.
-    ///
-    /// This deliberately cannot remove the active profile: its SQLite actor and
-    /// credential may still be owned by a [`crate::NativeAppliance`]. The caller
-    /// must first activate another profile and close every owner of this target.
-    ///
-    /// The complete directory is preflighted before the first removal. Only the
-    /// canonical credential, database, and SQLite WAL/SHM sidecars are accepted;
-    /// symlinks, subdirectories, and unknown artifacts fail closed.
+    /// This does not revoke the app identity from the appliance allow-list.
     pub fn delete_inactive_profile(
         &self,
-        device_id: String,
+        profile_key: String,
     ) -> Result<NativeProfileStoreSnapshot, NativeApplianceError> {
-        self.delete_inactive_profile_impl(device_id)
-    }
-}
-
-impl NativeProfileStore {
-    pub(crate) fn onboarding_credential_path(&self) -> PathBuf {
-        self.root
-            .join(UNCONFIGURED_DIRECTORY)
-            .join(ONBOARDING_CREDENTIAL_FILE)
-    }
-
-    pub(crate) fn promote_onboarding_credential(
-        &self,
-        expected_device_id: [u8; 16],
-        expected_credential_id: [u8; 16],
-        expected_generation: u64,
-    ) -> Result<NativeProfileSummary, NativeApplianceError> {
-        let _guard = self.lock_gate()?;
-        let onboarding_path = self.onboarding_credential_path();
-        let bytes = read_credential_bytes(&onboarding_path)
-            .map_err(|reason| NativeApplianceError::Storage { reason })?;
-        let summary =
-            credential_summary_from_bytes(bytes.as_slice(), CredentialImportPolicy::AnyDevice)
-                .map_err(NativeApplianceError::from)?;
-        if summary.device_id != hex::encode(expected_device_id)
-            || summary.credential_id != hex::encode(expected_credential_id)
-            || summary.generation != expected_generation
-        {
-            return Err(NativeApplianceError::Storage {
-                reason: "activated onboarding artifact does not match its authenticated pairing response"
-                    .to_owned(),
-            });
-        }
-
-        let profile = self
-            .install_and_activate_profile_locked(
-                bytes.as_slice(),
-                &summary,
-                CredentialImportPolicy::AnyDevice,
-            )
-            .map_err(NativeApplianceError::from)?;
-        fs::remove_file(&onboarding_path)
-            .map_err(storage_error("remove promoted onboarding credential"))?;
-        sync_directory(
-            onboarding_path
-                .parent()
-                .expect("onboarding credential has a directory"),
-            "unconfigured profile directory",
-        )?;
-        Ok(profile)
-    }
-
-    pub(crate) fn runtime_paths(&self) -> Result<NativeProfileRuntimePaths, NativeApplianceError> {
-        let _guard = self.lock_gate()?;
-        if let Some(profile_key) = read_active_profile(&self.root)? {
-            self.profile_summary_locked(&profile_key)?;
-            return Ok(self.profile_paths(&profile_key));
-        }
-
-        Ok(NativeProfileRuntimePaths {
-            database: self.root.join(UNCONFIGURED_DIRECTORY).join(DATABASE_FILE),
-            credential: self.root.join(UNCONFIGURED_DIRECTORY).join(CREDENTIAL_FILE),
-        })
-    }
-
-    fn delete_inactive_profile_impl(
-        &self,
-        device_id: String,
-    ) -> Result<NativeProfileStoreSnapshot, NativeApplianceError> {
-        let profile_key = validate_profile_key(&device_id)?;
+        let profile_key = validate_destination(&profile_key, "profile key")?;
         let _guard = self.lock_gate()?;
         if read_active_profile(&self.root)?.as_deref() == Some(profile_key.as_str()) {
             return Err(NativeApplianceError::InvalidArgument {
                 reason: "the active appliance profile cannot be deleted".to_owned(),
             });
         }
-
         self.profile_summary_locked(&profile_key)?;
-        let profiles_root = self.root.join(PROFILES_DIRECTORY);
-        let profile_directory = profiles_root.join(&profile_key);
-        let mut present = [false; 4];
-        for entry in fs::read_dir(&profile_directory)
-            .map_err(storage_error("read profile directory before deletion"))?
-        {
-            let entry = entry.map_err(storage_error(
-                "read profile directory entry before deletion",
-            ))?;
+        let directory = self.profile_directory(&profile_key);
+        for entry in fs::read_dir(&directory).map_err(storage_error("read profile directory"))? {
+            let entry = entry.map_err(storage_error("read profile entry"))?;
             let name =
                 entry
                     .file_name()
                     .into_string()
                     .map_err(|_| NativeApplianceError::Storage {
-                        reason: format!("profile {profile_key} contains a non-UTF-8 artifact name"),
+                        reason: "profile contains a non-UTF-8 artifact name".to_owned(),
                     })?;
-            let index = match name.as_str() {
-                CREDENTIAL_FILE => 0,
-                DATABASE_FILE => 1,
-                DATABASE_WAL_FILE => 2,
-                DATABASE_SHM_FILE => 3,
-                _ => {
-                    return Err(NativeApplianceError::Storage {
-                        reason: format!(
-                            "profile {profile_key} contains unsupported artifact {name}"
-                        ),
-                    });
-                }
-            };
+            if !matches!(
+                name.as_str(),
+                PROFILE_METADATA_FILE | DATABASE_FILE | DATABASE_WAL_FILE | DATABASE_SHM_FILE
+            ) {
+                return Err(NativeApplianceError::Storage {
+                    reason: format!("profile contains unsupported artifact {name}"),
+                });
+            }
             let metadata = fs::symlink_metadata(entry.path())
-                .map_err(storage_error("inspect profile artifact before deletion"))?;
+                .map_err(storage_error("inspect profile artifact"))?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(NativeApplianceError::Storage {
-                    reason: format!(
-                        "profile {profile_key} artifact {name} must be a regular non-symlink file"
-                    ),
+                    reason: format!("profile artifact {name} is not a regular file"),
                 });
             }
-            present[index] = true;
         }
-
-        // Keep the canonical credential until every optional database artifact
-        // has been removed. A pre-credential failure therefore leaves a
-        // validated, listable profile rather than an unidentifiable directory.
-        for index in [2_usize, 3, 1, 0] {
-            if !present[index] {
-                continue;
-            }
-            let name = [
-                CREDENTIAL_FILE,
-                DATABASE_FILE,
-                DATABASE_WAL_FILE,
-                DATABASE_SHM_FILE,
-            ][index];
-            fs::remove_file(profile_directory.join(name))
-                .map_err(storage_error("remove inactive profile artifact"))?;
-        }
-        fs::remove_dir(&profile_directory)
-            .map_err(storage_error("remove empty inactive profile directory"))?;
-        sync_directory(&profiles_root, "profiles directory")?;
-        self.snapshot_locked()
-    }
-
-    pub(crate) fn import_activated_credential(
-        &self,
-        staging_path: &Path,
-        policy: CredentialImportPolicy,
-    ) -> Result<NativeCredentialSummary, CredentialImportError> {
-        let _guard = self.lock_gate().map_err(profile_error_as_import)?;
-        let (bytes, summary) = read_import_credential_file(staging_path, policy)?;
-        self.install_and_activate_profile_locked(bytes.as_slice(), &summary, policy)
-            .map(|profile| profile.credential)
-    }
-
-    fn install_and_activate_profile_locked(
-        &self,
-        bytes: &[u8],
-        summary: &NativeCredentialSummary,
-        policy: CredentialImportPolicy,
-    ) -> Result<NativeProfileSummary, CredentialImportError> {
-        let profile_key =
-            validate_profile_key(&summary.device_id).map_err(profile_error_as_import)?;
-        let paths = self.profile_paths(&profile_key);
-        create_private_directory(
-            paths
-                .credential
-                .parent()
-                .expect("profile credential has a directory"),
-            "device profile",
-        )
-        .map_err(profile_error_as_import)?;
-
-        match inspect_credential(&paths.credential) {
-            NativeCredentialStatus::Missing => {
-                install_credential(&paths.credential, bytes, policy)?;
-            }
-            NativeCredentialStatus::Active {
-                summary: existing_summary,
-            } => {
-                let existing = read_credential_bytes(&paths.credential)
-                    .map_err(CredentialImportError::from)?;
-                if existing.as_slice() != bytes || existing_summary != *summary {
-                    return Err(CredentialImportError::Rejected {
-                        reason: "device profile already contains a different credential; replacement requires an explicit recovery flow"
-                            .to_owned(),
+        for name in [
+            DATABASE_WAL_FILE,
+            DATABASE_SHM_FILE,
+            DATABASE_FILE,
+            PROFILE_METADATA_FILE,
+        ] {
+            let path = directory.join(name);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(NativeApplianceError::Storage {
+                        reason: format!("could not remove profile artifact {name}: {error}"),
                     });
                 }
             }
-            NativeCredentialStatus::Invalid { reason } => {
-                return Err(CredentialImportError::Rejected {
-                    reason: format!(
-                        "device profile credential is invalid and cannot be replaced: {reason}"
-                    ),
-                });
-            }
         }
+        fs::remove_dir(&directory).map_err(storage_error("remove empty profile directory"))?;
+        sync_directory(&self.root.join(PROFILES_DIRECTORY), "profiles directory")?;
+        self.snapshot_locked()
+    }
+}
 
-        write_active_profile(&self.root, &profile_key)
-            .map_err(ProfileMetadataError::into_import)?;
-        Ok(NativeProfileSummary {
-            profile_key,
-            credential: summary.clone(),
+impl NativeProfileStore {
+    pub(crate) fn runtime_paths(&self) -> Result<NativeProfileRuntimePaths, NativeApplianceError> {
+        let _guard = self.lock_gate()?;
+        let Some(profile_key) = read_active_profile(&self.root)? else {
+            return Ok(NativeProfileRuntimePaths {
+                database: self.root.join(UNCONFIGURED_DIRECTORY).join(DATABASE_FILE),
+                management_destination: None,
+            });
+        };
+        self.profile_summary_locked(&profile_key)?;
+        Ok(NativeProfileRuntimePaths {
+            database: self.profile_directory(&profile_key).join(DATABASE_FILE),
+            management_destination: Some(decode_destination(&profile_key)?),
         })
     }
 
-    fn reconcile_exact_profile_publication_locked(
-        &self,
-        expected_bytes: &[u8],
-        expected_summary: &NativeCredentialSummary,
-        publication_reason: String,
-    ) -> Result<NativeProfileSummary, NativeApplianceError> {
-        let profile_key = validate_profile_key(&expected_summary.device_id)?;
-        let active_profile = read_active_profile(&self.root)?;
-        if active_profile.as_deref() != Some(profile_key.as_str()) {
-            return Err(NativeApplianceError::CredentialPublicationUncertain {
-                reason: publication_reason,
-            });
-        }
-        let paths = self.profile_paths(&profile_key);
-        let active_bytes = read_credential_bytes(&paths.credential).map_err(|reason| {
-            NativeApplianceError::CredentialPublicationUncertain {
-                reason: format!(
-                    "{publication_reason}; exact profile credential readback failed: {reason}"
-                ),
-            }
-        })?;
-        if active_bytes.as_slice() != expected_bytes {
-            return Err(NativeApplianceError::CredentialPublicationUncertain {
-                reason: format!(
-                    "{publication_reason}; active profile credential differs from the onboarding artifact"
-                ),
-            });
-        }
-        let profile = self.profile_summary_locked(&profile_key).map_err(|error| {
-            NativeApplianceError::CredentialPublicationUncertain {
-                reason: format!(
-                    "{publication_reason}; active profile summary readback failed: {error}"
-                ),
-            }
-        })?;
-        if profile.credential != *expected_summary {
-            return Err(NativeApplianceError::CredentialPublicationUncertain {
-                reason: format!(
-                    "{publication_reason}; active profile summary differs from the onboarding artifact"
-                ),
-            });
-        }
-        Ok(profile)
-    }
-
-    fn active_profile_summary_locked(
-        &self,
-    ) -> Result<Option<NativeProfileSummary>, NativeApplianceError> {
-        read_active_profile(&self.root)?
-            .map(|profile_key| self.profile_summary_locked(&profile_key))
-            .transpose()
-    }
-
-    fn lock_gate(&self) -> Result<MutexGuard<'_, ()>, NativeApplianceError> {
-        self.gate
-            .lock()
-            .map_err(|_| NativeApplianceError::Internal {
-                reason: "native profile store lock is poisoned".to_owned(),
-            })
-    }
-
     fn snapshot_locked(&self) -> Result<NativeProfileStoreSnapshot, NativeApplianceError> {
-        let active_profile_key = read_active_profile(&self.root)?;
-        let profiles_root = self.root.join(PROFILES_DIRECTORY);
-        require_private_directory(&profiles_root, "profiles directory")?;
         let mut profiles = Vec::new();
-        for entry in
-            fs::read_dir(&profiles_root).map_err(storage_error("read profiles directory"))?
-        {
-            let entry = entry.map_err(storage_error("read profile directory entry"))?;
-            let name =
+        let profiles_root = self.root.join(PROFILES_DIRECTORY);
+        for entry in fs::read_dir(&profiles_root).map_err(storage_error("read profiles"))? {
+            let entry = entry.map_err(storage_error("read profile entry"))?;
+            let metadata = entry
+                .metadata()
+                .map_err(storage_error("inspect profile entry"))?;
+            if !metadata.is_dir() {
+                return Err(NativeApplianceError::Storage {
+                    reason: "profiles directory contains a non-directory entry".to_owned(),
+                });
+            }
+            let key =
                 entry
                     .file_name()
                     .into_string()
                     .map_err(|_| NativeApplianceError::Storage {
-                        reason: "profile directory contains a non-UTF-8 name".to_owned(),
+                        reason: "profiles directory contains a non-UTF-8 entry".to_owned(),
                     })?;
-            let profile_key =
-                validate_profile_key(&name).map_err(|_| NativeApplianceError::Storage {
-                    reason: format!("profile directory contains invalid device key {name}"),
-                })?;
-            require_private_directory(&entry.path(), "device profile")?;
-            profiles.push(self.profile_summary_locked(&profile_key)?);
+            validate_destination(&key, "stored profile key")?;
+            profiles.push(self.profile_summary_locked(&key)?);
         }
-        profiles.sort_unstable_by(|left, right| left.profile_key.cmp(&right.profile_key));
-
-        if let Some(active) = &active_profile_key
-            && !profiles
-                .iter()
-                .any(|profile| &profile.profile_key == active)
+        profiles.sort_by(|left, right| left.profile_key.cmp(&right.profile_key));
+        let active_profile_key = read_active_profile(&self.root)?;
+        if let Some(active) = active_profile_key.as_deref()
+            && !profiles.iter().any(|profile| profile.profile_key == active)
         {
             return Err(NativeApplianceError::Storage {
-                reason: format!("active profile {active} does not have a validated profile"),
+                reason: "active profile metadata names a missing profile".to_owned(),
             });
         }
         Ok(NativeProfileStoreSnapshot {
@@ -552,281 +290,231 @@ impl NativeProfileStore {
         })
     }
 
-    fn credential_status_locked(&self) -> Result<NativeCredentialStatus, NativeApplianceError> {
-        let Some(profile_key) = read_active_profile(&self.root)? else {
-            return Ok(NativeCredentialStatus::Missing);
-        };
-        let paths = self.profile_paths(&profile_key);
-        Ok(match inspect_credential(&paths.credential) {
-            NativeCredentialStatus::Active { summary } if summary.device_id == profile_key => {
-                NativeCredentialStatus::Active { summary }
-            }
-            NativeCredentialStatus::Active { summary } => NativeCredentialStatus::Invalid {
-                reason: format!(
-                    "profile key {profile_key} does not match credential device ID {}",
-                    summary.device_id
-                ),
-            },
-            status => status,
-        })
-    }
-
     fn profile_summary_locked(
         &self,
         profile_key: &str,
     ) -> Result<NativeProfileSummary, NativeApplianceError> {
-        let paths = self.profile_paths(profile_key);
-        require_private_directory(
-            paths
-                .credential
-                .parent()
-                .expect("profile credential has a directory"),
-            "device profile",
+        let summary = read_profile_metadata(
+            &self
+                .profile_directory(profile_key)
+                .join(PROFILE_METADATA_FILE),
         )?;
-        match inspect_credential(&paths.credential) {
-            NativeCredentialStatus::Active { summary } if summary.device_id == profile_key => {
-                Ok(NativeProfileSummary {
-                    profile_key: profile_key.to_owned(),
-                    credential: summary,
-                })
-            }
-            NativeCredentialStatus::Active { summary } => Err(NativeApplianceError::Storage {
-                reason: format!(
-                    "profile key {profile_key} does not match credential device ID {}",
-                    summary.device_id
-                ),
-            }),
-            NativeCredentialStatus::Missing => Err(NativeApplianceError::Storage {
-                reason: format!("profile {profile_key} has no credential"),
-            }),
-            NativeCredentialStatus::Invalid { reason } => Err(NativeApplianceError::Storage {
-                reason: format!("profile {profile_key} credential is invalid: {reason}"),
-            }),
+        if summary.profile_key != profile_key || summary.management_destination != profile_key {
+            return Err(NativeApplianceError::Storage {
+                reason: "profile metadata does not match its directory key".to_owned(),
+            });
         }
+        Ok(summary)
     }
 
-    fn profile_paths(&self, profile_key: &str) -> NativeProfileRuntimePaths {
-        let directory = self.root.join(PROFILES_DIRECTORY).join(profile_key);
-        NativeProfileRuntimePaths {
-            database: directory.join(DATABASE_FILE),
-            credential: directory.join(CREDENTIAL_FILE),
-        }
+    fn profile_directory(&self, profile_key: &str) -> PathBuf {
+        self.root.join(PROFILES_DIRECTORY).join(profile_key)
     }
 
-    fn validate_active_profile_if_present(&self) -> Result<(), NativeApplianceError> {
-        if let Some(profile_key) = read_active_profile(&self.root)? {
-            self.profile_summary_locked(&profile_key)?;
-        }
-        Ok(())
+    fn lock_gate(&self) -> Result<MutexGuard<'_, ()>, NativeApplianceError> {
+        self.gate
+            .lock()
+            .map_err(|_| NativeApplianceError::Internal {
+                reason: "profile store lock is poisoned".to_owned(),
+            })
     }
 }
 
-fn profile_error_as_import(error: NativeApplianceError) -> CredentialImportError {
-    CredentialImportError::Rejected {
-        reason: error.to_string(),
-    }
-}
-
-fn validated_absolute_path(value: &str, label: &str) -> Result<PathBuf, NativeApplianceError> {
-    if value.is_empty() {
-        return Err(NativeApplianceError::InvalidArgument {
-            reason: format!("{label} must not be empty"),
-        });
-    }
-    let path = PathBuf::from(value);
+fn validated_absolute_path(path: &str, label: &str) -> Result<PathBuf, NativeApplianceError> {
+    let path = PathBuf::from(path);
     if !path.is_absolute() {
         return Err(NativeApplianceError::InvalidArgument {
             reason: format!("{label} must be absolute"),
         });
     }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
-        return Err(NativeApplianceError::InvalidArgument {
-            reason: format!("{label} must be lexically normalized"),
-        });
-    }
     Ok(path)
 }
 
-fn validate_profile_key(value: &str) -> Result<String, NativeApplianceError> {
-    if value.len() != DEVICE_ID_HEX_BYTES
+fn validate_destination(value: &str, label: &str) -> Result<String, NativeApplianceError> {
+    if value.len() != DESTINATION_HEX_BYTES
         || !value
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(NativeApplianceError::InvalidArgument {
-            reason: "device ID must be exactly 32 lowercase hexadecimal digits".to_owned(),
-        });
-    }
-    if value.as_bytes().iter().all(|byte| *byte == b'0') {
-        return Err(NativeApplianceError::InvalidArgument {
-            reason: "device ID must not be all zeroes".to_owned(),
+            reason: format!("{label} must be 32 lowercase hexadecimal characters"),
         });
     }
     Ok(value.to_owned())
 }
 
-fn read_active_profile(root: &Path) -> Result<Option<String>, NativeApplianceError> {
-    let path = root.join(ACTIVE_PROFILE_FILE);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage_error("inspect active profile metadata")(error)),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(NativeApplianceError::Storage {
-            reason: "active profile metadata must be a regular non-symlink file".to_owned(),
-        });
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o077 != 0 {
-        return Err(NativeApplianceError::Storage {
-            reason: "active profile metadata must not grant group or other permissions".to_owned(),
-        });
-    }
-    let mut file = match File::open(&path) {
-        Ok(file) => file,
-        Err(error) => return Err(storage_error("open active profile metadata")(error)),
-    };
-    let mut bytes = Vec::with_capacity(ACTIVE_PROFILE_MAGIC.len() + DEVICE_ID_HEX_BYTES + 1);
-    file.read_to_end(&mut bytes)
-        .map_err(storage_error("read active profile metadata"))?;
-    if !bytes.starts_with(ACTIVE_PROFILE_MAGIC)
-        || bytes.len() != ACTIVE_PROFILE_MAGIC.len() + DEVICE_ID_HEX_BYTES + 1
-        || bytes.last() != Some(&b'\n')
+fn validate_appliance_label(value: &str) -> Result<&str, NativeApplianceError> {
+    if value.is_empty()
+        || value.len() > 32
+        || value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
     {
-        return Err(NativeApplianceError::Storage {
-            reason: "active profile metadata has an unsupported or malformed format".to_owned(),
+        return Err(NativeApplianceError::InvalidArgument {
+            reason: "appliance label must contain between 1 and 32 UTF-8 bytes without control characters"
+                .to_owned(),
         });
     }
-    let key = std::str::from_utf8(
-        &bytes[ACTIVE_PROFILE_MAGIC.len()..ACTIVE_PROFILE_MAGIC.len() + DEVICE_ID_HEX_BYTES],
-    )
-    .map_err(|_| NativeApplianceError::Storage {
-        reason: "active profile metadata device ID is not UTF-8".to_owned(),
-    })?;
-    validate_profile_key(key)
-        .map(Some)
-        .map_err(|_| NativeApplianceError::Storage {
-            reason: "active profile metadata contains a non-canonical device ID".to_owned(),
-        })
+    Ok(value)
 }
 
-fn write_active_profile(root: &Path, profile_key: &str) -> Result<(), ProfileMetadataError> {
-    let profile_key =
-        validate_profile_key(profile_key).map_err(|error| ProfileMetadataError::Rejected {
-            reason: error.to_string(),
-        })?;
-    let destination = root.join(ACTIVE_PROFILE_FILE);
-    let mut staging = None;
-    for _ in 0..METADATA_STAGING_ATTEMPTS {
-        let mut nonce = [0_u8; 8];
-        getrandom::fill(&mut nonce).map_err(|error| ProfileMetadataError::Rejected {
-            reason: format!("could not generate active-profile staging name: {error}"),
-        })?;
-        let path = root.join(format!(".active-profile-{}", hex::encode(nonce)));
-        match secure_create_new(&path) {
-            Ok(file) => {
-                staging = Some((file, path));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(ProfileMetadataError::Rejected {
-                    reason: format!("could not create active profile staging file: {error}"),
-                });
-            }
-        }
-    }
-    let (mut file, staging_path) = staging.ok_or_else(|| ProfileMetadataError::Rejected {
-        reason: "could not allocate an active profile staging file".to_owned(),
+fn decode_destination(value: &str) -> Result<[u8; 16], NativeApplianceError> {
+    let mut decoded = [0; 16];
+    hex::decode_to_slice(value, &mut decoded).map_err(|error| NativeApplianceError::Storage {
+        reason: format!("stored profile destination could not be decoded: {error}"),
     })?;
-    if let Err(error) = file
-        .write_all(ACTIVE_PROFILE_MAGIC)
-        .and_then(|_| file.write_all(profile_key.as_bytes()))
-        .and_then(|_| file.write_all(b"\n"))
-    {
-        drop(file);
-        let _ = fs::remove_file(staging_path);
-        return Err(ProfileMetadataError::Rejected {
-            reason: format!("could not write active profile staging file: {error}"),
-        });
-    }
-    if let Err(error) = file.sync_all() {
-        drop(file);
-        let _ = fs::remove_file(staging_path);
-        return Err(ProfileMetadataError::Rejected {
-            reason: format!("could not synchronize active profile staging file: {error}"),
-        });
-    }
-    drop(file);
-    if let Err(error) = fs::rename(&staging_path, &destination) {
-        let _ = fs::remove_file(staging_path);
-        return Err(ProfileMetadataError::Rejected {
-            reason: format!("could not publish active profile metadata: {error}"),
-        });
-    }
-    sync_directory(root, "profile root").map_err(|error| {
-        ProfileMetadataError::PublicationUncertain {
-            reason: format!(
-                "active profile metadata was published but its directory durability is uncertain: {error}"
-            ),
-        }
-    })
+    Ok(decoded)
 }
 
 fn create_private_directory(path: &Path, label: &str) -> Result<(), NativeApplianceError> {
-    create_directory_all(path).map_err(storage_error("create private profile directory"))?;
-    require_private_directory(path, label)
-}
-
-#[cfg(unix)]
-fn create_directory_all(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true).mode(0o700).create(path)
-}
-
-#[cfg(not(unix))]
-fn create_directory_all(path: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(path)
-}
-
-fn require_private_directory(path: &Path, label: &str) -> Result<(), NativeApplianceError> {
+    fs::create_dir_all(path).map_err(storage_error("create private directory"))?;
     let metadata =
-        fs::symlink_metadata(path).map_err(storage_error("inspect private profile directory"))?;
+        fs::symlink_metadata(path).map_err(storage_error("inspect private directory"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(NativeApplianceError::Storage {
             reason: format!("{label} must be a real directory"),
         });
     }
     #[cfg(unix)]
-    {
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(NativeApplianceError::Storage {
-                reason: format!("{label} must not grant group or other permissions"),
-            });
-        }
-    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(storage_error("set private directory permissions"))?;
     Ok(())
 }
 
-#[cfg(unix)]
-fn secure_create_new(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+fn read_profile_metadata(path: &Path) -> Result<NativeProfileSummary, NativeApplianceError> {
+    let text = read_bounded_file(path, "profile metadata")?;
+    let text = text
+        .strip_suffix('\n')
+        .ok_or_else(|| NativeApplianceError::Storage {
+            reason: "profile metadata has an unsupported format".to_owned(),
+        })?;
+    let mut fields = text.split('\n');
+    let magic = fields.next().ok_or_else(|| NativeApplianceError::Storage {
+        reason: "profile metadata has an unsupported format".to_owned(),
+    })?;
+    if !matches!(magic, PROFILE_METADATA_MAGIC_V1 | PROFILE_METADATA_MAGIC_V2) {
+        return Err(NativeApplianceError::Storage {
+            reason: "profile metadata has an unsupported format".to_owned(),
+        });
+    }
+    let management = fields.next().ok_or_else(|| NativeApplianceError::Storage {
+        reason: "profile metadata is missing its management destination".to_owned(),
+    })?;
+    let lxmf = fields.next().ok_or_else(|| NativeApplianceError::Storage {
+        reason: "profile metadata is missing its LXMF destination".to_owned(),
+    })?;
+    let appliance_label = if magic == PROFILE_METADATA_MAGIC_V2 {
+        fields
+            .next()
+            .map(|label| {
+                if label.is_empty() {
+                    Ok(None)
+                } else {
+                    validate_appliance_label(label).map(|label| Some(label.to_owned()))
+                }
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    if fields.next().is_some() {
+        return Err(NativeApplianceError::Storage {
+            reason: "profile metadata contains trailing fields".to_owned(),
+        });
+    }
+    let management_destination = validate_destination(management, "stored management destination")?;
+    let lxmf_destination = validate_destination(lxmf, "stored LXMF destination")?;
+    Ok(NativeProfileSummary {
+        profile_key: management_destination.clone(),
+        management_destination,
+        lxmf_destination,
+        appliance_label,
+    })
 }
 
-#[cfg(not(unix))]
-fn secure_create_new(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
+fn write_profile_metadata(
+    path: &Path,
+    summary: &NativeProfileSummary,
+) -> Result<(), NativeApplianceError> {
+    let body = format!(
+        "{PROFILE_METADATA_MAGIC_V2}\n{}\n{}\n{}\n",
+        summary.management_destination,
+        summary.lxmf_destination,
+        summary.appliance_label.as_deref().unwrap_or("")
+    );
+    write_atomic(path, body.as_bytes(), "profile metadata")
+}
+
+fn read_active_profile(root: &Path) -> Result<Option<String>, NativeApplianceError> {
+    let path = root.join(ACTIVE_PROFILE_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = read_bounded_file(&path, "active profile metadata")?;
+    let value = text
+        .strip_prefix(ACTIVE_PROFILE_MAGIC)
+        .and_then(|value| value.strip_suffix('\n'))
+        .ok_or_else(|| NativeApplianceError::Storage {
+            reason: "active profile metadata has an unsupported format".to_owned(),
+        })?;
+    validate_destination(value, "active profile key").map(Some)
+}
+
+fn write_active_profile(root: &Path, profile_key: &str) -> Result<(), NativeApplianceError> {
+    let body = format!("{ACTIVE_PROFILE_MAGIC}{profile_key}\n");
+    write_atomic(
+        &root.join(ACTIVE_PROFILE_FILE),
+        body.as_bytes(),
+        "active profile metadata",
+    )
+}
+
+fn read_bounded_file(path: &Path, label: &str) -> Result<String, NativeApplianceError> {
+    let metadata = fs::symlink_metadata(path).map_err(storage_error("inspect metadata file"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > METADATA_MAX_BYTES
+    {
+        return Err(NativeApplianceError::Storage {
+            reason: format!("{label} must be a small regular file"),
+        });
+    }
+    let mut file = File::open(path).map_err(storage_error("open metadata file"))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(storage_error("read metadata file"))?;
+    Ok(text)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], label: &str) -> Result<(), NativeApplianceError> {
+    let parent = path.parent().ok_or_else(|| NativeApplianceError::Storage {
+        reason: format!("{label} has no parent directory"),
+    })?;
+    let mut nonce = [0; 8];
+    getrandom::fill(&mut nonce).map_err(|error| NativeApplianceError::Storage {
+        reason: format!("could not generate {label} staging name: {error}"),
+    })?;
+    let staging = parent.join(format!(".profile-{}.tmp", hex::encode(nonce)));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&staging)
+        .map_err(storage_error("create metadata staging file"))?;
+    let result = (|| {
+        file.write_all(bytes)
+            .map_err(storage_error("write metadata staging file"))?;
+        file.sync_all()
+            .map_err(storage_error("sync metadata staging file"))?;
+        fs::rename(&staging, path).map_err(storage_error("publish metadata file"))?;
+        sync_directory(parent, label)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    result
 }
 
 fn sync_directory(path: &Path, label: &str) -> Result<(), NativeApplianceError> {
@@ -839,32 +527,33 @@ fn sync_directory(path: &Path, label: &str) -> Result<(), NativeApplianceError> 
 
 fn storage_error(operation: &'static str) -> impl FnOnce(std::io::Error) -> NativeApplianceError {
     move |error| NativeApplianceError::Storage {
-        reason: format!("could not {operation}: {error}"),
+        reason: format!("{operation}: {error}"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
-        fn new(label: &str) -> Self {
-            let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().canonicalize().unwrap().join(format!(
-                "reticulum-mobile-profile-{label}-{}-{sequence}",
-                std::process::id()
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "reticulum-prns-profiles-{}-{nonce}-{}",
+                std::process::id(),
+                NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
             ));
+            fs::create_dir(&path).unwrap();
             Self(path)
-        }
-
-        fn path_string(&self) -> String {
-            self.0.to_string_lossy().into_owned()
         }
     }
 
@@ -874,442 +563,108 @@ mod tests {
         }
     }
 
-    fn activated_credential_bytes(
-        device_id: [u8; 16],
-        psk_byte: u8,
-    ) -> [u8; reticulum_device_client::ACTIVATED_CREDENTIAL_STATE_BYTES] {
-        let mut bytes = [0_u8; reticulum_device_client::ACTIVATED_CREDENTIAL_STATE_BYTES];
-        bytes[..8].copy_from_slice(b"RDPKEY1\0");
-        bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
-        bytes[10] = 2;
-        bytes[16..32].copy_from_slice(&device_id);
-        bytes[32..48].fill(0x42);
-        bytes[48..56].copy_from_slice(&7_u64.to_le_bytes());
-        bytes[56..88].fill(psk_byte);
-        bytes
-    }
-
     fn open_store(directory: &TestDirectory) -> Arc<NativeProfileStore> {
-        NativeProfileStore::open(directory.path_string()).unwrap()
-    }
-
-    fn write_onboarding_credential(store: &NativeProfileStore, bytes: &[u8]) {
-        let path = store.onboarding_credential_path();
-        let mut file = secure_create_new(&path).unwrap();
-        file.write_all(bytes).unwrap();
-        file.sync_all().unwrap();
+        NativeProfileStore::open(directory.0.to_string_lossy().into_owned()).unwrap()
     }
 
     #[test]
-    fn only_post_publication_metadata_failures_are_reconcilable() {
-        assert!(matches!(
-            ProfileMetadataError::Rejected {
-                reason: "staging write failed".to_owned()
-            }
-            .into_import(),
-            CredentialImportError::Rejected { .. }
-        ));
-        assert!(matches!(
-            ProfileMetadataError::PublicationUncertain {
-                reason: "directory sync failed".to_owned()
-            }
-            .into_import(),
-            CredentialImportError::PublicationUncertain { .. }
-        ));
-    }
-
-    #[test]
-    fn imported_profiles_are_keyed_by_validated_device_id_and_switch_explicitly() {
-        let directory = TestDirectory::new("multiple");
+    fn verified_destinations_are_remembered_without_bearer_credentials() {
+        let directory = TestDirectory::new();
         let store = open_store(&directory);
-        let first_id = *b"device-prof-0001";
-        let second_id = *b"device-prof-0002";
-        let first_path = directory.0.join("first-import.rdpkey");
-        let second_path = directory.0.join("second-import.rdpkey");
-        fs::write(&first_path, activated_credential_bytes(first_id, 0x24)).unwrap();
-        fs::write(&second_path, activated_credential_bytes(second_id, 0x25)).unwrap();
-
-        let first = store
-            .import_activated_credential(&first_path, CredentialImportPolicy::AnyDevice)
-            .unwrap();
-        let first_paths = store.runtime_paths().unwrap();
-        let second = store
-            .import_activated_credential(&second_path, CredentialImportPolicy::AnyDevice)
-            .unwrap();
-        let second_paths = store.runtime_paths().unwrap();
-
-        assert_ne!(first.device_id, second.device_id);
-        assert_ne!(first_paths.database, second_paths.database);
-        assert_ne!(first_paths.credential, second_paths.credential);
-        let snapshot = store.snapshot().unwrap();
-        assert_eq!(
-            snapshot.active_profile_key.as_deref(),
-            Some(second.device_id.as_str())
-        );
-        assert_eq!(snapshot.profiles.len(), 2);
-        assert_eq!(
-            snapshot
-                .profiles
-                .iter()
-                .map(|profile| profile.profile_key.as_str())
-                .collect::<Vec<_>>(),
-            vec![first.device_id.as_str(), second.device_id.as_str()]
-        );
-
-        store.activate_profile(first.device_id.clone()).unwrap();
-        assert_eq!(
-            store.runtime_paths().unwrap().database,
-            first_paths.database
-        );
-        assert_eq!(
-            store.snapshot().unwrap().active_profile_key.as_deref(),
-            Some(first.device_id.as_str())
-        );
-
-        fs::remove_file(first_path).unwrap();
-        fs::remove_file(second_path).unwrap();
-    }
-
-    #[test]
-    fn inactive_profile_deletion_removes_only_the_preflighted_profile_family() {
-        let directory = TestDirectory::new("delete-inactive");
-        let store = open_store(&directory);
-        let first_path = directory.0.join("first-delete-import.rdpkey");
-        let second_path = directory.0.join("second-delete-import.rdpkey");
-        fs::write(
-            &first_path,
-            activated_credential_bytes(*b"delete-device-01", 0x34),
-        )
-        .unwrap();
-        fs::write(
-            &second_path,
-            activated_credential_bytes(*b"delete-device-02", 0x35),
-        )
-        .unwrap();
-
-        let first = store
-            .import_activated_credential(&first_path, CredentialImportPolicy::AnyDevice)
-            .unwrap();
-        let first_paths = store.runtime_paths().unwrap();
-        fs::write(&first_paths.database, b"database").unwrap();
-        fs::write(
-            PathBuf::from(format!("{}-wal", first_paths.database.display())),
-            b"wal",
-        )
-        .unwrap();
-        fs::write(
-            PathBuf::from(format!("{}-shm", first_paths.database.display())),
-            b"shm",
-        )
-        .unwrap();
-        let second = store
-            .import_activated_credential(&second_path, CredentialImportPolicy::AnyDevice)
-            .unwrap();
-
-        let snapshot = store
-            .delete_inactive_profile(first.device_id.clone())
-            .unwrap();
-
-        assert_eq!(snapshot.active_profile_key, Some(second.device_id.clone()));
-        assert_eq!(snapshot.profiles.len(), 1);
-        assert_eq!(snapshot.profiles[0].profile_key, second.device_id);
-        assert!(!first_paths.credential.exists());
-        assert!(!first_paths.database.exists());
-        assert!(!PathBuf::from(format!("{}-wal", first_paths.database.display())).exists());
-        assert!(!PathBuf::from(format!("{}-shm", first_paths.database.display())).exists());
-        assert!(
-            !first_paths
-                .credential
-                .parent()
-                .expect("profile credential has a directory")
-                .exists()
-        );
-        fs::remove_file(first_path).unwrap();
-        fs::remove_file(second_path).unwrap();
-    }
-
-    #[test]
-    fn inactive_profile_deletion_rejects_active_noncanonical_and_unknown_targets() {
-        let directory = TestDirectory::new("delete-rejections");
-        let store = open_store(&directory);
-        let staging = directory.0.join("delete-rejection-import.rdpkey");
-        fs::write(
-            &staging,
-            activated_credential_bytes(*b"delete-reject-01", 0x44),
-        )
-        .unwrap();
+        let management = "11".repeat(16);
+        let lxmf = "22".repeat(16);
         let profile = store
-            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+            .remember_profile(management.clone(), lxmf.clone())
             .unwrap();
-        let before = store.snapshot().unwrap();
-
-        assert!(matches!(
-            store.delete_inactive_profile(profile.device_id.clone()),
-            Err(NativeApplianceError::InvalidArgument { reason })
-                if reason.contains("active appliance profile")
-        ));
-        assert!(matches!(
-            store.delete_inactive_profile(profile.device_id.to_uppercase()),
-            Err(NativeApplianceError::InvalidArgument { .. })
-        ));
-        assert!(matches!(
-            store.delete_inactive_profile("ab".repeat(16)),
-            Err(NativeApplianceError::Storage { .. })
-        ));
-        assert_eq!(store.snapshot().unwrap(), before);
-        assert!(store.runtime_paths().unwrap().credential.exists());
-        fs::remove_file(staging).unwrap();
+        assert_eq!(profile.profile_key, management);
+        assert_eq!(profile.lxmf_destination, lxmf);
+        assert_eq!(store.snapshot().unwrap().profiles, vec![profile]);
     }
 
     #[test]
-    fn inactive_profile_deletion_preflights_every_artifact_before_removing_anything() {
-        let directory = TestDirectory::new("delete-preflight");
+    fn runtime_targets_the_selected_management_destination() {
+        let directory = TestDirectory::new();
         let store = open_store(&directory);
-        let first_path = directory.0.join("first-preflight-import.rdpkey");
-        let second_path = directory.0.join("second-preflight-import.rdpkey");
-        fs::write(
-            &first_path,
-            activated_credential_bytes(*b"delete-extra-001", 0x54),
-        )
-        .unwrap();
-        fs::write(
-            &second_path,
-            activated_credential_bytes(*b"delete-extra-002", 0x55),
-        )
-        .unwrap();
-        let first = store
-            .import_activated_credential(&first_path, CredentialImportPolicy::AnyDevice)
-            .unwrap();
-        let first_paths = store.runtime_paths().unwrap();
-        fs::write(&first_paths.database, b"database").unwrap();
-        let unexpected = first_paths
-            .credential
-            .parent()
-            .expect("profile credential has a directory")
-            .join("unexpected.bin");
-        fs::write(&unexpected, b"unexpected").unwrap();
-        let second = store
-            .import_activated_credential(&second_path, CredentialImportPolicy::AnyDevice)
-            .unwrap();
-
-        assert!(matches!(
-            store.delete_inactive_profile(first.device_id.clone()),
-            Err(NativeApplianceError::Storage { reason })
-                if reason.contains("unsupported artifact unexpected.bin")
-        ));
-        assert!(first_paths.credential.exists());
-        assert!(first_paths.database.exists());
-        assert!(unexpected.exists());
-        assert_eq!(
-            store.snapshot().unwrap().active_profile_key,
-            Some(second.device_id)
-        );
-        fs::remove_file(first_path).unwrap();
-        fs::remove_file(second_path).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn inactive_profile_deletion_rejects_an_allowed_name_when_it_is_a_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TestDirectory::new("delete-symlink");
-        let store = open_store(&directory);
-        let first_path = directory.0.join("first-symlink-import.rdpkey");
-        let second_path = directory.0.join("second-symlink-import.rdpkey");
-        fs::write(
-            &first_path,
-            activated_credential_bytes(*b"delete-link-0001", 0x64),
-        )
-        .unwrap();
-        fs::write(
-            &second_path,
-            activated_credential_bytes(*b"delete-link-0002", 0x65),
-        )
-        .unwrap();
-        let first = store
-            .import_activated_credential(&first_path, CredentialImportPolicy::AnyDevice)
-            .unwrap();
-        let first_paths = store.runtime_paths().unwrap();
-        fs::write(&first_paths.database, b"database").unwrap();
-        let external = directory.0.join("external-wal");
-        fs::write(&external, b"outside profile").unwrap();
-        let linked_wal = PathBuf::from(format!("{}-wal", first_paths.database.display()));
-        symlink(&external, &linked_wal).unwrap();
+        let management = "ab".repeat(16);
         store
-            .import_activated_credential(&second_path, CredentialImportPolicy::AnyDevice)
+            .remember_profile(management.clone(), "cd".repeat(16))
             .unwrap();
-
-        assert!(matches!(
-            store.delete_inactive_profile(first.device_id),
-            Err(NativeApplianceError::Storage { reason })
-                if reason.contains("regular non-symlink file")
-        ));
-        assert!(first_paths.credential.exists());
-        assert!(first_paths.database.exists());
-        assert!(linked_wal.exists());
-        assert_eq!(fs::read(external).unwrap(), b"outside profile");
-        fs::remove_file(first_path).unwrap();
-        fs::remove_file(second_path).unwrap();
+        let paths = store.runtime_paths().unwrap();
+        assert_eq!(paths.management_destination, Some([0xab; 16]));
+        assert!(paths.database.ends_with(DATABASE_FILE));
     }
 
     #[test]
-    fn active_onboarding_artifact_is_idempotently_published_and_finalized() {
-        let directory = TestDirectory::new("onboarding-reconcile");
+    fn one_store_can_select_any_number_of_appliance_profiles() {
+        let directory = TestDirectory::new();
         let store = open_store(&directory);
-        let bytes = activated_credential_bytes(*b"reconcile-dev-01", 0x51);
-        write_onboarding_credential(&store, &bytes);
-
-        let reconciled = store.reconcile_onboarding_publication().unwrap();
-        let profile = reconciled
-            .active_profile
-            .expect("Active artifact publishes one profile");
-        assert!(reconciled.finalized_active_artifact);
-        assert_eq!(profile.profile_key, hex::encode(*b"reconcile-dev-01"));
-        assert!(!store.onboarding_credential_path().exists());
+        let first = store
+            .remember_profile("01".repeat(16), "11".repeat(16))
+            .unwrap();
+        let second = store
+            .remember_profile("02".repeat(16), "22".repeat(16))
+            .unwrap();
+        assert_eq!(store.snapshot().unwrap().profiles.len(), 2);
+        store.activate_profile(first.profile_key.clone()).unwrap();
         assert_eq!(
             store.snapshot().unwrap().active_profile_key,
-            Some(profile.profile_key.clone())
+            Some(first.profile_key.clone())
         );
-        assert_eq!(
-            fs::read(store.runtime_paths().unwrap().credential).unwrap(),
-            bytes
-        );
-
-        let already_finalized = store.reconcile_onboarding_publication().unwrap();
-        assert_eq!(already_finalized.active_profile, Some(profile));
-        assert!(!already_finalized.finalized_active_artifact);
+        assert_ne!(first, second);
     }
 
     #[test]
-    fn active_onboarding_artifact_matching_an_existing_profile_only_finalizes_scratch_state() {
-        let directory = TestDirectory::new("onboarding-existing");
+    fn conflicting_metadata_cannot_replace_a_saved_destination() {
+        let directory = TestDirectory::new();
         let store = open_store(&directory);
-        let bytes = activated_credential_bytes(*b"existing-dev-001", 0x61);
-        let staging = directory.0.join("existing-import.rdpkey");
-        fs::write(&staging, bytes).unwrap();
-        let imported = store
-            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+        let management = "33".repeat(16);
+        store
+            .remember_profile(management.clone(), "44".repeat(16))
             .unwrap();
-        write_onboarding_credential(&store, &bytes);
-
-        let reconciled = store.reconcile_onboarding_publication().unwrap();
-        assert!(reconciled.finalized_active_artifact);
-        assert_eq!(
-            reconciled
-                .active_profile
-                .as_ref()
-                .map(|profile| &profile.credential),
-            Some(&imported)
-        );
-        assert_eq!(
-            fs::read(store.runtime_paths().unwrap().credential).unwrap(),
-            bytes
-        );
-        assert!(!store.onboarding_credential_path().exists());
-        fs::remove_file(staging).unwrap();
+        assert!(store.remember_profile(management, "55".repeat(16)).is_err());
     }
 
     #[test]
-    fn reconciliation_never_replaces_a_different_same_device_credential() {
-        let directory = TestDirectory::new("onboarding-conflict");
+    fn appliance_label_cache_survives_reopen_and_profile_refresh() {
+        let directory = TestDirectory::new();
+        let management = "66".repeat(16);
+        let lxmf = "77".repeat(16);
         let store = open_store(&directory);
-        let device_id = *b"conflict-dev-001";
-        let original = activated_credential_bytes(device_id, 0x71);
-        let conflicting = activated_credential_bytes(device_id, 0x72);
-        let staging = directory.0.join("original-import.rdpkey");
-        fs::write(&staging, original).unwrap();
-        let original_summary = store
-            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+        store
+            .remember_profile(management.clone(), lxmf.clone())
             .unwrap();
-        write_onboarding_credential(&store, &conflicting);
-
-        assert!(matches!(
-            store.reconcile_onboarding_publication(),
-            Err(NativeApplianceError::Storage { reason })
-                if reason.contains("different credential")
-        ));
-        assert_eq!(
-            fs::read(store.runtime_paths().unwrap().credential).unwrap(),
-            original
-        );
-        assert_eq!(
-            fs::read(store.onboarding_credential_path()).unwrap(),
-            conflicting
-        );
-        assert_eq!(
-            store.snapshot().unwrap().active_profile_key,
-            Some(original_summary.device_id)
-        );
-        fs::remove_file(staging).unwrap();
-    }
-
-    #[test]
-    fn profile_activation_rejects_noncanonical_or_unknown_device_ids() {
-        let directory = TestDirectory::new("invalid-key");
-        let store = open_store(&directory);
-
-        for invalid in [
-            "ab",
-            "ABABABABABABABABABABABABABABABAB",
-            "00000000000000000000000000000000",
-            "gggggggggggggggggggggggggggggggg",
-        ] {
-            assert!(matches!(
-                store.activate_profile(invalid.to_owned()),
-                Err(NativeApplianceError::InvalidArgument { .. })
-            ));
-        }
-        assert!(matches!(
-            store.activate_profile("ab".repeat(16)),
-            Err(NativeApplianceError::Storage { .. })
-        ));
-    }
-
-    #[test]
-    fn duplicate_import_is_idempotent_but_different_secret_cannot_replace_profile() {
-        let directory = TestDirectory::new("duplicate");
-        let store = open_store(&directory);
-        let staging = directory.0.join("duplicate-import.rdpkey");
-        let original = activated_credential_bytes(*b"duplicate-dev-01", 0x41);
-        fs::write(&staging, original).unwrap();
-        let summary = store
-            .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
+        let labeled = store
+            .update_active_appliance_label(Some("North node".to_owned()))
             .unwrap();
+        assert_eq!(labeled.appliance_label.as_deref(), Some("North node"));
         assert_eq!(
             store
-                .import_activated_credential(&staging, CredentialImportPolicy::AnyDevice)
-                .unwrap(),
-            summary
+                .remember_profile(management, lxmf)
+                .unwrap()
+                .appliance_label
+                .as_deref(),
+            Some("North node")
         );
-
-        fs::write(
-            &staging,
-            activated_credential_bytes(*b"duplicate-dev-01", 0x42),
-        )
-        .unwrap();
-        assert!(matches!(
-            store.import_activated_credential(&staging, CredentialImportPolicy::AnyDevice),
-            Err(CredentialImportError::Rejected { reason })
-                if reason.contains("different credential")
-        ));
-        fs::remove_file(staging).unwrap();
-    }
-
-    #[test]
-    fn malformed_active_metadata_fails_closed_instead_of_selecting_a_profile() {
-        let directory = TestDirectory::new("bad-active");
-        let store = open_store(&directory);
         drop(store);
-        let metadata = directory.0.join(ACTIVE_PROFILE_FILE);
-        fs::write(&metadata, b"not active metadata").unwrap();
-        #[cfg(unix)]
-        fs::set_permissions(&metadata, fs::Permissions::from_mode(0o600)).unwrap();
 
-        assert!(matches!(
-            NativeProfileStore::open(directory.path_string()),
-            Err(NativeApplianceError::Storage { reason })
-                if reason.contains("unsupported or malformed")
-        ));
+        let reopened = open_store(&directory);
+        assert_eq!(
+            reopened.snapshot().unwrap().profiles[0]
+                .appliance_label
+                .as_deref(),
+            Some("North node")
+        );
+        assert!(
+            reopened
+                .update_active_appliance_label(Some("line\u{2028}break".to_owned()))
+                .is_err()
+        );
+        assert_eq!(
+            reopened
+                .update_active_appliance_label(None)
+                .unwrap()
+                .appliance_label,
+            None
+        );
     }
 }

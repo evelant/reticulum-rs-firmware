@@ -9,9 +9,9 @@ publish.workspace = true
 
 [dependencies]
 reticulum-device-api = { path = "../device-api", default-features = false, features = ["lxmf", "nomad", "network-config"] }
-reticulum-device-client = { path = "../device-client", features = ["network-config"] }
 reticulum-appliance-store = { path = "../appliance-store" }
 reticulum-lxmf-wire = { path = "../lxmf-wire", default-features = false }
+sha2.workspace = true
 
 [lib]
 path = "src/lib.rs"

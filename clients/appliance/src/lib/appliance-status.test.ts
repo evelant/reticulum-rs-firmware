@@ -13,6 +13,15 @@ function snapshot(
   overrides: Partial<ApplianceSnapshot> = {},
 ): ApplianceSnapshot {
   return {
+    capabilities: {
+      manual_service_announce: false,
+      nearby_peers: false,
+      network_config: false,
+      nomad: false,
+      radio_routes: false,
+      radio_trace: false,
+      reticulum_probe: false,
+    },
     connection,
     contact_count: 2,
     device: {
@@ -29,19 +38,19 @@ function snapshot(
 }
 
 describe("appliance status presentation", () => {
-  test("presents an authenticated BLE appliance with stable identity and honest activity", () => {
+  test("presents an authenticated Reticulum appliance with stable identity and honest activity", () => {
     expect(
       applianceStatusPresentation(
         snapshot({
           device_label: "aca704e13f88",
           endpoint: "3D957380-0E99-4BB1-87D1-B18CF2EBFB9C",
           state: "ready",
-          transport: "bluetooth_low_energy",
+          transport: "reticulum",
         }),
       ),
     ).toEqual({
       boardLabel: "AC:A7:04:E1:3F:88",
-      connectionLabel: "Connected over Bluetooth LE",
+      connectionLabel: "Connected through Reticulum",
       contactCountLabel: "2 contacts",
       deviceId: "653239302d6170692d31aca704e13f88",
       endpoint: "3D957380-0E99-4BB1-87D1-B18CF2EBFB9C",
@@ -60,7 +69,7 @@ describe("appliance status presentation", () => {
           device_label: "aca704e13f88",
           endpoint: "peripheral",
           state: "ready",
-          transport: "bluetooth_low_energy",
+          transport: "reticulum",
         },
         { imported_this_run: 1, pending_outbox: 0 },
       ),
@@ -79,12 +88,12 @@ describe("appliance status presentation", () => {
     expect(presentation.tone).toBe("neutral");
   });
 
-  test("presents unavailable future transports without inventing an endpoint", () => {
+  test("presents unavailable Reticulum without inventing an endpoint", () => {
     const presentation = applianceStatusPresentation(
-      snapshot({ state: "unavailable", transport: { other: "mesh_bridge" } }),
+      snapshot({ state: "unavailable", transport: "reticulum" }),
     );
 
-    expect(presentation.connectionLabel).toBe("Mesh bridge unavailable");
+    expect(presentation.connectionLabel).toBe("Reticulum unavailable");
     expect(presentation.endpoint).toBeNull();
   });
 
@@ -112,10 +121,8 @@ describe("appliance status presentation", () => {
     expect(formatDeviceId("field-node-alpha")).toBe("field-node-alpha");
   });
 
-  test("covers every generated transport and lifecycle label", () => {
-    expect(connectionTransportLabel("usb_serial")).toBe("USB serial");
-    expect(connectionTransportLabel("usb_otg")).toBe("USB OTG");
-    expect(connectionTransportLabel("wifi")).toBe("Wi-Fi");
+  test("covers the Reticulum connection and every lifecycle label", () => {
+    expect(connectionTransportLabel("reticulum")).toBe("Reticulum");
     expect(connectionStateLabel({ state: "connecting" })).toBe("Connecting");
     expect(connectionStateLabel({ state: "backoff" })).toBe("Waiting to reconnect");
     expect(connectionStateLabel({ state: "faulted" })).toBe("Connection fault");

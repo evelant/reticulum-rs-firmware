@@ -6,6 +6,7 @@ import type {
   RadioTraceTxOutcomeView,
 } from "../generated/api.ts";
 import { filterRadioTrace, isRadioTraceAttention, radioTracePresentation } from "./radio-trace.ts";
+import { syntheticReticulumInterfaceId } from "./reticulum-interface-id.ts";
 
 const PACKET = {
   encoded_packet_len: 211,
@@ -65,7 +66,7 @@ describe("RF trace presentation", () => {
         destination: "34".repeat(16),
         next_hop_identity: "56".repeat(16),
         hops: 2,
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         resolution: "exact_ready",
         packet_evidence: PACKET,
         rns_attempt_token: "78".repeat(32),
@@ -87,7 +88,7 @@ describe("RF trace presentation", () => {
     const tx = (outcome: RadioTraceTxOutcomeView) =>
       event({
         kind: "data_tx",
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         packet_evidence: PACKET,
         rns_attempt_token: "78".repeat(32),
         outcome,
@@ -130,19 +131,21 @@ describe("RF trace presentation", () => {
   test("shows receiver-local RSSI/SNR and terminal proof return signal honestly", () => {
     const rx = event({
       kind: "logical_rx",
-      interface_id: 1,
+      interface_id: syntheticReticulumInterfaceId(1),
       packet_evidence: PACKET,
       rns_packet_hash: "90".repeat(32),
       rssi_dbm: -98,
       snr_db: 4,
     });
-    expect(radioTracePresentation(rx).metadata).toContain("Interface 1 · RSSI -98 dBm · SNR 4 dB");
+    expect(radioTracePresentation(rx).metadata).toContain(
+      "Interface 0000000000000001 · RSSI -98 dBm · SNR 4 dB",
+    );
 
     const delivered = event({
       kind: "attempt_terminal",
       rns_attempt_token: "78".repeat(32),
       outcome: "delivered",
-      proof_interface_id: 1,
+      proof_interface_id: syntheticReticulumInterfaceId(1),
       proof_rssi_dbm: -101,
       proof_snr_db: 2,
     });
@@ -171,7 +174,7 @@ describe("RF trace presentation", () => {
         stage: "data_logical_rx",
         message_id: null,
         packet_evidence: PACKET,
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         rssi_dbm: -104,
         snr_db: 7,
         dispatch_outcome: null,
@@ -185,7 +188,7 @@ describe("RF trace presentation", () => {
         stage: "physical_tx_failed",
         message_id: "67".repeat(32),
         packet_evidence: PACKET,
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         rssi_dbm: null,
         snr_db: null,
         dispatch_outcome: "tx_fault",
@@ -196,7 +199,7 @@ describe("RF trace presentation", () => {
     const receivedPresentation = radioTracePresentation(received);
     expect(receivedPresentation.title).toBe("Inbound DATA reconstructed");
     expect(receivedPresentation.metadata).toContain(
-      "Inbound DATA · interface 1 · RSSI -104 dBm · SNR 7 dB",
+      "Inbound DATA · interface 0000000000000001 · RSSI -104 dBm · SNR 7 dB",
     );
     expect(receivedPresentation.metadata).toContain(
       `Inbound DATA correlation token ${"45".repeat(32)}`,
@@ -218,7 +221,7 @@ describe("RF trace presentation", () => {
       destination: "34".repeat(16),
       next_hop_identity: null,
       hops: 1,
-      interface_id: 1,
+      interface_id: syntheticReticulumInterfaceId(1),
       resolution: "broadcast_unavailable",
       packet_evidence: PACKET,
       rns_attempt_token: "78".repeat(32),
@@ -226,7 +229,7 @@ describe("RF trace presentation", () => {
     const rx = event(
       {
         kind: "logical_rx",
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         packet_evidence: PACKET,
         rns_packet_hash: null,
         rssi_dbm: -98,

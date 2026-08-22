@@ -70,6 +70,7 @@ function nomadInitialInput(state: NomadBrowserState): {
 }
 
 interface NomadPanelProps {
+  readonly available: boolean;
   readonly connected: boolean;
   readonly controller: NomadBrowserController;
   readonly destinationHint: string | null;
@@ -78,6 +79,7 @@ interface NomadPanelProps {
 }
 
 export function NomadPanel({
+  available,
   connected,
   controller,
   destinationHint,
@@ -244,9 +246,16 @@ export function NomadPanel({
           <Text style={styles.heading}>Browse a bounded page</Text>
         </View>
         <View style={[styles.pill, connected && styles.pillReady]}>
-          <Text style={styles.pillText}>{connected ? "appliance ready" : "disconnected"}</Text>
+          <Text style={styles.pillText}>
+            {!available ? "not available" : connected ? "appliance ready" : "disconnected"}
+          </Text>
         </View>
       </View>
+      {available ? null : (
+        <Text accessibilityLiveRegion="polite" style={styles.nomadHint}>
+          Nomad browsing is not available from this firmware yet.
+        </Text>
+      )}
       <Text style={styles.label}>Nomad node destination</Text>
       <TextInput
         accessibilityLabel="Nomad node destination"
@@ -277,7 +286,11 @@ export function NomadPanel({
       />
       {formError === null ? null : <Text style={styles.inlineError}>{formError}</Text>}
       <View style={styles.nomadFetchRow}>
-        <ActionButton disabled={!connected || slotOwned} label={fetchLabel} onPress={fetchPage} />
+        <ActionButton
+          disabled={!available || !connected || slotOwned}
+          label={fetchLabel}
+          onPress={fetchPage}
+        />
         <Text style={styles.nomadHint}>
           Anonymous request · one complete page · no Resource yet
         </Text>

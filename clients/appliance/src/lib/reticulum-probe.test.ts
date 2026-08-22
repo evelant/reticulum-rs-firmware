@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { ReticulumProbePollResponse, ReticulumProbeStartRequest } from "../generated/api.ts";
+import { syntheticReticulumInterfaceId } from "./reticulum-interface-id.ts";
 import { ReticulumProbeController, type ReticulumProbeState } from "./reticulum-probe.ts";
 
 class ManualSchedule {
@@ -34,7 +35,7 @@ describe("Reticulum proof probe controller", () => {
           round_trip_ms: 1_234,
           hops: 2,
           ingress_observation: {
-            interface_id: 7,
+            interface_id: syntheticReticulumInterfaceId(7),
             signal: { rssi_dbm: -91, snr_db: 7 },
           },
         },
@@ -86,7 +87,7 @@ describe("Reticulum proof probe controller", () => {
         round_trip_ms: 1_234,
         hops: 2,
         ingress_observation: {
-          interface_id: 7,
+          interface_id: syntheticReticulumInterfaceId(7),
           signal: { rssi_dbm: -91, snr_db: 7 },
         },
       },
@@ -150,7 +151,10 @@ describe("Reticulum proof probe controller", () => {
             result: {
               round_trip_ms: 800,
               hops: 1,
-              ingress_observation: { interface_id: 1, signal: null },
+              ingress_observation: {
+                interface_id: syntheticReticulumInterfaceId(1),
+                signal: null,
+              },
             },
           };
         },

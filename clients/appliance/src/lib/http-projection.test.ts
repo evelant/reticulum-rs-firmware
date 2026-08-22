@@ -5,6 +5,15 @@ import { applianceSnapshotFromHttp } from "./http-projection.ts";
 
 function snapshot(connection: HttpConnectionState): HttpApplianceSnapshot {
   return {
+    capabilities: {
+      manual_service_announce: false,
+      nearby_peers: false,
+      network_config: false,
+      nomad: false,
+      radio_routes: false,
+      radio_trace: false,
+      reticulum_probe: false,
+    },
     revision: 4,
     connection,
     device: null,
@@ -16,12 +25,12 @@ function snapshot(connection: HttpConnectionState): HttpApplianceSnapshot {
 }
 
 describe("HTTP appliance projection", () => {
-  test("retains bearer-neutral ready metadata", () => {
+  test("retains Reticulum ready metadata", () => {
     expect(
       applianceSnapshotFromHttp(
         snapshot({
           state: "ready",
-          transport: "bluetooth_low_energy",
+          transport: "reticulum",
           endpoint: "peripheral-a",
           device_label: "ACA704E13E88",
         }),
@@ -29,20 +38,20 @@ describe("HTTP appliance projection", () => {
     ).toEqual({
       ...snapshot({
         state: "ready",
-        transport: "bluetooth_low_energy",
+        transport: "reticulum",
         endpoint: "peripheral-a",
         device_label: "ACA704E13E88",
       }),
       connection: {
         state: "ready",
-        transport: "bluetooth_low_energy",
+        transport: "reticulum",
         endpoint: "peripheral-a",
         device_label: "ACA704E13E88",
       },
     });
   });
 
-  test("preserves every connection state without bearer metadata", () => {
+  test("preserves every connection state without ready metadata", () => {
     for (const state of [
       "starting",
       "disconnected",

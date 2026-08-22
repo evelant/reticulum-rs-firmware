@@ -2,7 +2,7 @@
 """Generate the Python-authoritative LXMF 1.0.1 foundation corpus.
 
 The generator imports the exact Python LXMF and RNS implementations pinned in
-``requirements-lxmf-1.0.1.txt``.  It does not import Rust or Rete code.  Fixed
+``requirements-lxmf-1.0.1.txt``. It does not import product Rust code. Fixed
 identity private keys in this file match public interoperability fixture input
 parameters also used by the Precursor oracle; they are behavioral test facts,
 not copied implementation source or usable credentials.
@@ -751,11 +751,6 @@ def build_vectors() -> dict[str, object]:
         "messages": ordered_messages,
         "inbound_oracles": _inbound_oracles(messages),
         "negative_mutations": _negative_mutations(messages),
-        "known_rete_incompatibilities": [
-            "rete-lxmf-core models fields as u8-to-bytes instead of arbitrary MessagePack values",
-            "rete-lxmf-core models stamps and tickets as two bytes instead of 32 and 16 bytes",
-            "these are documented expectations; this Python corpus does not import or execute Rete",
-        ],
     }
 
 

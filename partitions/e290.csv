@@ -1,12 +1,8 @@
-# Name,          Type, SubType, Offset,    Size,       Flags
-nvs,             data, nvs,     0x9000,    0x6000,
-phy_init,        data, phy,     0xf000,    0x1000,
-factory,         app,  factory,   0x10000,   0x600000,
-node_identity,   data, undefined, 0x610000,  0x2000,
-announce_clock,  data, undefined, 0x612000,  0x2000,
-api_credentials, data, undefined, 0x614000,  0x2000,
-ble_bond,        data, undefined, 0x616000,  0x2000,
-device_config,   data, undefined, 0x618000,  0x18000,
-node_journal,    data, undefined, 0x630000,  0x100000,
-lxmf_store,      data, undefined, 0x730000,  0x400000,
-# 0xb30000..0x1000000 intentionally remains unallocated for an OTA/layout decision.
+# Name,          Type, SubType,  Offset,    Size,       Flags
+nvs,             data, nvs,      0x9000,    0x6000,
+phy_init,        data, phy,      0xf000,    0x1000,
+ota_0,           app,  ota_0,   0x10000,   0x500000,
+ota_1,           app,  ota_1,  0x510000,   0x500000,
+otadata,         data, ota,    0xa10000,     0x2000,
+product_state,   data, undefined, 0xa12000,  0x46e000,
+prns_state,      data, undefined, 0xe80000,  0x180000,

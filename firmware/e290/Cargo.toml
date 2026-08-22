@@ -14,6 +14,7 @@ default = ["gateway"]
 appliance = [
     "display",
     "dep:esp-radio",
+    "dep:prns-interfaces-embassy",
     "dep:trouble-host",
     "esp-radio/ble",
     "esp-radio/unstable",
@@ -22,7 +23,6 @@ appliance = [
 gateway = [
     "appliance",
     "dep:embassy-net",
-    "dep:rete-core",
     "dep:smoltcp",
     "embassy-net/dhcpv4",
     "embassy-net/dns",
@@ -31,66 +31,42 @@ gateway = [
 ]
 display = [
     "dep:embedded-graphics",
-    "dep:reticulum-board-e290",
     "dep:reticulum-eink-ssd1680",
 ]
 
 [dependencies]
-reticulum-announce-clock = { path = "../../crates/announce-clock", default-features = false }
+allocator-api2 = { workspace = true, features = ["alloc"] }
+heapless = { version = "=0.8.0", default-features = false }
+personal-rns = { workspace = true, features = ["bluetooth-auto", "embassy-host", "external-alloc", "flash", "log", "lora", "tcp-dns"] }
+prns-interfaces-embassy = { workspace = true, optional = true, features = ["bluetooth-auto-trouble", "log"] }
 reticulum-appliance-display-model = { path = "../../crates/appliance-display-model", default-features = false }
-reticulum-ble-bond-store = { path = "../../crates/ble-bond-store", default-features = false }
-reticulum-board-e290 = { path = "../../crates/board-e290", default-features = false, optional = true }
-reticulum-board-e290-radio = { path = "../../crates/board-e290-radio" }
 reticulum-device-api = { path = "../../crates/device-api", default-features = false, features = ["rns-data", "lxmf", "nomad", "network-config"] }
-reticulum-device-api-adapter = { path = "../../crates/device-api-adapter", default-features = false, features = ["rns-data", "lxmf", "nomad", "network-config"] }
-reticulum-device-api-ble = { path = "../../crates/device-api-ble", default-features = false }
-reticulum-device-api-credential-store = { path = "../../crates/device-api-credential-store", default-features = false }
-reticulum-device-api-credentials = { path = "../../crates/device-api-credentials", default-features = false }
-reticulum-device-api-framing = { path = "../../crates/device-api-framing", default-features = false }
-reticulum-device-api-handoff = { path = "../../crates/device-api-handoff", default-features = false }
-reticulum-device-api-pairing = { path = "../../crates/device-api-pairing", default-features = false }
-reticulum-device-api-pairing-control = { path = "../../crates/device-api-pairing-control", default-features = false }
-reticulum-device-api-pairing-policy = { path = "../../crates/device-api-pairing-policy", default-features = false }
-reticulum-device-api-session = { path = "../../crates/device-api-session", default-features = false }
-reticulum-device-identity-store = { path = "../../crates/device-identity-store", default-features = false }
 reticulum-eink-ssd1680 = { path = "../../crates/eink-ssd1680", default-features = false, optional = true }
-reticulum-interface-router = { path = "../../crates/interface-router", default-features = false }
 reticulum-lxmf-durable-ingress = { path = "../../crates/lxmf-durable-ingress", default-features = false }
 reticulum-lxmf-ingress = { path = "../../crates/lxmf-ingress", default-features = false }
 reticulum-lxmf-mailbox-store = { path = "../../crates/lxmf-mailbox-store", default-features = false }
 reticulum-lxmf-model = { path = "../../crates/lxmf-model", default-features = false }
 reticulum-lxmf-store = { path = "../../crates/lxmf-store", default-features = false }
-reticulum-node-core = { path = "../../crates/node-core", default-features = false }
+reticulum-lxmf-wire = { path = "../../crates/lxmf-wire", default-features = false }
 reticulum-nomad-protocol = { path = "../../crates/nomad-protocol", default-features = false }
 reticulum-network-config-store = { path = "../../crates/network-config-store", default-features = false }
 reticulum-nor-flash-region = { path = "../../crates/nor-flash-region", default-features = false }
 reticulum-peer-discovery = { path = "../../crates/peer-discovery", default-features = false }
-reticulum-radio-interface = { path = "../../crates/radio-interface", default-features = false }
-reticulum-radio-tx-dispatch = { path = "../../crates/radio-tx-dispatch", default-features = false }
-reticulum-rns-interface-discovery = { path = "../../crates/rns-interface-discovery", default-features = false }
-reticulum-storage-actor = { path = "../../crates/storage-actor", default-features = false }
-reticulum-storage-journal = { path = "../../crates/storage-journal", default-features = false }
-reticulum-storage-model = { path = "../../crates/storage-model", default-features = false }
-reticulum-submission-runtime = { path = "../../crates/submission-runtime", default-features = false }
-reticulum-tx-supervisor = { path = "../../crates/tx-supervisor", default-features = false }
-rete-core = { workspace = true, optional = true }
 sha2.workspace = true
 smoltcp = { version = "=0.13.0", default-features = false, features = ["proto-dns", "proto-ipv4"], optional = true }
-subtle.workspace = true
 embassy-sync.workspace = true
 embedded-graphics = { workspace = true, optional = true }
+embedded-storage-async.workspace = true
+embedded-storage.workspace = true
 rand_core.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
-allocator-api2 = { workspace = true, features = ["alloc"] }
 # Trouble's public connection-update bound names this upstream trait directly
 # rather than re-exporting it from the host prelude.
-bt-hci = { version = "=0.9.0", default-features = false }
-reticulum-radio-lora-phy = { path = "../../crates/radio-lora-phy" }
-reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
-
+bt-hci = { version = "=0.8.1", default-features = false }
 embassy-executor = { workspace = true, features = ["log"] }
+embassy-embedded-hal.workspace = true
 embassy-futures.workspace = true
 embassy-time = { workspace = true, features = ["log"] }
 embedded-hal.workspace = true
@@ -123,7 +99,6 @@ esp-rtos = { workspace = true, features = [
     "esp32s3",
     "log-04",
 ] }
-embedded-storage.workspace = true
 embassy-net = { version = "=0.9.1", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",
@@ -135,29 +110,16 @@ esp-radio = { workspace = true, features = [
     "esp32s3",
 ], optional = true }
 esp-storage = { workspace = true, features = ["esp32s3", "critical-section", "embedded-storage"] }
+esp-sync = { workspace = true, features = ["esp32s3"] }
 log.workspace = true
 static_cell.workspace = true
-trouble-host = { git = "https://github.com/embassy-rs/trouble.git", rev = "088e09c451177d5db50cf3e58c68d05512265ba0", version = "=0.7.0", default-features = false, features = [
-    # Current upstream still cfg-gates two security mutex imports behind the
-    # central role. This is compile-time only; the product remains peripheral.
-    "central",
-    # One link's eight-entry queue costs 320 bytes of target BSS over four
-    # entries. It reduces event loss during pairing bursts; manager-state and
-    # bounded-drain recovery remain the correctness guarantee.
-    "connection-event-queue-size-8",
-    "default-packet-pool-mtu-255",
-    "derive",
-    "gatt",
-    "peripheral",
-    "security",
-], optional = true }
+trouble-host = { version = "=0.6.0", default-features = false, features = ["default-packet-pool-size-8"], optional = true }
 
 [dev-dependencies]
 critical-section = { workspace = true, features = ["std"] }
 embassy-futures.workspace = true
 embassy-sync.workspace = true
 embedded-storage.workspace = true
-reticulum-tx-handoff = { path = "../../crates/tx-handoff", default-features = false }
 reticulum-lxmf-wire = { path = "../../crates/lxmf-wire", default-features = false }
 
 [lib]

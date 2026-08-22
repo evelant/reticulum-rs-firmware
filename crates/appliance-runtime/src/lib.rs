@@ -9,6 +9,12 @@ use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod appliance_label;
+pub use appliance_label::{
+    ApplianceLabelMutationOutcome, ApplianceLabelMutationRequest, ApplianceLabelRequestError,
+    ApplianceLabelView,
+};
+
 use reticulum_appliance_store::{
     AttemptLocationStamp, ChatStore, Contact, ContactUpsertOutcome, ConversationPeer,
     DestinationHash, DeviceBinding, IdempotencyKey, InboundCommitOutcome,
@@ -21,9 +27,9 @@ use reticulum_appliance_sync::{
     ChatEngine, DeviceSessionError, EngineError, InboxStep, LxmfSession, ReconcileStep,
 };
 use reticulum_device_api::{
-    ApiErrorCode, MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES,
+    ApiErrorCode, CapabilityAvailability, CapabilitySnapshot, MAX_LXMF_BASIC_CONTENT_BYTES,
+    MAX_LXMF_BASIC_TITLE_BYTES,
 };
-use reticulum_device_client::ClientError;
 pub use reticulum_lxmf_wire::{
     BASIC_LXMF_SELECTION_OVERHEAD_BYTES, EMPTY_LXMF_FIELDS_ENCODED_BYTES, LINK_PACKET_MAX_CONTENT,
     MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES,
@@ -51,17 +57,16 @@ pub use activity::{
     MessageActivityPageView, MessageActivityRequestError,
 };
 pub use diagnostics::{
-    DiagnosticInterfaceKindView, DiagnosticInterfaceStateView, DiagnosticInterfaceView,
+    DiagnosticInterfaceModeView, DiagnosticInterfaceStateView, DiagnosticInterfaceView,
     DiagnosticLoraDataTxEvidenceView, DiagnosticLoraLastRxView, DiagnosticLoraLastTxView,
     DiagnosticLoraTxFamilyView, DiagnosticLoraTxOutcomeView, LoraDiagnosticsView,
-    MAX_RADIO_ROUTE_ENTRIES, RadioRoutesStatusView, RetainedRouteView, RnsDiagnosticsView,
-    RouteDiagnosticResolutionView,
+    MAX_RADIO_ROUTE_ENTRIES, RadioRoutesStatusView, RetainedRouteView, RouteNextHopView,
 };
 pub use location::{
     PhoneLocationAuthorizationView, PhoneLocationObservationError, PhoneLocationObservationView,
     PhoneLocationSourceView, PhoneLocationUnavailableReasonView,
 };
-pub use nearby::{MAX_NEARBY_PEERS, NearbyPeerView};
+pub use nearby::{MAX_NEARBY_PEERS, NearbyPeerObservation, NearbyPeerObserverKind, NearbyPeerView};
 pub use network::{
     LoraRadioProfileView, NetworkConfigMutation, NetworkConfigMutationOutcome,
     NetworkConfigMutationRequest, NetworkConfigView, NetworkRequestError, NetworkRuntimeStatusView,
@@ -519,24 +524,15 @@ impl From<OutboxRetryOutcome> for RetrySendResponse {
 
 type BoxedSession = Box<dyn LxmfSession<Error = DeviceSessionError> + Send>;
 
-/// Physical or local-network bearer used for one authenticated session.
+/// Network that owns one authenticated management session.
 ///
-/// The host service implements [`Self::BluetoothLowEnergy`]. The remaining
-/// variants deliberately reserve runtime vocabulary for future local-bearer
-/// adapters without implying that they are already available.
+/// PRNS selects the actual packet interface and route. The client runtime does
+/// not model Bluetooth, LoRa, TCP, USB, or Wi-Fi as separate product sessions.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionTransport {
-    /// Reserved host-side USB serial adapter.
-    UsbSerial,
-    /// Reserved direct USB OTG adapter owned by a native client.
-    UsbOtg,
-    /// Bluetooth Low Energy connection owned by a native client.
-    BluetoothLowEnergy,
-    /// Reserved local Wi-Fi adapter owned by a native or web client.
-    Wifi,
-    /// A future bearer identified by a stable implementation label.
-    Other(String),
+    /// One PRNS node using its attached Reticulum interfaces and routes.
+    Reticulum,
 }
 
 /// Transport-neutral labels published for an authenticated connection.
@@ -561,12 +557,12 @@ impl ConnectionMetadata {
         }
     }
 
-    /// Bearer used by the connection.
+    /// Network used by the connection.
     pub const fn transport(&self) -> &ConnectionTransport {
         &self.transport
     }
 
-    /// Bearer-specific endpoint label.
+    /// Management destination label.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -584,6 +580,7 @@ impl ConnectionMetadata {
 pub struct ConnectedSession {
     session: BoxedSession,
     metadata: ConnectionMetadata,
+    capabilities: ApplianceCapabilitiesView,
     connection_lease: Option<Box<dyn Send>>,
 }
 
@@ -596,11 +593,19 @@ impl ConnectedSession {
         Self {
             session: Box::new(session),
             metadata,
+            capabilities: ApplianceCapabilitiesView::none(),
             connection_lease: None,
         }
     }
 
-    /// Retain an opaque transport ownership guard with this session.
+    /// Publish the optional product operations negotiated with the device.
+    #[must_use]
+    pub const fn with_capabilities(mut self, capabilities: ApplianceCapabilitiesView) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// Retain an opaque session ownership guard.
     pub fn with_connection_lease<L>(mut self, lease: L) -> Self
     where
         L: Send + 'static,
@@ -615,9 +620,9 @@ impl ConnectedSession {
 pub enum ConnectFailure {
     /// A transient condition should use bounded exponential retry.
     Retryable(String),
-    /// The selected bearer has no connector implementation in this build.
+    /// The Reticulum connector is unavailable in this build or platform state.
     Unavailable {
-        /// Bearer that cannot currently be opened.
+        /// Network that cannot currently be opened.
         transport: ConnectionTransport,
         /// Actionable implementation or platform limitation.
         reason: String,
@@ -661,6 +666,13 @@ impl std::error::Error for ConnectFailure {}
 pub trait Connector: Send + 'static {
     /// Connect and authenticate with an explicit retryability classification.
     fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure>;
+
+    /// Read app-local authenticated LXMF announces without using a device session.
+    ///
+    /// Connectors that do not own a PRNS node leave this operation unavailable.
+    fn nearby_peers(&self) -> Result<Vec<NearbyPeerView>, String> {
+        Err("this connector does not expose app-local LXMF discovery".to_owned())
+    }
 }
 
 /// Timing and path policy for one appliance actor.
@@ -700,20 +712,20 @@ impl ApplianceConfig {
 pub enum ConnectionState {
     /// Actor has opened the database but has not attempted its connector.
     Starting,
-    /// No authenticated bearer is currently usable.
+    /// No authenticated Reticulum session is currently usable.
     Disconnected,
-    /// The selected bearer is being opened and authenticated.
+    /// A Reticulum Link is being opened, identified, and authorized.
     Connecting,
-    /// This build has no implementation for the selected bearer.
+    /// This build or platform state cannot provide the Reticulum connector.
     Unavailable {
-        /// Bearer reserved for a future connector implementation.
+        /// Unavailable network.
         transport: ConnectionTransport,
     },
     /// The registered board is authenticated and background work may run.
     Ready {
-        /// Bearer used by this authenticated session.
+        /// Network used by this authenticated session.
         transport: ConnectionTransport,
-        /// Bearer-specific endpoint label.
+        /// Management destination label.
         endpoint: String,
         /// Stable user-visible device label.
         device_label: String,
@@ -727,7 +739,7 @@ pub enum ConnectionState {
 }
 
 impl ConnectionState {
-    /// Selected unavailable bearer or active ready bearer.
+    /// Selected unavailable or active network.
     pub const fn transport(&self) -> Option<&ConnectionTransport> {
         match self {
             Self::Unavailable { transport } | Self::Ready { transport, .. } => Some(transport),
@@ -740,7 +752,7 @@ impl ConnectionState {
         }
     }
 
-    /// Bearer-specific endpoint label, when the actor is ready.
+    /// Management destination label, when the actor is ready.
     pub fn endpoint(&self) -> Option<&str> {
         match self {
             Self::Ready { endpoint, .. } => Some(endpoint),
@@ -775,6 +787,120 @@ pub struct DeviceView {
     device_id: String,
     primary_destination: String,
     lxmf_delivery_destination: String,
+}
+
+/// Optional device-backed operations available to the universal application.
+///
+/// The Reticulum device API handshake is authoritative for product operations
+/// it describes. Embedded radio-trace projections remain false until the
+/// handshake grows an explicit field for that independent diagnostic stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
+pub struct ApplianceCapabilitiesView {
+    nearby_peers: bool,
+    #[serde(skip)]
+    #[ts(skip)]
+    appliance_nearby_peers: bool,
+    manual_service_announce: bool,
+    network_config: bool,
+    nomad: bool,
+    reticulum_probe: bool,
+    radio_routes: bool,
+    radio_trace: bool,
+}
+
+impl ApplianceCapabilitiesView {
+    /// No optional product operation is known to be available.
+    pub const fn none() -> Self {
+        Self {
+            nearby_peers: false,
+            appliance_nearby_peers: false,
+            manual_service_announce: false,
+            network_config: false,
+            nomad: false,
+            reticulum_probe: false,
+            radio_routes: false,
+            radio_trace: false,
+        }
+    }
+
+    /// Project one device API capability handshake into app-facing controls.
+    pub const fn from_device_api(capabilities: CapabilitySnapshot) -> Self {
+        Self {
+            nearby_peers: matches!(
+                capabilities.lxmf_peer_discovery(),
+                CapabilityAvailability::Available
+            ),
+            appliance_nearby_peers: matches!(
+                capabilities.lxmf_peer_discovery(),
+                CapabilityAvailability::Available
+            ),
+            manual_service_announce: matches!(
+                capabilities.manual_service_announce(),
+                CapabilityAvailability::Available
+            ),
+            network_config: matches!(
+                capabilities.network_config(),
+                CapabilityAvailability::Available
+            ),
+            nomad: matches!(capabilities.nomad(), CapabilityAvailability::Available),
+            reticulum_probe: matches!(
+                capabilities.reticulum_probe(),
+                CapabilityAvailability::Available
+            ),
+            radio_routes: matches!(
+                capabilities.route_diagnostics(),
+                CapabilityAvailability::Available
+            ),
+            radio_trace: false,
+        }
+    }
+
+    /// Publish discovery supplied by the app-owned PRNS node.
+    #[must_use]
+    pub const fn with_local_nearby_peers(mut self) -> Self {
+        self.nearby_peers = true;
+        self
+    }
+
+    /// Whether authenticated nearby LXMF peer snapshots can be read.
+    pub const fn nearby_peers(self) -> bool {
+        self.nearby_peers
+    }
+
+    /// Whether the active appliance exposes its own announce observations.
+    pub const fn appliance_nearby_peers(self) -> bool {
+        self.appliance_nearby_peers
+    }
+
+    /// Whether ordinary service announces can be requested manually.
+    pub const fn manual_service_announce(self) -> bool {
+        self.manual_service_announce
+    }
+
+    /// Whether board-owned network configuration can be read and changed.
+    pub const fn network_config(self) -> bool {
+        self.network_config
+    }
+
+    /// Whether bounded NomadNet pages can be fetched through the board.
+    pub const fn nomad(self) -> bool {
+        self.nomad
+    }
+
+    /// Whether authenticated Reticulum path-and-proof probes are available.
+    pub const fn reticulum_probe(self) -> bool {
+        self.reticulum_probe
+    }
+
+    /// Whether embedded route diagnostics are available.
+    pub const fn radio_routes(self) -> bool {
+        self.radio_routes
+    }
+
+    /// Whether embedded packet-correlated radio trace is available.
+    pub const fn radio_trace(self) -> bool {
+        self.radio_trace
+    }
 }
 
 impl DeviceView {
@@ -812,6 +938,7 @@ pub struct ApplianceSnapshot {
     revision: u64,
     connection: ConnectionState,
     device: Option<DeviceView>,
+    capabilities: ApplianceCapabilitiesView,
     #[serde(serialize_with = "serialize_json_safe_usize")]
     #[ts(as = "JsonSafeInteger")]
     pending_outbox: usize,
@@ -830,6 +957,7 @@ impl ApplianceSnapshot {
             revision: 1,
             connection: ConnectionState::Starting,
             device: None,
+            capabilities: ApplianceCapabilitiesView::none(),
             pending_outbox: 0,
             contact_count: 0,
             imported_this_run: 0,
@@ -850,6 +978,11 @@ impl ApplianceSnapshot {
     /// Authenticated device identity, when connected at least once.
     pub const fn device(&self) -> Option<&DeviceView> {
         self.device.as_ref()
+    }
+
+    /// Optional product operations negotiated for the active session.
+    pub const fn capabilities(&self) -> ApplianceCapabilitiesView {
+        self.capabilities
     }
 
     /// Number of locally durable outbox rows still needing device work.
@@ -1070,14 +1203,14 @@ impl From<MessageSignalObservation> for MessageSignalObservationView {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[allow(missing_docs)]
 pub struct MessageIngressObservationView {
-    interface_id: u8,
+    interface_id: [u8; 8],
     signal: Option<MessageSignalObservationView>,
 }
 
 impl From<MessageIngressObservation> for MessageIngressObservationView {
     fn from(ingress: MessageIngressObservation) -> Self {
         Self {
-            interface_id: ingress.interface().get(),
+            interface_id: *ingress.interface().as_bytes(),
             signal: ingress.signal().map(MessageSignalObservationView::from),
         }
     }
@@ -1225,6 +1358,7 @@ pub(crate) fn status_name(status: OutboxStatus) -> TimelineStatus {
             TimelineStatus::AwaitingDelivery
         }
         OutboxStatus::Device(SubmissionState::Delivered(_)) => TimelineStatus::Delivered,
+        OutboxStatus::Device(SubmissionState::ApplicationDelivered) => TimelineStatus::Delivered,
         OutboxStatus::Device(SubmissionState::Failed(failure)) => match failure {
             SubmissionFailure::NoPath => TimelineStatus::FailedNoPath,
             SubmissionFailure::DeliveryTimeout => TimelineStatus::FailedDeliveryTimeout,
@@ -1243,6 +1377,11 @@ fn current_unix_timestamp_millis() -> u64 {
 }
 
 enum Command {
+    ApplianceLabelGet(oneshot::Sender<Result<ApplianceLabelView, String>>),
+    ApplianceLabelMutate {
+        request: ApplianceLabelMutationRequest,
+        reply: oneshot::Sender<Result<ApplianceLabelMutationOutcome, String>>,
+    },
     Contacts(oneshot::Sender<Result<Vec<ContactView>, String>>),
     ConversationPeers(oneshot::Sender<Result<Vec<ConversationPeerView>, String>>),
     PhoneLocationGet(oneshot::Sender<Result<PhoneLocationObservationView, String>>),
@@ -1319,6 +1458,7 @@ impl Command {
                 | Self::ConversationPeers(_)
                 | Self::PhoneLocationGet(_)
                 | Self::PhoneLocationUpdate { .. }
+                | Self::NearbyPeers(_)
                 | Self::Timeline { .. }
                 | Self::MessageActivity { .. }
                 | Self::RadioTrace { .. }
@@ -1375,6 +1515,20 @@ impl ApplianceHandle {
     /// Subscribe to immutable snapshot revision changes.
     pub fn subscribe_revisions(&self) -> watch::Receiver<u64> {
         self.revisions.clone()
+    }
+
+    /// Read the durable product-owned appliance label.
+    pub async fn appliance_label(&self) -> Result<ApplianceLabelView, ServiceError> {
+        self.request(Command::ApplianceLabelGet).await
+    }
+
+    /// Compare-and-swap the durable product-owned appliance label.
+    pub async fn mutate_appliance_label(
+        &self,
+        request: ApplianceLabelMutationRequest,
+    ) -> Result<ApplianceLabelMutationOutcome, ServiceError> {
+        self.request(|reply| Command::ApplianceLabelMutate { request, reply })
+            .await
     }
 
     /// Load the current contact projection.
@@ -1567,14 +1721,13 @@ impl ApplianceHandle {
     /// Schedule the connector immediately if there is no current session.
     ///
     /// Unlike [`Self::reconnect`], this never drops an already established
-    /// bearer. Platform-owned transports use it after registering a fresh
-    /// physical link, including when the actor raced ahead and already claimed
-    /// that link.
+    /// session. Platform adapters use it after network state changes, including
+    /// when the actor raced ahead and already established the Link.
     pub async fn ensure_connected(&self) -> Result<(), ServiceError> {
         self.request(Command::EnsureConnected).await
     }
 
-    /// Drop the current bearer and immediately retry the connector.
+    /// Drop the current session and immediately retry the connector.
     pub async fn reconnect(&self) -> Result<(), ServiceError> {
         self.request(Command::Reconnect).await
     }
@@ -1713,6 +1866,7 @@ struct Actor<C> {
     next_reconcile: Instant,
     next_inbox: Instant,
     next_radio_trace: Instant,
+    radio_trace_available: bool,
     radio_trace_chat_yields_remaining: u8,
     urgent_reconcile_outbox: Option<OutboxId>,
     urgent_reconcile_due: bool,
@@ -1778,6 +1932,7 @@ impl<C: Connector> Actor<C> {
             next_reconcile: now,
             next_inbox: now,
             next_radio_trace: now,
+            radio_trace_available: false,
             radio_trace_chat_yields_remaining: 0,
             urgent_reconcile_outbox: None,
             urgent_reconcile_due: false,
@@ -1914,25 +2069,18 @@ impl<C: Connector> Actor<C> {
                 let _ = reply.send(Ok(PhoneLocationObservationView::from(observation)));
             }
             Command::NearbyPeers(reply) => {
-                let read = match self.session.as_mut() {
-                    Some(session) => nearby::read_nearby_peers(session.as_mut())
-                        .map_err(|error| error.to_string()),
-                    None => Err(
-                        "no authenticated appliance session is ready for nearby discovery"
-                            .to_owned(),
-                    ),
-                };
+                let result = self.nearby_peers();
                 let session_consumed = self
                     .session
                     .as_ref()
                     .is_some_and(|session| !session.is_usable());
                 if session_consumed {
-                    let reason = read.as_ref().err().cloned().unwrap_or_else(|| {
-                        "nearby peer request consumed the authenticated session".to_owned()
+                    let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
+                        "nearby-peer refresh consumed the authenticated session".to_owned()
                     });
                     self.retry_connection(reason);
                 }
-                let _ = reply.send(read);
+                let _ = reply.send(result);
             }
             Command::NomadFetchStart { request, reply } => {
                 let result = match self.session.as_mut() {
@@ -2039,6 +2187,56 @@ impl<C: Connector> Actor<C> {
                 if session_consumed {
                     let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
                         "Reticulum probe poll consumed the authenticated session".to_owned()
+                    });
+                    self.retry_connection(reason);
+                }
+                let _ = reply.send(result);
+            }
+            Command::ApplianceLabelGet(reply) => {
+                let result = match self.session.as_mut() {
+                    Some(session) => session
+                        .appliance_label_get()
+                        .map(ApplianceLabelView::from)
+                        .map_err(|error| error.to_string()),
+                    None => Err(
+                        "no authenticated appliance session is ready for appliance settings"
+                            .to_owned(),
+                    ),
+                };
+                let session_consumed = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.is_usable());
+                if session_consumed {
+                    let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
+                        "appliance label read consumed the authenticated session".to_owned()
+                    });
+                    self.retry_connection(reason);
+                }
+                let _ = reply.send(result);
+            }
+            Command::ApplianceLabelMutate { request, reply } => {
+                let result = match self.session.as_mut() {
+                    Some(session) => request
+                        .with_device_request(|request| session.appliance_label_mutate(request))
+                        .map_err(|error| error.to_string())
+                        .and_then(|result| {
+                            result
+                                .map(ApplianceLabelMutationOutcome::from)
+                                .map_err(|error| error.to_string())
+                        }),
+                    None => Err(
+                        "no authenticated appliance session is ready for appliance settings"
+                            .to_owned(),
+                    ),
+                };
+                let session_consumed = self
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| !session.is_usable());
+                if session_consumed {
+                    let reason = result.as_ref().err().cloned().unwrap_or_else(|| {
+                        "appliance label mutation consumed the authenticated session".to_owned()
                     });
                     self.retry_connection(reason);
                 }
@@ -2277,6 +2475,66 @@ impl<C: Connector> Actor<C> {
         }
     }
 
+    fn nearby_peers(&mut self) -> Result<Vec<NearbyPeerView>, String> {
+        let appliance_available = self.snapshot.capabilities.appliance_nearby_peers();
+        let mut observations = match self.connector.nearby_peers() {
+            Ok(observations) => observations,
+            Err(_) if appliance_available => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        if !appliance_available {
+            return Ok(observations);
+        }
+
+        let management_destination = self
+            .snapshot
+            .device
+            .as_ref()
+            .map(|device| device.primary_destination.clone())
+            .ok_or_else(|| {
+                "the authenticated appliance identity is unavailable for nearby-peer provenance"
+                    .to_owned()
+            })?;
+        let session = self.session.as_mut().ok_or_else(|| {
+            "no authenticated appliance session is ready for nearby-peer discovery".to_owned()
+        })?;
+        let mut cursor = None;
+        let mut incarnation = None;
+        let mut appliance_peers: Vec<reticulum_device_api::LxmfDiscoveredPeer> =
+            Vec::with_capacity(MAX_NEARBY_PEERS);
+        for _ in 0..MAX_NEARBY_PEERS {
+            let page = session
+                .next_nearby_peer(cursor)
+                .map_err(|error| error.to_string())?;
+            let next = page.next_cursor();
+            if incarnation.is_some_and(|incarnation| incarnation != next.incarnation()) {
+                appliance_peers.clear();
+            }
+            incarnation = Some(next.incarnation());
+            let Some(peer) = page.peer().copied() else {
+                break;
+            };
+            if let Some(existing) = appliance_peers
+                .iter_mut()
+                .find(|existing| existing.destination() == peer.destination())
+            {
+                *existing = peer;
+            } else {
+                appliance_peers.push(peer);
+            }
+            if cursor == Some(next) {
+                break;
+            }
+            cursor = Some(next);
+        }
+        observations.extend(
+            appliance_peers
+                .iter()
+                .map(|peer| NearbyPeerView::from_appliance_peer(peer, &management_destination)),
+        );
+        Ok(observations)
+    }
+
     fn background_turn(&mut self) {
         let now = Instant::now();
         if self.session.is_none() {
@@ -2297,7 +2555,7 @@ impl<C: Connector> Actor<C> {
     fn select_background_work(&mut self, now: Instant) -> Option<BackgroundWork> {
         let inbox_due = now >= self.next_inbox;
         let reconcile_due = now >= self.next_reconcile;
-        let radio_trace_due = now >= self.next_radio_trace;
+        let radio_trace_due = self.radio_trace_available && now >= self.next_radio_trace;
         if self.urgent_reconcile_outbox.is_some() && self.urgent_reconcile_due {
             if reconcile_due {
                 self.radio_trace_chat_yields_remaining =
@@ -2372,6 +2630,7 @@ impl<C: Connector> Actor<C> {
             }
         }
         let ConnectedSession {
+            capabilities,
             connection_lease,
             metadata,
             session,
@@ -2388,6 +2647,8 @@ impl<C: Connector> Actor<C> {
         self.next_inbox = Instant::now();
         self.next_reconcile = Instant::now();
         self.next_radio_trace = Instant::now();
+        self.snapshot.capabilities = capabilities;
+        self.radio_trace_available = capabilities.radio_trace();
         // A newly usable session first imports chat and hands off any durable
         // outbox work. Trace catch-up remains bounded, but must not preempt the
         // first useful foreground-visible synchronization turn.
@@ -2563,6 +2824,19 @@ impl<C: Connector> Actor<C> {
         let page = match page {
             Ok(page) => page,
             Err(error) => {
+                if matches!(
+                    &error,
+                    DeviceSessionError::Api(response)
+                        if response.code == ApiErrorCode::CapabilityUnavailable
+                            && response.operation
+                                == Some(reticulum_device_api::OP_RADIO_TRACE_PAGE)
+                ) {
+                    self.radio_trace_available = false;
+                    if self.clear_background_error(BackgroundWork::RadioTrace) {
+                        self.publish();
+                    }
+                    return;
+                }
                 let usable = self
                     .session
                     .as_ref()
@@ -2637,10 +2911,19 @@ impl<C: Connector> Actor<C> {
                     self.retry_connection(error.to_string());
                     return;
                 }
-                match &error {
-                    DeviceSessionError::Client(ClientError::Api {
-                        error: response, ..
-                    }) => match background_api_retry_delay(&self.config, response.code) {
+                let api_response = match &error {
+                    DeviceSessionError::Api(response) => Some(response),
+                    DeviceSessionError::Request(_) => {
+                        self.clear_session();
+                        self.engine.reset_session_scan();
+                        self.retry_connection(error.to_string());
+                        return;
+                    }
+                    _ => None,
+                };
+                match api_response {
+                    Some(response) => match background_api_retry_delay(&self.config, response.code)
+                    {
                         Some(delay) => {
                             if work == BackgroundWork::Reconcile
                                 && self.urgent_reconcile_outbox.is_some()
@@ -2663,7 +2946,7 @@ impl<C: Connector> Actor<C> {
                         }
                         None => self.permanent_fault(error.to_string()),
                     },
-                    _ => self.permanent_fault(error.to_string()),
+                    None => self.permanent_fault(error.to_string()),
                 }
             }
         }
@@ -2714,6 +2997,8 @@ impl<C: Connector> Actor<C> {
     fn clear_session(&mut self) {
         self.session = None;
         self.session_lease = None;
+        self.snapshot.capabilities = ApplianceCapabilitiesView::none();
+        self.radio_trace_available = false;
         self.radio_trace_cursor = None;
         self.radio_trace_chat_yields_remaining = 0;
     }

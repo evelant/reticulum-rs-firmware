@@ -4,6 +4,7 @@ import type {
   TimelineDirection,
   TimelineStatus,
 } from "../generated/api.ts";
+import { reticulumInterfaceIdHex } from "./reticulum-interface-id.ts";
 
 export type MessageActivityFilter = "all" | TimelineDirection | "attention";
 
@@ -176,11 +177,12 @@ export function messageActivityLocationMetadata(event: MessageActivityEventView)
 export function messageActivityIngressMetadata(event: MessageActivityEventView): string[] {
   const ingress = event.ingress_observation;
   if (ingress === null) return [];
+  const interfaceId = reticulumInterfaceIdHex(ingress.interface_id);
   if (ingress.signal === null) {
-    return [`Receiver-local final hop · interface ${ingress.interface_id} · no RF signal values`];
+    return [`Receiver-local final hop · interface ${interfaceId} · no RF signal values`];
   }
   return [
-    `Receiver-local final hop · interface ${ingress.interface_id} · RSSI ${ingress.signal.rssi_dbm} dBm · SNR ${ingress.signal.snr_db} dB`,
+    `Receiver-local final hop · interface ${interfaceId} · RSSI ${ingress.signal.rssi_dbm} dBm · SNR ${ingress.signal.snr_db} dB`,
   ];
 }
 

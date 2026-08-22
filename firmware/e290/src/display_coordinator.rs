@@ -2,13 +2,11 @@
 //!
 //! The coordinator owns the complete Home snapshot. Producers update narrow
 //! fields instead of publishing competing full frames, so mailbox activity
-//! cannot erase BLE recovery state and ordinary Home changes cannot replace a
-//! pairing passkey. The owner of this value must sit at the sole downstream
+//! cannot erase enrollment state. The owner of this value must sit at the sole downstream
 //! rendering boundary so no producer can bypass its priority rules.
 
 use reticulum_appliance_display_model::{
-    DisplayCommand, DisplayHomeSnapshot, DisplayLabel, DisplaySetupState, PairingPasskey,
-    PairingSecretClearReason, PairingWindowSeconds,
+    DisplayCommand, DisplayHomeSnapshot, DisplayLabel, DisplaySetupState,
 };
 
 /// Minimum interval between successive non-terminal mailbox-count refreshes.
@@ -57,18 +55,14 @@ impl DisplayCoordinatorOutput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VisiblePresentation {
     None,
-    Blank,
     Booting(DisplayLabel),
     Home,
-    Pairing,
-    PairingFailed(DisplayLabel),
-    PairingTimedOut(DisplayLabel),
 }
 
 /// Sole owner of complete semantic state for the E290 display.
 ///
-/// Pairing, pairing terminal states, and booting are protected presentations:
-/// Home-field changes remain retained but cannot replace them. Call
+/// Booting is a protected presentation: Home-field changes remain retained but
+/// cannot replace it. Call
 /// [`E290DisplayCoordinator::resume_home`] only when the protected lifecycle
 /// has actually ended.
 pub struct E290DisplayCoordinator {
@@ -109,45 +103,6 @@ impl E290DisplayCoordinator {
         DisplayCoordinatorOutput::Publish(DisplayCommand::ShowBooting { label })
     }
 
-    /// Request a pairing passkey as a protected presentation.
-    ///
-    /// Passkeys are intentionally never deduplicated. Ownership of every
-    /// supplied secret transfers to the returned command and then to the
-    /// display state or is zeroized when that command is dropped.
-    pub fn show_pairing(
-        &mut self,
-        label: DisplayLabel,
-        passkey: PairingPasskey,
-        expires_after_seconds: PairingWindowSeconds,
-    ) -> DisplayCoordinatorOutput {
-        self.visible = VisiblePresentation::Pairing;
-        self.defer_home_behind_protected_view();
-        DisplayCoordinatorOutput::Publish(DisplayCommand::ShowPairing {
-            label,
-            passkey,
-            expires_after_seconds,
-        })
-    }
-
-    /// Clear any pairing passkey and install its protected terminal view.
-    pub fn clear_pairing_secret(
-        &mut self,
-        label: DisplayLabel,
-        reason: PairingSecretClearReason,
-    ) -> DisplayCoordinatorOutput {
-        let next = match reason {
-            PairingSecretClearReason::TimedOut => VisiblePresentation::PairingTimedOut(label),
-            PairingSecretClearReason::Failed => VisiblePresentation::PairingFailed(label),
-            PairingSecretClearReason::Reboot => VisiblePresentation::Blank,
-        };
-        if self.visible == next && self.visible != VisiblePresentation::Pairing {
-            return DisplayCoordinatorOutput::Unchanged;
-        }
-        self.visible = next;
-        self.defer_home_behind_protected_view();
-        DisplayCoordinatorOutput::Publish(DisplayCommand::ClearPairingSecret { label, reason })
-    }
-
     /// Explicitly leave a protected lifecycle and publish the latest complete
     /// Home state.
     pub fn resume_home(&mut self, now_ms: u64) -> DisplayCoordinatorOutput {
@@ -165,14 +120,34 @@ impl E290DisplayCoordinator {
 
     /// Update only the authoritative setup/recovery field.
     ///
-    /// This narrow mutation prevents mailbox updates from accidentally
-    /// replacing `BluetoothRecoveryRequired` with a stale full snapshot.
+    /// This narrow mutation prevents mailbox updates from replacing current
+    /// enrollment state with a stale full snapshot.
     pub fn set_setup(&mut self, setup: DisplaySetupState, now_ms: u64) -> DisplayCoordinatorOutput {
         if self.home.setup() == setup {
             return DisplayCoordinatorOutput::Unchanged;
         }
         self.home = self.home.with_setup(setup);
         self.home_changed_immediately(now_ms)
+    }
+
+    /// Apply the complete non-secret Home telemetry projection.
+    ///
+    /// Appliance-label changes refresh immediately; mailbox-only changes retain
+    /// the e-paper coalescing policy below.
+    pub fn set_home_telemetry(
+        &mut self,
+        appliance_label: Option<DisplayLabel>,
+        uncollected_messages: u32,
+        now_ms: u64,
+    ) -> DisplayCoordinatorOutput {
+        if self.home.appliance_label() != appliance_label {
+            self.home = self
+                .home
+                .with_appliance_label(appliance_label)
+                .with_uncollected_messages(uncollected_messages);
+            return self.home_changed_immediately(now_ms);
+        }
+        self.set_uncollected_messages(uncollected_messages, now_ms)
     }
 
     /// Update the count of messages not yet acknowledged as collected.
@@ -290,7 +265,7 @@ fn normalized_home(snapshot: DisplayHomeSnapshot) -> DisplayHomeSnapshot {
 mod tests {
     use reticulum_appliance_display_model::{
         DisplayCompositionState, DisplayHomeSnapshot, DisplayLabel, DisplaySetupState,
-        DisplayViewKind, PairingPasskey, PairingSecretClearReason, PairingWindowSeconds,
+        DisplayViewKind,
     };
 
     use super::{DisplayCoordinatorOutput, E290DisplayCoordinator, MESSAGE_BURST_COALESCE_MILLIS};
@@ -303,7 +278,7 @@ mod tests {
         DisplayHomeSnapshot::new(
             label(),
             DisplayLabel::new("e13f88").expect("fixture suffix fits"),
-            DisplaySetupState::Paired,
+            DisplaySetupState::Enrolled,
             DisplayCompositionState::Configured,
             DisplayCompositionState::Configured,
             DisplayCompositionState::Configured,
@@ -364,16 +339,12 @@ mod tests {
     }
 
     #[test]
-    fn pairing_protects_secret_view_and_resume_uses_latest_home() {
+    fn booting_defers_home_changes_until_resume() {
         let mut coordinator = E290DisplayCoordinator::new(home());
         let _ = coordinator.resume_home(0);
         assert_eq!(
-            published_view(coordinator.show_pairing(
-                label(),
-                PairingPasskey::from_number(123_456).expect("fixture passkey"),
-                PairingWindowSeconds::new(30).expect("fixture window"),
-            )),
-            Some(DisplayViewKind::Pairing)
+            published_view(coordinator.show_booting(label())),
+            Some(DisplayViewKind::Booting)
         );
         assert!(matches!(
             coordinator.set_uncollected_messages(1, 1),
@@ -382,7 +353,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            coordinator.set_setup(DisplaySetupState::BluetoothRecoveryRequired, 2),
+            coordinator.set_setup(DisplaySetupState::EnrollmentRequired, 2),
             DisplayCoordinatorOutput::Deferred {
                 refresh_at_ms: None
             }
@@ -394,29 +365,7 @@ mod tests {
         assert_eq!(coordinator.home().uncollected_messages(), 1);
         assert_eq!(
             coordinator.home().setup(),
-            DisplaySetupState::BluetoothRecoveryRequired
-        );
-    }
-
-    #[test]
-    fn terminal_pairing_view_is_not_replaced_by_ordinary_home_activity() {
-        let mut coordinator = E290DisplayCoordinator::new(home());
-        let _ = coordinator.resume_home(0);
-        assert_eq!(
-            published_view(
-                coordinator.clear_pairing_secret(label(), PairingSecretClearReason::Failed,)
-            ),
-            Some(DisplayViewKind::PairingFailed)
-        );
-        assert!(matches!(
-            coordinator.set_uncollected_messages(1, 1),
-            DisplayCoordinatorOutput::Deferred {
-                refresh_at_ms: None
-            }
-        ));
-        assert_eq!(
-            published_view(coordinator.resume_home(2)),
-            Some(DisplayViewKind::Home)
+            DisplaySetupState::EnrollmentRequired
         );
     }
 
@@ -435,13 +384,13 @@ mod tests {
         ));
         assert_eq!(coordinator.home().uncollected_messages(), 101);
         assert!(matches!(
-            coordinator.set_setup(DisplaySetupState::Paired, 4),
+            coordinator.set_setup(DisplaySetupState::Enrolled, 4),
             DisplayCoordinatorOutput::Unchanged
         ));
     }
 
     #[test]
-    fn boot_and_terminal_commands_deduplicate_without_replacing_home_state() {
+    fn boot_commands_deduplicate_without_replacing_home_state() {
         let mut coordinator = E290DisplayCoordinator::new(home());
         assert_eq!(
             published_view(coordinator.show_booting(label())),
@@ -449,16 +398,6 @@ mod tests {
         );
         assert!(matches!(
             coordinator.show_booting(label()),
-            DisplayCoordinatorOutput::Unchanged
-        ));
-        assert_eq!(
-            published_view(
-                coordinator.clear_pairing_secret(label(), PairingSecretClearReason::TimedOut,)
-            ),
-            Some(DisplayViewKind::PairingTimedOut)
-        );
-        assert!(matches!(
-            coordinator.clear_pairing_secret(label(), PairingSecretClearReason::TimedOut),
             DisplayCoordinatorOutput::Unchanged
         ));
     }

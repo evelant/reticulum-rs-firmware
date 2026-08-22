@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the small deterministic Reticulum 1.3.8 foundation corpus."""
+"""Generate the small deterministic Reticulum 1.4.2 foundation corpus."""
 
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ import RNS
 from RNS.vendor import umsgpack
 
 
-DEFAULT_OUTPUT = Path(__file__).parents[1] / "vectors" / "rns-1.3.8.json"
+DEFAULT_OUTPUT = Path(__file__).parents[1] / "vectors" / "rns-1.4.2.json"
 PEER_MANIFEST = Path(__file__).parents[1] / "peers.toml"
-REQUIREMENTS = Path(__file__).with_name("requirements-rns-1.3.8.txt")
+REQUIREMENTS = Path(__file__).with_name("requirements-rns-1.4.2.txt")
 EXPECTED_PYTHON = (3, 13, 7)
 EXPECTED_UMSGPACK = "2.7.1"
 LRRTT_MEASURED_RTT = 0.25
@@ -74,7 +74,7 @@ def released_peer() -> dict[str, str]:
 
 
 def fixed_identity(label: str) -> RNS.Identity:
-    """Create the same stable 64-byte private identity used by Rete's corpus."""
+    """Create the stable 64-byte private identity used by this corpus."""
     identity = RNS.Identity(create_keys=False)
     identity.load_private_key(hashlib.sha512(label.encode("utf-8")).digest())
     return identity
@@ -86,7 +86,7 @@ def verify_installed_peer(peer: dict[str, str]) -> str:
     if installed != peer["version"]:
         raise RuntimeError(
             f"expected rns {peer['version']}, found {installed}; "
-            "install interop/python/requirements-rns-1.3.8.txt"
+            "install interop/python/requirements-rns-1.4.2.txt"
         )
 
     distribution = importlib.metadata.distribution("rns")
@@ -197,7 +197,7 @@ def unpack_outcome(payload: bytes) -> tuple[dict[str, object], object | None]:
 
 
 def rns_rtt_formula_outcome(value: object) -> dict[str, object]:
-    """Exercise RNS 1.3.8's exact ``max(measured_rtt, unpacked)`` formula."""
+    """Exercise RNS 1.4.2's exact ``max(measured_rtt, unpacked)`` formula."""
     try:
         rtt = max(LRRTT_MEASURED_RTT, value)
     except Exception as error:
@@ -285,7 +285,7 @@ def lrrtt_messagepack_vectors() -> dict[str, object]:
             trailing=trailing,
         ),
         lrrtt_case(
-            "legacy_rete_raw_u32_timestamp",
+            "legacy_raw_u32_timestamp",
             legacy_timestamp,
             first_object=legacy_timestamp[:1],
             trailing=legacy_timestamp[1:],
@@ -302,7 +302,7 @@ def lrrtt_messagepack_vectors() -> dict[str, object]:
     source = Path(umsgpack.__file__)
     return {
         "origin": (
-            "decoded by RNS 1.3.8's vendored RNS.vendor.umsgpack; canonical "
+            "decoded by RNS 1.4.2's vendored RNS.vendor.umsgpack; canonical "
             "float64 cases are encoded by that same module"
         ),
         "scope": (
@@ -703,7 +703,7 @@ def lrrtt_responder_lifecycle() -> dict[str, object]:
 
 
 def lrrtt_lifecycle_vectors(identity: RNS.Identity) -> dict[str, object]:
-    """Freeze released RNS 1.3.8 LRRTT timing and repeat-state behavior."""
+    """Freeze released RNS 1.4.2 LRRTT timing and repeat-state behavior."""
     link_source = Path(import_module("RNS.Link").__file__)
     packet_source = Path(import_module("RNS.Packet").__file__)
     return {
@@ -741,6 +741,101 @@ def lrrtt_lifecycle_vectors(identity: RNS.Identity) -> dict[str, object]:
     }
 
 
+def proof_strategy_vectors(identity: RNS.Identity) -> dict[str, object]:
+    """Exercise released RNS destination delivery and proof callback ordering."""
+    app_name = "reticulum_rs_firmware"
+    aspects = ("proof_strategy",)
+    inbound = RNS.Destination(
+        identity,
+        RNS.Destination.IN,
+        RNS.Destination.SINGLE,
+        app_name,
+        *aspects,
+    )
+    outbound = RNS.Destination(
+        identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        app_name,
+        *aspects,
+    )
+    cases: list[dict[str, object]] = []
+    active_events: list[str] = []
+    delivered_payload: bytes | None = None
+    delivered_from_packed: bool | None = None
+
+    def on_delivery(data: bytes, packet: RNS.Packet) -> None:
+        nonlocal delivered_payload, delivered_from_packed
+        active_events.append("delivery")
+        delivered_payload = data
+        delivered_from_packed = packet.fromPacked
+
+    def on_proof_requested(packet: RNS.Packet) -> bool:
+        active_events.append("proof_requested")
+        return active_decision
+
+    def record_proof(packet: RNS.Packet, destination=None) -> None:
+        del packet, destination
+        active_events.append("proof")
+
+    inbound.set_packet_callback(on_delivery)
+    inbound.set_proof_requested_callback(on_proof_requested)
+
+    active_decision = False
+    definitions = (
+        ("prove_none", RNS.Destination.PROVE_NONE, False),
+        ("prove_all", RNS.Destination.PROVE_ALL, False),
+        ("prove_app_accept", RNS.Destination.PROVE_APP, True),
+        ("prove_app_reject", RNS.Destination.PROVE_APP, False),
+    )
+    with patch.object(RNS.Packet, "prove", record_proof):
+        for name, strategy, decision in definitions:
+            active_events.clear()
+            active_decision = decision
+            delivered_payload = None
+            delivered_from_packed = None
+            payload = f"rns-1.4.2-{name}".encode("ascii")
+            inbound.set_proof_strategy(strategy)
+            packet = RNS.Packet(outbound, payload)
+            packet.pack()
+
+            # Run the released process-global transport path. It decrypts and
+            # invokes the destination callback before applying PROVE_ALL or
+            # synchronously consulting the PROVE_APP callback.
+            RNS.Transport.inbound(packet.raw)
+            if delivered_payload != payload:
+                raise RuntimeError(f"released RNS did not deliver {name}")
+            if delivered_from_packed is not True:
+                raise RuntimeError(f"released RNS did not unpack {name} before delivery")
+            cases.append(
+                {
+                    "name": name,
+                    "strategy": strategy,
+                    "proof_requested_decision": decision,
+                    "payload_hex": payload.hex(),
+                    "events": list(active_events),
+                    "delivered_from_packed": delivered_from_packed,
+                }
+            )
+
+    destination_module = import_module("RNS.Destination")
+    transport_module = import_module("RNS.Transport")
+    return {
+        "constants": {
+            "prove_none": RNS.Destination.PROVE_NONE,
+            "prove_app": RNS.Destination.PROVE_APP,
+            "prove_all": RNS.Destination.PROVE_ALL,
+        },
+        "destination_source_sha256": hashlib.sha256(
+            Path(destination_module.__file__).read_bytes()
+        ).hexdigest(),
+        "transport_source_sha256": hashlib.sha256(
+            Path(transport_module.__file__).read_bytes()
+        ).hexdigest(),
+        "cases": cases,
+    }
+
+
 def build_vectors() -> dict[str, object]:
     peer = released_peer()
     if sys.version_info[:3] != EXPECTED_PYTHON:
@@ -752,8 +847,18 @@ def build_vectors() -> dict[str, object]:
     installed = verify_installed_peer(peer)
 
     # Reticulum requires one process-global instance before destinations are
-    # registered. A fresh temporary config creates no persistent node state.
+    # registered. Force a standalone temporary instance so a developer's
+    # running shared instance cannot consume the generator process or affect
+    # packet delivery.
     with tempfile.TemporaryDirectory(prefix="reticulum-rs-vectors-") as config_dir:
+        Path(config_dir, "config").write_text(
+            "[reticulum]\n"
+            "  share_instance = No\n"
+            "  enable_transport = No\n"
+            "\n"
+            "[interfaces]\n",
+            encoding="utf-8",
+        )
         RNS.Reticulum(configdir=config_dir, loglevel=RNS.LOG_CRITICAL)
 
         identity = fixed_identity("alice")
@@ -806,7 +911,7 @@ def build_vectors() -> dict[str, object]:
             "reticulum_rs_firmware",
             "interop",
         )
-        plain_payload = b"rete foundation conformance"
+        plain_payload = b"prns migration conformance"
         plain_packet = RNS.Packet(plain_destination, plain_payload)
         plain_packet.pack()
 
@@ -818,7 +923,7 @@ def build_vectors() -> dict[str, object]:
         assert public_key == identity.get_public_key()
 
         return {
-            "schema": 2,
+            "schema": 3,
             "protocol": "Reticulum",
             "lane": "released",
             "peer": {
@@ -829,7 +934,7 @@ def build_vectors() -> dict[str, object]:
             },
             "generator": {
                 "script": "interop/python/generate_rns_vectors.py",
-                "requirements": "interop/python/requirements-rns-1.3.8.txt",
+                "requirements": "interop/python/requirements-rns-1.4.2.txt",
                 "command": "python interop/python/generate_rns_vectors.py",
                 "python_version": ".".join(str(part) for part in EXPECTED_PYTHON),
                 "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -840,13 +945,15 @@ def build_vectors() -> dict[str, object]:
                     "creation because Python correctly uses a fresh ephemeral "
                     "key and IV. LRRTT sections record released-peer decode, "
                     "RTT-formula, request-clock ordering and direct Link.receive "
-                    "repeat-lifecycle behavior; candidate conformance is checked "
-                    "separately."
+                    "repeat-lifecycle behavior. The proof section runs the "
+                    "released Transport.inbound path and records immediate "
+                    "destination and PROVE_APP callback ordering; candidate "
+                    "conformance is checked separately."
                 ),
             },
             "identity": {
                 "label": "alice",
-                "origin": "created by Python RNS 1.3.8 from the SHA-512 of the test label",
+                "origin": "created by Python RNS 1.4.2 from the SHA-512 of the test label",
                 "normalization": "lowercase hexadecimal; no wire-byte normalization",
                 "test_only": True,
                 "private_key_hex": identity.get_private_key().hex(),
@@ -856,7 +963,7 @@ def build_vectors() -> dict[str, object]:
             "announce": {
                 "app_name": "testapp",
                 "aspects": ["aspect1"],
-                "origin": "created and packed by Python RNS 1.3.8",
+                "origin": "created and packed by Python RNS 1.4.2",
                 "normalization": "fixed five-byte random prefix and timestamp for reproducibility",
                 "fixed_timestamp": fixed_timestamp,
                 "destination_hash_hex": destination.hash.hex(),
@@ -869,13 +976,14 @@ def build_vectors() -> dict[str, object]:
             "plain_data": {
                 "app_name": "reticulum_rs_firmware",
                 "aspects": ["interop"],
-                "origin": "created and packed by Python RNS 1.3.8",
+                "origin": "created and packed by Python RNS 1.4.2",
                 "normalization": "lowercase hexadecimal; no wire-byte normalization",
                 "payload_hex": plain_payload.hex(),
                 "destination_hash_hex": plain_destination.hash.hex(),
                 "raw_hex": plain_packet.raw.hex(),
                 "packet_hash_hex": plain_packet.packet_hash.hex(),
             },
+            "proof_strategy": proof_strategy_vectors(identity),
             "lrrtt_messagepack": lrrtt_messagepack_vectors(),
             "lrrtt_lifecycle": lrrtt_lifecycle_vectors(identity),
         }

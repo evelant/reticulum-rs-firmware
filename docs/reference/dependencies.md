@@ -1,92 +1,97 @@
 # Dependencies and provenance
 
-`Cargo.toml`, `Cargo.lock`, `bun.lock`, and the checked vendor inventories are
-the authoritative resolved dependency graph. This document records only source
-and licensing decisions that are not obvious from those files.
+`Cargo.toml`, `Cargo.lock`, `clients/appliance/package.json`, and `bun.lock` are
+the authoritative dependency graph. This
+document records source and licensing decisions that are not obvious from
+those files.
 
-## Rete
+## PRNS
 
-Rete is the Reticulum foundation. It is consumed as an owned git submodule at
-`vendor/rete`, pointing at the `firmware` branch of
-[evelant/rete](https://github.com/evelant/rete), itself a fork of the dormant
-[s-retlaw/rete](https://github.com/s-retlaw/rete). The four core crates
-(`rete-core`, `rete-transport`, `rete-stack`, `rete-lxmf-core`) are declared as
-git dependencies and patched to that submodule checkout, so in-tree edits take
-effect without fetching the declared revision.
+PRNS is the only Reticulum implementation selected by current product targets.
+The workspace pins `personal-rns`, `prns-ffi`, and
+`prns-interfaces-embassy` to exact `evelant/Prns` commit
+`b763fb5076a965d6eb411923c387e3805f47e40a` (PRNS 0.3.6), based directly on
+`trunk` commit `f7872d6fcad9c5ba33b942bc19bb183f2b4a0d13`. The selected revision adds
+two allocation-free, generic Embassy surfaces: bounded live topology
+inspection and a borrowed callback for complete announces after ordinary PRNS
+admission. Neither changes routing, announce acceptance, proof timing, or
+application policy. Cargo resolves the published revision directly from git.
+The checkout under `reference/Prns` is review material, not a path dependency
+or vendored build input.
 
-Core Rete changes are made directly on the fork as ordinary commits and
-versioned here by the submodule pointer. Upstream `s-retlaw/rete` remains a
-clean merge target: the pinned fork history is a strict descendant of its
-`main`. Clone this repository with `--recursive` (or run
-`git submodule update --init`) so the submodule is present.
+Do not patch PRNS to preserve product abstractions. First express the E290 and
+its applications through the published recipes, commands, storage layout,
+events, and interface adapters. A fork change is justified only by a concrete
+generic gap useful to unrelated Reticulum applications or boards, and must be
+qualified against the Python authority before the product pin changes.
 
-Rete declares `MIT OR Apache-2.0` in its package metadata. The fork supplies
-the canonical `LICENSE-MIT` and `LICENSE-APACHE` files that upstream omitted,
-resolving the corresponding-source packaging gap. Do not point a build at an
-unpinned checkout or mix Rete crate revisions.
+PRNS is MIT OR Apache-2.0. Its resolved source and notices must accompany a
+distribution according to those terms.
+
+The retired alpha implementation is not a dependency or source checkout. Its
+last uncommitted request-preparation experiment is retained only as an ignored
+migration-evidence patch under
+`target/private-e290-proofs/prns-migration/`.
 
 ## Espressif platform
 
 The ESP32-S3 HAL, radio, runtime, bootloader, logging, and storage crates resolve
 together from exact esp-rs revision
-`b50efcb0dcd94b58ec337e511891057aa1f2e8fb`. This revision includes the runtime
-stack-slice corrections and ESP32-S3 Wi-Fi/Bluetooth combo-PHY lifecycle needed
-by the gateway profile. Prefer a coherent newer upstream revision when fixes
-are available; do not backport or vendor platform code merely to avoid a
-dependency update.
+`b50efcb0dcd94b58ec337e511891057aa1f2e8fb`. This aligns the product with the
+embedded graph selected by PRNS and includes the runtime stack-slice corrections
+needed by the E290 image. Prefer a coherent newer upstream revision when fixes
+are released; do not add a second controller/runtime graph.
 
 These crates use their upstream MIT/Apache-2.0 licensing.
 
 ## LoRa driver
 
-The workspace patches `lora-phy` 3.0.1 to the audited source tree under
-`vendor/lora-phy-3.0.1`. The overlay adds the board PA/RF hooks, continuous-RX
-IRQ ownership, terminal receive classification, and standby/IRQ quiescence
-required by the E290 radio actor. The complete inventory, source hashes, exact
-edits, and removal criteria are in:
-
-- `vendor/lora-phy-3.0.1/VENDOR-HASHES.json`
-- `vendor/lora-phy-3.0.1/PATCHES.md`
-
-Remove the path patch after an upstream release supplies equivalent behavior
-and the project has moved its regression tests to that release. `lora-phy` is
-MIT OR Apache-2.0.
+The E290 composition uses PRNS's unmodified native SX126x driver. Board wiring,
+the fitted 863--928 MHz RF range, and the four qualified output-power choices
+remain product configuration in `firmware/e290`. The former `lora-phy` overlay
+and duplicate radio-interface crates are not dependencies or source inputs.
+Two powered E290s exchange routes and opportunistic LXMF over this path;
+broader RF, recovery, and sustained-traffic qualification remains a release
+gate rather than a reason to retain the alpha driver.
 
 ## Bluetooth and application stack
 
-Firmware BLE uses the exact Trouble revision declared by `firmware/e290`.
-Mobile bindings use UniFFI and the pinned Expo TurboModule generator. The Expo,
-React Native, MapLibre, BLE, TypeScript, and build dependencies are exact pins
-in `clients/appliance/package.json` and `bun.lock`.
+Embedded Bluetooth Auto uses PRNS's Trouble/ESP adapter on the one ESP radio
+controller owner. Apple clients use PRNS's CoreBluetooth adapter; Android uses
+the public PRNS Android bridge and the product JNI/TurboModule wrapper. No
+custom device-control GATT/session stack remains.
 
-Generated native bindings and web assets are build outputs from those pinned
-tools. Do not patch generated output to hide an upstream incompatibility;
-record a narrow reproducible source/tool patch and its removal condition.
+Mobile bindings use UniFFI and the pinned Expo TurboModule generator. Expo,
+React Native, MapLibre, TypeScript, and build dependencies are exact pins in
+`clients/appliance/package.json` and `bun.lock`.
+
+Generated native bindings and web assets are build outputs from their pinned
+Rust and TypeScript sources. Do not hand-edit generated output or patch it to
+hide an upstream incompatibility.
 
 ## Reticulum and LXMF compatibility
 
-Released Python Reticulum and LXMF packages are interoperability authorities,
-not firmware runtime dependencies. Their exact requirements and generated
-vectors live under `interop/`. Project Rust code is independently implemented
-against documented behavior and generated bytes unless a source file explicitly
-retains another license.
+Python RNS 1.4.2 and Python LXMF 1.0.1 are interoperability authorities, not
+firmware runtime dependencies. Their exact requirements and generated vectors
+live under `interop/`. PRNS and product application code are checked against
+their documented behavior and generated bytes.
 
-Reticulum- or LXMF-derived material retains the Reticulum license and notices.
-The repository's compatibility license files and `NOTICE` must remain with a
-distribution.
+Reticulum- or LXMF-derived material retains the applicable Reticulum license
+and notices. The repository's compatibility license files and `NOTICE` must
+remain with a distribution.
 
 ## Project code and release obligations
 
-Project-owned source is `MIT OR Apache-2.0`. A dependency with another FOSS
-license may be used when its terms are satisfied; do not silently relabel copied
-or modified source under the workspace license.
+Project-owned source is MIT OR Apache-2.0. A dependency with another FOSS
+license may be used when its terms are satisfied; do not silently relabel
+copied or modified source under the workspace license.
 
 Before distributing firmware or an app build:
 
 1. generate a bill of materials from the exact lockfiles;
 2. include required license and notice texts;
 3. retain corresponding source when a dependency requires it;
-4. keep the vendor inventories and patches reproducible; and
+4. keep source provenance and any future patches reproducible; and
 5. expose component versions and licenses through an About or licenses view.
 
 Opening an upstream issue or pull request requires direct user approval. Local

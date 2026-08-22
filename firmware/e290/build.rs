@@ -15,11 +15,9 @@ fn main() {
 
 fn require_partition_contract() {
     use partition_contract::{
-        ANNOUNCE_CLOCK_LABEL, ANNOUNCE_CLOCK_LEN, ANNOUNCE_CLOCK_OFFSET, API_CREDENTIALS_LABEL,
-        API_CREDENTIALS_LEN, API_CREDENTIALS_OFFSET, BLE_BOND_LABEL, BLE_BOND_LEN, BLE_BOND_OFFSET,
-        DEVICE_CONFIG_LABEL, DEVICE_CONFIG_LEN, DEVICE_CONFIG_OFFSET, LXMF_STORE_LABEL,
-        LXMF_STORE_LEN, LXMF_STORE_OFFSET, NODE_IDENTITY_LABEL, NODE_IDENTITY_LEN,
-        NODE_IDENTITY_OFFSET, NODE_JOURNAL_LABEL, NODE_JOURNAL_LEN, NODE_JOURNAL_OFFSET,
+        OTA_0_LABEL, OTA_0_LEN, OTA_0_OFFSET, OTA_1_LABEL, OTA_1_LEN, OTA_1_OFFSET, OTA_DATA_LABEL,
+        OTA_DATA_LEN, OTA_DATA_OFFSET, PRNS_STATE_LABEL, PRNS_STATE_LEN, PRNS_STATE_OFFSET,
+        PRODUCT_STATE_LABEL, PRODUCT_STATE_LEN, PRODUCT_STATE_OFFSET,
     };
 
     let path =
@@ -35,46 +33,26 @@ fn require_partition_contract() {
         .collect::<Vec<_>>();
 
     let required = [
+        (OTA_0_LABEL, "app", "ota_0", OTA_0_OFFSET, OTA_0_LEN),
+        (OTA_1_LABEL, "app", "ota_1", OTA_1_OFFSET, OTA_1_LEN),
+        (OTA_DATA_LABEL, "data", "ota", OTA_DATA_OFFSET, OTA_DATA_LEN),
         (
-            NODE_IDENTITY_LABEL,
+            PRODUCT_STATE_LABEL,
+            "data",
             "undefined",
-            NODE_IDENTITY_OFFSET,
-            NODE_IDENTITY_LEN,
+            PRODUCT_STATE_OFFSET,
+            PRODUCT_STATE_LEN,
         ),
         (
-            ANNOUNCE_CLOCK_LABEL,
+            PRNS_STATE_LABEL,
+            "data",
             "undefined",
-            ANNOUNCE_CLOCK_OFFSET,
-            ANNOUNCE_CLOCK_LEN,
-        ),
-        (
-            API_CREDENTIALS_LABEL,
-            "undefined",
-            API_CREDENTIALS_OFFSET,
-            API_CREDENTIALS_LEN,
-        ),
-        (BLE_BOND_LABEL, "undefined", BLE_BOND_OFFSET, BLE_BOND_LEN),
-        (
-            DEVICE_CONFIG_LABEL,
-            "undefined",
-            DEVICE_CONFIG_OFFSET,
-            DEVICE_CONFIG_LEN,
-        ),
-        (
-            NODE_JOURNAL_LABEL,
-            "undefined",
-            NODE_JOURNAL_OFFSET,
-            NODE_JOURNAL_LEN,
-        ),
-        (
-            LXMF_STORE_LABEL,
-            "undefined",
-            LXMF_STORE_OFFSET,
-            LXMF_STORE_LEN,
+            PRNS_STATE_OFFSET,
+            PRNS_STATE_LEN,
         ),
     ];
 
-    for &(label, subtype, offset, len) in &required {
+    for &(label, kind, subtype, offset, len) in &required {
         let matches = rows
             .iter()
             .filter(|row| row.first().copied() == Some(label))
@@ -86,7 +64,7 @@ fn require_partition_contract() {
         );
         let row = matches[0];
         assert!(row.len() >= 5, "E290 partition row {label} is incomplete");
-        assert_eq!(row[1], "data", "{label} must be a data partition");
+        assert_eq!(row[1], kind, "{label} has the wrong partition type");
         assert_eq!(row[2], subtype, "{label} has the wrong subtype");
         assert_eq!(parse_hex(row[3]), offset, "{label} has the wrong offset");
         assert_eq!(parse_hex(row[4]), len, "{label} has the wrong length");
@@ -104,7 +82,7 @@ fn require_partition_contract() {
         let end = offset
             .checked_add(len)
             .unwrap_or_else(|| panic!("E290 partition range overflows: {label}"));
-        for &(required_label, _, required_offset, required_len) in &required {
+        for &(required_label, _, _, required_offset, required_len) in &required {
             let required_end = required_offset
                 .checked_add(required_len)
                 .expect("fixed E290 product partition range must not overflow");

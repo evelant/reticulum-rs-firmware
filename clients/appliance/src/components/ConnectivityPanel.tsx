@@ -51,6 +51,7 @@ interface ConnectivityPanelProps {
   readonly controller: NetworkConfigController;
   readonly onRefreshRadioRoutes?: () => void;
   readonly onSubtopicHintConsumed?: () => void;
+  readonly radioRoutesAvailable: boolean;
   readonly radioRoutesState?: RadioRoutesControllerState | null;
   readonly state: NetworkConfigControllerState;
   readonly subtopicHint?: NetworkSubtopic | null;
@@ -243,6 +244,7 @@ export function ConnectivityPanel({
   controller,
   onRefreshRadioRoutes,
   onSubtopicHintConsumed,
+  radioRoutesAvailable,
   radioRoutesState = null,
   state,
   subtopicHint = null,
@@ -648,14 +650,20 @@ export function ConnectivityPanel({
       />
     );
 
-  const routesSection =
-    radioRoutesState === null || onRefreshRadioRoutes === undefined ? null : (
-      <RadioRoutesPanel
-        disabled={mutating}
-        onRefresh={onRefreshRadioRoutes}
-        state={radioRoutesState}
-      />
-    );
+  const routesSection = !radioRoutesAvailable ? (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Routes</Text>
+      <Text accessibilityLiveRegion="polite" style={styles.secondary}>
+        Live route details are not available from this firmware yet.
+      </Text>
+    </View>
+  ) : radioRoutesState === null || onRefreshRadioRoutes === undefined ? null : (
+    <RadioRoutesPanel
+      disabled={mutating}
+      onRefresh={onRefreshRadioRoutes}
+      state={radioRoutesState}
+    />
+  );
 
   const peersSection =
     configuration === null ? null : (

@@ -9,13 +9,11 @@ assumption.
 ## Repository map
 
 - `firmware/e290/`: the supported E290 firmware image and board composition.
-- `crates/`: portable protocol, routing, storage, device API, radio, and client
-  libraries.
+- `crates/`: portable application protocols, storage, display, and client
+  libraries. PRNS is an exact git dependency rather than an in-tree wrapper.
 - `clients/appliance/`: the TypeScript/Expo application and native Rust bridge.
 - `interop/`: deterministic compatibility vectors and their generators.
 - `partitions/`: current ESP32 flash layouts.
-- `vendor/`: the owned Rete git submodule (`vendor/rete`) and the reviewed
-  `lora-phy` source overlay that the active build requires.
 - `xtask/`: small, recurring repository and firmware operations.
 
 The client-side Rust layers are `appliance-store`, `appliance-sync`,
@@ -27,10 +25,12 @@ TypeScript owns presentation and platform integration.
 
 - The board operates and retries messages without a connected app.
 - Persist outbound intent before acknowledging it to a client.
-- Persist inbound LXMF before releasing its Reticulum delivery proof.
+- Preserve PRNS/Python immediate proof timing. Persist and deduplicate inbound
+  LXMF after delivery without adding deferred proofs.
 - Keep routing and application services independent of LoRa and board details.
-- Model LoRa and TCP as separate Reticulum packet interfaces. BLE is the local
-  device-API bearer; USB Serial/JTAG is reserved for diagnostics.
+- Model LoRa, TCP, and Bluetooth Auto as Reticulum packet interfaces. Product
+  operations use Links, requests, and Resources; USB Serial/JTAG is reserved
+  for diagnostics and recovery.
 - Give each radio, flash device, display, session, and network actor one owner.
   Use bounded queues and explicit ownership transfer.
 - The complete E290 image may rely on PSRAM. Do not constrain the product to
@@ -47,10 +47,12 @@ TypeScript owns presentation and platform integration.
 - Use TypeScript and Bun exclusively for app-side source and scripts.
 - Prefer upstream dependency releases and fixes over vendoring or backports.
   Keep each necessary overlay small and document its removal condition.
-- Rete is owned: it lives in the `evelant/rete` fork (of `s-retlaw/rete`) and is
-  consumed as the `vendor/rete` submodule. Make Rete changes directly on the
-  fork, then bump the submodule pointer here. Clone with `--recursive`; `xtask
-  doctor` checks the submodule is initialized.
+- Use the exact PRNS revision pinned in the workspace without product-local
+  patches. Adapt product design to PRNS public APIs first. Change PRNS only for
+  a demonstrated generic gap useful to unrelated Reticulum applications or
+  boards, and never place appliance or LXMF policy in PRNS core.
+- Application data uses typed quotas inside one generic `product_state` arena;
+  do not create physical partition layouts for application combinations.
 - Alpha API and storage compatibility may change. Make reset or migration
   consequences explicit when persisted formats change.
 - Add or update doc comments where ownership, durability, timing, protocol, or
@@ -82,7 +84,6 @@ cargo fmt --all -- --check
 RUST_MIN_STACK=16777216 cargo test --locked
 RUST_MIN_STACK=16777216 cargo test --locked -p reticulum-e290-firmware --lib
 cargo clippy --locked --all-targets -- -D warnings
-RUST_MIN_STACK=16777216 cargo test --locked -p reticulum-rns-rete --features conformance --test rns_1_3_8
 ```
 
 Protocol or wire changes also require the isolated Python authority checks in
@@ -103,6 +104,7 @@ Build and package the default gateway image from the repository root:
 
 ```sh
 source "$HOME/export-esp.sh"
+firmware/e290/bootloader/build-container.sh
 cargo run --locked -p xtask -- doctor
 cargo run --locked -p xtask -- build
 cargo run --locked -p xtask -- check-elf

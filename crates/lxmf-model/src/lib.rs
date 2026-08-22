@@ -41,14 +41,17 @@ impl MessageId {
     }
 }
 
-/// Domain-separated digest of authenticated LXMF material.
+/// Domain-separated digest of LXMF signature-input material.
 ///
 /// The wire/ingress authority calculates this over the complete authenticated
 /// material `destination || source || payload_without_stamp` under a
-/// project-owned domain separator. It is intentionally independent of the
-/// protocol [`MessageId`], allowing replay logic to fail closed if persisted
-/// or deliberately forced input presents one message ID for different signed
-/// material. An optional stamp is excluded from both values.
+/// project-owned domain separator. Signature verification is recorded
+/// separately, matching Python LXMF's ability to deliver a parsed message whose
+/// source is unknown or whose signature is invalid. It is intentionally
+/// independent of the protocol [`MessageId`], allowing replay logic to fail
+/// closed if persisted or deliberately forced input presents one message ID
+/// for different signed material. An optional stamp is excluded from both
+/// values.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AuthenticatedMaterialFingerprint([u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH]);
 
@@ -62,6 +65,17 @@ impl AuthenticatedMaterialFingerprint {
     pub const fn as_bytes(&self) -> &[u8; AUTHENTICATED_MATERIAL_FINGERPRINT_LENGTH] {
         &self.0
     }
+}
+
+/// Python LXMF-compatible signature state for one parsed inbound message.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SignatureVerification {
+    /// The source identity was known and its Ed25519 signature validated.
+    Validated,
+    /// No source identity was known when the message was parsed.
+    SourceUnknown,
+    /// A known source identity did not validate the supplied signature.
+    Invalid,
 }
 
 /// Complete RNS destination hash receiving an LXMF message.
@@ -387,17 +401,17 @@ impl fmt::Display for CarrierLengthMismatch {
 /// transport such as LoRa or TCP; callers resolve the identifier through the
 /// device's interface descriptors.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct InboundInterfaceId(u8);
+pub struct InboundInterfaceId([u8; 8]);
 
 impl InboundInterfaceId {
     /// Preserve one complete product-local interface identifier.
-    pub const fn new(value: u8) -> Self {
-        Self(value)
+    pub const fn new(bytes: [u8; 8]) -> Self {
+        Self(bytes)
     }
 
-    /// Numeric product-local interface identifier.
-    pub const fn get(self) -> u8 {
-        self.0
+    /// Borrow the complete Reticulum interface identity.
+    pub const fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
     }
 }
 
@@ -430,8 +444,7 @@ impl InboundSignalObservation {
     }
 }
 
-/// First-arrival transport evidence retained with one authenticated LXMF
-/// message.
+/// First-arrival transport evidence retained with one parsed LXMF message.
 ///
 /// The evidence is deliberately excluded from the authenticated-message
 /// fingerprint. A replay over a different route is still the same LXMF
@@ -469,6 +482,7 @@ pub struct InboundMessageMetadata {
     authenticated_material: AuthenticatedMaterialFingerprint,
     destination: DestinationHash,
     source: SourceHash,
+    signature_verification: SignatureVerification,
     timestamp_bits: u64,
     carrier: CarrierProvenance,
     stamp_admission: StampAdmissionProvenance,
@@ -487,6 +501,7 @@ impl InboundMessageMetadata {
         authenticated_material: AuthenticatedMaterialFingerprint,
         destination: DestinationHash,
         source: SourceHash,
+        signature_verification: SignatureVerification,
         timestamp_bits: u64,
         carrier: CarrierProvenance,
         stamp_admission: StampAdmissionProvenance,
@@ -511,6 +526,7 @@ impl InboundMessageMetadata {
             authenticated_material,
             destination,
             source,
+            signature_verification,
             timestamp_bits,
             carrier,
             stamp_admission,
@@ -543,14 +559,19 @@ impl InboundMessageMetadata {
         self.authenticated_material
     }
 
-    /// Authenticated local delivery destination.
+    /// Local delivery destination bound by the Reticulum carrier.
     pub const fn destination(self) -> DestinationHash {
         self.destination
     }
 
-    /// Authenticated source delivery destination.
+    /// Source delivery destination claimed by the parsed LXMF message.
     pub const fn source(self) -> SourceHash {
         self.source
+    }
+
+    /// Signature state observed while parsing this arrival.
+    pub const fn signature_verification(self) -> SignatureVerification {
+        self.signature_verification
     }
 
     /// Exact IEEE-754 timestamp bits retained from MessagePack.
@@ -578,7 +599,7 @@ impl InboundMessageMetadata {
         self.ingress
     }
 
-    /// Authenticated logical-message fingerprint used for replay decisions.
+    /// Logical-message fingerprint used for replay decisions.
     pub const fn authenticated_fingerprint(self) -> AuthenticatedMessageFingerprint {
         AuthenticatedMessageFingerprint {
             message_id: self.message_id,

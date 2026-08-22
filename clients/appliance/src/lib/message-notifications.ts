@@ -202,8 +202,8 @@ function notificationFor(event: MessageActivityEventView): InboundMessageNotific
  * supplies a second dedupe layer if the process stops between presentation and
  * persistence.
  *
- * This actor runs only while JavaScript is alive. A later native background BLE
- * watcher should feed the same durable activity journal and ledger contract;
+ * This actor runs only while JavaScript is alive. A later native background
+ * PRNS worker should feed the same durable activity journal and ledger contract;
  * this class deliberately makes no locked-phone delivery claim.
  */
 export class MessageNotificationReconciler {

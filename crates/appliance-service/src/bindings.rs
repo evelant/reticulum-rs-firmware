@@ -1,41 +1,42 @@
 //! App-facing TypeScript binding generation and JSON integer policy.
 
 use reticulum_appliance_runtime::{
-    ApplianceSnapshot, BASIC_LXMF_SELECTION_OVERHEAD_BYTES, BytesEncoding, BytesView,
-    ConnectionState, ConnectionTransport, ContactRequest, ContactView, ConversationPeerView,
-    DeviceView, DiagnosticInterfaceKindView, DiagnosticInterfaceStateView, DiagnosticInterfaceView,
-    DiagnosticLoraDataTxEvidenceView, DiagnosticLoraLastRxView, DiagnosticLoraLastTxView,
-    DiagnosticLoraTxFamilyView, DiagnosticLoraTxOutcomeView, EMPTY_LXMF_FIELDS_ENCODED_BYTES,
-    LINK_PACKET_MAX_CONTENT, LoraDiagnosticsView, LoraRadioProfileView, MAX_CONTACT_NAME_BYTES,
-    MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES, ManualServiceAnnounceDisposition,
-    MessageActivityEventView, MessageActivityKindView, MessageActivityPageRequest,
-    MessageActivityPageView, MessageIngressObservationView, MessageLocationView,
-    MessageSignalObservationView, MutationOutcome, MutationResponse, NearbyPeerView,
-    NetworkConfigMutation, NetworkConfigMutationOutcome, NetworkConfigMutationRequest,
-    NetworkConfigView, NetworkRuntimeStatusView, NomadFetchFailure, NomadFetchPhase,
-    NomadFetchPollRequest, NomadFetchPollResponse, NomadFetchStartOutcome, NomadFetchStartRequest,
-    NomadFetchStartResponse, PacketEvidenceView, PhoneLocationAuthorizationView,
-    PhoneLocationObservationView, PhoneLocationSourceView, PhoneLocationUnavailableReasonView,
-    RadioRoutesStatusView, RadioTraceAttemptOutcomeView, RadioTraceEventKindView,
-    RadioTraceEventView, RadioTraceInboundProofStageView, RadioTraceMessageCorrelationView,
-    RadioTracePageRequest, RadioTracePageView, RadioTraceProfileView,
-    RadioTraceRouteResolutionView, RadioTraceTxOutcomeView, RetainedRouteView,
-    ReticulumDnsDiagnosticsView, ReticulumDnsPrimaryOutcomeView, ReticulumDnsRawAttemptView,
-    ReticulumDnsRawOutcomeView, ReticulumDnsRawSetupStateView, ReticulumDnsRawSourceView,
-    ReticulumDnsResolutionSourceView, ReticulumDnsResolutionView, ReticulumProbeFailure,
-    ReticulumProbeIngressView, ReticulumProbePhase, ReticulumProbePollRequest,
-    ReticulumProbePollResponse, ReticulumProbeSignalView, ReticulumProbeStartOutcome,
-    ReticulumProbeStartRequest, ReticulumProbeStartResponse, ReticulumProbeSuccessView,
-    ReticulumTcpFailureView, ReticulumTcpPeerHostnameInput, ReticulumTcpPeerIpv4Input,
-    ReticulumTcpPeerStateView, ReticulumTcpPeerView, RetrySendOutcome, RetrySendRequest,
-    RetrySendResponse, RmapDeferredReasonView, RmapEgressConfirmationView,
+    ApplianceCapabilitiesView, ApplianceLabelMutationOutcome, ApplianceLabelMutationRequest,
+    ApplianceLabelView, ApplianceSnapshot, BASIC_LXMF_SELECTION_OVERHEAD_BYTES, BytesEncoding,
+    BytesView, ConnectionState, ConnectionTransport, ContactRequest, ContactView,
+    ConversationPeerView, DeviceView, DiagnosticInterfaceModeView, DiagnosticInterfaceStateView,
+    DiagnosticInterfaceView, DiagnosticLoraDataTxEvidenceView, DiagnosticLoraLastRxView,
+    DiagnosticLoraLastTxView, DiagnosticLoraTxFamilyView, DiagnosticLoraTxOutcomeView,
+    EMPTY_LXMF_FIELDS_ENCODED_BYTES, LINK_PACKET_MAX_CONTENT, LoraDiagnosticsView,
+    LoraRadioProfileView, MAX_CONTACT_NAME_BYTES, MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES,
+    ManualServiceAnnounceDisposition, MessageActivityEventView, MessageActivityKindView,
+    MessageActivityPageRequest, MessageActivityPageView, MessageIngressObservationView,
+    MessageLocationView, MessageSignalObservationView, MutationOutcome, MutationResponse,
+    NearbyPeerObserverKind, NearbyPeerView, NetworkConfigMutation, NetworkConfigMutationOutcome,
+    NetworkConfigMutationRequest, NetworkConfigView, NetworkRuntimeStatusView, NomadFetchFailure,
+    NomadFetchPhase, NomadFetchPollRequest, NomadFetchPollResponse, NomadFetchStartOutcome,
+    NomadFetchStartRequest, NomadFetchStartResponse, PacketEvidenceView,
+    PhoneLocationAuthorizationView, PhoneLocationObservationView, PhoneLocationSourceView,
+    PhoneLocationUnavailableReasonView, RadioRoutesStatusView, RadioTraceAttemptOutcomeView,
+    RadioTraceEventKindView, RadioTraceEventView, RadioTraceInboundProofStageView,
+    RadioTraceMessageCorrelationView, RadioTracePageRequest, RadioTracePageView,
+    RadioTraceProfileView, RadioTraceRouteResolutionView, RadioTraceTxOutcomeView,
+    RetainedRouteView, ReticulumDnsDiagnosticsView, ReticulumDnsPrimaryOutcomeView,
+    ReticulumDnsRawAttemptView, ReticulumDnsRawOutcomeView, ReticulumDnsRawSetupStateView,
+    ReticulumDnsRawSourceView, ReticulumDnsResolutionSourceView, ReticulumDnsResolutionView,
+    ReticulumProbeFailure, ReticulumProbeIngressView, ReticulumProbePhase,
+    ReticulumProbePollRequest, ReticulumProbePollResponse, ReticulumProbeSignalView,
+    ReticulumProbeStartOutcome, ReticulumProbeStartRequest, ReticulumProbeStartResponse,
+    ReticulumProbeSuccessView, ReticulumTcpFailureView, ReticulumTcpPeerHostnameInput,
+    ReticulumTcpPeerIpv4Input, ReticulumTcpPeerStateView, ReticulumTcpPeerView, RetrySendOutcome,
+    RetrySendRequest, RetrySendResponse, RmapDeferredReasonView, RmapEgressConfirmationView,
     RmapInitialTcpGateStateView, RmapPhoneLocation, RmapQueueOutcomeView, RmapRuntimeStatusView,
-    RmapStampPhaseView, RnsDiagnosticsView, RouteDiagnosticResolutionView, SendOutcome,
-    SendRequest, SendResponse, TimelineDirection, TimelineStatus, TimelineView,
-    WifiCredentialUpdate, WifiNetworkProfileView, WifiStationStateView,
+    RmapStampPhaseView, RouteNextHopView, SendOutcome, SendRequest, SendResponse,
+    TimelineDirection, TimelineStatus, TimelineView, WifiCredentialUpdate, WifiNetworkProfileView,
+    WifiStationStateView,
 };
 use reticulum_device_api::{
-    API_VERSION_MAJOR, API_VERSION_MINOR, DEFAULT_RETICULUM_TCP_PORT, MAX_DEVICE_NAME_BYTES,
+    API_VERSION_MAJOR, API_VERSION_MINOR, DEFAULT_RETICULUM_TCP_PORT, MAX_APPLIANCE_LABEL_BYTES,
     MAX_LXMF_BASIC_CONTENT_BYTES, MAX_LXMF_BASIC_TITLE_BYTES, MAX_LXMF_READ_CHUNK_BYTES,
     MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES,
     MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS, MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES,
@@ -44,13 +45,11 @@ use reticulum_device_api::{
 };
 use ts_rs::TS;
 
-use crate::onboarding::{
-    OnboardingFault, OnboardingMethod, OnboardingSnapshot, OnboardingStage, OnboardingState,
-    OnboardingView, RecoveryAction, RecoveryRequest,
-};
 use crate::web::{ErrorBody, HttpApplianceSnapshot, HttpConnectionState, SessionRequest};
 
-pub(crate) use reticulum_appliance_runtime::{JsonSafeInteger, serialize_json_safe_u64};
+pub(crate) use reticulum_appliance_runtime::JsonSafeInteger;
+#[cfg(test)]
+use reticulum_appliance_runtime::serialize_json_safe_u64;
 
 /// Marker for successful HTTP responses that deliberately contain no body.
 #[derive(TS)]
@@ -89,7 +88,7 @@ pub fn render_api_bindings() -> String {
          export const MIN_WIFI_PASSPHRASE_BYTES = {MIN_WIFI_PASSPHRASE_BYTES} as const;\n\
          export const MAX_WIFI_PASSPHRASE_BYTES = {MAX_WIFI_PASSPHRASE_BYTES} as const;\n\
          export const MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES = {MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES} as const;\n\
-         export const MAX_DEVICE_NAME_BYTES = {MAX_DEVICE_NAME_BYTES} as const;\n\
+         export const MAX_APPLIANCE_LABEL_BYTES = {MAX_APPLIANCE_LABEL_BYTES} as const;\n\
          export const DEFAULT_RETICULUM_TCP_PORT = {DEFAULT_RETICULUM_TCP_PORT} as const;\n\n"
     ));
 
@@ -98,19 +97,15 @@ pub fn render_api_bindings() -> String {
     append_declaration::<ConnectionTransport>(&mut output, &config);
     append_declaration::<ConnectionState>(&mut output, &config);
     append_declaration::<DeviceView>(&mut output, &config);
+    append_declaration::<ApplianceCapabilitiesView>(&mut output, &config);
     append_declaration::<ApplianceSnapshot>(&mut output, &config);
     append_declaration::<HttpConnectionState>(&mut output, &config);
     append_declaration::<HttpApplianceSnapshot>(&mut output, &config);
-    append_declaration::<OnboardingStage>(&mut output, &config);
-    append_declaration::<OnboardingFault>(&mut output, &config);
-    append_declaration::<OnboardingState>(&mut output, &config);
-    append_declaration::<OnboardingSnapshot>(&mut output, &config);
-    append_declaration::<OnboardingMethod>(&mut output, &config);
-    append_declaration::<OnboardingView>(&mut output, &config);
     append_declaration::<ContactView>(&mut output, &config);
     append_declaration::<ConversationPeerView>(&mut output, &config);
+    append_declaration::<NearbyPeerObserverKind>(&mut output, &config);
     append_declaration::<NearbyPeerView>(&mut output, &config);
-    append_declaration::<DiagnosticInterfaceKindView>(&mut output, &config);
+    append_declaration::<DiagnosticInterfaceModeView>(&mut output, &config);
     append_declaration::<DiagnosticInterfaceStateView>(&mut output, &config);
     append_declaration::<DiagnosticInterfaceView>(&mut output, &config);
     append_declaration::<DiagnosticLoraTxOutcomeView>(&mut output, &config);
@@ -119,13 +114,15 @@ pub fn render_api_bindings() -> String {
     append_declaration::<DiagnosticLoraLastRxView>(&mut output, &config);
     append_declaration::<DiagnosticLoraLastTxView>(&mut output, &config);
     append_declaration::<LoraDiagnosticsView>(&mut output, &config);
-    append_declaration::<RnsDiagnosticsView>(&mut output, &config);
-    append_declaration::<RouteDiagnosticResolutionView>(&mut output, &config);
+    append_declaration::<RouteNextHopView>(&mut output, &config);
     append_declaration::<RetainedRouteView>(&mut output, &config);
     append_declaration::<RadioRoutesStatusView>(&mut output, &config);
     append_declaration::<BytesEncoding>(&mut output, &config);
     append_declaration::<BytesView>(&mut output, &config);
     append_declaration::<WifiNetworkProfileView>(&mut output, &config);
+    append_declaration::<ApplianceLabelView>(&mut output, &config);
+    append_declaration::<ApplianceLabelMutationRequest>(&mut output, &config);
+    append_declaration::<ApplianceLabelMutationOutcome>(&mut output, &config);
     append_declaration::<ReticulumTcpPeerView>(&mut output, &config);
     append_declaration::<RmapPhoneLocation>(&mut output, &config);
     append_declaration::<LoraRadioProfileView>(&mut output, &config);
@@ -181,8 +178,6 @@ pub fn render_api_bindings() -> String {
     append_declaration::<RadioTracePageRequest>(&mut output, &config);
     append_declaration::<RadioTracePageView>(&mut output, &config);
     append_declaration::<SessionRequest>(&mut output, &config);
-    append_declaration::<RecoveryAction>(&mut output, &config);
-    append_declaration::<RecoveryRequest>(&mut output, &config);
     append_declaration::<ContactRequest>(&mut output, &config);
     append_declaration::<MutationOutcome>(&mut output, &config);
     append_declaration::<MutationResponse>(&mut output, &config);
@@ -314,9 +309,12 @@ mod tests {
         let bindings = render_api_bindings();
         assert!(bindings.contains("export type RadioRoutesStatusView ="));
         assert!(bindings.contains("export type RetainedRouteView ="));
-        assert!(bindings.contains("last_local_use_age_ms: JsonSafeInteger | null"));
-        assert!(bindings.contains("route_table_revision: JsonSafeInteger"));
-        assert!(bindings.contains("\"broadcast_ready\""));
+        assert!(bindings.contains("last_activity_age_ms: JsonSafeInteger"));
+        assert!(bindings.contains("route_count: number"));
+        assert!(bindings.contains("\"kind\": \"direct\""));
+        assert!(bindings.contains("transport_identity: string"));
+        assert!(bindings.contains("export type DiagnosticInterfaceModeView ="));
+        assert!(bindings.contains("\"reconnecting\""));
         assert!(bindings.contains("applied_tx_power_dbm: number"));
         assert!(bindings.contains("rssi_dbm: number"));
     }
@@ -326,7 +324,9 @@ mod tests {
         let bindings = render_api_bindings();
         assert!(bindings.contains("export type MessageSignalObservationView ="));
         assert!(bindings.contains("export type MessageIngressObservationView ="));
-        assert!(bindings.contains("interface_id: number"));
+        assert!(bindings.contains(
+            "interface_id: [number, number, number, number, number, number, number, number]"
+        ));
         assert!(bindings.contains("signal: MessageSignalObservationView | null"));
         assert!(bindings.contains("ingress_observation: MessageIngressObservationView | null"));
         assert!(bindings.contains("export type MessageActivityPageRequest ="));

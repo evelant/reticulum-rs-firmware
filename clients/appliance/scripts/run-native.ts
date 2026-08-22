@@ -1,4 +1,4 @@
-import { runExpo } from "./expo-cli.ts";
+import { runExpo, runExpoPrebuild } from "./expo-cli.ts";
 import { type NativeBuildProfile, prepareNativeBindings } from "./native-bindings.ts";
 import { assertExpectedBun } from "./toolchain.ts";
 
@@ -52,7 +52,7 @@ export async function runNative(
   const environment = platform === "ios" ? await iosEnvironment() : process.env;
 
   await prepareNativeBindings(platform, profile);
-  await runExpo(["prebuild", "--platform", platform, "--clean", "--no-install"], environment);
+  await runExpoPrebuild(["--platform", platform, "--clean", "--no-install"], platform, environment);
   await runExpo([`run:${platform}`, ...arguments_], environment);
 }
 

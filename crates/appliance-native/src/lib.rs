@@ -2,9 +2,9 @@
 //!
 //! The immutable bridge contract establishes that an installed application and
 //! its generated TypeScript declarations agree with the Rust device API. The
-//! [`NativeAppliance`] facade additionally owns durable offline chat state. The
-//! BLE constructors connect that state to the authenticated device API without
-//! moving protocol parsing into the platform application.
+//! [`NativeAppliance`] facade additionally owns durable offline chat state.
+//! [`NativePrnsNode`] is the replacement network owner: it runs an ordinary
+//! PRNS node and Bluetooth Auto interface without the alpha device bearer.
 
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -14,33 +14,26 @@ use reticulum_device_api::{
     MAX_LXMF_READ_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_NOMAD_PAGE_BYTES, MAX_NOMAD_PAGE_PATH_BYTES,
     MAX_NOMAD_REQUEST_TIMESTAMP_UNIX_MS,
 };
-use reticulum_device_api_ble::{
-    GATT_PROFILE_MAJOR, GATT_PROFILE_MINOR, MAXIMUM_ATT_VALUE_BYTES, RX_UUID,
-    SECURITY_CONFIRMATION_READY_VALUE, SECURITY_CONFIRMATION_UUID, SERVICE_UUID, TX_UUID,
-};
-
+#[cfg(target_os = "android")]
+mod android_prns_jni;
 mod appliance;
-mod ble;
-mod credential;
-mod onboarding;
+mod prns_node;
+mod prns_session;
 mod profile;
 
 pub use appliance::{NativeAppliance, NativeApplianceError};
-pub use ble::{NativeBleError, NativeBlePlatformCommand};
-pub use credential::{NativeCredentialStatus, NativeCredentialSummary};
-pub use onboarding::{
-    NativeBleOnboarding, NativeBleOnboardingError, NativeBleOnboardingFailure,
-    NativeBleOnboardingOperation, NativeBleOnboardingPhase, NativeBleOnboardingSnapshot,
+pub use prns_node::{
+    NativePrnsManagementCandidate, NativePrnsManagementError, NativePrnsManagementIdentity,
+    NativePrnsNode, NativePrnsNodeError, NativePrnsNodeSnapshot, NativePrnsNodeState,
+    NativePrnsOtaError, NativePrnsOtaPhase, NativePrnsOtaSlot, NativePrnsOtaStatus,
 };
-pub use profile::{
-    NativeOnboardingPublicationReconciliation, NativeProfileStore, NativeProfileStoreSnapshot,
-    NativeProfileSummary,
-};
+pub use prns_session::PrnsConnector;
+pub use profile::{NativeProfileStore, NativeProfileStoreSnapshot, NativeProfileSummary};
 
 /// Incompatible generation of the callable native bridge.
-pub const BRIDGE_API_MAJOR: u16 = 2;
+pub const BRIDGE_API_MAJOR: u16 = 3;
 /// Backward-compatible revision of the callable native bridge.
-pub const BRIDGE_API_MINOR: u16 = 0;
+pub const BRIDGE_API_MINOR: u16 = 2;
 
 /// Exact protocol contract compiled into a native client binary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
@@ -69,31 +62,6 @@ pub struct NativeBridgeContract {
     pub max_nomad_request_timestamp_unix_ms: u64,
 }
 
-/// BLE GATT profile compiled into the firmware and native client.
-///
-/// The generated TypeScript binding is the app's source for these values; the
-/// Expo layer does not duplicate UUID or fragmentation constants.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
-pub struct NativeBleGattProfile {
-    /// Incompatible GATT profile generation.
-    pub major: u16,
-    /// Compatible revision within this GATT profile generation.
-    pub minor: u16,
-    /// Project-owned primary service UUID.
-    pub service_uuid: String,
-    /// Phone-to-device write-with-response characteristic UUID.
-    pub rx_uuid: String,
-    /// Device-to-phone indication characteristic UUID.
-    pub tx_uuid: String,
-    /// Public retained-link readiness characteristic UUID.
-    pub security_confirmation_uuid: String,
-    /// Public value proving that the retained authenticated link is ready for
-    /// application protocol bytes.
-    pub security_confirmation_ready_value: Vec<u8>,
-    /// Largest characteristic value permitted by the firmware profile.
-    pub maximum_att_value_bytes: u32,
-}
-
 /// Return the immutable API contract compiled into this native library.
 #[must_use]
 #[uniffi::export]
@@ -119,24 +87,6 @@ pub fn native_bridge_contract() -> NativeBridgeContract {
     }
 }
 
-/// Return the shared BLE GATT profile used by firmware discovery and native
-/// app connections.
-#[must_use]
-#[uniffi::export]
-pub fn native_ble_gatt_profile() -> NativeBleGattProfile {
-    NativeBleGattProfile {
-        major: GATT_PROFILE_MAJOR,
-        minor: GATT_PROFILE_MINOR,
-        service_uuid: SERVICE_UUID.to_owned(),
-        rx_uuid: RX_UUID.to_owned(),
-        tx_uuid: TX_UUID.to_owned(),
-        security_confirmation_uuid: SECURITY_CONFIRMATION_UUID.to_owned(),
-        security_confirmation_ready_value: SECURITY_CONFIRMATION_READY_VALUE.to_vec(),
-        maximum_att_value_bytes: u32::try_from(MAXIMUM_ATT_VALUE_BYTES)
-            .expect("ATT value bound must fit u32"),
-    }
-}
-
 uniffi::setup_scaffolding!();
 
 #[cfg(test)]
@@ -148,9 +98,9 @@ mod tests {
         assert_eq!(
             native_bridge_contract(),
             NativeBridgeContract {
-                bridge_api_major: 2,
-                bridge_api_minor: 0,
-                device_api_major: 3,
+                bridge_api_major: 3,
+                bridge_api_minor: 2,
+                device_api_major: 6,
                 device_api_minor: 0,
                 max_message_bytes: 512,
                 max_lxmf_read_chunk_bytes: 416,
@@ -159,23 +109,6 @@ mod tests {
                 max_nomad_page_path_bytes: 128,
                 max_nomad_page_bytes: 400,
                 max_nomad_request_timestamp_unix_ms: 9_007_199_254_740_991,
-            }
-        );
-    }
-
-    #[test]
-    fn exported_ble_profile_matches_the_portable_firmware_contract() {
-        assert_eq!(
-            native_ble_gatt_profile(),
-            NativeBleGattProfile {
-                major: 2,
-                minor: 3,
-                service_uuid: "f3c8a0b0-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
-                rx_uuid: "f3c8a0b1-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
-                tx_uuid: "f3c8a0b2-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
-                security_confirmation_uuid: "f3c8a0b3-5e7a-4c51-a3b9-7d2160d20a02".to_owned(),
-                security_confirmation_ready_value: b"RDY1".to_vec(),
-                maximum_att_value_bytes: 248,
             }
         );
     }

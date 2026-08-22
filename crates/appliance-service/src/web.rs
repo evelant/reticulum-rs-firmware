@@ -21,11 +21,10 @@ use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use ts_rs::TS;
 
-use crate::onboarding::OnboardingView;
 use reticulum_appliance_runtime::{
-    ApplianceHandle, ApplianceSnapshot, ClientRequestError, ConnectionState, ContactRequest,
-    DeviceView, JsonSafeInteger, MessageActivityPageRequest, MutationResponse,
-    NomadFetchPollRequest, NomadFetchStartRequest, RadioTracePageRequest,
+    ApplianceCapabilitiesView, ApplianceHandle, ApplianceSnapshot, ClientRequestError,
+    ConnectionState, ContactRequest, DeviceView, JsonSafeInteger, MessageActivityPageRequest,
+    MutationResponse, NomadFetchPollRequest, NomadFetchStartRequest, RadioTracePageRequest,
     ReticulumProbePollRequest, ReticulumProbeStartRequest, RetrySendRequest, RetrySendResponse,
     SendRequest, SendResponse, ServiceError, parse_destination, serialize_json_safe_u64,
 };
@@ -148,7 +147,6 @@ fn router(state: WebState) -> Router {
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
         .route("/api/v1/session", post(create_session))
-        .route("/api/v1/onboarding", get(onboarding))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/contacts", get(contacts))
         .route("/api/v1/conversations", get(conversation_peers))
@@ -171,14 +169,6 @@ fn router(state: WebState) -> Router {
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
-}
-
-async fn onboarding(
-    State(state): State<WebState>,
-    headers: HeaderMap,
-) -> Result<Response, HttpError> {
-    require_api(&state, &headers, false)?;
-    Ok(Json(OnboardingView::unavailable()).into_response())
 }
 
 async fn security_headers(request: Request, next: Next) -> Response {
@@ -306,6 +296,7 @@ pub(crate) struct HttpApplianceSnapshot {
     revision: u64,
     connection: HttpConnectionState,
     device: Option<DeviceView>,
+    capabilities: ApplianceCapabilitiesView,
     #[serde(serialize_with = "serialize_json_safe_u64")]
     #[ts(as = "JsonSafeInteger")]
     pending_outbox: u64,
@@ -324,6 +315,7 @@ impl From<&ApplianceSnapshot> for HttpApplianceSnapshot {
             revision: snapshot.revision(),
             connection: HttpConnectionState::from(snapshot.connection()),
             device: snapshot.device().cloned(),
+            capabilities: snapshot.capabilities(),
             pending_outbox: u64::try_from(snapshot.pending_outbox())
                 .expect("outbox count must fit u64"),
             contact_count: u64::try_from(snapshot.contact_count())
@@ -785,7 +777,7 @@ mod tests {
     impl Connector for UnavailableTestConnector {
         fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
             Err(ConnectFailure::unavailable(
-                ConnectionTransport::BluetoothLowEnergy,
+                ConnectionTransport::Reticulum,
                 "device sessions are unavailable in web adapter tests",
             ))
         }
@@ -824,9 +816,9 @@ mod tests {
     }
 
     #[test]
-    fn http_connection_projection_is_bearer_neutral() {
+    fn http_connection_projection_reports_reticulum() {
         let ready = ConnectionState::Ready {
-            transport: reticulum_appliance_runtime::ConnectionTransport::BluetoothLowEnergy,
+            transport: reticulum_appliance_runtime::ConnectionTransport::Reticulum,
             endpoint: "peripheral-a".to_owned(),
             device_label: "001122334455".to_owned(),
         };
@@ -834,14 +826,14 @@ mod tests {
             serde_json::to_value(HttpConnectionState::from(&ready)).unwrap(),
             serde_json::json!({
                 "state": "ready",
-                "transport": "bluetooth_low_energy",
+                "transport": "reticulum",
                 "endpoint": "peripheral-a",
                 "device_label": "001122334455",
             })
         );
 
         let unavailable = ConnectionState::Unavailable {
-            transport: reticulum_appliance_runtime::ConnectionTransport::BluetoothLowEnergy,
+            transport: reticulum_appliance_runtime::ConnectionTransport::Reticulum,
         };
         assert_eq!(
             serde_json::to_value(HttpConnectionState::from(&unavailable)).unwrap(),
@@ -890,28 +882,6 @@ mod tests {
         assert!(policy.contains("style-src 'self' 'unsafe-inline'"));
         assert!(policy.contains("img-src 'self' data: blob: https:"));
         assert!(policy.contains("worker-src 'self' blob:"));
-    }
-
-    #[tokio::test]
-    async fn onboarding_reports_explicitly_unavailable_outside_managed_mode() {
-        let app = router(test_state());
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .uri("/api/v1/onboarding")
-                    .header(HOST, "127.0.0.1:43123")
-                    .header(COOKIE, format!("{SESSION_COOKIE}={}", "ab".repeat(32)))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), BODY_LIMIT).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["available"], false);
-        assert_eq!(json["method"], serde_json::Value::Null);
-        assert_eq!(json["snapshot"], serde_json::Value::Null);
     }
 
     #[tokio::test]

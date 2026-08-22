@@ -35,7 +35,7 @@ fn inbound(id: u8, source: u8, at: u64, content: &[u8]) -> InboundMessage {
 
 fn ingress(interface: u8, rssi_dbm: i16, snr_db: i16) -> MessageIngressObservation {
     MessageIngressObservation::new(
-        MessageInterfaceId::new(interface),
+        MessageInterfaceId::new([0, 0, 0, 0, 0, 0, 0, interface]),
         Some(MessageSignalObservation::new(rssi_dbm, snr_db)),
     )
 }
@@ -117,7 +117,7 @@ fn rf_route(sequence: u64, token: u8, submission: u64) -> RfTraceObservation {
             destination(0x91),
             None,
             0,
-            RfTraceInterfaceId::new(1),
+            RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1]),
             RfTraceRouteResolution::BroadcastReady,
             evidence(0x55),
             RnsAttemptToken::new([token; 32]),
@@ -133,7 +133,7 @@ fn rf_tx(sequence: u64, token: u8) -> RfTraceObservation {
         RfTraceObservationKind::DataTx(
             RfTraceTxObservation::new(
                 RnsAttemptToken::new([token; 32]),
-                RfTraceInterfaceId::new(1),
+                RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1]),
                 evidence(0x55),
                 RfTraceTxOutcome::Transmitted,
                 2,
@@ -1191,7 +1191,7 @@ fn rf_trace_import_is_atomic_idempotent_correlated_and_restart_safe() {
         RfTraceEventSequence::new(4).unwrap(),
         4_000,
         RfTraceObservationKind::LogicalRx(RfTraceRxObservation::new(
-            RfTraceInterfaceId::new(1),
+            RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1]),
             evidence(0x55),
             Some(RnsAttemptToken::new([0xa1; 32])),
             -91,
@@ -1207,7 +1207,7 @@ fn rf_trace_import_is_atomic_idempotent_correlated_and_restart_safe() {
             RfTraceEventSequence::new(5).unwrap(),
             5_000,
             RfTraceObservationKind::LogicalRx(RfTraceRxObservation::new(
-                RfTraceInterfaceId::new(1),
+                RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1]),
                 evidence(0x55),
                 None,
                 -94,

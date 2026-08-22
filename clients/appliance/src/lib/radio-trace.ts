@@ -6,6 +6,7 @@ import type {
   RadioTraceTxOutcomeView,
 } from "../generated/api.ts";
 import { phoneLocationMetadata } from "./message-activity.ts";
+import { reticulumInterfaceIdHex } from "./reticulum-interface-id.ts";
 
 export type RadioTraceFilter =
   | "all"
@@ -188,7 +189,7 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
       }
       metadata.push(`Destination ${evidence.destination}`);
       metadata.push(
-        `${evidence.hops === 1 ? "Direct · 1 hop" : `${evidence.hops} hops`} · interface ${evidence.interface_id}`,
+        `${evidence.hops === 1 ? "Direct · 1 hop" : `${evidence.hops} hops`} · interface ${reticulumInterfaceIdHex(evidence.interface_id)}`,
       );
       metadata.push(
         evidence.next_hop_identity === null
@@ -205,7 +206,7 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
           : `LoRa DATA did not complete · ${sentence(evidence.outcome)}`;
       tone = evidence.outcome === "transmitted" ? "success" : "danger";
       metadata.push(txOutcomeLabel(evidence.outcome));
-      metadata.push(`Interface ${evidence.interface_id}`);
+      metadata.push(`Interface ${reticulumInterfaceIdHex(evidence.interface_id)}`);
       metadata.push(
         `${evidence.completed_physical_frames}/${evidence.planned_physical_frames} physical frames completed · authorized frame ${evidence.authorized_frame_observed ? "observed" : "not observed"}`,
       );
@@ -216,7 +217,7 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
       title = "LoRa logical packet received";
       tone = "success";
       metadata.push(
-        `Interface ${evidence.interface_id} · RSSI ${evidence.rssi_dbm} dBm · SNR ${evidence.snr_db} dB`,
+        `Interface ${reticulumInterfaceIdHex(evidence.interface_id)} · RSSI ${evidence.rssi_dbm} dBm · SNR ${evidence.snr_db} dB`,
       );
       metadata.push(...packetMetadata(evidence), ...tokenMetadata(evidence));
       break;
@@ -231,7 +232,9 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
       if (evidence.proof_interface_id === null) {
         metadata.push("No local proof ingress was retained");
       } else {
-        metadata.push(`Proof returned on interface ${evidence.proof_interface_id}`);
+        metadata.push(
+          `Proof returned on interface ${reticulumInterfaceIdHex(evidence.proof_interface_id)}`,
+        );
         metadata.push(
           evidence.proof_rssi_dbm === null || evidence.proof_snr_db === null
             ? "Proof interface did not report physical signal"
@@ -244,16 +247,6 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
       switch (evidence.stage) {
         case "data_logical_rx":
           title = "Inbound DATA reconstructed";
-          break;
-        case "durable_commit":
-          title = "Inbound LXMF committed durably";
-          tone = "success";
-          break;
-        case "proof_retained":
-          title = "Delivery proof retained durably";
-          break;
-        case "proof_staged":
-          title = "Delivery proof staged";
           break;
         case "ordinary_queued":
           title = "Delivery proof accepted for transmission";
@@ -269,10 +262,11 @@ export function radioTracePresentation(event: RadioTraceEventView): RadioTracePr
       }
       if (evidence.message_id !== null) metadata.push(`LXMF message ${evidence.message_id}`);
       if (evidence.interface_id !== null) {
+        const interfaceId = reticulumInterfaceIdHex(evidence.interface_id);
         metadata.push(
           evidence.rssi_dbm === null || evidence.snr_db === null
-            ? `Interface ${evidence.interface_id} · no physical signal retained`
-            : `Inbound DATA · interface ${evidence.interface_id} · RSSI ${evidence.rssi_dbm} dBm · SNR ${evidence.snr_db} dB`,
+            ? `Interface ${interfaceId} · no physical signal retained`
+            : `Inbound DATA · interface ${interfaceId} · RSSI ${evidence.rssi_dbm} dBm · SNR ${evidence.snr_db} dB`,
         );
       }
       if (evidence.packet_evidence !== null) {

@@ -4,6 +4,8 @@
 #include <ReactCommon/CallInvokerHolder.h>
 #include "reticulum-appliance-native.h"
 
+extern "C" void reticulum_appliance_prns_android_link_anchor();
+
 namespace jsi = facebook::jsi;
 namespace react = facebook::react;
 
@@ -24,6 +26,7 @@ Java_org_reticulum_appliance_nativebridge_ApplianceNativeModule_nativeInstallRus
     jlong rtPtr,
     jobject callInvokerHolderJavaObj
 ) {
+    reticulum_appliance_prns_android_link_anchor();
     using JCallInvokerHolder = facebook::react::CallInvokerHolder;
 
     auto holderLocal = facebook::jni::make_local(callInvokerHolderJavaObj);

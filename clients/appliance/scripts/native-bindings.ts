@@ -58,8 +58,6 @@ const requiredPlatformPaths = {
     "android/src/main/java/org/reticulum/appliance/nativebridge/ApplianceNativeModule.kt",
     "android/src/main/java/org/reticulum/appliance/nativebridge/ApplianceNativePackage.kt",
     "android/src/main/jniLibs/arm64-v8a/libreticulum_appliance_native.a",
-    "android/src/main/jniLibs/armeabi-v7a/libreticulum_appliance_native.a",
-    "android/src/main/jniLibs/x86/libreticulum_appliance_native.a",
     "android/src/main/jniLibs/x86_64/libreticulum_appliance_native.a",
   ],
   ios: [
@@ -85,12 +83,7 @@ const generatedTrackedPaths = [
 type GeneratedSnapshot = ReadonlyMap<string, Uint8Array | null>;
 
 const requiredRustTargets = {
-  android: [
-    "aarch64-linux-android",
-    "armv7-linux-androideabi",
-    "i686-linux-android",
-    "x86_64-linux-android",
-  ],
+  android: ["aarch64-linux-android", "x86_64-linux-android"],
   ios: ["aarch64-apple-ios", "aarch64-apple-ios-sim"],
 } as const satisfies Record<NativePlatform, readonly string[]>;
 
@@ -232,18 +225,146 @@ async function buildEnvironment(
 }
 
 async function writeAndroidCompatibilityFiles(): Promise<void> {
+  const manifest = `<!-- Generated Android permissions for PRNS Bluetooth Auto. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission
+    android:name="android.permission.BLUETOOTH_SCAN"
+    android:usesPermissionFlags="neverForLocation" />
+  <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+  <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+  <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+  <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+</manifest>
+`;
+  const classicManifestPath = join(moduleDirectory, "android/src/main/AndroidManifest.xml");
   const manifestPath = join(moduleDirectory, "android/src/main/AndroidManifestNew.xml");
   await mkdir(dirname(manifestPath), { recursive: true });
-  await writeFile(
-    manifestPath,
-    `<!-- Generated compatibility manifest for Android Gradle Plugin 7.3+. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-</manifest>
-`,
-  );
+  await writeFile(classicManifestPath, manifest);
+  await writeFile(manifestPath, manifest);
   await writeFile(
     join(moduleDirectory, "android/proguard-rules.pro"),
     "# The native bridge does not currently require consumer ProGuard rules.\n",
+  );
+
+  const gradlePath = join(moduleDirectory, "android/build.gradle");
+  const gradle = await readFile(gradlePath, "utf8");
+  const sourceMarker = `apply plugin: "kotlin-android"\n`;
+  if (!gradle.includes(sourceMarker)) {
+    throw new Error("generated Android Gradle plugin stanza changed");
+  }
+  await writeFile(
+    gradlePath,
+    gradle.replace(
+      sourceMarker,
+      `${sourceMarker}\n// Product-owned platform half of PRNS's public Android Bluetooth Auto bridge.\nandroid.sourceSets.main.java.srcDirs += ["../android-prns"]\n`,
+    ),
+  );
+
+  const modulePath = join(
+    moduleDirectory,
+    "android/src/main/java/org/reticulum/appliance/nativebridge/ApplianceNativeModule.kt",
+  );
+  const moduleSource = await readFile(modulePath, "utf8");
+  const classMarker = `  NativeApplianceNativeSpec(reactContext) {\n`;
+  if (!moduleSource.includes(classMarker)) {
+    throw new Error("generated Android native module class changed");
+  }
+  const withBluetoothOwner = moduleSource.replace(
+    classMarker,
+    `${classMarker}\n  // Product-owned platform half of PRNS's Android Bluetooth Auto interface.\n  private val prnsBluetoothAuto = PrnsBluetoothAuto(reactContext.applicationContext)\n`,
+  );
+  const kotlinInstallMarker = `  override fun installRustCrate(): Boolean {
+    val context = this.reactApplicationContext
+    return nativeInstallRustCrate(
+      context.javaScriptContextHolder!!.get(),
+      context.jsCallInvokerHolder!!
+    )
+  }
+`;
+  if (!withBluetoothOwner.includes(kotlinInstallMarker)) {
+    throw new Error("generated Android native module install method changed");
+  }
+  const withBluetoothStart = withBluetoothOwner.replace(
+    kotlinInstallMarker,
+    `  override fun installRustCrate(): Boolean {
+    val context = this.reactApplicationContext
+    val installed = nativeInstallRustCrate(
+      context.javaScriptContextHolder!!.get(),
+      context.jsCallInvokerHolder!!
+    )
+    if (installed) {
+      prnsBluetoothAuto.start()
+    }
+    return installed
+  }
+`,
+  );
+  const kotlinCleanupMarker = `  override fun cleanupRustCrate(): Boolean {
+    return nativeCleanupRustCrate(
+      this.reactApplicationContext.javaScriptContextHolder!!.get()
+    )
+  }
+`;
+  if (!withBluetoothStart.includes(kotlinCleanupMarker)) {
+    throw new Error("generated Android native module cleanup method changed");
+  }
+  const withBluetoothLifecycle = withBluetoothStart.replace(
+    kotlinCleanupMarker,
+    `  override fun cleanupRustCrate(): Boolean {
+    prnsBluetoothAuto.stop()
+    return nativeCleanupRustCrate(
+      this.reactApplicationContext.javaScriptContextHolder!!.get()
+    )
+  }
+`,
+  );
+  const companionMarker = `  companion object {\n`;
+  if (!withBluetoothLifecycle.includes(companionMarker)) {
+    throw new Error("generated Android native module companion changed");
+  }
+  await writeFile(
+    modulePath,
+    withBluetoothLifecycle.replace(
+      companionMarker,
+      `  override fun invalidate() {\n    prnsBluetoothAuto.stop()\n    super.invalidate()\n  }\n\n${companionMarker}`,
+    ),
+  );
+
+  const cppAdapterPath = join(moduleDirectory, "android/cpp-adapter.cpp");
+  const cppAdapter = await readFile(cppAdapterPath, "utf8");
+  const namespaceMarker = `namespace jsi = facebook::jsi;\n`;
+  const installMarker = `) {\n    using JCallInvokerHolder = facebook::react::CallInvokerHolder;\n`;
+  if (!cppAdapter.includes(namespaceMarker) || !cppAdapter.includes(installMarker)) {
+    throw new Error("generated Android C++ adapter changed");
+  }
+  await writeFile(
+    cppAdapterPath,
+    cppAdapter
+      .replace(
+        namespaceMarker,
+        `extern "C" void reticulum_appliance_prns_android_link_anchor();\n\n${namespaceMarker}`,
+      )
+      .replace(
+        installMarker,
+        `) {\n    reticulum_appliance_prns_android_link_anchor();\n    using JCallInvokerHolder = facebook::react::CallInvokerHolder;\n`,
+      ),
+  );
+}
+
+async function writeIosCompatibilityFiles(): Promise<void> {
+  const podspecPath = join(moduleDirectory, "ApplianceNative.podspec");
+  const podspec = await readFile(podspecPath, "utf8");
+  const frameworkMarker = `  s.vendored_frameworks = "ReticulumApplianceNativeFramework.xcframework"\n`;
+  if (!podspec.includes(frameworkMarker)) {
+    throw new Error("generated iOS vendored framework stanza changed");
+  }
+  await writeFile(
+    podspecPath,
+    podspec.replace(
+      frameworkMarker,
+      `${frameworkMarker}  # PRNS Bluetooth Auto references CoreBluetooth from the Rust archive.\n  s.frameworks = "CoreBluetooth"\n`,
+    ),
   );
 }
 
@@ -323,6 +444,8 @@ async function buildPlatform(
   if (platform === "android") {
     await writeAndroidCompatibilityFiles();
     await normalizeAndroidCmake();
+  } else {
+    await writeIosCompatibilityFiles();
   }
   await requireGeneratedPaths([...requiredCommonPaths, ...requiredPlatformPaths[platform]]);
 }

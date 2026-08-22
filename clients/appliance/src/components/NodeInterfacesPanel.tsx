@@ -32,6 +32,7 @@ function configuredSubtopic(kind: NodeInterfaceKind): NetworkSubtopic | null {
       return "peers";
     case "wifi_station":
       return "overview";
+    case "bluetooth":
     case "other":
       return null;
   }

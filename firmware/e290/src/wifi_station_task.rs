@@ -16,8 +16,8 @@ use embassy_net::{Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer, with_timeout};
 use esp_hal::peripherals::WIFI;
 use esp_radio::wifi::{
-    AuthenticationMethod, Config as WifiConfig, ConnectionError, ControllerConfig, CountryInfo,
-    Interface, WifiController, WifiError, sta::StationConfig,
+    AuthenticationMethod, Config as WifiConfig, ControllerConfig, CountryInfo, Interface,
+    WifiController, WifiError, sta::StationConfig,
 };
 use log::{error, info, warn};
 use reticulum_e290_firmware::wifi_driver_metrics::{InstrumentedWifiDriver, WIFI_DRIVER_METRICS};
@@ -83,7 +83,6 @@ pub fn start(
         .with_ampdu_tx_enable(WIFI_AMPDU_TX_ENABLED)
         .with_rx_ba_win(WIFI_RX_BA_WINDOW)
         .with_initial_config(station_config);
-    let station_interface = Interface::station();
     info!(
         "e290-wireless-diagnostic stage=wifi-controller status=START internal_free={} rx_queue={} tx_queue={} static_rx={} dynamic_rx={} dynamic_tx={} ampdu_rx={} ampdu_tx={} ba_window={}",
         esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into()),
@@ -96,13 +95,13 @@ pub fn start(
         WIFI_AMPDU_TX_ENABLED,
         WIFI_RX_BA_WINDOW,
     );
-    let mut controller = match WifiController::new(wifi, controller_config) {
-        Ok(controller) => {
+    let (mut controller, interfaces) = match esp_radio::wifi::new(wifi, controller_config) {
+        Ok(parts) => {
             info!(
                 "e290-wireless-diagnostic stage=wifi-controller status=PASS internal_free={}",
                 esp_alloc::HEAP.free_caps(esp_alloc::MemoryCapability::Internal.into()),
             );
-            controller
+            parts
         }
         Err(reason) => {
             info!(
@@ -130,7 +129,7 @@ pub fn start(
 
     let network_config = embassy_net::Config::dhcpv4(Default::default());
     let resources = NETWORK_RESOURCES.init(StackResources::<NETWORK_STACK_RESOURCES>::new());
-    let station_driver = InstrumentedWifiDriver::new(station_interface, &WIFI_DRIVER_METRICS);
+    let station_driver = InstrumentedWifiDriver::new(interfaces.station, &WIFI_DRIVER_METRICS);
     let (stack, runner) = embassy_net::new(station_driver, network_config, resources, random_seed);
     let task_pool_fault_status =
         WifiStationStatus::for_bootstrap(&bootstrap, WifiStationPhase::Faulted);
@@ -154,7 +153,7 @@ pub fn start(
 #[embassy_executor::task]
 async fn run_station(
     controller: WifiController<'static>,
-    runner: Runner<'static, InstrumentedWifiDriver<Interface>>,
+    runner: Runner<'static, InstrumentedWifiDriver<Interface<'static>>>,
     stack: Stack<'static>,
     bootstrap: WifiStationBootstrap,
     status: &'static WifiStationStatusCell,
@@ -166,7 +165,7 @@ async fn run_station(
     .await;
 }
 
-async fn run_network(mut runner: Runner<'static, InstrumentedWifiDriver<Interface>>) -> ! {
+async fn run_network(mut runner: Runner<'static, InstrumentedWifiDriver<Interface<'static>>>) -> ! {
     runner.run().await
 }
 
@@ -380,24 +379,20 @@ fn current_rssi(controller: &WifiController<'_>) -> Option<i8> {
         .and_then(|rssi| i8::try_from(rssi).ok())
 }
 
-fn connection_error_rssi(reason: &ConnectionError) -> Option<i8> {
+fn connection_error_rssi(reason: &WifiError) -> Option<i8> {
     match reason {
-        ConnectionError::Failed(info) => Some(info.rssi),
-        ConnectionError::WifiError(_) => None,
+        WifiError::Disconnected(info) => Some(info.rssi),
         _ => None,
     }
 }
 
-fn connection_error_label(reason: &ConnectionError) -> &'static str {
-    match reason {
-        ConnectionError::Failed(_) => "disconnected",
-        ConnectionError::WifiError(reason) => wifi_error_label(reason),
-        _ => "unknown",
-    }
+fn connection_error_label(reason: &WifiError) -> &'static str {
+    wifi_error_label(reason)
 }
 
 fn wifi_error_label(reason: &WifiError) -> &'static str {
     match reason {
+        WifiError::Disconnected(_) => "disconnected",
         WifiError::Unsupported => "unsupported",
         WifiError::InvalidArguments => "invalid-arguments",
         WifiError::Failed => "driver-failure",

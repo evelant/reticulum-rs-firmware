@@ -9,6 +9,7 @@ import {
   timelineMessageCapabilities,
   timelineStatusLabel,
 } from "./message-actions.ts";
+import { syntheticReticulumInterfaceId } from "./reticulum-interface-id.ts";
 
 function message(overrides: Partial<TimelineView> = {}): TimelineView {
   return {
@@ -103,7 +104,7 @@ describe("timeline message actions", () => {
     const observed = message({
       ...received,
       ingress_observation: {
-        interface_id: 7,
+        interface_id: syntheticReticulumInterfaceId(7),
         signal: {
           rssi_dbm: -97,
           snr_db: 4,

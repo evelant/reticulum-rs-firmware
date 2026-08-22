@@ -21,8 +21,8 @@ use core::fmt;
 pub const DESTINATION_HASH_LENGTH: usize = 16;
 /// Length of a public Reticulum identity hash.
 pub const IDENTITY_HASH_LENGTH: usize = 16;
-/// Length of the combined public X25519-plus-Ed25519 Reticulum key.
-pub const IDENTITY_PUBLIC_KEY_LENGTH: usize = 64;
+/// Length of a complete PRNS interface identifier.
+pub const INTERFACE_ID_LENGTH: usize = 8;
 
 /// Complete destination hash from an authenticated announce.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -56,48 +56,22 @@ impl IdentityHash {
     }
 }
 
-/// Combined public X25519-plus-Ed25519 Reticulum identity key.
+/// Complete product-owned copy of the PRNS interface that observed an announce.
 ///
-/// The bytes are public protocol material but are redacted from `Debug` so
-/// diagnostic output cannot accidentally become a bulk identity export.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub struct IdentityPublicKey([u8; IDENTITY_PUBLIC_KEY_LENGTH]);
-
-impl IdentityPublicKey {
-    /// Construct a public identity key from all bytes.
-    pub const fn new(bytes: [u8; IDENTITY_PUBLIC_KEY_LENGTH]) -> Self {
-        Self(bytes)
-    }
-
-    /// Borrow all public identity-key bytes.
-    pub const fn as_bytes(&self) -> &[u8; IDENTITY_PUBLIC_KEY_LENGTH] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for IdentityPublicKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("IdentityPublicKey(<redacted>)")
-    }
-}
-
-/// Stable product-owned scalar for the interface that observed an announce.
-///
-/// This has the same complete one-byte range as an RNS interface identifier,
-/// but is local to this dependency-free projection crate. It is descriptive
-/// observation metadata, not permission to route on that interface.
+/// It is descriptive observation metadata, not permission to route on that
+/// interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ObservedInterfaceId(u8);
+pub struct ObservedInterfaceId([u8; INTERFACE_ID_LENGTH]);
 
 impl ObservedInterfaceId {
-    /// Construct an observed-interface scalar from its complete value.
-    pub const fn new(value: u8) -> Self {
+    /// Construct an observed interface from its complete value.
+    pub const fn new(value: [u8; INTERFACE_ID_LENGTH]) -> Self {
         Self(value)
     }
 
-    /// Return the raw observed-interface value.
-    pub const fn get(self) -> u8 {
-        self.0
+    /// Borrow the complete observed-interface value.
+    pub const fn as_bytes(&self) -> &[u8; INTERFACE_ID_LENGTH] {
+        &self.0
     }
 }
 
@@ -181,7 +155,7 @@ impl ObservationMetadata {
         self.hops
     }
 
-    /// Stable scalar of the interface that observed the announce.
+    /// Complete identifier of the interface that observed the announce.
     pub const fn interface(self) -> ObservedInterfaceId {
         self.interface
     }
@@ -206,7 +180,6 @@ impl ObservationMetadata {
 pub struct AuthenticatedAnnounceObservation<'a> {
     destination: DestinationHash,
     identity_hash: IdentityHash,
-    public_key: IdentityPublicKey,
     app_data: &'a [u8],
     metadata: ObservationMetadata,
 }
@@ -216,14 +189,12 @@ impl<'a> AuthenticatedAnnounceObservation<'a> {
     pub const fn new(
         destination: DestinationHash,
         identity_hash: IdentityHash,
-        public_key: IdentityPublicKey,
         app_data: &'a [u8],
         metadata: ObservationMetadata,
     ) -> Self {
         Self {
             destination,
             identity_hash,
-            public_key,
             app_data,
             metadata,
         }
@@ -237,11 +208,6 @@ impl<'a> AuthenticatedAnnounceObservation<'a> {
     /// Hash of the identity that authenticated the announce.
     pub const fn identity_hash(self) -> IdentityHash {
         self.identity_hash
-    }
-
-    /// Combined public identity key that authenticated the announce.
-    pub const fn public_key(self) -> IdentityPublicKey {
-        self.public_key
     }
 
     /// Borrow bounded application data exactly as authenticated.
@@ -261,7 +227,6 @@ impl fmt::Debug for AuthenticatedAnnounceObservation<'_> {
             .debug_struct("AuthenticatedAnnounceObservation")
             .field("destination", &self.destination)
             .field("identity_hash", &self.identity_hash)
-            .field("public_key", &"<redacted>")
             .field("app_data_len", &self.app_data.len())
             .field("app_data", &"<redacted>")
             .field("metadata", &self.metadata)
@@ -318,7 +283,6 @@ impl From<ObservationGeneration> for DiscoveryCursor {
 pub struct DiscoveredPeer<const APP_DATA_CAPACITY: usize> {
     destination: DestinationHash,
     identity_hash: IdentityHash,
-    public_key: IdentityPublicKey,
     app_data: [u8; APP_DATA_CAPACITY],
     app_data_len: usize,
     hops: u8,
@@ -340,7 +304,6 @@ impl<const APP_DATA_CAPACITY: usize> DiscoveredPeer<APP_DATA_CAPACITY> {
         Self {
             destination: observation.destination,
             identity_hash: observation.identity_hash,
-            public_key: observation.public_key,
             app_data,
             app_data_len,
             hops: metadata.hops,
@@ -361,11 +324,6 @@ impl<const APP_DATA_CAPACITY: usize> DiscoveredPeer<APP_DATA_CAPACITY> {
         self.identity_hash
     }
 
-    /// Combined public identity key that authenticated the announce.
-    pub const fn public_key(&self) -> IdentityPublicKey {
-        self.public_key
-    }
-
     /// Exact authenticated application data without zero padding.
     pub fn app_data(&self) -> &[u8] {
         &self.app_data[..self.app_data_len]
@@ -376,7 +334,7 @@ impl<const APP_DATA_CAPACITY: usize> DiscoveredPeer<APP_DATA_CAPACITY> {
         self.hops
     }
 
-    /// Stable scalar for the interface that saw the latest observation.
+    /// Complete identifier of the interface that saw the latest observation.
     pub const fn interface(&self) -> ObservedInterfaceId {
         self.interface
     }
@@ -403,7 +361,6 @@ impl<const APP_DATA_CAPACITY: usize> fmt::Debug for DiscoveredPeer<APP_DATA_CAPA
             .debug_struct("DiscoveredPeer")
             .field("destination", &self.destination)
             .field("identity_hash", &self.identity_hash)
-            .field("public_key", &"<redacted>")
             .field("app_data_len", &self.app_data_len)
             .field("app_data", &"<redacted>")
             .field("hops", &self.hops)
@@ -538,29 +495,32 @@ impl<const APP_DATA_CAPACITY: usize> DiscoveryPage<APP_DATA_CAPACITY> {
     }
 }
 
-/// Fixed-capacity latest-observation history keyed by destination hash.
+/// Caller-backed latest-observation history keyed by destination hash.
 ///
-/// The two const parameters independently bound peer count and per-peer
-/// application data. Full insertion evicts the record with the smallest
-/// latest-observation generation; generations are unique, making eviction
-/// independent of physical slot order or equal timestamps.
-pub struct DiscoveredPeers<const PEER_CAPACITY: usize, const APP_DATA_CAPACITY: usize> {
-    peers: [Option<DiscoveredPeer<APP_DATA_CAPACITY>>; PEER_CAPACITY],
+/// The supplied slot slice fixes peer capacity and lets an embedded product
+/// choose internal RAM, mapped external RAM, or static storage without this
+/// protocol-neutral crate owning an allocator. Full insertion evicts the
+/// record with the smallest latest-observation generation; generations are
+/// unique, making eviction independent of physical slot order or equal
+/// timestamps.
+pub struct DiscoveredPeers<'storage, const APP_DATA_CAPACITY: usize> {
+    peers: &'storage mut [Option<DiscoveredPeer<APP_DATA_CAPACITY>>],
     len: usize,
     latest_generation: u64,
     last_observed_at: Option<MonotonicMillis>,
 }
 
-impl<const PEER_CAPACITY: usize, const APP_DATA_CAPACITY: usize>
-    DiscoveredPeers<PEER_CAPACITY, APP_DATA_CAPACITY>
-{
-    /// Construct an empty table or explicitly reject zero peer capacity.
-    pub const fn try_new() -> Result<Self, DiscoveryCapacityError> {
-        if PEER_CAPACITY == 0 {
+impl<'storage, const APP_DATA_CAPACITY: usize> DiscoveredPeers<'storage, APP_DATA_CAPACITY> {
+    /// Claim empty caller-owned slots or explicitly reject zero peer capacity.
+    pub fn try_new(
+        peers: &'storage mut [Option<DiscoveredPeer<APP_DATA_CAPACITY>>],
+    ) -> Result<Self, DiscoveryCapacityError> {
+        if peers.is_empty() {
             return Err(DiscoveryCapacityError::ZeroPeerCapacity);
         }
+        peers.fill(None);
         Ok(Self {
-            peers: [None; PEER_CAPACITY],
+            peers,
             len: 0,
             latest_generation: 0,
             last_observed_at: None,
@@ -577,9 +537,9 @@ impl<const PEER_CAPACITY: usize, const APP_DATA_CAPACITY: usize>
         self.len == 0
     }
 
-    /// Compile-time peer-record capacity.
-    pub const fn capacity(&self) -> usize {
-        PEER_CAPACITY
+    /// Caller-supplied peer-record capacity.
+    pub fn capacity(&self) -> usize {
+        self.peers.len()
     }
 
     /// Latest accepted generation, or `None` before any observation.
@@ -727,13 +687,11 @@ impl<const PEER_CAPACITY: usize, const APP_DATA_CAPACITY: usize>
     }
 }
 
-impl<const PEER_CAPACITY: usize, const APP_DATA_CAPACITY: usize> fmt::Debug
-    for DiscoveredPeers<PEER_CAPACITY, APP_DATA_CAPACITY>
-{
+impl<const APP_DATA_CAPACITY: usize> fmt::Debug for DiscoveredPeers<'_, APP_DATA_CAPACITY> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DiscoveredPeers")
-            .field("capacity", &PEER_CAPACITY)
+            .field("capacity", &self.peers.len())
             .field("app_data_capacity", &APP_DATA_CAPACITY)
             .field("len", &self.len)
             .field("latest_generation", &self.latest_generation())

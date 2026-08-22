@@ -861,17 +861,17 @@ impl RfTraceEventSequence {
 
 /// Device-local interface selected for one RF trace event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RfTraceInterfaceId(u8);
+pub struct RfTraceInterfaceId([u8; 8]);
 
 impl RfTraceInterfaceId {
     /// Preserve one complete device-local interface identifier.
-    pub const fn new(value: u8) -> Self {
-        Self(value)
+    pub const fn new(bytes: [u8; 8]) -> Self {
+        Self(bytes)
     }
 
-    /// Numeric device-local interface identifier.
-    pub const fn get(self) -> u8 {
-        self.0
+    /// Borrow the complete Reticulum interface identity.
+    pub const fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
     }
 }
 
@@ -1368,17 +1368,11 @@ impl RfTraceAttemptObservation {
     }
 }
 
-/// Receiver-side durable DATA-to-proof lifecycle stage.
+/// Receiver-side immediate DATA-to-proof lifecycle stage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RfTraceInboundProofStage {
     /// A complete DATA packet was reconstructed by the receiving interface.
     DataLogicalRx,
-    /// The LXMF message became durable in the receiver mailbox.
-    DurableCommit,
-    /// The exact proof became durable in its delayed-proof owner.
-    ProofRetained,
-    /// The proof moved into the dedicated admission holder.
-    ProofStaged,
     /// The ordinary transmit coordinator accepted the proof.
     OrdinaryQueued,
     /// The selected interface reported physical proof TxDone.
@@ -1441,7 +1435,7 @@ impl RfTraceInboundProofObservation {
         self.rns_attempt_token
     }
 
-    /// Durable receiver lifecycle stage.
+    /// Immediate receiver lifecycle stage.
     pub const fn stage(self) -> RfTraceInboundProofStage {
         self.stage
     }
@@ -1483,7 +1477,7 @@ pub enum RfTraceObservationKind {
     LogicalRx(RfTraceRxObservation),
     /// Terminal delivery-receipt state for one exact DATA attempt.
     AttemptTerminal(RfTraceAttemptObservation),
-    /// One receiver-side durable DATA-to-proof lifecycle stage.
+    /// One receiver-side immediate DATA-to-proof lifecycle stage.
     InboundProof(RfTraceInboundProofObservation),
 }
 
@@ -1850,17 +1844,17 @@ impl Contact {
 
 /// Device-local interface that received one imported LXMF carrier.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct MessageInterfaceId(u8);
+pub struct MessageInterfaceId([u8; 8]);
 
 impl MessageInterfaceId {
     /// Preserve one complete device-local interface identifier.
-    pub const fn new(value: u8) -> Self {
-        Self(value)
+    pub const fn new(bytes: [u8; 8]) -> Self {
+        Self(bytes)
     }
 
-    /// Numeric device-local interface identifier.
-    pub const fn get(self) -> u8 {
-        self.0
+    /// Borrow the complete Reticulum interface identity.
+    pub const fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
     }
 }
 
@@ -2246,6 +2240,9 @@ pub enum SubmissionState {
     AwaitingDelivery(PacketEvidence),
     /// A matching delivery proof reached a durable terminal state.
     Delivered(PacketEvidence),
+    /// The application completed through a protocol-owned receipt without
+    /// exposing the underlying prepared Reticulum packet.
+    ApplicationDelivered,
     /// The submission reached a durable failure.
     Failed(SubmissionFailure),
     /// The submission was durably cancelled.
@@ -2255,7 +2252,10 @@ pub enum SubmissionState {
 impl SubmissionState {
     /// Whether this state needs no further status refresh.
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Delivered(_) | Self::Failed(_) | Self::Cancelled)
+        matches!(
+            self,
+            Self::Delivered(_) | Self::ApplicationDelivered | Self::Failed(_) | Self::Cancelled
+        )
     }
 
     pub(crate) const fn progression_rank(self) -> u8 {
@@ -2263,14 +2263,20 @@ impl SubmissionState {
             Self::Queued => 0,
             Self::Preparing => 1,
             Self::AwaitingDelivery(_) => 2,
-            Self::Delivered(_) | Self::Failed(_) | Self::Cancelled => 3,
+            Self::Delivered(_) | Self::ApplicationDelivered | Self::Failed(_) | Self::Cancelled => {
+                3
+            }
         }
     }
 
     pub(crate) const fn packet_evidence(self) -> Option<PacketEvidence> {
         match self {
             Self::AwaitingDelivery(evidence) | Self::Delivered(evidence) => Some(evidence),
-            Self::Queued | Self::Preparing | Self::Failed(_) | Self::Cancelled => None,
+            Self::Queued
+            | Self::Preparing
+            | Self::ApplicationDelivered
+            | Self::Failed(_)
+            | Self::Cancelled => None,
         }
     }
 }

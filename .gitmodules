@@ -1,4 +1,0 @@
-[submodule "vendor/rete"]
-	path = vendor/rete
-	url = https://github.com/evelant/rete.git
-	branch = firmware

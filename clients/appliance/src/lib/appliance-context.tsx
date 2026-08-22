@@ -1,4 +1,4 @@
-import type { NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
+import type { NativePrnsOtaStatus, NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
 import { usePathname, useRouter } from "expo-router";
 import {
   createContext,
@@ -17,14 +17,14 @@ import { APPLIANCE_KEYBOARD_LAYOUT } from "../components/appliance-screen-layout
 import type { QueueMessageResult } from "../components/ConversationPanel.tsx";
 import type { RadioTraceExportFormat } from "../components/RadioTracePanel.tsx";
 import type {
+  ApplianceLabelMutationOutcome,
+  ApplianceLabelView,
   ApplianceSnapshot,
   ContactView,
   ConversationPeerView,
   MessageActivityPageView,
-  OnboardingView,
   RadioTraceEventView,
   RadioTracePageView,
-  RecoveryRequest,
   RetrySendRequest,
   SendRequest,
   TimelineView,
@@ -33,8 +33,6 @@ import { ApplianceApi } from "./api";
 import { errorText } from "./app-error.ts";
 import { applianceProfilesPresentation } from "./appliance-profiles.ts";
 import { applianceStatusPresentation } from "./appliance-status.ts";
-import { bleBondRepairProgressMessage } from "./ble-bond-repair.ts";
-import type { BleCandidate, BleScanOptions } from "./ble-central-types.ts";
 import { ensureDraftIdentity } from "./draft.ts";
 import { deliverExportArtifact } from "./export-artifact";
 import {
@@ -86,7 +84,11 @@ import {
   type NetworkConfigurationClient,
 } from "./network-config.ts";
 import { NomadBrowserController, type NomadBrowserState } from "./nomad-browser.ts";
-import { onboardingPresentation } from "./onboarding.ts";
+import {
+  completesAdditionalApplianceEnrollment,
+  type OnboardingView,
+  onboardingPresentation,
+} from "./onboarding.ts";
 import {
   type RadioRoutesClient,
   RadioRoutesController,
@@ -99,6 +101,10 @@ import {
   radioTraceJsonArtifact,
 } from "./radio-trace-export.ts";
 import { randomHex } from "./random.ts";
+import type {
+  ReticulumApplianceCandidate,
+  ReticulumDiscoveryOptions,
+} from "./reticulum-appliance-candidate.ts";
 import { ReticulumProbeController, type ReticulumProbeState } from "./reticulum-probe.ts";
 import { SettledPoll } from "./settled-poll.ts";
 import {
@@ -107,7 +113,10 @@ import {
   type TransmissionMapFeatureDetails,
 } from "./transmission-map.ts";
 
-const EMPTY_ONBOARDING: OnboardingView = { available: false, method: null, snapshot: null };
+const EMPTY_ONBOARDING: OnboardingView = {
+  available: false,
+  lifecycle: { state: "unavailable" },
+};
 const FOREGROUND_RECONNECT_DELAY_MS = 2_000;
 const MESSAGE_ACTIVITY_PAGE_SIZE = 50;
 const RADIO_TRACE_PAGE_SIZE = 50;
@@ -119,6 +128,37 @@ interface MapFeatureEvidence {
   readonly profileKey: string;
   readonly timelineSequence: number;
 }
+
+export type FirmwareUpdateState =
+  | { readonly state: "unavailable" }
+  | { readonly state: "idle" }
+  | { readonly state: "selecting" }
+  | {
+      readonly state: "staging";
+      readonly fileName: string;
+      readonly imageBytes: number;
+      readonly version: string;
+    }
+  | {
+      readonly state: "staged";
+      readonly fileName: string;
+      readonly status: NativePrnsOtaStatus;
+    }
+  | {
+      readonly state: "rebooting";
+      readonly fileName: string;
+      readonly status: NativePrnsOtaStatus;
+    }
+  | {
+      readonly state: "reboot_requested";
+      readonly fileName: string;
+      readonly status: NativePrnsOtaStatus;
+    }
+  | {
+      readonly state: "failed";
+      readonly error: string;
+      readonly fileName: string | null;
+    };
 
 export interface ApplianceContextValue {
   readonly compact: boolean;
@@ -137,13 +177,15 @@ export interface ApplianceContextValue {
   readonly nativeCore: NativeCoreStatus | null;
   readonly onboarding: OnboardingView;
   readonly profiles: NativeProfileStoreSnapshot | null;
-  readonly deviceName: string | null;
+  readonly applianceLabel: string | null;
+  readonly applianceLabelReady: boolean;
+  readonly mutateApplianceLabel:
+    | ((label: string | null) => Promise<ApplianceLabelMutationOutcome>)
+    | null;
   readonly canManageProfiles: boolean;
   readonly hasSavedProfiles: boolean;
   readonly canAddAppliance: boolean;
   readonly canForgetProfile: boolean;
-  readonly canRepairBond: boolean;
-  readonly exactBleTargetRequired: boolean;
   readonly connectivityAvailable: boolean;
   readonly foreground: boolean;
 
@@ -152,23 +194,23 @@ export interface ApplianceContextValue {
   readonly messageNotificationError: string | null;
   readonly reconnectProgress: ForegroundReconnectProgress | null;
   readonly enableMessageNotifications: () => Promise<void>;
+  readonly firmwareUpdateState: FirmwareUpdateState;
+  readonly stageFirmwareUpdate: ((version: string) => Promise<boolean>) | undefined;
+  readonly rebootIntoStagedFirmware: (() => Promise<boolean>) | undefined;
+  readonly clearFirmwareUpdate: () => void;
 
   readonly activateApplianceProfile: (profileKey: string) => Promise<boolean>;
   readonly beginAddAppliance: () => void;
   readonly reconnectActiveProfile: () => Promise<boolean>;
-  readonly repairActiveBleBond: () => Promise<boolean>;
   readonly forgetInactiveProfile: (profileKey: string) => Promise<boolean>;
   readonly clearProfileOperation: () => void;
   readonly sync: () => void;
 
   readonly addingAppliance: boolean;
   readonly cancelOnboarding: (() => Promise<void>) | null;
-  readonly onboardingMutation: (
-    action: "start" | "continue" | "refresh" | RecoveryRequest["action"],
-    candidate: BleCandidate | null,
-  ) => void;
-  readonly bleCandidateScanner:
-    | ((options?: BleScanOptions) => Promise<readonly BleCandidate[]>)
+  readonly onboardingMutation: (candidate: ReticulumApplianceCandidate | null) => void;
+  readonly reticulumCandidateScanner:
+    | ((options?: ReticulumDiscoveryOptions) => Promise<readonly ReticulumApplianceCandidate[]>)
     | null;
   readonly switchToKnownProfile: (profileKey: string) => void;
 
@@ -204,6 +246,7 @@ export interface ApplianceContextValue {
   readonly onMeasurePath: (destination: string) => Promise<void>;
   readonly onAbandonRetainedProbe: () => void;
   readonly clearDraft: () => void;
+  readonly reticulumProbeAvailable: boolean;
   readonly reticulumProbeState: ReticulumProbeState;
   readonly messageLocationPreference: MessageLocationPreferenceState;
   readonly nearbyReader: (() => Promise<NearbyPeerView[]>) | null;
@@ -233,12 +276,14 @@ export interface ApplianceContextValue {
   readonly nomadState: NomadBrowserState;
   readonly nomadDestinationHint: string | null;
   readonly consumeNomadDestinationHint: () => void;
+  readonly nomadAvailable: boolean;
   readonly nomadConnected: boolean;
 
   readonly networkController: NetworkConfigController | null;
   readonly networkState: NetworkConfigControllerState | null;
   readonly networkDeviceKey: string | null;
   readonly manualServiceAnnounce: (() => Promise<"already_pending" | "queued">) | undefined;
+  readonly radioRoutesAvailable: boolean;
   readonly radioRoutesController: RadioRoutesController | null;
   readonly radioRoutesState: RadioRoutesControllerState | null;
   readonly onRefreshRadioRoutes: (() => void) | undefined;
@@ -360,6 +405,10 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
   const [snapshot, setSnapshot] = useState<ApplianceSnapshot | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingView>(EMPTY_ONBOARDING);
   const [profiles, setProfiles] = useState<NativeProfileStoreSnapshot | null>(null);
+  const [applianceLabelState, setApplianceLabelState] = useState<{
+    readonly deviceKey: string;
+    readonly view: ApplianceLabelView;
+  } | null>(null);
   const [addingAppliance, setAddingAppliance] = useState(false);
   const [contacts, setContacts] = useState<ContactView[]>([]);
   const [conversations, setConversations] = useState<ConversationPeerView[]>([]);
@@ -416,10 +465,16 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
   const [messageNotificationPermissionCheckedEpoch, setMessageNotificationPermissionCheckedEpoch] =
     useState<number | null>(null);
   const [messageNotificationError, setMessageNotificationError] = useState<string | null>(null);
+  const [firmwareUpdateState, setFirmwareUpdateState] = useState<FirmwareUpdateState>(
+    api.stageFirmwareUpdate === undefined || api.rebootIntoStagedFirmware === undefined
+      ? { state: "unavailable" }
+      : { state: "idle" },
+  );
   const [messageNotificationTargets, setMessageNotificationTargets] = useState<
     readonly MessageNotificationTarget[]
   >([]);
   const addingApplianceRef = useRef(false);
+  const additionalApplianceDestinationRef = useRef<string | null>(null);
   const draft = useRef<DraftSubmission | null>(null);
   const retryMessageRequests = useRef(new Map<string, RetrySendRequest>());
   const activityPageRef = useRef<MessageActivityPageView | null>(null);
@@ -462,7 +517,7 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
   messagePaneRef.current = messagePane;
   workspaceRef.current = workspace;
 
-  const ready = onboardingPresentation(onboarding).ready;
+  const ready = onboardingPresentation(onboarding).ready && !addingAppliance;
   const displayedError =
     error ??
     (ready && (reconnectProgress === null || snapshot?.connection.state === "faulted")
@@ -528,19 +583,27 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
       ? null
       : applianceProfilesPresentation(profiles).activeProfile?.boardLabel) ??
     applianceStatusPresentation(snapshot).boardLabel;
+  const capabilities = snapshot?.capabilities;
   const connectivityAvailable =
     networkController !== null &&
+    networkDeviceKey !== null &&
+    capabilities?.network_config === true &&
+    snapshot?.connection.state === "ready";
+  const applianceLabelAvailable =
+    api.applianceLabel !== undefined &&
+    api.mutateApplianceLabel !== undefined &&
     networkDeviceKey !== null &&
     snapshot?.connection.state === "ready";
   const canManageProfiles = api.profiles !== undefined && api.activateProfile !== undefined;
   const hasSavedProfiles = (profiles?.profiles.length ?? 0) > 0;
   const canAddAppliance =
-    api.beginAddAppliance !== undefined && (api.supportsAdditionalBleOnboarding?.() ?? true);
-  const exactBleTargetRequired = api.supportsBleCandidateDiscovery?.() ?? false;
+    api.beginAddAppliance !== undefined && (api.supportsAdditionalApplianceEnrollment?.() ?? true);
   const nearbyReader = useMemo(() => {
     const read = api.nearbyPeers;
-    return read === undefined ? null : () => read.call(api);
-  }, [api]);
+    return capabilities?.nearby_peers !== true || read === undefined ? null : () => read.call(api);
+  }, [api, capabilities?.nearby_peers]);
+  const radioRoutesAvailable =
+    capabilities?.radio_routes === true && radioRoutesController !== null;
   const resetActivity = useCallback(() => {
     activityRequests.current.invalidate();
     activityReadInFlight.current = null;
@@ -751,13 +814,13 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     },
     [exportRadioTrace, radioTraceExporting],
   );
-  const bleCandidateScanner = useMemo(() => {
+  const reticulumCandidateScanner = useMemo(() => {
     if (!bootstrapped) return null;
-    const scan = api.scanBleCandidates;
-    const supported = api.supportsBleCandidateDiscovery?.() ?? scan !== undefined;
+    const scan = api.scanReticulumCandidates;
+    const supported = api.supportsReticulumCandidateDiscovery?.() ?? scan !== undefined;
     return scan === undefined || !supported
       ? null
-      : (options?: BleScanOptions) => scan.call(api, options);
+      : (options?: ReticulumDiscoveryOptions) => scan.call(api, options);
   }, [api, bootstrapped]);
 
   useEffect(() => {
@@ -930,8 +993,69 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
   }, [connectivityAvailable, foreground, networkController, networkDeviceKey, workspace]);
 
   useEffect(() => {
+    const read = api.applianceLabel;
+    if (
+      read === undefined ||
+      !applianceLabelAvailable ||
+      !foreground ||
+      networkDeviceKey === null
+    ) {
+      setApplianceLabelState(null);
+      return;
+    }
+    const deviceKey = networkDeviceKey;
+    let active = true;
+    void read
+      .call(api)
+      .then(async (view) => {
+        if (!active) return;
+        setApplianceLabelState({ deviceKey, view });
+        const nextProfiles = await api.profiles?.();
+        if (active && nextProfiles !== undefined) setProfiles(nextProfiles);
+      })
+      .catch((nextError) => {
+        if (active) setError(`Appliance label could not be read: ${errorText(nextError)}`);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, applianceLabelAvailable, foreground, networkDeviceKey]);
+
+  const mutateApplianceLabel = useMemo(() => {
+    const mutate = api.mutateApplianceLabel;
+    const read = api.applianceLabel;
+    if (
+      mutate === undefined ||
+      read === undefined ||
+      !applianceLabelAvailable ||
+      networkDeviceKey === null
+    ) {
+      return null;
+    }
+    return async (label: string | null): Promise<ApplianceLabelMutationOutcome> => {
+      const current = applianceLabelState;
+      if (current === null || current.deviceKey !== networkDeviceKey) {
+        throw new Error("The appliance label is not ready to change");
+      }
+      const outcome = await mutate.call(api, {
+        expected_revision: current.view.revision,
+        label,
+      });
+      const view =
+        outcome.outcome === "applied"
+          ? { label, revision: outcome.revision }
+          : await read.call(api);
+      setApplianceLabelState({ deviceKey: networkDeviceKey, view });
+      const nextProfiles = await api.profiles?.();
+      if (nextProfiles !== undefined) setProfiles(nextProfiles);
+      return outcome;
+    };
+  }, [api, applianceLabelAvailable, applianceLabelState, networkDeviceKey]);
+
+  useEffect(() => {
     if (
       radioRoutesController !== null &&
+      radioRoutesAvailable &&
       workspace === "connectivity" &&
       connectivityAvailable &&
       foreground &&
@@ -941,7 +1065,14 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
       return;
     }
     radioRoutesController?.suspend();
-  }, [connectivityAvailable, foreground, networkDeviceKey, radioRoutesController, workspace]);
+  }, [
+    connectivityAvailable,
+    foreground,
+    networkDeviceKey,
+    radioRoutesAvailable,
+    radioRoutesController,
+    workspace,
+  ]);
 
   useEffect(() => {
     if (
@@ -1017,13 +1148,19 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
       setOnboarding(nextOnboarding);
       setProfiles(nextProfiles);
       const nextReady = onboardingPresentation(nextOnboarding).ready;
-      const completingAdditionalAppliance = addingApplianceRef.current && nextReady;
-      if (addingApplianceRef.current && !nextReady) {
+      const completingAdditionalAppliance =
+        addingApplianceRef.current &&
+        completesAdditionalApplianceEnrollment(
+          nextOnboarding,
+          additionalApplianceDestinationRef.current,
+        );
+      if (addingApplianceRef.current && !completingAdditionalAppliance) {
         timelineRequests.current.invalidate();
         return;
       }
       if (completingAdditionalAppliance) {
         addingApplianceRef.current = false;
+        additionalApplianceDestinationRef.current = null;
         setAddingAppliance(false);
         timelineRequests.current.invalidate();
         selectedRef.current = null;
@@ -1347,35 +1484,6 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     );
   };
 
-  const repairActiveBleBond = async (): Promise<boolean> => {
-    const repair = api.repairBleBond;
-    if (repair === undefined) {
-      setProfileOperation({
-        message: "Bluetooth bond repair is unavailable for this client.",
-        state: "error",
-      });
-      return false;
-    }
-    const label = profileLabel(profiles?.activeProfileKey);
-    automaticReconnect.inhibit();
-    let repairSucceeded = false;
-    const completed = await runActiveProfileOperation(
-      `Finding ${label}… The board must already show BLE Recovery from a reset-time GPIO21 hold. Keep GPIO21 released during discovery; hold it again for about two seconds only when the app asks for physical presence.`,
-      `Bluetooth bond repaired for ${label}; the saved appliance data was retained.`,
-      async () => {
-        await repair.call(api, (stage) => {
-          setProfileOperation({
-            message: bleBondRepairProgressMessage(stage, label),
-            state: "switching",
-          });
-        });
-        repairSucceeded = true;
-      },
-    );
-    if (repairSucceeded) automaticReconnect.allow();
-    return completed;
-  };
-
   const forgetInactiveProfile = async (profileKey: string): Promise<boolean> => {
     const forget = api.forgetProfile;
     const normalizedProfileKey = profileKey.trim().toLowerCase();
@@ -1449,7 +1557,7 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
           new Error("the authoritative profile store still lists this appliance"));
     if (failure === undefined) {
       setProfileOperation({
-        message: `Deleted ${label}'s local credential, messages, contacts, and outbox. The board credential and Bluetooth bond were not revoked.`,
+        message: `Deleted ${label}'s local messages, contacts, and outbox. The app identity remains authorized by the board until it is revoked through management.`,
         state: "success",
       });
     } else {
@@ -1589,12 +1697,14 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     timelineRequests.current.invalidate();
     nomadBrowser.reset();
     addingApplianceRef.current = true;
+    additionalApplianceDestinationRef.current = null;
     setAddingAppliance(true);
     void run(async () => {
       try {
         await begin.call(api);
       } catch (nextError) {
         addingApplianceRef.current = false;
+        additionalApplianceDestinationRef.current = null;
         setAddingAppliance(false);
         throw nextError;
       }
@@ -1602,11 +1712,7 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
   };
 
   const switchToKnownProfile = (profileKey: string) => {
-    if (
-      mutationInFlight.current ||
-      api.cancelOnboarding === undefined ||
-      api.activateProfile === undefined
-    ) {
+    if (mutationInFlight.current || api.activateProfile === undefined) {
       return;
     }
     const targetLabel =
@@ -1625,22 +1731,8 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     });
     void (async () => {
       try {
-        try {
-          await api.cancelOnboarding?.();
-        } catch (nextError) {
-          try {
-            await refresh();
-          } catch {
-            // The cancellation failure remains the useful recovery message.
-          }
-          const message = `Could not leave Add appliance safely: ${errorText(nextError)}`;
-          setProfileOperation({
-            message,
-            state: "error",
-          });
-          return;
-        }
         addingApplianceRef.current = false;
+        additionalApplianceDestinationRef.current = null;
         setAddingAppliance(false);
         await activateProfileWithAuthority(profileKey);
       } finally {
@@ -1650,30 +1742,21 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     })();
   };
 
-  const onboardingMutation = (
-    action: "start" | "continue" | "refresh" | RecoveryRequest["action"],
-    candidate: BleCandidate | null,
-  ) => {
-    void run(() => {
-      if (action === "start") return api.startOnboarding(candidate ?? undefined);
-      if (action === "continue") {
-        if (api.continueOnboarding === undefined) {
-          throw new Error("This client cannot continue a retained BLE pairing ceremony.");
-        }
-        return api.continueOnboarding();
-      }
-      if (action === "refresh") return api.refreshOnboarding();
-      return api.recoverOnboarding({ action }, candidate ?? undefined);
-    });
+  const onboardingMutation = (candidate: ReticulumApplianceCandidate | null) => {
+    if (addingApplianceRef.current && candidate !== null) {
+      additionalApplianceDestinationRef.current = candidate.managementDestination;
+    }
+    void run(() => api.startOnboarding(candidate ?? undefined));
   };
 
-  const cancelOnboarding =
-    api.cancelOnboarding === undefined
-      ? null
-      : async (): Promise<void> => {
-          await api.cancelOnboarding?.();
-          await refresh();
-        };
+  const cancelOnboarding = addingAppliance
+    ? async (): Promise<void> => {
+        addingApplianceRef.current = false;
+        additionalApplianceDestinationRef.current = null;
+        setAddingAppliance(false);
+        await refresh();
+      }
+    : null;
 
   const upsertContact = (
     destination: string,
@@ -1826,6 +1909,89 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     setMessageNotificationPermissionCheckedEpoch(messageNotificationPermissionEpoch.current);
   };
 
+  const stageFirmwareUpdateOperation = api.stageFirmwareUpdate;
+  const stageFirmwareUpdate =
+    stageFirmwareUpdateOperation === undefined
+      ? undefined
+      : async (versionInput: string): Promise<boolean> => {
+          const version = versionInput.trim();
+          if (!/^[!-~]{1,32}$/.test(version)) {
+            setFirmwareUpdateState({
+              state: "failed",
+              error: "Release label must be 1–32 printable ASCII characters without spaces.",
+              fileName: null,
+            });
+            return false;
+          }
+          setFirmwareUpdateState({ state: "selecting" });
+          let fileName: string | null = null;
+          try {
+            const { File } = await import("expo-file-system");
+            const selection = await File.pickFileAsync({
+              mimeTypes: "application/octet-stream",
+              multipleFiles: false,
+            });
+            if (selection.canceled) {
+              setFirmwareUpdateState({ state: "idle" });
+              return false;
+            }
+            const file = selection.result;
+            fileName = file.name;
+            if (file.size < 64 || file.size > 5 * 1024 * 1024) {
+              throw new Error(
+                "Select a complete E290 application image between 64 bytes and 5 MiB.",
+              );
+            }
+            setFirmwareUpdateState({
+              state: "staging",
+              fileName,
+              imageBytes: file.size,
+              version,
+            });
+            const image = await file.arrayBuffer();
+            const status = await stageFirmwareUpdateOperation.call(api, image, version);
+            setFirmwareUpdateState({ state: "staged", fileName, status });
+            return true;
+          } catch (nextError) {
+            setFirmwareUpdateState({
+              state: "failed",
+              error: errorText(nextError),
+              fileName,
+            });
+            return false;
+          }
+        };
+
+  const rebootIntoStagedFirmwareOperation = api.rebootIntoStagedFirmware;
+  const rebootIntoStagedFirmware =
+    rebootIntoStagedFirmwareOperation === undefined
+      ? undefined
+      : async (): Promise<boolean> => {
+          if (firmwareUpdateState.state !== "staged") return false;
+          const prior = firmwareUpdateState;
+          setFirmwareUpdateState({
+            state: "rebooting",
+            fileName: prior.fileName,
+            status: prior.status,
+          });
+          try {
+            const status = await rebootIntoStagedFirmwareOperation.call(api);
+            setFirmwareUpdateState({
+              state: "reboot_requested",
+              fileName: prior.fileName,
+              status,
+            });
+            return true;
+          } catch (nextError) {
+            setFirmwareUpdateState({
+              state: "failed",
+              error: errorText(nextError),
+              fileName: prior.fileName,
+            });
+            return false;
+          }
+        };
+
   notificationActivateProfile.current = activateApplianceProfile;
   notificationChooseContact.current = chooseContact;
   const messageNotificationTarget = messageNotificationTargets[0] ?? null;
@@ -1911,18 +2077,15 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     nativeCore,
     onboarding,
     profiles,
-    deviceName:
-      networkState !== null &&
-      networkState.deviceKey === networkDeviceKey &&
-      networkState.loadState === "ready"
-        ? (networkState.configuration?.device_name ?? null)
-        : null,
+    applianceLabel:
+      applianceLabelState?.deviceKey === networkDeviceKey ? applianceLabelState.view.label : null,
+    applianceLabelReady:
+      applianceLabelState !== null && applianceLabelState.deviceKey === networkDeviceKey,
+    mutateApplianceLabel,
     canManageProfiles,
     hasSavedProfiles,
     canAddAppliance,
     canForgetProfile: api.forgetProfile !== undefined,
-    canRepairBond: api.repairBleBond !== undefined,
-    exactBleTargetRequired,
     connectivityAvailable,
     foreground,
 
@@ -1931,11 +2094,20 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     messageNotificationError,
     reconnectProgress,
     enableMessageNotifications,
+    firmwareUpdateState,
+    stageFirmwareUpdate,
+    rebootIntoStagedFirmware,
+    clearFirmwareUpdate: () => {
+      setFirmwareUpdateState(
+        api.stageFirmwareUpdate === undefined || api.rebootIntoStagedFirmware === undefined
+          ? { state: "unavailable" }
+          : { state: "idle" },
+      );
+    },
 
     activateApplianceProfile,
     beginAddAppliance,
     reconnectActiveProfile,
-    repairActiveBleBond,
     forgetInactiveProfile,
     clearProfileOperation: () => setProfileOperation({ state: "idle" }),
     sync: () => void run(() => api.sync()),
@@ -1943,7 +2115,7 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     addingAppliance,
     cancelOnboarding,
     onboardingMutation,
-    bleCandidateScanner,
+    reticulumCandidateScanner,
     switchToKnownProfile,
 
     contacts,
@@ -1963,6 +2135,7 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     clearDraft: () => {
       draft.current = null;
     },
+    reticulumProbeAvailable: capabilities?.reticulum_probe === true,
     reticulumProbeState,
     messageLocationPreference,
     nearbyReader,
@@ -1971,7 +2144,7 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     activityLoading,
     activityPage,
     loadActivity,
-    radioTraceAvailable: api.radioTrace !== undefined,
+    radioTraceAvailable: capabilities?.radio_trace === true && api.radioTrace !== undefined,
     radioTraceError,
     radioTraceLoading,
     radioTracePage,
@@ -1997,16 +2170,19 @@ export function ApplianceProvider({ children }: { readonly children: ReactNode }
     nomadState,
     nomadDestinationHint,
     consumeNomadDestinationHint,
-    nomadConnected: snapshot?.connection.state === "ready",
+    nomadAvailable: capabilities?.nomad === true,
+    nomadConnected: capabilities?.nomad === true && snapshot?.connection.state === "ready",
 
     networkController,
     networkState,
     networkDeviceKey,
-    manualServiceAnnounce,
+    manualServiceAnnounce:
+      capabilities?.manual_service_announce === true ? manualServiceAnnounce : undefined,
+    radioRoutesAvailable,
     radioRoutesController,
     radioRoutesState,
     onRefreshRadioRoutes:
-      radioRoutesController === null
+      !radioRoutesAvailable || radioRoutesController === null
         ? undefined
         : () => {
             void radioRoutesController.refresh();

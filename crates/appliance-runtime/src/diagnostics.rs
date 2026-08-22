@@ -18,29 +18,37 @@ pub const MAX_RADIO_ROUTE_ENTRIES: usize = 256;
 
 const MAX_ROUTE_PAGE_REQUESTS: usize =
     MAX_RADIO_ROUTE_ENTRIES.div_ceil(api::MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES);
-const MAX_ROUTE_SNAPSHOT_ATTEMPTS: usize = 2;
 
-/// Stable transport family for one configured interface.
+/// PRNS forwarding mode for one interface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum DiagnosticInterfaceKindView {
-    /// LoRa packet radio.
-    Lora,
-    /// Outbound Reticulum TCP client.
-    TcpClient,
-    /// Another transport without a stable app category yet.
-    Other,
-    /// Inbound Reticulum TCP server.
-    TcpServer,
+pub enum DiagnosticInterfaceModeView {
+    /// Ordinary full interface.
+    Full,
+    /// Point-to-point interface.
+    PointToPoint,
+    /// Access-point interface.
+    AccessPoint,
+    /// Roaming interface.
+    Roaming,
+    /// Boundary interface.
+    Boundary,
+    /// Gateway interface.
+    Gateway,
+    /// Internal transport interface.
+    Internal,
 }
 
-impl From<api::DiagnosticInterfaceKind> for DiagnosticInterfaceKindView {
-    fn from(kind: api::DiagnosticInterfaceKind) -> Self {
-        match kind {
-            api::DiagnosticInterfaceKind::LoRa => Self::Lora,
-            api::DiagnosticInterfaceKind::TcpClient => Self::TcpClient,
-            api::DiagnosticInterfaceKind::Other => Self::Other,
-            api::DiagnosticInterfaceKind::TcpServer => Self::TcpServer,
+impl From<api::DiagnosticInterfaceMode> for DiagnosticInterfaceModeView {
+    fn from(mode: api::DiagnosticInterfaceMode) -> Self {
+        match mode {
+            api::DiagnosticInterfaceMode::Full => Self::Full,
+            api::DiagnosticInterfaceMode::PointToPoint => Self::PointToPoint,
+            api::DiagnosticInterfaceMode::AccessPoint => Self::AccessPoint,
+            api::DiagnosticInterfaceMode::Roaming => Self::Roaming,
+            api::DiagnosticInterfaceMode::Boundary => Self::Boundary,
+            api::DiagnosticInterfaceMode::Gateway => Self::Gateway,
+            api::DiagnosticInterfaceMode::Internal => Self::Internal,
         }
     }
 }
@@ -49,20 +57,35 @@ impl From<api::DiagnosticInterfaceKind> for DiagnosticInterfaceKindView {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticInterfaceStateView {
-    /// Configured but not currently usable.
-    Offline,
-    /// Online and eligible for Reticulum traffic.
-    Online,
-    /// The interface owner has latched a fault.
-    Faulted,
+    /// Interface owner is starting.
+    Initializing,
+    /// Interface is connected.
+    Connected,
+    /// Interface is usable with degraded service.
+    Degraded,
+    /// Interface is reconnecting.
+    Reconnecting,
+    /// Interface owner failed.
+    Failed,
+    /// Interface is disconnected.
+    Disconnected,
+    /// Interface is deliberately disabled.
+    Disabled,
+    /// Interface state is not classified.
+    Unknown,
 }
 
 impl From<api::DiagnosticInterfaceState> for DiagnosticInterfaceStateView {
     fn from(state: api::DiagnosticInterfaceState) -> Self {
         match state {
-            api::DiagnosticInterfaceState::Offline => Self::Offline,
-            api::DiagnosticInterfaceState::Online => Self::Online,
-            api::DiagnosticInterfaceState::Faulted => Self::Faulted,
+            api::DiagnosticInterfaceState::Initializing => Self::Initializing,
+            api::DiagnosticInterfaceState::Connected => Self::Connected,
+            api::DiagnosticInterfaceState::Degraded => Self::Degraded,
+            api::DiagnosticInterfaceState::Reconnecting => Self::Reconnecting,
+            api::DiagnosticInterfaceState::Failed => Self::Failed,
+            api::DiagnosticInterfaceState::Disconnected => Self::Disconnected,
+            api::DiagnosticInterfaceState::Disabled => Self::Disabled,
+            api::DiagnosticInterfaceState::Unknown => Self::Unknown,
         }
     }
 }
@@ -70,25 +93,39 @@ impl From<api::DiagnosticInterfaceState> for DiagnosticInterfaceStateView {
 /// One configured local Reticulum interface.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub struct DiagnosticInterfaceView {
-    id: u8,
-    kind: DiagnosticInterfaceKindView,
+    id: [u8; 8],
+    mode: DiagnosticInterfaceModeView,
     state: DiagnosticInterfaceStateView,
+    failure_reason: Option<String>,
     #[serde(serialize_with = "serialize_json_safe_u64")]
     #[ts(as = "JsonSafeInteger")]
-    generation: u64,
-    logical_mtu: u16,
-    bitrate: Option<u32>,
+    rx_bytes: u64,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    tx_bytes: u64,
+    destinations: u32,
+    links: u32,
+    transported_links: u32,
+    supervisor: Option<[u8; 8]>,
 }
 
 impl From<api::DiagnosticInterfaceRecord> for DiagnosticInterfaceView {
     fn from(interface: api::DiagnosticInterfaceRecord) -> Self {
         Self {
-            id: interface.id(),
-            kind: interface.kind().into(),
+            id: *interface.id().as_bytes(),
+            mode: interface.mode().into(),
             state: interface.state().into(),
-            generation: json_safe(interface.generation()),
-            logical_mtu: interface.logical_mtu(),
-            bitrate: interface.bitrate(),
+            failure_reason: interface
+                .failure_reason()
+                .map(|reason| reason.as_str().to_owned()),
+            rx_bytes: json_safe(interface.rx_bytes()),
+            tx_bytes: json_safe(interface.tx_bytes()),
+            destinations: interface.destinations(),
+            links: interface.links(),
+            transported_links: interface.transported_links(),
+            supervisor: interface
+                .supervisor()
+                .map(|supervisor| *supervisor.as_bytes()),
         }
     }
 }
@@ -137,7 +174,7 @@ impl From<api::DiagnosticLoraTxFamily> for DiagnosticLoraTxFamilyView {
 /// App-correlatable prepared-packet identity for one LoRa DATA dispatch.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub struct DiagnosticLoraDataTxEvidenceView {
-    interface_id: u8,
+    interface_id: [u8; 8],
     encoded_packet_len: u16,
     encoded_packet_sha256: String,
 }
@@ -145,7 +182,7 @@ pub struct DiagnosticLoraDataTxEvidenceView {
 impl From<api::DiagnosticLoraDataTxEvidence> for DiagnosticLoraDataTxEvidenceView {
     fn from(evidence: api::DiagnosticLoraDataTxEvidence) -> Self {
         Self {
-            interface_id: evidence.interface_id(),
+            interface_id: *evidence.interface_id().as_bytes(),
             encoded_packet_len: evidence.encoded_packet_len(),
             encoded_packet_sha256: hex::encode(evidence.encoded_packet_sha256().as_bytes()),
         }
@@ -286,134 +323,67 @@ impl From<api::LoraDiagnostics> for LoraDiagnosticsView {
     }
 }
 
-/// Reticulum transport and retained-path counters.
+/// PRNS next-hop decision for one live route.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
-pub struct RnsDiagnosticsView {
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    received: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    forwarded: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    dedup_drops: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    invalid_drops: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    announces_received: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    paths_learned: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    paths_expired: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    links_established: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    links_closed: u64,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    links_failed: u64,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RouteNextHopView {
+    /// Destination is directly reachable on the selected interface.
+    Direct,
+    /// Destination is reached through a transport identity.
+    Via {
+        /// Lowercase Reticulum transport identity hash.
+        transport_identity: String,
+    },
 }
 
-impl From<api::RnsDiagnostics> for RnsDiagnosticsView {
-    fn from(rns: api::RnsDiagnostics) -> Self {
-        Self {
-            received: json_safe(rns.received()),
-            forwarded: json_safe(rns.forwarded()),
-            dedup_drops: json_safe(rns.dedup_drops()),
-            invalid_drops: json_safe(rns.invalid_drops()),
-            announces_received: json_safe(rns.announces_received()),
-            paths_learned: json_safe(rns.paths_learned()),
-            paths_expired: json_safe(rns.paths_expired()),
-            links_established: json_safe(rns.links_established()),
-            links_closed: json_safe(rns.links_closed()),
-            links_failed: json_safe(rns.links_failed()),
-        }
-    }
-}
-
-/// Current interpretation of one retained route.
-///
-/// `BroadcastReady` and `BroadcastUnavailable` describe fallback resolution;
-/// they do not mean the destination is a connected or recently heard peer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum RouteDiagnosticResolutionView {
-    /// The exact retained route is usable through its selected interface.
-    ExactReady,
-    /// The exact retained route's selected interface is offline or faulted.
-    ExactOffline,
-    /// The exact retained route lacks a complete next-hop or interface binding.
-    ExactMissing,
-    /// Broadcast fallback is currently available.
-    BroadcastReady,
-    /// Neither an exact usable route nor broadcast fallback is available.
-    BroadcastUnavailable,
-}
-
-impl From<api::RouteDiagnosticResolution> for RouteDiagnosticResolutionView {
-    fn from(resolution: api::RouteDiagnosticResolution) -> Self {
-        match resolution {
-            api::RouteDiagnosticResolution::ExactReady => Self::ExactReady,
-            api::RouteDiagnosticResolution::ExactOffline => Self::ExactOffline,
-            api::RouteDiagnosticResolution::ExactMissing => Self::ExactMissing,
-            api::RouteDiagnosticResolution::BroadcastReady => Self::BroadcastReady,
-            api::RouteDiagnosticResolution::BroadcastUnavailable => Self::BroadcastUnavailable,
+impl From<api::RouteDiagnosticNextHop> for RouteNextHopView {
+    fn from(next_hop: api::RouteDiagnosticNextHop) -> Self {
+        match next_hop {
+            api::RouteDiagnosticNextHop::Direct => Self::Direct,
+            api::RouteDiagnosticNextHop::Via(identity) => Self::Via {
+                transport_identity: hex::encode(identity.as_bytes()),
+            },
         }
     }
 }
 
 /// One retained Reticulum route.
 ///
-/// `last_local_use_age_ms` is local route-table LRU activity. It is not the
+/// `last_activity_age_ms` is local route-table LRU activity. It is not the
 /// time a peer was last heard; recently heard announces remain a separate
 /// nearby-peer projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub struct RetainedRouteView {
     destination: String,
-    next_hop_identity: Option<String>,
+    next_hop: RouteNextHopView,
     hops: u8,
-    retained_interface_id: Option<u8>,
-    resolution: RouteDiagnosticResolutionView,
-    #[serde(serialize_with = "crate::serialize_optional_json_safe_u64")]
-    #[ts(as = "Option<JsonSafeInteger>")]
-    learned_age_ms: Option<u64>,
-    #[serde(serialize_with = "crate::serialize_optional_json_safe_u64")]
-    #[ts(as = "Option<JsonSafeInteger>")]
-    last_local_use_age_ms: Option<u64>,
-    #[serde(serialize_with = "crate::serialize_optional_json_safe_u64")]
-    #[ts(as = "Option<JsonSafeInteger>")]
-    expires_in_ms: Option<u64>,
+    interface_id: [u8; 8],
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    learned_age_ms: u64,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    last_activity_age_ms: u64,
+    #[serde(serialize_with = "serialize_json_safe_u64")]
+    #[ts(as = "JsonSafeInteger")]
+    expires_in_ms: u64,
 }
 
 impl From<api::RouteDiagnosticEntry> for RetainedRouteView {
     fn from(route: api::RouteDiagnosticEntry) -> Self {
         Self {
             destination: hex::encode(route.destination().0),
-            next_hop_identity: route
-                .next_hop_identity()
-                .map(|identity| hex::encode(identity.as_bytes())),
+            next_hop: route.next_hop().into(),
             hops: route.hops(),
-            retained_interface_id: route.retained_interface(),
-            resolution: route.resolution().into(),
-            learned_age_ms: route.learned_age_ms().map(json_safe),
-            last_local_use_age_ms: route.last_used_age_ms().map(json_safe),
-            expires_in_ms: route.expires_in_ms().map(json_safe),
+            interface_id: *route.interface().as_bytes(),
+            learned_age_ms: json_safe(route.learned_age_ms()),
+            last_activity_age_ms: json_safe(route.last_activity_age_ms()),
+            expires_in_ms: json_safe(route.expires_in_ms()),
         }
     }
 }
 
-/// One coherent app-facing node, radio, and retained-route refresh.
-///
-/// The route list is bounded and collected only while every page reports the
-/// same route-table revision. Retained routes are routing state, not a list of
-/// connected or reachable peers.
+/// One bounded app-facing view of PRNS node, interface, and live-route state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, TS)]
 pub struct RadioRoutesStatusView {
     #[serde(serialize_with = "serialize_json_safe_u64")]
@@ -421,20 +391,14 @@ pub struct RadioRoutesStatusView {
     uptime_ms: u64,
     interfaces: Vec<DiagnosticInterfaceView>,
     lora: Option<LoraDiagnosticsView>,
-    rns: RnsDiagnosticsView,
-    observed_peer_count: u32,
-    retained_route_count: u32,
-    usable_route_count: u32,
-    #[serde(serialize_with = "serialize_json_safe_u64")]
-    #[ts(as = "JsonSafeInteger")]
-    route_table_revision: u64,
+    route_count: u32,
+    link_count: u32,
     routes: Vec<RetainedRouteView>,
 }
 
 impl RadioRoutesStatusView {
-    fn from_stable_snapshot(
+    fn from_snapshot(
         snapshot: api::NodeDiagnosticsSnapshot,
-        route_table_revision: u64,
         routes: Vec<api::RouteDiagnosticEntry>,
     ) -> Self {
         Self {
@@ -447,11 +411,8 @@ impl RadioRoutesStatusView {
                 .map(Into::into)
                 .collect(),
             lora: snapshot.lora().map(Into::into),
-            rns: snapshot.rns().into(),
-            observed_peer_count: snapshot.observed_peer_count(),
-            retained_route_count: snapshot.retained_route_count(),
-            usable_route_count: snapshot.usable_route_count(),
-            route_table_revision: json_safe(route_table_revision),
+            route_count: snapshot.route_count(),
+            link_count: snapshot.link_count(),
             routes: routes.into_iter().map(Into::into).collect(),
         }
     }
@@ -460,27 +421,19 @@ impl RadioRoutesStatusView {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RadioRoutesReadError {
     Session(String),
-    InvalidRouteCounts { retained: u32, usable: u32 },
     RouteLimitExceeded { reported: u32, limit: usize },
     RoutePageLimitExceeded { limit: usize },
-    RouteTableChangedRepeatedly,
     NonAdvancingCursor,
     NonIncreasingDestination,
-    RouteCountExceeded { reported: u32 },
-    RoutePageEndedEarly { reported: u32, received: usize },
 }
 
 impl fmt::Display for RadioRoutesReadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Session(error) => write!(formatter, "diagnostics request failed: {error}"),
-            Self::InvalidRouteCounts { retained, usable } => write!(
-                formatter,
-                "node diagnostics reported {usable} usable routes but only {retained} retained routes"
-            ),
             Self::RouteLimitExceeded { reported, limit } => write!(
                 formatter,
-                "retained route count {reported} exceeds client limit {limit}"
+                "PRNS route count {reported} exceeds client limit {limit}"
             ),
             Self::RoutePageLimitExceeded { limit } => {
                 write!(
@@ -488,33 +441,13 @@ impl fmt::Display for RadioRoutesReadError {
                     "route diagnostics exceeded {limit} page requests"
                 )
             }
-            Self::RouteTableChangedRepeatedly => formatter.write_str(
-                "retained route table changed repeatedly during one diagnostics refresh",
-            ),
             Self::NonAdvancingCursor => {
                 formatter.write_str("route diagnostics returned a non-advancing cursor")
             }
             Self::NonIncreasingDestination => formatter
                 .write_str("route diagnostics destinations were not globally strictly increasing"),
-            Self::RouteCountExceeded { reported } => write!(
-                formatter,
-                "route diagnostics returned more entries than its reported total {reported}"
-            ),
-            Self::RoutePageEndedEarly { reported, received } => write!(
-                formatter,
-                "route diagnostics ended after {received} of {reported} reported entries"
-            ),
         }
     }
-}
-
-#[derive(Debug)]
-enum StableRouteRead {
-    Complete {
-        revision: u64,
-        routes: Vec<api::RouteDiagnosticEntry>,
-    },
-    Changed,
 }
 
 pub(crate) fn read_radio_routes(
@@ -543,54 +476,31 @@ fn read_radio_routes_from<S: ?Sized>(
         api::RouteDiagnosticsRequest,
     ) -> Result<api::RouteDiagnosticsPage, String>,
 ) -> Result<RadioRoutesStatusView, RadioRoutesReadError> {
-    for attempt in 0..MAX_ROUTE_SNAPSHOT_ATTEMPTS {
-        let snapshot = read_node(source).map_err(RadioRoutesReadError::Session)?;
-        match read_stable_routes_with(snapshot, |request| read_page(source, request))? {
-            StableRouteRead::Complete { revision, routes } => {
-                return Ok(RadioRoutesStatusView::from_stable_snapshot(
-                    snapshot, revision, routes,
-                ));
-            }
-            StableRouteRead::Changed if attempt + 1 < MAX_ROUTE_SNAPSHOT_ATTEMPTS => {}
-            StableRouteRead::Changed => {
-                return Err(RadioRoutesReadError::RouteTableChangedRepeatedly);
-            }
-        }
-    }
-    unreachable!("the fixed diagnostics attempt loop always returns")
+    let snapshot = read_node(source).map_err(RadioRoutesReadError::Session)?;
+    let routes = read_routes_with(snapshot.route_count(), |request| read_page(source, request))?;
+    Ok(RadioRoutesStatusView::from_snapshot(snapshot, routes))
 }
 
-fn read_stable_routes_with(
-    snapshot: api::NodeDiagnosticsSnapshot,
+fn read_routes_with(
+    reported_route_count: u32,
     mut request_page: impl FnMut(
         api::RouteDiagnosticsRequest,
     ) -> Result<api::RouteDiagnosticsPage, String>,
-) -> Result<StableRouteRead, RadioRoutesReadError> {
-    let expected_revision = snapshot.rns().route_revision();
-    let expected_total = snapshot.retained_route_count();
-    if snapshot.usable_route_count() > expected_total {
-        return Err(RadioRoutesReadError::InvalidRouteCounts {
-            retained: expected_total,
-            usable: snapshot.usable_route_count(),
-        });
-    }
-    if expected_total as usize > MAX_RADIO_ROUTE_ENTRIES {
+) -> Result<Vec<api::RouteDiagnosticEntry>, RadioRoutesReadError> {
+    if reported_route_count as usize > MAX_RADIO_ROUTE_ENTRIES {
         return Err(RadioRoutesReadError::RouteLimitExceeded {
-            reported: expected_total,
+            reported: reported_route_count,
             limit: MAX_RADIO_ROUTE_ENTRIES,
         });
     }
 
-    let mut routes = Vec::with_capacity(expected_total as usize);
+    let mut routes = Vec::with_capacity(reported_route_count as usize);
     let mut after = None;
 
     for _ in 0..MAX_ROUTE_PAGE_REQUESTS {
         let requested_after = after;
         let page = request_page(api::RouteDiagnosticsRequest::new(requested_after))
             .map_err(RadioRoutesReadError::Session)?;
-        if page.revision() != expected_revision || page.total_count() != expected_total {
-            return Ok(StableRouteRead::Changed);
-        }
 
         for route in page.entries().iter().flatten().copied() {
             let destination = route.destination();
@@ -600,9 +510,9 @@ fn read_stable_routes_with(
                 return Err(RadioRoutesReadError::NonIncreasingDestination);
             }
             routes.push(route);
-            if routes.len() > expected_total as usize {
-                return Err(RadioRoutesReadError::RouteCountExceeded {
-                    reported: expected_total,
+            if routes.len() > MAX_RADIO_ROUTE_ENTRIES {
+                return Err(RadioRoutesReadError::RoutePageLimitExceeded {
+                    limit: MAX_ROUTE_PAGE_REQUESTS,
                 });
             }
             after = Some(destination);
@@ -610,25 +520,11 @@ fn read_stable_routes_with(
 
         match page.next_cursor() {
             Some(next) => {
-                if Some(next) != after
-                    || requested_after.is_some_and(|previous| next <= previous)
-                    || routes.len() >= expected_total as usize
-                {
+                if Some(next) != after || requested_after.is_some_and(|previous| next <= previous) {
                     return Err(RadioRoutesReadError::NonAdvancingCursor);
                 }
             }
-            None if routes.len() == expected_total as usize => {
-                return Ok(StableRouteRead::Complete {
-                    revision: expected_revision,
-                    routes,
-                });
-            }
-            None => {
-                return Err(RadioRoutesReadError::RoutePageEndedEarly {
-                    reported: expected_total,
-                    received: routes.len(),
-                });
-            }
+            None => return Ok(routes),
         }
     }
 
@@ -657,91 +553,23 @@ mod tests {
         api::DestinationHash([value; 16])
     }
 
-    fn route(value: u8, resolution: api::RouteDiagnosticResolution) -> api::RouteDiagnosticEntry {
-        api::RouteDiagnosticEntry::new(
-            destination(value),
-            Some(api::IdentityHash::new([value.wrapping_add(1); 16])),
-            2,
-            Some(1),
-            resolution,
-            Some(u64::from(value) * 1_000),
-            Some(u64::from(value) * 2_000),
-            Some(u64::from(value) * 3_000),
-        )
+    fn interface() -> api::ReticulumInterfaceId {
+        api::ReticulumInterfaceId::new([14, 1, 2, 3, 4, 5, 6, 7])
     }
 
-    fn node(
-        revision_learned: u64,
-        revision_expired: u64,
-        retained: u32,
-    ) -> api::NodeDiagnosticsSnapshot {
-        api::NodeDiagnosticsSnapshot::new(
-            12_345,
-            [
-                Some(api::DiagnosticInterfaceRecord::new(
-                    1,
-                    api::DiagnosticInterfaceKind::LoRa,
-                    api::DiagnosticInterfaceState::Online,
-                    7,
-                    500,
-                    Some(5_470),
-                )),
-                None,
-                None,
-                None,
-            ],
-            Some(api::LoraDiagnostics::new(
-                22,
-                915_000_000,
-                125_000,
-                7,
-                5,
-                10,
-                8,
-                1,
-                1,
-                3,
-                2,
-                6,
-                1,
-                0,
-                4,
-                9,
-                Some(api::DiagnosticLoraLastRx::new(500, -91, 7)),
-                Some(api::DiagnosticLoraLastTx::data(
-                    700,
-                    api::DiagnosticLoraTxOutcome::Completed,
-                    api::DiagnosticLoraDataTxEvidence::try_new(
-                        1,
-                        183,
-                        api::EncodedPacketSha256::new([0xab; 32]),
-                    )
-                    .unwrap(),
-                )),
-                None,
-            )),
-            api::RnsDiagnostics::new(
-                20,
-                5,
-                2,
-                1,
-                8,
-                revision_learned,
-                revision_expired,
-                3,
-                1,
-                1,
-                revision_learned.saturating_add(revision_expired),
-            ),
-            4,
-            retained,
-            retained,
+    fn route(value: u8) -> api::RouteDiagnosticEntry {
+        api::RouteDiagnosticEntry::new(
+            destination(value),
+            api::RouteDiagnosticNextHop::Via(api::IdentityHash::new([value.wrapping_add(1); 16])),
+            2,
+            interface(),
+            u64::from(value) * 1_000,
+            u64::from(value) * 2_000,
+            u64::from(value) * 3_000,
         )
     }
 
     fn page(
-        revision: u64,
-        total: u32,
         entries: &[api::RouteDiagnosticEntry],
         next: Option<api::DestinationHash>,
     ) -> api::RouteDiagnosticsPage {
@@ -749,28 +577,46 @@ mod tests {
         for (slot, entry) in slots.iter_mut().zip(entries) {
             *slot = Some(*entry);
         }
-        api::RouteDiagnosticsPage::new(revision, total, slots, next).unwrap()
+        api::RouteDiagnosticsPage::new(slots, next).unwrap()
+    }
+
+    fn node(route_count: u32) -> api::NodeDiagnosticsSnapshot {
+        api::NodeDiagnosticsSnapshot::new(
+            12_345,
+            [
+                Some(api::DiagnosticInterfaceRecord::new(
+                    interface(),
+                    api::DiagnosticInterfaceMode::Internal,
+                    api::DiagnosticInterfaceState::Connected,
+                    None,
+                    7,
+                    500,
+                    4,
+                    3,
+                    2,
+                    None,
+                )),
+                None,
+                None,
+                None,
+            ],
+            None,
+            route_count,
+            3,
+        )
     }
 
     #[test]
-    fn coherent_pages_project_lowercase_hashes_and_explicit_local_lru_semantics() {
-        let first = [
-            route(0x0a, api::RouteDiagnosticResolution::ExactReady),
-            route(0x0b, api::RouteDiagnosticResolution::ExactOffline),
-            route(0x0c, api::RouteDiagnosticResolution::BroadcastReady),
-            route(0x0d, api::RouteDiagnosticResolution::ExactMissing),
-        ];
-        let second = [route(
-            0xaa,
-            api::RouteDiagnosticResolution::BroadcastUnavailable,
-        )];
-        let mut pages = VecDeque::from([
-            page(9, 5, &first, Some(destination(0x0d))),
-            page(9, 5, &second, None),
-        ]);
-        let snapshot = node(7, 2, 5);
-        let StableRouteRead::Complete { revision, routes } =
-            read_stable_routes_with(snapshot, |request| {
+    fn live_prns_routes_project_without_product_resolution_policy() {
+        let first = [route(0x0a), route(0x0b), route(0x0c), route(0x0d)];
+        let second = [route(0xaa)];
+        let mut pages =
+            VecDeque::from([page(&first, Some(destination(0x0d))), page(&second, None)]);
+        let mut source = ();
+        let snapshot = read_radio_routes_from(
+            &mut source,
+            |_| Ok(node(5)),
+            |_, request| {
                 let expected_after = if pages.len() == 2 {
                     None
                 } else {
@@ -778,158 +624,59 @@ mod tests {
                 };
                 assert_eq!(request.after(), expected_after);
                 Ok(pages.pop_front().unwrap())
-            })
-            .unwrap()
-        else {
-            panic!("stable scripted pages must complete")
-        };
-        let view = RadioRoutesStatusView::from_stable_snapshot(snapshot, revision, routes);
-        let encoded = serde_json::to_value(view).unwrap();
+            },
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(snapshot).unwrap();
 
-        assert_eq!(encoded["route_table_revision"], 9);
-        assert_eq!(encoded["retained_route_count"], 5);
-        assert_eq!(encoded["interfaces"][0]["kind"], "lora");
-        assert_eq!(encoded["lora"]["applied_tx_power_dbm"], 22);
-        assert_eq!(encoded["lora"]["last_rx"]["rssi_dbm"], -91);
-        assert_eq!(encoded["lora"]["last_tx"]["family"], "data");
-        assert_eq!(
-            encoded["lora"]["last_data_tx"]["data_evidence"]["encoded_packet_len"],
-            183
-        );
-        assert_eq!(
-            encoded["lora"]["last_data_tx"]["data_evidence"]["encoded_packet_sha256"],
-            "ab".repeat(32)
-        );
+        assert_eq!(encoded["route_count"], 5);
+        assert_eq!(encoded["link_count"], 3);
+        assert_eq!(encoded["interfaces"][0]["mode"], "internal");
+        assert_eq!(encoded["interfaces"][0]["state"], "connected");
         assert_eq!(
             encoded["routes"][0]["destination"],
             "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
         );
+        assert_eq!(encoded["routes"][0]["next_hop"]["kind"], "via");
         assert_eq!(
-            encoded["routes"][0]["next_hop_identity"],
-            "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+            encoded["routes"][0]["next_hop"]["transport_identity"],
+            "0b".repeat(16)
         );
-        assert_eq!(encoded["routes"][0]["last_local_use_age_ms"], 20_000);
-        assert_eq!(encoded["routes"][2]["resolution"], json!("broadcast_ready"));
+        assert_eq!(encoded["routes"][0]["last_activity_age_ms"], 20_000);
     }
 
     #[test]
-    fn route_revision_or_total_change_requests_a_whole_snapshot_retry() {
-        let snapshot = node(7, 2, 1);
-        let changed_revision = read_stable_routes_with(snapshot, |_| {
-            Ok(page(
-                10,
-                1,
-                &[route(1, api::RouteDiagnosticResolution::ExactReady)],
-                None,
-            ))
-        })
-        .unwrap();
-        assert!(matches!(changed_revision, StableRouteRead::Changed));
-
-        let changed_total = read_stable_routes_with(snapshot, |_| {
-            Ok(page(
-                9,
-                2,
-                &[route(1, api::RouteDiagnosticResolution::ExactReady)],
-                None,
-            ))
-        })
-        .unwrap();
-        assert!(matches!(changed_total, StableRouteRead::Changed));
+    fn a_route_table_change_does_not_require_a_synthetic_revision() {
+        let routes = read_routes_with(2, |_| Ok(page(&[route(1)], None))).unwrap();
+        assert_eq!(routes.len(), 1);
     }
 
     #[test]
-    fn one_mid_read_change_restarts_the_complete_node_and_route_snapshot() {
-        struct Script {
-            node_reads: usize,
-            page_reads: usize,
-        }
-
-        let mut script = Script {
-            node_reads: 0,
-            page_reads: 0,
-        };
-        let view = read_radio_routes_from(
-            &mut script,
-            |script| {
-                script.node_reads += 1;
-                Ok(if script.node_reads == 1 {
-                    node(9, 0, 1)
-                } else {
-                    node(10, 0, 1)
-                })
-            },
-            |script, request| {
-                script.page_reads += 1;
-                assert_eq!(request.after(), None);
-                Ok(page(
-                    10,
-                    1,
-                    &[route(1, api::RouteDiagnosticResolution::ExactReady)],
-                    None,
-                ))
-            },
-        )
-        .unwrap();
-
-        assert_eq!(script.node_reads, 2);
-        assert_eq!(script.page_reads, 2);
+    fn paging_rejects_repeated_destinations_and_nonadvancing_cursors() {
+        let mut calls = 0;
+        let repeated = read_routes_with(2, |_| {
+            calls += 1;
+            Ok(page(&[route(1)], Some(destination(1))))
+        });
+        assert_eq!(calls, 2);
         assert_eq!(
-            serde_json::to_value(view).unwrap()["route_table_revision"],
-            10
+            repeated.unwrap_err(),
+            RadioRoutesReadError::NonIncreasingDestination
+        );
+
+        let invalid = api::RouteDiagnosticsPage::new(
+            [Some(route(1)), None, None, None],
+            Some(destination(2)),
+        );
+        assert!(
+            invalid.is_err(),
+            "the wire model rejects an unrelated cursor"
         );
     }
 
     #[test]
-    fn repeated_mid_read_change_is_a_bounded_visible_failure() {
-        let mut calls = 0_usize;
-        let error = read_radio_routes_from(
-            &mut (),
-            |_| Ok(node(9, 0, 1)),
-            |_, _| {
-                calls += 1;
-                Ok(page(
-                    10,
-                    1,
-                    &[route(1, api::RouteDiagnosticResolution::ExactReady)],
-                    None,
-                ))
-            },
-        )
-        .unwrap_err();
-        assert_eq!(calls, MAX_ROUTE_SNAPSHOT_ATTEMPTS);
-        assert_eq!(error, RadioRoutesReadError::RouteTableChangedRepeatedly);
-    }
-
-    #[test]
-    fn route_ceiling_accepts_the_configured_full_table_and_rejects_more() {
-        let snapshot = node(1, 0, MAX_RADIO_ROUTE_ENTRIES as u32);
-        let mut page_reads = 0_usize;
-        let StableRouteRead::Complete { routes, .. } =
-            read_stable_routes_with(snapshot, |request| {
-                page_reads += 1;
-                let first = request
-                    .after()
-                    .map_or(0, |destination| destination.0[0] + 1);
-                let entries = [
-                    route(first, api::RouteDiagnosticResolution::ExactReady),
-                    route(first + 1, api::RouteDiagnosticResolution::ExactReady),
-                    route(first + 2, api::RouteDiagnosticResolution::ExactReady),
-                    route(first + 3, api::RouteDiagnosticResolution::ExactReady),
-                ];
-                let next = (usize::from(first) + entries.len() < MAX_RADIO_ROUTE_ENTRIES)
-                    .then(|| destination(first + 3));
-                Ok(page(1, MAX_RADIO_ROUTE_ENTRIES as u32, &entries, next))
-            })
-            .unwrap()
-        else {
-            panic!("the maximum bounded table must complete")
-        };
-        assert_eq!(routes.len(), MAX_RADIO_ROUTE_ENTRIES);
-        assert_eq!(page_reads, MAX_ROUTE_PAGE_REQUESTS);
-
-        let over_limit = node(1, 0, MAX_RADIO_ROUTE_ENTRIES as u32 + 1);
-        let error = read_stable_routes_with(over_limit, |_| {
+    fn reported_route_count_enforces_the_host_allocation_ceiling() {
+        let error = read_routes_with(MAX_RADIO_ROUTE_ENTRIES as u32 + 1, |_| {
             panic!("an over-limit snapshot must be rejected before paging")
         })
         .unwrap_err();
@@ -943,81 +690,33 @@ mod tests {
     }
 
     #[test]
-    fn contradictory_usable_route_count_is_rejected_before_projection() {
-        let valid = node(0, 0, 0);
-        let invalid = api::NodeDiagnosticsSnapshot::new(
-            valid.uptime_ms(),
-            *valid.interfaces(),
-            valid.lora(),
-            valid.rns(),
-            valid.observed_peer_count(),
-            0,
+    fn json_safe_fields_saturate_and_direct_routes_are_explicit() {
+        let direct = api::RouteDiagnosticEntry::new(
+            destination(1),
+            api::RouteDiagnosticNextHop::Direct,
             1,
+            interface(),
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
         );
-        let error = read_stable_routes_with(invalid, |_| {
-            panic!("an invalid node snapshot must be rejected before paging")
-        })
-        .unwrap_err();
-        assert_eq!(
-            error,
-            RadioRoutesReadError::InvalidRouteCounts {
-                retained: 0,
-                usable: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn route_aggregation_rejects_nonadvancing_and_truncated_pages() {
-        let snapshot = node(9, 0, 2);
-        let first_route = route(1, api::RouteDiagnosticResolution::ExactReady);
-        let nonadvancing = read_stable_routes_with(snapshot, |_| {
-            Ok(page(9, 2, &[first_route], Some(destination(1))))
-        });
-        // The page itself advances from the initial cursor; repeating it is
-        // rejected on the second request.
-        assert_eq!(
-            nonadvancing.unwrap_err(),
-            RadioRoutesReadError::NonIncreasingDestination
-        );
-
-        let truncated = read_stable_routes_with(snapshot, |_| Ok(page(9, 2, &[first_route], None)));
-        assert_eq!(
-            truncated.unwrap_err(),
-            RadioRoutesReadError::RoutePageEndedEarly {
-                reported: 2,
-                received: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn every_u64_projection_saturates_at_the_json_safe_integer_boundary() {
         let snapshot = api::NodeDiagnosticsSnapshot::new(
             u64::MAX,
             [None; api::MAX_DIAGNOSTIC_INTERFACES],
             None,
-            api::RnsDiagnostics::new(
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                0,
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-            ),
-            0,
-            0,
+            1,
             0,
         );
-        let view = RadioRoutesStatusView::from_stable_snapshot(snapshot, u64::MAX, Vec::new());
+        let view = RadioRoutesStatusView::from_snapshot(snapshot, vec![direct]);
         let encoded = serde_json::to_value(view).unwrap();
         assert_eq!(encoded["uptime_ms"], MAX_JSON_SAFE_INTEGER);
-        assert_eq!(encoded["route_table_revision"], MAX_JSON_SAFE_INTEGER);
-        assert_eq!(encoded["rns"]["received"], MAX_JSON_SAFE_INTEGER);
+        assert_eq!(
+            encoded["routes"][0]["learned_age_ms"],
+            MAX_JSON_SAFE_INTEGER
+        );
+        assert_eq!(
+            encoded["routes"][0]["next_hop"],
+            json!({ "kind": "direct" })
+        );
     }
 }

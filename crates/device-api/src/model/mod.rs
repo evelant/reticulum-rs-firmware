@@ -1,7 +1,9 @@
-//! Rete-independent logical API model and authorization vocabulary.
+//! Network-engine-independent logical API model and authorization vocabulary.
 
 use core::{convert::Infallible, marker::PhantomData, num::NonZeroU16, ops::BitOr};
 
+mod appliance_label;
+pub use appliance_label::*;
 #[cfg(feature = "lxmf")]
 mod lxmf;
 #[cfg(feature = "lxmf")]
@@ -20,14 +22,16 @@ mod network_config;
 pub use network_config::*;
 
 /// Current incompatible device API generation.
-pub const API_VERSION_MAJOR: u16 = 3;
+pub const API_VERSION_MAJOR: u16 = 6;
 /// Current compatible feature revision within the API generation.
 pub const API_VERSION_MINOR: u16 = 0;
 
 /// Maximum size of one decoded or encoded logical CBOR message.
 pub const MAX_MESSAGE_BYTES: usize = 512;
 /// Maximum encoded size of the operation-specific body within a message.
-pub const MAX_BODY_BYTES: usize = 448;
+///
+/// The remaining 32 bytes accommodate the versioned envelope around the body.
+pub const MAX_BODY_BYTES: usize = 480;
 /// Maximum payload accepted by the RNS DATA submission request.
 pub const MAX_SUBMIT_RNS_DATA_PAYLOAD_BYTES: usize = 383;
 /// Structural per-field title limit accepted by the basic-LXMF codec.
@@ -52,14 +56,16 @@ pub const MAX_WIFI_SSID_BYTES: usize = 32;
 pub const MAX_WIFI_NETWORK_PROFILES: usize = 4;
 /// Maximum interface records returned by one node-diagnostics snapshot.
 pub const MAX_DIAGNOSTIC_INTERFACES: usize = 4;
+/// Maximum UTF-8 bytes retained for one PRNS interface failure reason.
+pub const MAX_DIAGNOSTIC_FAILURE_REASON_BYTES: usize = 48;
 /// Maximum route records returned by one diagnostics page.
 pub const MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES: usize = 4;
 /// Maximum radio-trace events returned by one diagnostics page.
 pub const MAX_RADIO_TRACE_PAGE_ENTRIES: usize = 2;
 /// Maximum ASCII DNS hostname length for one outbound Reticulum TCP peer.
 pub const MAX_RETICULUM_TCP_PEER_HOSTNAME_BYTES: usize = 96;
-/// Maximum encoded UTF-8 board display name length.
-pub const MAX_DEVICE_NAME_BYTES: usize = 32;
+/// Maximum encoded UTF-8 product-owned appliance label length.
+pub const MAX_APPLIANCE_LABEL_BYTES: usize = 32;
 /// Minimum WPA2-Personal passphrase length in bytes.
 pub const MIN_WIFI_PASSPHRASE_BYTES: usize = 8;
 /// Maximum WPA2-Personal passphrase length in bytes.
@@ -144,6 +150,22 @@ impl IdentityHash {
     }
 }
 
+/// Opaque identity of one Reticulum packet interface.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ReticulumInterfaceId([u8; 8]);
+
+impl ReticulumInterfaceId {
+    /// Construct an interface identity from all PRNS/RNS bytes.
+    pub const fn new(bytes: [u8; 8]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the complete opaque identity.
+    pub const fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
+    }
+}
+
 /// Physical or logical transport family represented by diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticInterfaceKind {
@@ -172,64 +194,154 @@ impl DiagnosticInterfaceKind {
 /// Current usable state of one configured interface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticInterfaceState {
-    /// The interface is configured but not currently usable.
-    Offline,
-    /// The interface is online and eligible for Reticulum traffic.
-    Online,
-    /// The interface owner has latched a fault.
-    Faulted,
+    /// The interface owner is starting.
+    Initializing,
+    /// The interface is connected.
+    Connected,
+    /// The interface is usable with degraded service.
+    Degraded,
+    /// The interface is reconnecting.
+    Reconnecting,
+    /// The interface owner failed.
+    Failed,
+    /// The interface is disconnected.
+    Disconnected,
+    /// The interface is deliberately disabled.
+    Disabled,
+    /// The interface owner cannot classify its current state.
+    Unknown,
 }
 
 impl DiagnosticInterfaceState {
     /// Stable numeric wire representation.
     pub const fn wire_code(self) -> u8 {
         match self {
-            Self::Offline => 0,
-            Self::Online => 1,
-            Self::Faulted => 2,
+            Self::Initializing => 0,
+            Self::Connected => 1,
+            Self::Degraded => 2,
+            Self::Reconnecting => 3,
+            Self::Failed => 4,
+            Self::Disconnected => 5,
+            Self::Disabled => 6,
+            Self::Unknown => 255,
         }
+    }
+}
+
+/// PRNS interface forwarding mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticInterfaceMode {
+    /// Ordinary full interface.
+    Full,
+    /// Point-to-point interface.
+    PointToPoint,
+    /// Access-point interface.
+    AccessPoint,
+    /// Roaming interface.
+    Roaming,
+    /// Boundary interface.
+    Boundary,
+    /// Gateway interface.
+    Gateway,
+    /// Internal transport interface.
+    Internal,
+}
+
+impl DiagnosticInterfaceMode {
+    /// Stable numeric wire representation.
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::Full => 0,
+            Self::PointToPoint => 1,
+            Self::AccessPoint => 2,
+            Self::Roaming => 3,
+            Self::Boundary => 4,
+            Self::Gateway => 5,
+            Self::Internal => 6,
+        }
+    }
+}
+
+/// Bounded UTF-8 PRNS interface failure reason.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DiagnosticInterfaceFailureReason {
+    bytes: [u8; MAX_DIAGNOSTIC_FAILURE_REASON_BYTES],
+    len: u8,
+}
+
+impl DiagnosticInterfaceFailureReason {
+    /// Copy one complete reason when it fits the stable device boundary.
+    pub fn try_from_str(reason: &str) -> Option<Self> {
+        if reason.len() > MAX_DIAGNOSTIC_FAILURE_REASON_BYTES {
+            return None;
+        }
+        let mut bytes = [0; MAX_DIAGNOSTIC_FAILURE_REASON_BYTES];
+        bytes[..reason.len()].copy_from_slice(reason.as_bytes());
+        Some(Self {
+            bytes,
+            len: reason.len() as u8,
+        })
+    }
+
+    /// Validated UTF-8 reason.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)])
+            .expect("the constructor stores validated UTF-8")
     }
 }
 
 /// One fixed-capacity interface record in a node diagnostics snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DiagnosticInterfaceRecord {
-    id: u8,
-    kind: DiagnosticInterfaceKind,
+    id: ReticulumInterfaceId,
+    mode: DiagnosticInterfaceMode,
     state: DiagnosticInterfaceState,
-    generation: u64,
-    logical_mtu: u16,
-    bitrate: Option<u32>,
+    failure_reason: Option<DiagnosticInterfaceFailureReason>,
+    rx_bytes: u64,
+    tx_bytes: u64,
+    destinations: u32,
+    links: u32,
+    transported_links: u32,
+    supervisor: Option<ReticulumInterfaceId>,
 }
 
 impl DiagnosticInterfaceRecord {
     /// Construct one complete interface record.
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
-        id: u8,
-        kind: DiagnosticInterfaceKind,
+        id: ReticulumInterfaceId,
+        mode: DiagnosticInterfaceMode,
         state: DiagnosticInterfaceState,
-        generation: u64,
-        logical_mtu: u16,
-        bitrate: Option<u32>,
+        failure_reason: Option<DiagnosticInterfaceFailureReason>,
+        rx_bytes: u64,
+        tx_bytes: u64,
+        destinations: u32,
+        links: u32,
+        transported_links: u32,
+        supervisor: Option<ReticulumInterfaceId>,
     ) -> Self {
         Self {
             id,
-            kind,
+            mode,
             state,
-            generation,
-            logical_mtu,
-            bitrate,
+            failure_reason,
+            rx_bytes,
+            tx_bytes,
+            destinations,
+            links,
+            transported_links,
+            supervisor,
         }
     }
 
     /// Product-owned interface identifier.
-    pub const fn id(self) -> u8 {
+    pub const fn id(self) -> ReticulumInterfaceId {
         self.id
     }
 
-    /// Stable transport family.
-    pub const fn kind(self) -> DiagnosticInterfaceKind {
-        self.kind
+    /// PRNS forwarding mode.
+    pub const fn mode(self) -> DiagnosticInterfaceMode {
+        self.mode
     }
 
     /// Current usable state.
@@ -237,19 +349,39 @@ impl DiagnosticInterfaceRecord {
         self.state
     }
 
-    /// Product-owned incarnation or reconfiguration generation.
-    pub const fn generation(self) -> u64 {
-        self.generation
+    /// Current PRNS failure reason, when supplied and bounded.
+    pub const fn failure_reason(self) -> Option<DiagnosticInterfaceFailureReason> {
+        self.failure_reason
     }
 
-    /// Maximum logical Reticulum packet bytes accepted by this interface.
-    pub const fn logical_mtu(self) -> u16 {
-        self.logical_mtu
+    /// Bytes received by this interface owner.
+    pub const fn rx_bytes(self) -> u64 {
+        self.rx_bytes
     }
 
-    /// Approximate raw interface bitrate, when meaningful and known.
-    pub const fn bitrate(self) -> Option<u32> {
-        self.bitrate
+    /// Bytes transmitted by this interface owner.
+    pub const fn tx_bytes(self) -> u64 {
+        self.tx_bytes
+    }
+
+    /// Destinations currently attributed to this interface by PRNS.
+    pub const fn destinations(self) -> u32 {
+        self.destinations
+    }
+
+    /// Links currently attributed to this interface by PRNS.
+    pub const fn links(self) -> u32 {
+        self.links
+    }
+
+    /// Transported links currently attributed to this interface by PRNS.
+    pub const fn transported_links(self) -> u32 {
+        self.transported_links
+    }
+
+    /// Supervisor interface for a fleet member, otherwise `None`.
+    pub const fn supervisor(self) -> Option<ReticulumInterfaceId> {
+        self.supervisor
     }
 }
 
@@ -301,7 +433,7 @@ impl DiagnosticLoraTxFamily {
 /// message timeline's encoded-packet evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DiagnosticLoraDataTxEvidence {
-    interface_id: u8,
+    interface_id: ReticulumInterfaceId,
     encoded_packet_len: NonZeroU16,
     encoded_packet_sha256: EncodedPacketSha256,
 }
@@ -311,7 +443,7 @@ impl DiagnosticLoraDataTxEvidence {
     ///
     /// A complete encoded Reticulum packet cannot be empty.
     pub const fn try_new(
-        interface_id: u8,
+        interface_id: ReticulumInterfaceId,
         encoded_packet_len: u16,
         encoded_packet_sha256: EncodedPacketSha256,
     ) -> Option<Self> {
@@ -326,7 +458,7 @@ impl DiagnosticLoraDataTxEvidence {
     }
 
     /// Exact Reticulum interface selected for this dispatch attempt.
-    pub const fn interface_id(self) -> u8 {
+    pub const fn interface_id(self) -> ReticulumInterfaceId {
         self.interface_id
     }
 
@@ -782,32 +914,25 @@ pub struct NodeDiagnosticsSnapshot {
     uptime_ms: u64,
     interfaces: [Option<DiagnosticInterfaceRecord>; MAX_DIAGNOSTIC_INTERFACES],
     lora: Option<LoraDiagnostics>,
-    rns: RnsDiagnostics,
-    observed_peer_count: u32,
-    retained_route_count: u32,
-    usable_route_count: u32,
+    route_count: u32,
+    link_count: u32,
 }
 
 impl NodeDiagnosticsSnapshot {
     /// Construct one complete node diagnostics snapshot.
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         uptime_ms: u64,
         interfaces: [Option<DiagnosticInterfaceRecord>; MAX_DIAGNOSTIC_INTERFACES],
         lora: Option<LoraDiagnostics>,
-        rns: RnsDiagnostics,
-        observed_peer_count: u32,
-        retained_route_count: u32,
-        usable_route_count: u32,
+        route_count: u32,
+        link_count: u32,
     ) -> Self {
         Self {
             uptime_ms,
             interfaces,
             lora,
-            rns,
-            observed_peer_count,
-            retained_route_count,
-            usable_route_count,
+            route_count,
+            link_count,
         }
     }
 
@@ -828,24 +953,14 @@ impl NodeDiagnosticsSnapshot {
         self.lora
     }
 
-    /// Reticulum transport and path-table counters.
-    pub const fn rns(self) -> RnsDiagnostics {
-        self.rns
+    /// Routes visible in PRNS at the instant of the live query.
+    pub const fn route_count(self) -> u32 {
+        self.route_count
     }
 
-    /// Volatile authenticated or otherwise observed peer records.
-    pub const fn observed_peer_count(self) -> u32 {
-        self.observed_peer_count
-    }
-
-    /// Route records retained regardless of current interface usability.
-    pub const fn retained_route_count(self) -> u32 {
-        self.retained_route_count
-    }
-
-    /// Retained routes whose selected interface is currently usable.
-    pub const fn usable_route_count(self) -> u32 {
-        self.usable_route_count
+    /// Active links visible in PRNS at the instant of the live query.
+    pub const fn link_count(self) -> u32 {
+        self.link_count
     }
 }
 
@@ -1013,7 +1128,7 @@ impl RadioTraceAttemptToken {
 /// Packet identity common to transmit and receive trace events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RadioTracePacketEvidence {
-    interface_id: u8,
+    interface_id: ReticulumInterfaceId,
     packet_len: NonZeroU16,
     encoded_packet_sha256: EncodedPacketSha256,
     attempt_token: Option<RadioTraceAttemptToken>,
@@ -1023,7 +1138,7 @@ impl RadioTracePacketEvidence {
     /// Construct complete packet evidence, rejecting an impossible empty
     /// encoded Reticulum packet.
     pub const fn try_new(
-        interface_id: u8,
+        interface_id: ReticulumInterfaceId,
         packet_len: u16,
         encoded_packet_sha256: EncodedPacketSha256,
         attempt_token: Option<RadioTraceAttemptToken>,
@@ -1040,7 +1155,7 @@ impl RadioTracePacketEvidence {
     }
 
     /// Product-owned Reticulum interface identifier.
-    pub const fn interface_id(self) -> u8 {
+    pub const fn interface_id(self) -> ReticulumInterfaceId {
         self.interface_id
     }
 
@@ -1384,17 +1499,11 @@ impl RadioTraceAttemptTerminal {
     }
 }
 
-/// Receiver-side durable DATA-to-proof lifecycle stage.
+/// Receiver-side immediate DATA-to-proof lifecycle stage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RadioTraceInboundProofStage {
     /// A complete DATA packet was reconstructed by the receiving interface.
     DataLogicalRx,
-    /// The LXMF message became durable in the receiver mailbox.
-    DurableCommit,
-    /// The exact Reticulum proof became durable in its delayed-proof owner.
-    ProofRetained,
-    /// The proof moved into the dedicated admission holder.
-    ProofStaged,
     /// The ordinary transmit coordinator accepted the proof packet.
     OrdinaryQueued,
     /// The selected interface reported physical proof TxDone.
@@ -1408,9 +1517,6 @@ impl RadioTraceInboundProofStage {
     pub const fn wire_code(self) -> u8 {
         match self {
             Self::DataLogicalRx => 0,
-            Self::DurableCommit => 1,
-            Self::ProofRetained => 2,
-            Self::ProofStaged => 3,
             Self::OrdinaryQueued => 4,
             Self::PhysicalTxDone => 5,
             Self::PhysicalTxFailed => 6,
@@ -1458,7 +1564,7 @@ pub struct RadioTraceInboundProof {
     stage: RadioTraceInboundProofStage,
     message_id: Option<[u8; 32]>,
     packet: Option<RadioTraceInboundProofPacket>,
-    interface_id: Option<u8>,
+    interface_id: Option<ReticulumInterfaceId>,
     signal: Option<IngressSignal>,
     dispatch_outcome: Option<RadioTraceTxOutcome>,
 }
@@ -1471,7 +1577,7 @@ impl RadioTraceInboundProof {
         stage: RadioTraceInboundProofStage,
         message_id: Option<[u8; 32]>,
         packet: Option<RadioTraceInboundProofPacket>,
-        interface_id: Option<u8>,
+        interface_id: Option<ReticulumInterfaceId>,
         signal: Option<IngressSignal>,
         dispatch_outcome: Option<RadioTraceTxOutcome>,
     ) -> Result<Self, InvalidRadioTraceInboundProof> {
@@ -1514,7 +1620,7 @@ impl RadioTraceInboundProof {
         self.correlation_token
     }
 
-    /// Durable receiver lifecycle stage.
+    /// Immediate receiver lifecycle stage.
     pub const fn stage(self) -> RadioTraceInboundProofStage {
         self.stage
     }
@@ -1530,7 +1636,7 @@ impl RadioTraceInboundProof {
     }
 
     /// Exact receive or proof-return interface, when known.
-    pub const fn interface_id(self) -> Option<u8> {
+    pub const fn interface_id(self) -> Option<ReticulumInterfaceId> {
         self.interface_id
     }
 
@@ -1778,23 +1884,23 @@ impl RouteDiagnosticsRequest {
     }
 }
 
-/// How one retained destination currently resolves.
+/// Resolution recorded by one packet-correlated radio-trace route event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteDiagnosticResolution {
-    /// An exact retained route is usable now.
+    /// An exact retained route was usable.
     ExactReady,
-    /// An exact retained route exists but its interface is offline or faulted.
+    /// An exact retained route selected an offline interface.
     ExactOffline,
-    /// An exact retained route has incomplete next-hop or interface state.
+    /// An exact retained route was incomplete.
     ExactMissing,
-    /// No exact route exists, but at least one broadcast interface is usable.
+    /// Broadcast fallback was selected.
     BroadcastReady,
-    /// Neither an exact route nor a usable broadcast interface exists.
+    /// No route or broadcast fallback was available.
     BroadcastUnavailable,
 }
 
 impl RouteDiagnosticResolution {
-    /// Stable numeric wire representation.
+    /// Stable numeric wire representation for retained trace events.
     pub const fn wire_code(self) -> u8 {
         match self {
             Self::ExactReady => 0,
@@ -1806,17 +1912,25 @@ impl RouteDiagnosticResolution {
     }
 }
 
+/// Next hop selected by PRNS for one live route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteDiagnosticNextHop {
+    /// Destination is reached directly on the receiving interface.
+    Direct,
+    /// Destination is reached through this transport identity.
+    Via(IdentityHash),
+}
+
 /// One retained route or route-resolution diagnostics record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteDiagnosticEntry {
     destination: DestinationHash,
-    next_hop_identity: Option<IdentityHash>,
+    next_hop: RouteDiagnosticNextHop,
     hops: u8,
-    retained_interface: Option<u8>,
-    resolution: RouteDiagnosticResolution,
-    learned_age_ms: Option<u64>,
-    last_used_age_ms: Option<u64>,
-    expires_in_ms: Option<u64>,
+    interface: ReticulumInterfaceId,
+    learned_age_ms: u64,
+    last_activity_age_ms: u64,
+    expires_in_ms: u64,
 }
 
 impl RouteDiagnosticEntry {
@@ -1824,22 +1938,20 @@ impl RouteDiagnosticEntry {
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         destination: DestinationHash,
-        next_hop_identity: Option<IdentityHash>,
+        next_hop: RouteDiagnosticNextHop,
         hops: u8,
-        retained_interface: Option<u8>,
-        resolution: RouteDiagnosticResolution,
-        learned_age_ms: Option<u64>,
-        last_used_age_ms: Option<u64>,
-        expires_in_ms: Option<u64>,
+        interface: ReticulumInterfaceId,
+        learned_age_ms: u64,
+        last_activity_age_ms: u64,
+        expires_in_ms: u64,
     ) -> Self {
         Self {
             destination,
-            next_hop_identity,
+            next_hop,
             hops,
-            retained_interface,
-            resolution,
+            interface,
             learned_age_ms,
-            last_used_age_ms,
+            last_activity_age_ms,
             expires_in_ms,
         }
     }
@@ -1849,9 +1961,9 @@ impl RouteDiagnosticEntry {
         self.destination
     }
 
-    /// Public identity hash selected as next hop, when known.
-    pub const fn next_hop_identity(self) -> Option<IdentityHash> {
-        self.next_hop_identity
+    /// Direct or transported PRNS next hop.
+    pub const fn next_hop(self) -> RouteDiagnosticNextHop {
+        self.next_hop
     }
 
     /// Reticulum hop count.
@@ -1859,28 +1971,23 @@ impl RouteDiagnosticEntry {
         self.hops
     }
 
-    /// Product-owned retained interface identifier, when known.
-    pub const fn retained_interface(self) -> Option<u8> {
-        self.retained_interface
-    }
-
-    /// Current exact or broadcast resolution result.
-    pub const fn resolution(self) -> RouteDiagnosticResolution {
-        self.resolution
+    /// Receiving interface selected by the route.
+    pub const fn interface(self) -> ReticulumInterfaceId {
+        self.interface
     }
 
     /// Saturating age since the route was learned, when tracked.
-    pub const fn learned_age_ms(self) -> Option<u64> {
+    pub const fn learned_age_ms(self) -> u64 {
         self.learned_age_ms
     }
 
     /// Saturating age since the route was used, when tracked.
-    pub const fn last_used_age_ms(self) -> Option<u64> {
-        self.last_used_age_ms
+    pub const fn last_activity_age_ms(self) -> u64 {
+        self.last_activity_age_ms
     }
 
     /// Remaining lifetime before expiry, when tracked.
-    pub const fn expires_in_ms(self) -> Option<u64> {
+    pub const fn expires_in_ms(self) -> u64 {
         self.expires_in_ms
     }
 }
@@ -1888,8 +1995,6 @@ impl RouteDiagnosticEntry {
 /// One bounded lexicographically ordered page of route diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteDiagnosticsPage {
-    revision: u64,
-    total_count: u32,
     entries: [Option<RouteDiagnosticEntry>; MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES],
     next_cursor: Option<DestinationHash>,
 }
@@ -1900,8 +2005,6 @@ impl RouteDiagnosticsPage {
     /// A present next cursor must equal the last returned destination so the
     /// following request remains an unambiguous exclusive continuation.
     pub fn new(
-        revision: u64,
-        total_count: u32,
         entries: [Option<RouteDiagnosticEntry>; MAX_ROUTE_DIAGNOSTIC_PAGE_ENTRIES],
         next_cursor: Option<DestinationHash>,
     ) -> Result<Self, InvalidRouteDiagnosticsPage> {
@@ -1929,21 +2032,9 @@ impl RouteDiagnosticsPage {
             return Err(InvalidRouteDiagnosticsPage::InvalidNextCursor);
         }
         Ok(Self {
-            revision,
-            total_count,
             entries,
             next_cursor,
         })
-    }
-
-    /// Path-table revision computed as learned plus expired path counters.
-    pub const fn revision(self) -> u64 {
-        self.revision
-    }
-
-    /// Complete retained route count at snapshot time.
-    pub const fn total_count(self) -> u32 {
-        self.total_count
     }
 
     /// Dense ordered fixed-capacity route slots.
@@ -2264,7 +2355,7 @@ pub enum AuthorizationError {
     PermissionDenied(RequiredPermission),
 }
 
-/// Logical request body. It contains no transport, session, or Rete owner.
+/// Logical request body. It contains no transport, session, or engine owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DeviceRequest<'a> {
@@ -2272,6 +2363,10 @@ pub enum DeviceRequest<'a> {
     SystemCapabilities,
     /// Read the node's public primary Reticulum destination.
     IdentitySummary,
+    /// Read the product-owned appliance label.
+    ApplianceLabelGet,
+    /// Compare-and-swap the product-owned appliance label.
+    ApplianceLabelMutate(ApplianceLabelMutationRequest<'a>),
     /// Read status for a previously accepted submission.
     SubmissionStatus {
         /// Device-assigned submission identifier.
@@ -2390,6 +2485,8 @@ impl DeviceRequest<'_> {
         match self {
             Self::SystemCapabilities => OP_SYSTEM_CAPABILITIES,
             Self::IdentitySummary => OP_IDENTITY_SUMMARY,
+            Self::ApplianceLabelGet => OP_APPLIANCE_LABEL_GET,
+            Self::ApplianceLabelMutate(_) => OP_APPLIANCE_LABEL_MUTATE,
             Self::SubmissionStatus { .. } => OP_SUBMISSION_STATUS,
             #[cfg(feature = "lxmf")]
             Self::LxmfNext { .. } => OP_LXMF_NEXT,
@@ -2428,9 +2525,11 @@ impl DeviceRequest<'_> {
     /// Whether this operation can change node state.
     pub const fn is_mutating(&self) -> bool {
         match self {
-            Self::SystemCapabilities | Self::IdentitySummary | Self::SubmissionStatus { .. } => {
-                false
-            }
+            Self::SystemCapabilities
+            | Self::IdentitySummary
+            | Self::ApplianceLabelGet
+            | Self::SubmissionStatus { .. } => false,
+            Self::ApplianceLabelMutate(_) => true,
             #[cfg(feature = "lxmf")]
             Self::LxmfNext { .. }
             | Self::LxmfRead { .. }
@@ -2463,6 +2562,9 @@ impl DeviceRequest<'_> {
     const fn authorization_requirement(&self) -> AuthorizationRequirement {
         match self {
             Self::SystemCapabilities | Self::IdentitySummary => AuthorizationRequirement::Public,
+            Self::ApplianceLabelGet | Self::ApplianceLabelMutate(_) => {
+                AuthorizationRequirement::Authenticated
+            }
             Self::SubmissionStatus { .. } => {
                 AuthorizationRequirement::Permission(RequiredPermission::ReadSubmissionStatus)
             }
@@ -2614,6 +2716,8 @@ pub struct CapabilitySnapshot {
     pub(crate) manual_service_announce: CapabilityAvailability,
     /// Runtime availability of authenticated Reticulum path-and-proof probes.
     pub(crate) reticulum_probe: CapabilityAvailability,
+    /// Runtime availability of live PRNS node, interface, and route inspection.
+    pub(crate) route_diagnostics: CapabilityAvailability,
 }
 
 impl CapabilitySnapshot {
@@ -2684,6 +2788,7 @@ impl CapabilitySnapshot {
             },
             manual_service_announce: CapabilityAvailability::Available,
             reticulum_probe: CapabilityAvailability::Available,
+            route_diagnostics: CapabilityAvailability::Available,
         }
     }
 
@@ -2709,6 +2814,7 @@ impl CapabilitySnapshot {
         snapshot.network_config = CapabilityAvailability::Unavailable;
         snapshot.manual_service_announce = CapabilityAvailability::Unavailable;
         snapshot.reticulum_probe = CapabilityAvailability::Unavailable;
+        snapshot.route_diagnostics = CapabilityAvailability::Unavailable;
         snapshot
     }
 
@@ -2772,6 +2878,15 @@ impl CapabilitySnapshot {
         reticulum_probe: CapabilityAvailability,
     ) -> Self {
         self.reticulum_probe = reticulum_probe;
+        self
+    }
+
+    /// Add live PRNS node, interface, and route inspection to a dispatcher snapshot.
+    pub const fn with_dispatch_route_diagnostics(
+        mut self,
+        route_diagnostics: CapabilityAvailability,
+    ) -> Self {
+        self.route_diagnostics = route_diagnostics;
         self
     }
 
@@ -2950,6 +3065,11 @@ impl CapabilitySnapshot {
     pub const fn reticulum_probe(self) -> CapabilityAvailability {
         self.reticulum_probe
     }
+
+    /// Runtime availability of live PRNS node, interface, and route inspection.
+    pub const fn route_diagnostics(self) -> CapabilityAvailability {
+        self.route_diagnostics
+    }
 }
 
 /// Receiver-local physical signal values for one received Reticulum carrier.
@@ -2982,21 +3102,21 @@ impl IngressSignal {
 /// First-arrival interface and optional final-hop signal evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IngressObservation {
-    interface_id: u8,
+    interface_id: ReticulumInterfaceId,
     signal: Option<IngressSignal>,
 }
 
 impl IngressObservation {
     /// Construct one immutable first-arrival observation.
-    pub const fn new(interface_id: u8, signal: Option<IngressSignal>) -> Self {
+    pub const fn new(interface_id: ReticulumInterfaceId, signal: Option<IngressSignal>) -> Self {
         Self {
             interface_id,
             signal,
         }
     }
 
-    /// Device-local interface that received the carrier.
-    pub const fn interface_id(self) -> u8 {
+    /// Complete Reticulum interface identity that received the carrier.
+    pub const fn interface_id(self) -> ReticulumInterfaceId {
         self.interface_id
     }
 
@@ -3254,6 +3374,12 @@ pub enum SubmissionState {
     AwaitingDelivery(PreparedPacketDetails),
     /// A later proof or application acknowledgement completed the submission.
     Delivered(PreparedPacketDetails),
+    /// The application protocol completed without exposing a prepared RNS packet.
+    ///
+    /// LXMF uses this state after ordinary PRNS receipt settlement. PRNS owns
+    /// the encrypted packet and its proof evidence, while the product status
+    /// reports only completion of the durable application intent.
+    ApplicationDelivered,
     /// Submission terminated with a typed failure.
     Failed(SubmissionFailure),
     /// Submission was cancelled before it became irreversible.
@@ -3270,6 +3396,7 @@ impl SubmissionState {
             Self::Delivered(_) => 3,
             Self::Failed(_) => 4,
             Self::Cancelled => 5,
+            Self::ApplicationDelivered => 6,
         }
     }
 }
@@ -3396,6 +3523,10 @@ pub enum DeviceResponse {
     SystemCapabilities(CapabilitySnapshot),
     /// Result of `identity.summary`.
     IdentitySummary(IdentitySummary),
+    /// Current durable product-owned appliance label.
+    ApplianceLabel(ApplianceLabelSnapshot),
+    /// Durable product-owned appliance-label mutation outcome.
+    ApplianceLabelMutation(ApplianceLabelMutationOutcome),
     /// Result of `submission.status`.
     SubmissionStatus(SubmissionStatus),
     /// Next committed LXMF metadata entry in physical commit order.
@@ -3456,6 +3587,8 @@ impl DeviceResponse {
         match self {
             Self::SystemCapabilities(_) => OP_SYSTEM_CAPABILITIES,
             Self::IdentitySummary(_) => OP_IDENTITY_SUMMARY,
+            Self::ApplianceLabel(_) => OP_APPLIANCE_LABEL_GET,
+            Self::ApplianceLabelMutation(_) => OP_APPLIANCE_LABEL_MUTATE,
             Self::SubmissionStatus(_) => OP_SUBMISSION_STATUS,
             #[cfg(feature = "lxmf")]
             Self::LxmfNext(_) => OP_LXMF_NEXT,

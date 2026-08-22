@@ -8,13 +8,14 @@ The repository provides two product profiles:
 
 | Profile | Selection | Contents |
 | --- | --- | --- |
-| Gateway | default, or `--profile gateway` | LoRa, BLE API/onboarding, display, Wi-Fi station, and one outbound Reticulum TCP interface |
-| Appliance | `--profile appliance` | LoRa, BLE API/onboarding, and display without the Wi-Fi/TCP uplink |
+| Gateway | default, or `--profile gateway` | PRNS LoRa, Bluetooth Auto, display, Wi-Fi station, and one outbound Reticulum TCP interface |
+| Appliance | `--profile appliance` | PRNS LoRa, Bluetooth Auto, and display without the Wi-Fi/TCP uplink |
 
 Both product profiles emit startup, lifecycle, BLE, radio, storage, display,
 and fault logs over native USB Serial/JTAG at `Info` level. The gateway also
-logs Wi-Fi and TCP state. USB is diagnostics-only; the authenticated local
-device API is exposed over BLE.
+logs Wi-Fi and TCP state. USB is diagnostics-only. Bluetooth carries ordinary
+Reticulum traffic through PRNS Bluetooth Auto; management and enrollment are
+Reticulum application protocols rather than a separate BLE device API.
 
 ## Toolchains
 
@@ -45,8 +46,20 @@ ESP32-S3.
 
 ## Build and package
 
-The repository wrapper selects the target, release flags, partition table, and
-output layout consistently. The default profile is `gateway`:
+Build the pinned ESP-IDF bootloader with application rollback enabled before
+packaging either profile:
+
+```sh
+firmware/e290/bootloader/build-container.sh
+```
+
+This downloads the architecture-specific official ESP-IDF v5.5.5 container on
+first use and writes generated output under `target/e290-bootloader`. The
+repository wrapper refuses to package with `espflash`'s default rollback-
+disabled bootloader.
+
+The wrapper then selects the target, release flags, partition table, bootloader,
+and output layout consistently. The default profile is `gateway`:
 
 ```sh
 cargo run --locked -p xtask -- build
@@ -65,8 +78,9 @@ cargo run --locked -p xtask -- package --profile appliance \
 
 `package` builds first and produces one merged address-zero image for the
 checked 16 MiB partition map, DIO flash mode, 80 MHz flash frequency, and the
-application in `factory`. The file is not padded through product data, so an
-ordinary address-zero write preserves state above the application partition.
+rollback-enabled second-stage bootloader, with the application in `ota_0`. The
+file is not padded through `ota_1` or either state arena, so an ordinary
+address-zero write does not overwrite those later regions.
 `check-elf` verifies the linked startup stack and compiler-emitted frame sizes;
 PSRAM cannot compensate for an oversized CPU startup stack.
 
@@ -90,8 +104,9 @@ espflash save-image --skip-update-check \
   --chip esp32s3 --merge --skip-padding \
   --flash-mode dio --flash-freq 80mhz --flash-size 16mb \
   --xtal-freq 40mhz \
+  --bootloader target/e290-bootloader/bootloader/bootloader.bin \
   --partition-table partitions/e290.csv \
-  --target-app-partition factory \
+  --target-app-partition ota_0 \
   "$ELF" target/e290-gateway.bin
 ```
 
@@ -125,11 +140,11 @@ physical radio module is not HT-RA62-HF.
 
 ## Fresh provisioning
 
-Fresh provisioning deletes the Reticulum identity, BLE bond, device
-credentials, network configuration, journals, and all messages. It is required
-before the first installation of the current storage formats. It is also the
-correct recovery when the installed layout or format is unknown; do not try to
-mount incompatible product data.
+Fresh provisioning deletes the Reticulum identity, product application data,
+network configuration, and PRNS routes, ratchets, timebase, and journals. It is
+required before the first installation of the PRNS image and current storage
+formats. It is also the correct recovery when the installed layout or format
+is unknown; do not try to mount incompatible alpha data.
 
 Erase the complete flash, then write the packaged image:
 
@@ -147,23 +162,13 @@ The current store layout is defined in
 [`partitions/README.md`](../../partitions/README.md). Double-check `$PORT`
 immediately before the destructive command.
 
-## Upgrade while preserving state
+## Development reinstall
 
-Use this only after the board has already been provisioned with every format
-version listed in [`partitions/README.md`](../../partitions/README.md). Do not
-erase product data:
-
-```sh
-IMAGE=target/e290-gateway.bin
-espflash write-bin --chip esp32s3 --port "$PORT" \
-  --after no-reset --non-interactive --skip-update-check \
-  0x0 "$IMAGE"
-```
-
-The merged image ends before product data at `0x610000`. A future incompatible
-storage change must update this guide and require fresh provisioning or an
-explicit migration; reflashing the application alone does not make
-incompatible persistent data safe.
+The PRNS cutover is an explicit full-reset boundary. Use the fresh
+provisioning procedure above rather than attempting to preserve alpha board
+state. State-preserving releases use the Reticulum OTA application and inactive
+A/B slot described in [OTA updates](../ota-updates.md); a raw development flash
+is not a substitute for that activation and rollback protocol.
 
 To package and flash directly from the ELF instead of writing a merged image,
 retain every geometry input explicitly:
@@ -171,7 +176,7 @@ retain every geometry input explicitly:
 ```sh
 espflash flash --chip esp32s3 --port "$PORT" \
   --flash-size 16mb --flash-mode dio --flash-freq 80mhz \
-  --target-app-partition factory \
+  --target-app-partition ota_0 \
   --partition-table partitions/e290.csv \
   --after no-reset --non-interactive --skip-update-check \
   "$ELF"
@@ -191,9 +196,10 @@ espflash monitor --chip esp32s3 --port "$PORT" \
   --elf "$ELF" --skip-update-check --non-interactive --no-reset
 ```
 
-Continue with [BLE pairing](pairing.md). Configure Wi-Fi, the TCP peer, announce
-policy, RMAP, and the LoRa profile from the app. Material network and radio
-changes are saved atomically and apply after reboot.
+Bluetooth Auto and the management application are still awaiting powered E290
+and native mobile qualification. Until those gates pass, use USB diagnostics
+to assess boot and do not treat a target build or Bluetooth advertisement as
+proof that enrollment or configuration is operational.
 
 ## Radio configuration
 
@@ -214,10 +220,10 @@ If the display remains at `STARTING`, confirm that the board left the loader,
 the image was packaged with the checked 16 MiB partition table, and the target
 has at least 8 MiB mapped PSRAM. Capture USB logs before changing state.
 
-If the app cannot find the board, wait for `READY`, grant Bluetooth permission,
-and close other clients that may own the single GATT connection. Use the
-[board-only recovery flow](pairing.md#recover-a-stale-or-unavailable-bluetooth-bond)
-when the retained bond belongs to another phone.
+If a PRNS mobile node cannot attach over Bluetooth Auto, wait for `READY`, grant
+Bluetooth permission, close other clients that may own a connection, and
+capture USB diagnostics. Powered mobile interoperability is an open migration
+gate; do not fall back to the removed custom device-control bearer.
 
 If Wi-Fi or TCP is unhealthy, keep BLE connected if possible and inspect the
 Network panel plus USB logs for association, DHCP, DNS, socket, and reconnect

@@ -12,6 +12,7 @@ import {
   messageActivityStatusLabel,
   sortMessageActivityNewestFirst,
 } from "./message-activity.ts";
+import { syntheticReticulumInterfaceId } from "./reticulum-interface-id.ts";
 
 function activityEvent(
   overrides: Partial<MessageActivityEventView> = {},
@@ -80,14 +81,14 @@ describe("message activity presentation", () => {
       outbox_id: null,
       attempt_number: null,
       ingress_observation: {
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         signal: { rssi_dbm: -103, snr_db: -2 },
       },
       activity: { kind: "inbound_imported", message_id: "fe".repeat(32) },
     });
 
     expect(messageActivityPresentation(event, new Map()).metadata).toContain(
-      "Receiver-local final hop · interface 1 · RSSI -103 dBm · SNR -2 dB",
+      "Receiver-local final hop · interface 0000000000000001 · RSSI -103 dBm · SNR -2 dB",
     );
   });
 

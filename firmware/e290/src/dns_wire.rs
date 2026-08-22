@@ -160,7 +160,7 @@ pub fn parse_a_response(
                     label.map_err(|_| DnsResponseError::Malformed)?;
                 }
             }
-            DnsRecordData::Other(_, _) => {}
+            DnsRecordData::Aaaa(_) | DnsRecordData::Other(_, _) => {}
         }
     }
 

@@ -59,6 +59,25 @@ fn destination(tag: u8) -> DestinationHash {
     DestinationHash::new([tag; 16])
 }
 
+#[test]
+fn device_capabilities_gate_only_negotiated_app_operations() {
+    let negotiated = reticulum_device_api::CapabilitySnapshot::for_dispatch(false)
+        .with_dispatch_network_config(reticulum_device_api::CapabilityAvailability::Available)
+        .with_dispatch_manual_service_announce(
+            reticulum_device_api::CapabilityAvailability::Disabled,
+        );
+
+    let capabilities = ApplianceCapabilitiesView::from_device_api(negotiated);
+
+    assert!(!capabilities.nearby_peers());
+    assert!(!capabilities.manual_service_announce());
+    assert!(capabilities.network_config());
+    assert!(!capabilities.nomad());
+    assert!(!capabilities.reticulum_probe());
+    assert!(!capabilities.radio_routes());
+    assert!(!capabilities.radio_trace());
+}
+
 fn binding(tag: u8) -> DeviceBinding {
     DeviceBinding::new(
         [tag; 16],
@@ -120,24 +139,24 @@ fn inbox(handle: u64, tag: u8) -> (InboxSummary, InboundMessage) {
 }
 
 #[test]
-fn connection_bearer_is_part_of_the_transport_neutral_projection() {
+fn connection_network_is_reticulum() {
     let state = ConnectionState::Ready {
-        transport: ConnectionTransport::UsbSerial,
-        endpoint: "/dev/cu.usbmodem-test".to_owned(),
+        transport: ConnectionTransport::Reticulum,
+        endpoint: "00112233445566778899aabbccddeeff".to_owned(),
         device_label: "001122334455".to_owned(),
     };
     assert!(matches!(
         state.transport(),
-        Some(ConnectionTransport::UsbSerial)
+        Some(ConnectionTransport::Reticulum)
     ));
-    assert_eq!(state.endpoint(), Some("/dev/cu.usbmodem-test"));
+    assert_eq!(state.endpoint(), Some("00112233445566778899aabbccddeeff"));
     assert_eq!(state.device_label(), Some("001122334455"));
     assert_eq!(
         serde_json::to_value(state).unwrap(),
         serde_json::json!({
             "state": "ready",
-            "transport": "usb_serial",
-            "endpoint": "/dev/cu.usbmodem-test",
+            "transport": "reticulum",
+            "endpoint": "00112233445566778899aabbccddeeff",
             "device_label": "001122334455",
         })
     );
@@ -325,6 +344,8 @@ struct FakeSession {
     submitted: Arc<Mutex<Vec<OutboxMaterial>>>,
     status: SubmissionState,
     nearby_generation: Option<Arc<AtomicU64>>,
+    remote_nearby_peer: Option<reticulum_device_api::LxmfDiscoveredPeer>,
+    radio_trace_available: bool,
 }
 
 impl LxmfSession for FakeSession {
@@ -332,6 +353,23 @@ impl LxmfSession for FakeSession {
 
     fn binding(&mut self) -> Result<DeviceBinding, Self::Error> {
         Ok(self.binding)
+    }
+
+    fn appliance_label_get(
+        &mut self,
+    ) -> Result<reticulum_device_api::ApplianceLabelSnapshot, Self::Error> {
+        Ok(reticulum_device_api::ApplianceLabelSnapshot::new(0, None))
+    }
+
+    fn appliance_label_mutate(
+        &mut self,
+        request: reticulum_device_api::ApplianceLabelMutationRequest<'_>,
+    ) -> Result<reticulum_device_api::ApplianceLabelMutationOutcome, Self::Error> {
+        Ok(
+            reticulum_device_api::ApplianceLabelMutationOutcome::Applied {
+                revision: request.expected_revision.saturating_add(1),
+            },
+        )
     }
 
     fn submit(&mut self, material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
@@ -383,8 +421,22 @@ impl LxmfSession for FakeSession {
 
     fn next_nearby_peer(
         &mut self,
-        _after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
+        after: Option<reticulum_device_api::LxmfPeerDiscoveryCursor>,
     ) -> Result<reticulum_device_api::LxmfPeerDiscoveryPage, Self::Error> {
+        if let Some(peer) = self.remote_nearby_peer {
+            let generation = peer.generation();
+            let incarnation = reticulum_device_api::LxmfPeerDiscoveryIncarnation::new([0x7a; 8]);
+            let peer = after
+                .is_none_or(|after| after.after_generation() < generation.get())
+                .then_some(peer);
+            return Ok(reticulum_device_api::LxmfPeerDiscoveryPage::new(
+                reticulum_device_api::LxmfPeerDiscoveryCursor::new(incarnation, generation.get()),
+                Some(generation),
+                Some(generation),
+                false,
+                peer,
+            ));
+        }
         let generation = self
             .nearby_generation
             .as_ref()
@@ -472,6 +524,14 @@ impl LxmfSession for FakeSession {
         &mut self,
         _request: reticulum_device_api::RadioTracePageRequest,
     ) -> Result<reticulum_device_api::RadioTracePage, Self::Error> {
+        if !self.radio_trace_available {
+            return Err(DeviceSessionError::Api(
+                reticulum_device_api::ApiErrorResponse {
+                    code: ApiErrorCode::CapabilityUnavailable,
+                    operation: Some(reticulum_device_api::OP_RADIO_TRACE_PAGE),
+                },
+            ));
+        }
         Ok(empty_radio_trace_page())
     }
 
@@ -486,6 +546,7 @@ struct FakeConnector {
     submitted: Arc<Mutex<Vec<OutboxMaterial>>>,
     status: SubmissionState,
     nearby_generation: Option<Arc<AtomicU64>>,
+    remote_nearby_peer: Option<reticulum_device_api::LxmfDiscoveredPeer>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -519,6 +580,23 @@ impl LxmfSession for NomadSession {
 
     fn binding(&mut self) -> Result<DeviceBinding, Self::Error> {
         Ok(binding(0x81))
+    }
+
+    fn appliance_label_get(
+        &mut self,
+    ) -> Result<reticulum_device_api::ApplianceLabelSnapshot, Self::Error> {
+        Ok(reticulum_device_api::ApplianceLabelSnapshot::new(0, None))
+    }
+
+    fn appliance_label_mutate(
+        &mut self,
+        request: reticulum_device_api::ApplianceLabelMutationRequest<'_>,
+    ) -> Result<reticulum_device_api::ApplianceLabelMutationOutcome, Self::Error> {
+        Ok(
+            reticulum_device_api::ApplianceLabelMutationOutcome::Applied {
+                revision: request.expected_revision.saturating_add(1),
+            },
+        )
     }
 
     fn submit(&mut self, _material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
@@ -612,7 +690,7 @@ impl LxmfSession for NomadSession {
                 1_234,
                 2,
                 reticulum_device_api::IngressObservation::new(
-                    7,
+                    reticulum_device_api::ReticulumInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 7]),
                     Some(reticulum_device_api::IngressSignal::new(-91, 7)),
                 ),
             ),
@@ -686,7 +764,11 @@ impl Connector for NomadConnector {
             NomadSession {
                 trace: self.trace.clone(),
             },
-            ConnectionMetadata::new(ConnectionTransport::UsbSerial, "/dev/fake", "001122334455"),
+            ConnectionMetadata::new(
+                ConnectionTransport::Reticulum,
+                "destination",
+                "001122334455",
+            ),
         ))
     }
 }
@@ -721,6 +803,23 @@ impl LxmfSession for NetworkSession {
 
     fn binding(&mut self) -> Result<DeviceBinding, Self::Error> {
         Ok(binding(0x91))
+    }
+
+    fn appliance_label_get(
+        &mut self,
+    ) -> Result<reticulum_device_api::ApplianceLabelSnapshot, Self::Error> {
+        Ok(reticulum_device_api::ApplianceLabelSnapshot::new(0, None))
+    }
+
+    fn appliance_label_mutate(
+        &mut self,
+        request: reticulum_device_api::ApplianceLabelMutationRequest<'_>,
+    ) -> Result<reticulum_device_api::ApplianceLabelMutationOutcome, Self::Error> {
+        Ok(
+            reticulum_device_api::ApplianceLabelMutationOutcome::Applied {
+                revision: request.expected_revision.saturating_add(1),
+            },
+        )
     }
 
     fn submit(&mut self, _material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
@@ -873,12 +972,16 @@ impl LxmfSession for NetworkSession {
             4_500,
             [
                 Some(reticulum_device_api::DiagnosticInterfaceRecord::new(
-                    1,
-                    reticulum_device_api::DiagnosticInterfaceKind::LoRa,
-                    reticulum_device_api::DiagnosticInterfaceState::Online,
+                    reticulum_device_api::ReticulumInterfaceId::new([14, 0, 0, 0, 0, 0, 0, 1]),
+                    reticulum_device_api::DiagnosticInterfaceMode::Internal,
+                    reticulum_device_api::DiagnosticInterfaceState::Connected,
+                    None,
                     2,
                     500,
-                    Some(5_470),
+                    3,
+                    0,
+                    0,
+                    None,
                 )),
                 None,
                 None,
@@ -906,7 +1009,7 @@ impl LxmfSession for NetworkSession {
                     700,
                     reticulum_device_api::DiagnosticLoraTxOutcome::Completed,
                     reticulum_device_api::DiagnosticLoraDataTxEvidence::try_new(
-                        1,
+                        reticulum_device_api::ReticulumInterfaceId::new([14, 0, 0, 0, 0, 0, 0, 1]),
                         183,
                         reticulum_device_api::EncodedPacketSha256::new([0xab; 32]),
                     )
@@ -914,10 +1017,8 @@ impl LxmfSession for NetworkSession {
                 )),
                 None,
             )),
-            reticulum_device_api::RnsDiagnostics::new(9, 2, 1, 0, 4, 1, 0, 0, 0, 0, 1),
-            3,
             1,
-            1,
+            0,
         ))
     }
 
@@ -929,21 +1030,19 @@ impl LxmfSession for NetworkSession {
         assert_eq!(request.after(), None);
         let route = reticulum_device_api::RouteDiagnosticEntry::new(
             reticulum_device_api::DestinationHash([0x95; 16]),
-            Some(reticulum_device_api::IdentityHash::new([0x96; 16])),
+            reticulum_device_api::RouteDiagnosticNextHop::Via(
+                reticulum_device_api::IdentityHash::new([0x96; 16]),
+            ),
             2,
-            Some(1),
-            reticulum_device_api::RouteDiagnosticResolution::ExactReady,
-            Some(1_200),
-            Some(400),
-            Some(28_800),
+            reticulum_device_api::ReticulumInterfaceId::new([14, 0, 0, 0, 0, 0, 0, 1]),
+            1_200,
+            400,
+            28_800,
         );
-        Ok(reticulum_device_api::RouteDiagnosticsPage::new(
-            1,
-            1,
-            [Some(route), None, None, None],
-            None,
+        Ok(
+            reticulum_device_api::RouteDiagnosticsPage::new([Some(route), None, None, None], None)
+                .unwrap(),
         )
-        .unwrap())
     }
 
     fn radio_trace_page(
@@ -975,7 +1074,11 @@ impl Connector for NetworkConnector {
             NetworkSession {
                 trace: self.trace.clone(),
             },
-            ConnectionMetadata::new(ConnectionTransport::UsbSerial, "/dev/fake", "001122334455"),
+            ConnectionMetadata::new(
+                ConnectionTransport::Reticulum,
+                "destination",
+                "001122334455",
+            ),
         ))
     }
 }
@@ -988,8 +1091,8 @@ impl Connector for UnavailableConnector {
     fn connect(&mut self) -> Result<ConnectedSession, ConnectFailure> {
         self.attempts.fetch_add(1, Ordering::Relaxed);
         Err(ConnectFailure::unavailable(
-            ConnectionTransport::BluetoothLowEnergy,
-            "BLE adapter is not implemented",
+            ConnectionTransport::Reticulum,
+            "Reticulum connector is not implemented",
         ))
     }
 }
@@ -1020,8 +1123,14 @@ impl Connector for LeaseConnector {
                 submitted: Arc::new(Mutex::new(Vec::new())),
                 status: SubmissionState::Queued,
                 nearby_generation: None,
+                remote_nearby_peer: None,
+                radio_trace_available: true,
             },
-            ConnectionMetadata::new(ConnectionTransport::UsbSerial, "/dev/fake", "001122334455"),
+            ConnectionMetadata::new(
+                ConnectionTransport::Reticulum,
+                "destination",
+                "001122334455",
+            ),
         )
         .with_connection_lease(CountingLease(self.lease_drops.clone())))
     }
@@ -1041,6 +1150,19 @@ impl LxmfSession for DropOrderSession {
     type Error = DeviceSessionError;
 
     fn binding(&mut self) -> Result<DeviceBinding, Self::Error> {
+        Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+    }
+
+    fn appliance_label_get(
+        &mut self,
+    ) -> Result<reticulum_device_api::ApplianceLabelSnapshot, Self::Error> {
+        Err(DeviceSessionError::MissingLxmfDeliveryDestination)
+    }
+
+    fn appliance_label_mutate(
+        &mut self,
+        _request: reticulum_device_api::ApplianceLabelMutationRequest<'_>,
+    ) -> Result<reticulum_device_api::ApplianceLabelMutationOutcome, Self::Error> {
         Err(DeviceSessionError::MissingLxmfDeliveryDestination)
     }
 
@@ -1182,7 +1304,11 @@ impl Connector for BindingFailureConnector {
             DropOrderSession {
                 order: self.order.clone(),
             },
-            ConnectionMetadata::new(ConnectionTransport::UsbSerial, "/dev/fake", "001122334455"),
+            ConnectionMetadata::new(
+                ConnectionTransport::Reticulum,
+                "destination",
+                "001122334455",
+            ),
         )
         .with_connection_lease(DropOrderLease(self.order.clone())))
     }
@@ -1196,16 +1322,39 @@ impl Connector for FakeConnector {
             .pop_front()
             .unwrap_or_else(|| Err("no scripted connection remains".to_owned()))
             .map_err(ConnectFailure::retryable)?;
-        Ok(ConnectedSession::new(
+        let connected = ConnectedSession::new(
             FakeSession {
                 binding,
                 inbox,
                 submitted: self.submitted.clone(),
                 status: self.status,
                 nearby_generation: self.nearby_generation.clone(),
+                remote_nearby_peer: self.remote_nearby_peer,
+                radio_trace_available: true,
             },
-            ConnectionMetadata::new(ConnectionTransport::UsbSerial, "/dev/fake", "001122334455"),
-        ))
+            ConnectionMetadata::new(
+                ConnectionTransport::Reticulum,
+                "destination",
+                "001122334455",
+            ),
+        );
+        Ok(if self.remote_nearby_peer.is_some() {
+            connected.with_capabilities(ApplianceCapabilitiesView::from_device_api(
+                reticulum_device_api::CapabilitySnapshot::for_dispatch_with_lxmf_basic_send_and_peer_discovery(
+                    false,
+                    reticulum_device_api::CapabilityAvailability::Available,
+                    reticulum_device_api::CapabilityAvailability::Available,
+                    reticulum_device_api::CapabilityAvailability::Available,
+                    reticulum_device_api::MAX_LXMF_PEER_APP_DATA_BYTES as u16,
+                ),
+            ))
+        } else {
+            connected
+        })
+    }
+
+    fn nearby_peers(&self) -> Result<Vec<NearbyPeerView>, String> {
+        Ok(Vec::new())
     }
 }
 
@@ -1232,6 +1381,7 @@ fn connected_fake_actor(
         submitted: submitted.clone(),
         status: SubmissionState::Queued,
         nearby_generation: None,
+        remote_nearby_peer: None,
     };
     let (_commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
     let initial = Arc::new(ApplianceSnapshot::starting());
@@ -1252,16 +1402,14 @@ fn connected_fake_actor(
 
 fn background_api_error(
     code: ApiErrorCode,
-    operation: reticulum_device_client::Operation,
     wire_operation: u16,
 ) -> EngineError<SqliteStoreError, DeviceSessionError> {
-    EngineError::Session(DeviceSessionError::Client(ClientError::Api {
-        operation,
-        error: reticulum_device_api::ApiErrorResponse {
+    EngineError::Session(DeviceSessionError::Api(
+        reticulum_device_api::ApiErrorResponse {
             code,
             operation: Some(wire_operation),
         },
-    }))
+    ))
 }
 
 #[test]
@@ -1316,11 +1464,7 @@ fn retryable_reconcile_error_rearms_hot_row_without_dropping_the_session() {
 
         actor.background_error(
             BackgroundWork::Reconcile,
-            background_api_error(
-                code,
-                reticulum_device_client::Operation::SubmissionStatus,
-                reticulum_device_api::OP_SUBMISSION_STATUS,
-            ),
+            background_api_error(code, reticulum_device_api::OP_SUBMISSION_STATUS),
         );
         let after = Instant::now();
 
@@ -1349,11 +1493,7 @@ fn retry_later_delays_only_inbox_work_then_retries_on_the_same_session() {
     let before = Instant::now();
     actor.background_error(
         BackgroundWork::Inbox,
-        background_api_error(
-            ApiErrorCode::RetryLater,
-            reticulum_device_client::Operation::LxmfNext,
-            reticulum_device_api::OP_LXMF_NEXT,
-        ),
+        background_api_error(ApiErrorCode::RetryLater, reticulum_device_api::OP_LXMF_NEXT),
     );
     let after = Instant::now();
 
@@ -1385,7 +1525,6 @@ fn retry_later_reconcile_runs_the_same_durable_row_after_backoff() {
         BackgroundWork::Reconcile,
         background_api_error(
             ApiErrorCode::RetryLater,
-            reticulum_device_client::Operation::LxmfBasicSend,
             reticulum_device_api::OP_LXMF_BASIC_SEND,
         ),
     );
@@ -1610,6 +1749,7 @@ fn urgent_send_reconciliation_precedes_due_inbox_and_radio_trace_work() {
     actor.next_inbox = now;
     actor.next_reconcile = now;
     actor.next_radio_trace = now;
+    actor.radio_trace_available = true;
     actor.urgent_reconcile_outbox = Some(OutboxId::new(1).unwrap());
     actor.urgent_reconcile_due = true;
     actor.radio_trace_chat_yields_remaining = 0;
@@ -1659,6 +1799,8 @@ fn hot_outbox_alternates_with_ordinary_fairness_without_starving_older_work() {
         submitted: submitted.clone(),
         status: SubmissionState::Preparing,
         nearby_generation: None,
+        remote_nearby_peer: None,
+        radio_trace_available: true,
     }));
     actor.urgent_reconcile_outbox = Some(hot);
     actor.urgent_reconcile_due = true;
@@ -1697,6 +1839,40 @@ fn idle_radio_trace_poll_is_slower_than_chat_status_polling() {
     assert_eq!(config.radio_trace_idle_interval, Duration::from_secs(5));
     assert!(config.radio_trace_idle_interval > config.status_poll_interval);
     assert!(config.radio_trace_idle_interval > config.inbox_poll_interval);
+}
+
+#[test]
+fn unavailable_optional_radio_trace_does_not_fault_the_session_or_retry() {
+    let database = TestDatabase::new("radio-trace-unavailable");
+    let store = SqliteChatStore::open(&database.0).unwrap();
+    let (mut actor, submitted) = connected_fake_actor(config(&database), store, Vec::new());
+    actor.session = Some(Box::new(FakeSession {
+        binding: binding(0x28),
+        inbox: Vec::new(),
+        submitted,
+        status: SubmissionState::Queued,
+        nearby_generation: None,
+        remote_nearby_peer: None,
+        radio_trace_available: false,
+    }));
+    actor.radio_trace_available = true;
+
+    assert!(actor.radio_trace_available);
+    actor.radio_trace_turn();
+
+    assert!(!actor.radio_trace_available);
+    assert!(actor.session.is_some());
+    assert!(matches!(
+        actor.snapshot.connection(),
+        ConnectionState::Ready { .. }
+    ));
+    assert_eq!(actor.snapshot.last_error(), None);
+
+    let now = Instant::now();
+    actor.next_inbox = now + Duration::from_secs(1);
+    actor.next_reconcile = now + Duration::from_secs(1);
+    actor.next_radio_trace = now;
+    assert_eq!(actor.select_background_work(now), None);
 }
 
 #[test]
@@ -1739,6 +1915,7 @@ fn newly_connected_chat_work_precedes_due_trace_catch_up() {
     actor.next_inbox = now;
     actor.next_reconcile = now;
     actor.next_radio_trace = now;
+    actor.radio_trace_available = true;
     actor.radio_trace_chat_yields_remaining = RADIO_TRACE_CHAT_YIELD_TURNS;
 
     assert_eq!(
@@ -1767,6 +1944,7 @@ async fn actor_reconnects_binds_imports_and_processes_offline_outbox() {
         submitted: submitted.clone(),
         status: SubmissionState::Queued,
         nearby_generation: None,
+        remote_nearby_peer: None,
     };
     let store = SqliteChatStore::open(&database.0).unwrap();
     let handle = start_with_connector(config(&database), store, connector).unwrap();
@@ -1859,6 +2037,7 @@ async fn terminal_outbox_is_not_resubmitted_on_startup_sync_or_reconnect() {
         submitted: submitted.clone(),
         status: SubmissionState::Failed(SubmissionFailure::DeliveryTimeout),
         nearby_generation: None,
+        remote_nearby_peer: None,
     };
     let store = SqliteChatStore::open(&database.0).unwrap();
     let handle = start_with_connector(config(&database), store, connector).unwrap();
@@ -1900,7 +2079,7 @@ async fn terminal_outbox_is_not_resubmitted_on_startup_sync_or_reconnect() {
 }
 
 #[tokio::test]
-async fn nearby_generation_changes_do_not_rearm_a_terminal_outbox() {
+async fn app_local_nearby_reads_do_not_rearm_a_terminal_outbox() {
     let database = TestDatabase::new("terminal-outbox-nearby");
     seed_terminal_outbox(&database, 0x43);
     let nearby_generation = Arc::new(AtomicU64::new(1));
@@ -1911,6 +2090,7 @@ async fn nearby_generation_changes_do_not_rearm_a_terminal_outbox() {
         submitted: submitted.clone(),
         status: SubmissionState::Failed(SubmissionFailure::DeliveryTimeout),
         nearby_generation: Some(nearby_generation.clone()),
+        remote_nearby_peer: None,
     };
     let store = SqliteChatStore::open(&database.0).unwrap();
     let handle = start_with_connector(config(&database), store, connector).unwrap();
@@ -1929,6 +2109,50 @@ async fn nearby_generation_changes_do_not_rearm_a_terminal_outbox() {
         submitted.lock().unwrap().is_empty(),
         "nearby observations and sync activity must not create a fresh device submission"
     );
+    handle.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn nearby_refresh_reads_the_active_appliance_projection_with_node_provenance() {
+    let database = TestDatabase::new("appliance-nearby-provenance");
+    let generation = reticulum_device_api::LxmfPeerGeneration::new(1).unwrap();
+    let remote_peer = reticulum_device_api::LxmfDiscoveredPeer::new(
+        reticulum_device_api::DestinationHash([0x44; 16]),
+        reticulum_device_api::IdentityHash::new([0x45; 16]),
+        b"LoRa neighbor",
+        1,
+        reticulum_device_api::ReticulumInterfaceId::new([14, 1, 2, 3, 4, 5, 6, 7]),
+        Some(-98),
+        Some(4),
+        750,
+        generation,
+    )
+    .unwrap();
+    let connector = FakeConnector {
+        outcomes: VecDeque::from([Ok((binding(0x23), Vec::new()))]),
+        attempts: Arc::new(AtomicUsize::new(0)),
+        submitted: Arc::new(Mutex::new(Vec::new())),
+        status: SubmissionState::Queued,
+        nearby_generation: None,
+        remote_nearby_peer: Some(remote_peer),
+    };
+    let store = SqliteChatStore::open(&database.0).unwrap();
+    let handle = start_with_connector(config(&database), store, connector).unwrap();
+    wait_for(&handle, |snapshot| {
+        matches!(snapshot.connection(), ConnectionState::Ready { .. })
+    })
+    .await;
+
+    assert!(handle.snapshot().capabilities().nearby_peers());
+    let peers = handle.nearby_peers().await.unwrap();
+    assert_eq!(peers.len(), 1);
+    let peer = serde_json::to_value(&peers[0]).unwrap();
+    assert_eq!(peer["destination"], "44".repeat(16));
+    assert_eq!(peer["display_name"], "LoRa neighbor");
+    assert_eq!(peer["interface_name"], "lora");
+    assert_eq!(peer["observer_kind"], "appliance");
+    assert_eq!(peer["observer_management_destination"], "24".repeat(16));
+
     handle.shutdown_and_wait().await.unwrap();
 }
 
@@ -2002,7 +2226,7 @@ async fn actor_serializes_nomad_fetches_and_probes_through_its_existing_session(
                 "round_trip_ms": 1_234,
                 "hops": 2,
                 "ingress_observation": {
-                    "interface_id": 7,
+                    "interface_id": [0, 0, 0, 0, 0, 0, 0, 7],
                     "signal": {
                         "rssi_dbm": -91,
                         "snr_db": 7,
@@ -2076,7 +2300,6 @@ async fn actor_serializes_network_reads_and_secret_bearing_mutations() {
                 "coding_rate_denominator": 5,
                 "tx_power_dbm": 14
             },
-            "device_name": null
         })
     );
     assert_eq!(
@@ -2104,12 +2327,16 @@ async fn actor_serializes_network_reads_and_secret_bearing_mutations() {
         serde_json::json!({
             "uptime_ms": 4_500,
             "interfaces": [{
-                "id": 1,
-                "kind": "lora",
-                "state": "online",
-                "generation": 2,
-                "logical_mtu": 500,
-                "bitrate": 5_470
+                "id": [14, 0, 0, 0, 0, 0, 0, 1],
+                "mode": "internal",
+                "state": "connected",
+                "failure_reason": null,
+                "rx_bytes": 2,
+                "tx_bytes": 500,
+                "destinations": 3,
+                "links": 0,
+                "transported_links": 0,
+                "supervisor": null
             }],
             "lora": {
                 "applied_tx_power_dbm": 22,
@@ -2134,7 +2361,7 @@ async fn actor_serializes_network_reads_and_secret_bearing_mutations() {
                     "outcome": "completed",
                     "family": "data",
                     "data_evidence": {
-                        "interface_id": 1,
+                        "interface_id": [14, 0, 0, 0, 0, 0, 0, 1],
                         "encoded_packet_len": 183,
                         "encoded_packet_sha256": "ab".repeat(32)
                     }
@@ -2144,36 +2371,24 @@ async fn actor_serializes_network_reads_and_secret_bearing_mutations() {
                     "outcome": "completed",
                     "family": "data",
                     "data_evidence": {
-                        "interface_id": 1,
+                        "interface_id": [14, 0, 0, 0, 0, 0, 0, 1],
                         "encoded_packet_len": 183,
                         "encoded_packet_sha256": "ab".repeat(32)
                     }
                 }
             },
-            "rns": {
-                "received": 9,
-                "forwarded": 2,
-                "dedup_drops": 1,
-                "invalid_drops": 0,
-                "announces_received": 4,
-                "paths_learned": 1,
-                "paths_expired": 0,
-                "links_established": 0,
-                "links_closed": 0,
-                "links_failed": 0
-            },
-            "observed_peer_count": 3,
-            "retained_route_count": 1,
-            "usable_route_count": 1,
-            "route_table_revision": 1,
+            "route_count": 1,
+            "link_count": 0,
             "routes": [{
                 "destination": "95".repeat(16),
-                "next_hop_identity": "96".repeat(16),
+                "next_hop": {
+                    "kind": "via",
+                    "transport_identity": "96".repeat(16)
+                },
                 "hops": 2,
-                "retained_interface_id": 1,
-                "resolution": "exact_ready",
+                "interface_id": [14, 0, 0, 0, 0, 0, 0, 1],
                 "learned_age_ms": 1_200,
-                "last_local_use_age_ms": 400,
+                "last_activity_age_ms": 400,
                 "expires_in_ms": 28_800
             }]
         })
@@ -2240,6 +2455,7 @@ async fn database_binding_mismatch_faults_without_retrying_another_board() {
         submitted: Arc::new(Mutex::new(Vec::new())),
         status: SubmissionState::Queued,
         nearby_generation: None,
+        remote_nearby_peer: None,
     };
     let handle = start_with_connector(config(&database), store, connector).unwrap();
     wait_for(&handle, |snapshot| {
@@ -2264,7 +2480,7 @@ async fn unavailable_connector_settles_without_background_retry() {
     wait_for(&handle, |snapshot| {
         snapshot.connection()
             == &ConnectionState::Unavailable {
-                transport: ConnectionTransport::BluetoothLowEnergy,
+                transport: ConnectionTransport::Reticulum,
             }
     })
     .await;
@@ -2272,7 +2488,7 @@ async fn unavailable_connector_settles_without_background_retry() {
     assert_eq!(attempts.load(Ordering::Relaxed), 1);
     assert_eq!(
         handle.snapshot().last_error(),
-        Some("BLE adapter is not implemented")
+        Some("Reticulum connector is not implemented")
     );
     handle.shutdown_and_wait().await.unwrap();
 }
@@ -2476,6 +2692,7 @@ async fn ensure_connected_interrupts_retry_backoff_without_clearing_state() {
         submitted,
         status: SubmissionState::Queued,
         nearby_generation: None,
+        remote_nearby_peer: None,
     };
     let mut delayed = config(&database);
     delayed.reconnect_initial = Duration::from_secs(30);

@@ -19,8 +19,8 @@ use reticulum_lxmf_model::{
     AuthenticatedMaterialFingerprint, CarrierProvenance, DestinationHash, DurableMessageReceipt,
     ExactWireDigest, InboundInterfaceId, InboundMessageCandidate, InboundMessageLengths,
     InboundMessageMetadata, InboundSignalObservation, InboundTransportObservation, MessageHandle,
-    MessageId, ReplayFingerprint, ReplayRelation, RequiredStampCost, SourceHash,
-    StampAdmissionProvenance,
+    MessageId, ReplayFingerprint, ReplayRelation, RequiredStampCost, SignatureVerification,
+    SourceHash, StampAdmissionProvenance,
 };
 use sha2::{Digest, Sha256};
 
@@ -30,7 +30,7 @@ mod tests;
 /// Physical erase extent used by the store format.
 pub const EXTENT_SIZE: usize = 4096;
 /// Current physical format version.
-pub const PHYSICAL_FORMAT_VERSION: u16 = 3;
+pub const PHYSICAL_FORMAT_VERSION: u16 = 5;
 /// Bytes occupied by the repeated header in every extent.
 pub const EXTENT_HEADER_SIZE: usize = 512;
 /// Bytes occupied by the footer in the final extent.
@@ -81,9 +81,10 @@ const HEADER_EXACT_WIRE_DIGEST_OFFSET: usize = 220;
 const HEADER_PADDING_OFFSET: usize = 252;
 const HEADER_INGRESS_KIND_OFFSET: usize = HEADER_PADDING_OFFSET;
 const HEADER_INGRESS_INTERFACE_OFFSET: usize = 253;
-const HEADER_INGRESS_SIGNAL_KIND_OFFSET: usize = 254;
-const HEADER_INGRESS_RSSI_OFFSET: usize = 256;
-const HEADER_INGRESS_SNR_OFFSET: usize = 258;
+const HEADER_INGRESS_SIGNAL_KIND_OFFSET: usize = 261;
+const HEADER_INGRESS_RSSI_OFFSET: usize = 262;
+const HEADER_INGRESS_SNR_OFFSET: usize = 264;
+const HEADER_SIGNATURE_VERIFICATION_OFFSET: usize = 266;
 
 const FOOTER_MAGIC_OFFSET: usize = 0;
 const FOOTER_VERSION_OFFSET: usize = 8;
@@ -1542,6 +1543,8 @@ fn encode_header(
         metadata.timestamp_bits(),
     );
     header[HEADER_CARRIER_OFFSET] = encode_carrier(metadata.carrier());
+    header[HEADER_SIGNATURE_VERIFICATION_OFFSET] =
+        encode_signature_verification(metadata.signature_verification());
     let (stamp_kind, stamp_argument, stamp_observed) = encode_stamp(metadata.stamp_admission());
     header[HEADER_STAMP_KIND_OFFSET] = stamp_kind;
     write_u16(&mut header, HEADER_STAMP_ARGUMENT_OFFSET, stamp_argument);
@@ -1563,7 +1566,8 @@ fn encode_header(
         .copy_from_slice(exact_wire_digest.as_bytes());
     if let Some(ingress) = metadata.ingress_observation() {
         header[HEADER_INGRESS_KIND_OFFSET] = 1;
-        header[HEADER_INGRESS_INTERFACE_OFFSET] = ingress.interface().get();
+        header[HEADER_INGRESS_INTERFACE_OFFSET..HEADER_INGRESS_SIGNAL_KIND_OFFSET]
+            .copy_from_slice(ingress.interface().as_bytes());
         if let Some(signal) = ingress.signal() {
             header[HEADER_INGRESS_SIGNAL_KIND_OFFSET] = 1;
             write_i16(&mut header, HEADER_INGRESS_RSSI_OFFSET, signal.rssi_dbm());
@@ -1630,6 +1634,9 @@ fn decode_header(
     source.copy_from_slice(&header[HEADER_SOURCE_OFFSET..HEADER_TIMESTAMP_OFFSET]);
     let carrier =
         decode_carrier(header[HEADER_CARRIER_OFFSET]).ok_or(HeaderDecodeError::Invalid)?;
+    let signature_verification =
+        decode_signature_verification(header[HEADER_SIGNATURE_VERIFICATION_OFFSET])
+            .ok_or(HeaderDecodeError::Invalid)?;
     let stamp = decode_stamp(
         header[HEADER_STAMP_KIND_OFFSET],
         read_u16(header, HEADER_STAMP_ARGUMENT_OFFSET),
@@ -1647,6 +1654,10 @@ fn decode_header(
     let ingress = match header[HEADER_INGRESS_KIND_OFFSET] {
         0 => None,
         1 => {
+            let mut interface = [0_u8; 8];
+            interface.copy_from_slice(
+                &header[HEADER_INGRESS_INTERFACE_OFFSET..HEADER_INGRESS_SIGNAL_KIND_OFFSET],
+            );
             let signal = match header[HEADER_INGRESS_SIGNAL_KIND_OFFSET] {
                 0 => None,
                 1 => Some(InboundSignalObservation::new(
@@ -1656,7 +1667,7 @@ fn decode_header(
                 _ => return Err(HeaderDecodeError::Invalid),
             };
             Some(InboundTransportObservation::new(
-                InboundInterfaceId::new(header[HEADER_INGRESS_INTERFACE_OFFSET]),
+                InboundInterfaceId::new(interface),
                 signal,
             ))
         }
@@ -1667,6 +1678,7 @@ fn decode_header(
         AuthenticatedMaterialFingerprint::new(authenticated_material),
         DestinationHash::new(destination),
         SourceHash::new(source),
+        signature_verification,
         read_u64(header, HEADER_TIMESTAMP_OFFSET),
         carrier,
         stamp,
@@ -1746,6 +1758,23 @@ fn decode_carrier(value: u8) -> Option<CarrierProvenance> {
         1 => Some(CarrierProvenance::Opportunistic),
         2 => Some(CarrierProvenance::LinkDataContextNone),
         3 => Some(CarrierProvenance::ResourceComplete),
+        _ => None,
+    }
+}
+
+fn encode_signature_verification(verification: SignatureVerification) -> u8 {
+    match verification {
+        SignatureVerification::Validated => 0,
+        SignatureVerification::SourceUnknown => 1,
+        SignatureVerification::Invalid => 2,
+    }
+}
+
+fn decode_signature_verification(value: u8) -> Option<SignatureVerification> {
+    match value {
+        0 => Some(SignatureVerification::Validated),
+        1 => Some(SignatureVerification::SourceUnknown),
+        2 => Some(SignatureVerification::Invalid),
         _ => None,
     }
 }

@@ -6,10 +6,11 @@ and authenticated session, serializes mutations, reconnects through a supplied
 `Connector`, reconciles the outbox and inbox, imports radio traces, and
 publishes immutable UI projections.
 
-Connectors own bearer selection and return transport metadata plus any lease
-that must live for the authenticated session. Retryable, unavailable, and
-permanent connection failures remain distinct. The runtime never discovers a
-platform device or silently replaces the selected bearer.
+Connectors open identified PRNS Links and return management-destination
+metadata plus any guard that must live for the authenticated session.
+Retryable, unavailable, and permanent connection failures remain distinct.
+The runtime does not model the packet interface selected by PRNS as a separate
+product connection.
 
 Scheduling is bounded and fair: foreground commands cannot starve inbox,
 submission, or trace work; a transient API `RetryLater` backs off only the

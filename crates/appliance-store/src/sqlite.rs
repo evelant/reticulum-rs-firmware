@@ -28,7 +28,7 @@ use crate::{
 };
 
 /// Current SQLite `PRAGMA user_version` owned by this adapter.
-pub const SQLITE_SCHEMA_VERSION: u32 = 11;
+pub const SQLITE_SCHEMA_VERSION: u32 = 13;
 
 const INBOUND_COLUMNS: &str = "message_id, sequence, local_destination, source, timestamp_unix_ms, \
                                title, content, ingress_interface, ingress_rssi, ingress_snr, \
@@ -332,6 +332,7 @@ impl SqliteChatStore {
             OutboxStatus::Device(SubmissionState::Failed(failure)) if failure.is_retryable() => {}
             OutboxStatus::Device(
                 SubmissionState::Delivered(_)
+                | SubmissionState::ApplicationDelivered
                 | SubmissionState::Failed(_)
                 | SubmissionState::Cancelled,
             ) => return Err(ChatStoreError::OutboxNotRetryable(outbox_id).into()),
@@ -400,17 +401,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreError
         transaction.commit()?;
         return Ok(());
     }
-    if version == 10 {
-        transaction.execute_batch(
-            "ALTER TABLE rf_trace_events ADD COLUMN inbound_stage INTEGER \
-                 CHECK (inbound_stage BETWEEN 0 AND 6);\n\
-             ALTER TABLE rf_trace_events ADD COLUMN inbound_message_id BLOB \
-                 CHECK (inbound_message_id IS NULL OR length(inbound_message_id) = 32);",
-        )?;
-        transaction.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)?;
-        transaction.commit()?;
-        return Ok(());
-    }
     if version != 0 {
         return Err(SqliteStoreError::UnsupportedSchemaVersion(version));
     }
@@ -441,7 +431,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreError
                      timestamp_unix_ms INTEGER NOT NULL CHECK (timestamp_unix_ms > 0),\n\
                      title BLOB NOT NULL,\n\
                      content BLOB NOT NULL,\n\
-                     ingress_interface INTEGER CHECK (ingress_interface BETWEEN 0 AND 255),\n\
+                     ingress_interface BLOB CHECK (ingress_interface IS NULL OR length(ingress_interface) = 8),\n\
                      ingress_rssi INTEGER CHECK (ingress_rssi BETWEEN -32768 AND 32767),\n\
                      ingress_snr INTEGER CHECK (ingress_snr BETWEEN -32768 AND 32767),\n\
                      location_latitude_e6 INTEGER CHECK (location_latitude_e6 BETWEEN -90000000 AND 90000000),\n\
@@ -475,7 +465,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreError
                      content BLOB NOT NULL,\n\
                      submission_id INTEGER UNIQUE CHECK (submission_id > 0),\n\
                      message_id BLOB UNIQUE CHECK (message_id IS NULL OR length(message_id) = 32),\n\
-                     status_kind INTEGER NOT NULL CHECK (status_kind BETWEEN 0 AND 7),\n\
+                     status_kind INTEGER NOT NULL CHECK (status_kind BETWEEN 0 AND 8),\n\
                      failure_kind INTEGER CHECK (failure_kind BETWEEN 0 AND 3),\n\
                      packet_len INTEGER CHECK (packet_len > 0 AND packet_len <= 65535),\n\
                      packet_sha256 BLOB CHECK (packet_sha256 IS NULL OR length(packet_sha256) = 32),\n\
@@ -489,7 +479,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreError
                      location_accuracy_cm INTEGER CHECK (location_accuracy_cm BETWEEN 0 AND 65535),\n\
                      location_updated_at_unix_seconds INTEGER CHECK (location_updated_at_unix_seconds BETWEEN 0 AND 4294967295),\n\
                      CHECK ((status_kind = 0 AND submission_id IS NULL AND message_id IS NULL) OR\n\
-                            (status_kind BETWEEN 1 AND 7 AND submission_id IS NOT NULL AND message_id IS NOT NULL)),\n\
+                            (status_kind BETWEEN 1 AND 8 AND submission_id IS NOT NULL AND message_id IS NOT NULL)),\n\
                      CHECK ((status_kind IN (4, 5) AND packet_len IS NOT NULL AND packet_sha256 IS NOT NULL) OR\n\
                             (status_kind NOT IN (4, 5) AND packet_len IS NULL AND packet_sha256 IS NULL)),\n\
                      CHECK ((status_kind = 6 AND failure_kind IS NOT NULL) OR\n\
@@ -517,7 +507,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), SqliteStoreError
                      kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 4),\n\
                      submission_id INTEGER CHECK (submission_id > 0),\n\
                      message_id BLOB CHECK (message_id IS NULL OR length(message_id) = 32),\n\
-                     status_kind INTEGER CHECK (status_kind BETWEEN 2 AND 7),\n\
+                     status_kind INTEGER CHECK (status_kind BETWEEN 2 AND 8),\n\
                      failure_kind INTEGER CHECK (failure_kind BETWEEN 0 AND 3),\n\
                      packet_len INTEGER CHECK (packet_len > 0 AND packet_len <= 65535),\n\
                      packet_sha256 BLOB CHECK (packet_sha256 IS NULL OR length(packet_sha256) = 32),\n\
@@ -606,7 +596,7 @@ fn create_rf_trace_schema(transaction: &Transaction<'_>) -> Result<(), SqliteSto
              event_sequence BLOB NOT NULL CHECK (length(event_sequence) = 8),\n\
              observed_at_us BLOB NOT NULL CHECK (length(observed_at_us) = 8),\n\
              kind INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),\n\
-             interface_id INTEGER CHECK (interface_id BETWEEN 0 AND 255),\n\
+             interface_id BLOB CHECK (interface_id IS NULL OR length(interface_id) = 8),\n\
              packet_len INTEGER CHECK (packet_len BETWEEN 1 AND 65535),\n\
              packet_sha256 BLOB CHECK (packet_sha256 IS NULL OR length(packet_sha256) = 32),\n\
              attempt_token BLOB CHECK (attempt_token IS NULL OR length(attempt_token) = 32),\n\
@@ -624,7 +614,7 @@ fn create_rf_trace_schema(transaction: &Transaction<'_>) -> Result<(), SqliteSto
              rx_rssi INTEGER CHECK (rx_rssi BETWEEN -32768 AND 32767),\n\
              rx_snr INTEGER CHECK (rx_snr BETWEEN -32768 AND 32767),\n\
              attempt_outcome INTEGER CHECK (attempt_outcome BETWEEN 0 AND 2),\n\
-             proof_interface INTEGER CHECK (proof_interface BETWEEN 0 AND 255),\n\
+             proof_interface BLOB CHECK (proof_interface IS NULL OR length(proof_interface) = 8),\n\
              proof_rssi INTEGER CHECK (proof_rssi BETWEEN -32768 AND 32767),\n\
              proof_snr INTEGER CHECK (proof_snr BETWEEN -32768 AND 32767),\n\
              inbound_stage INTEGER CHECK (inbound_stage BETWEEN 0 AND 6),\n\
@@ -769,7 +759,7 @@ struct RawInbound {
     timestamp_unix_ms: i64,
     title: Vec<u8>,
     content: Vec<u8>,
-    ingress_interface: Option<i64>,
+    ingress_interface: Option<Vec<u8>>,
     ingress_rssi: Option<i64>,
     ingress_snr: Option<i64>,
     location_latitude_e6: Option<i64>,
@@ -799,17 +789,11 @@ fn decode_inbound(raw: RawInbound) -> Result<InboundRecord, SqliteStoreError> {
     let ingress = match (raw.ingress_interface, raw.ingress_rssi, raw.ingress_snr) {
         (None, None, None) => None,
         (Some(interface), None, None) => Some(MessageIngressObservation::new(
-            MessageInterfaceId::new(
-                u8::try_from(interface)
-                    .map_err(|_| SqliteStoreError::CorruptData("inbound ingress_interface"))?,
-            ),
+            MessageInterfaceId::new(array_from_blob(interface, "inbound ingress_interface")?),
             None,
         )),
         (Some(interface), Some(rssi), Some(snr)) => Some(MessageIngressObservation::new(
-            MessageInterfaceId::new(
-                u8::try_from(interface)
-                    .map_err(|_| SqliteStoreError::CorruptData("inbound ingress_interface"))?,
-            ),
+            MessageInterfaceId::new(array_from_blob(interface, "inbound ingress_interface")?),
             Some(MessageSignalObservation::new(
                 i16::try_from(rssi)
                     .map_err(|_| SqliteStoreError::CorruptData("inbound ingress_rssi"))?,
@@ -943,13 +927,13 @@ fn decode_message_location(
 
 fn encode_ingress_observation(
     ingress: Option<MessageIngressObservation>,
-) -> (Option<i64>, Option<i64>, Option<i64>) {
+) -> (Option<Vec<u8>>, Option<i64>, Option<i64>) {
     match ingress {
         None => (None, None, None),
         Some(ingress) => match ingress.signal() {
-            None => (Some(i64::from(ingress.interface().get())), None, None),
+            None => (Some(ingress.interface().as_bytes().to_vec()), None, None),
             Some(signal) => (
-                Some(i64::from(ingress.interface().get())),
+                Some(ingress.interface().as_bytes().to_vec()),
                 Some(i64::from(signal.rssi_dbm())),
                 Some(i64::from(signal.snr_db())),
             ),
@@ -1241,6 +1225,9 @@ fn decode_status(
         7 if failure.is_none() && evidence.is_none() => {
             OutboxStatus::Device(SubmissionState::Cancelled)
         }
+        8 if failure.is_none() && evidence.is_none() => {
+            OutboxStatus::Device(SubmissionState::ApplicationDelivered)
+        }
         _ => return Err(SqliteStoreError::CorruptData("outbox status")),
     };
     Ok(status)
@@ -1276,6 +1263,7 @@ fn encode_status(status: OutboxStatus) -> (i64, Option<i64>, Option<i64>, Option
             None,
         ),
         OutboxStatus::Device(SubmissionState::Cancelled) => (7, None, None, None),
+        OutboxStatus::Device(SubmissionState::ApplicationDelivered) => (8, None, None, None),
     }
 }
 
@@ -1305,7 +1293,7 @@ struct RawActivity {
     location_source: Option<i64>,
     location_mocked: Option<i64>,
     location_unavailable_reason: Option<i64>,
-    ingress_interface: Option<i64>,
+    ingress_interface: Option<Vec<u8>>,
     ingress_rssi: Option<i64>,
     ingress_snr: Option<i64>,
     message_location_latitude_e6: Option<i64>,
@@ -1456,15 +1444,17 @@ fn decode_activity(raw: RawActivity) -> Result<MessageActivityEvent, SqliteStore
     let ingress_observation = match (raw.ingress_interface, raw.ingress_rssi, raw.ingress_snr) {
         (None, None, None) => None,
         (Some(interface), None, None) => Some(MessageIngressObservation::new(
-            MessageInterfaceId::new(u8::try_from(interface).map_err(|_| {
-                SqliteStoreError::CorruptData("message activity ingress_interface")
-            })?),
+            MessageInterfaceId::new(array_from_blob(
+                interface,
+                "message activity ingress_interface",
+            )?),
             None,
         )),
         (Some(interface), Some(rssi), Some(snr)) => Some(MessageIngressObservation::new(
-            MessageInterfaceId::new(u8::try_from(interface).map_err(|_| {
-                SqliteStoreError::CorruptData("message activity ingress_interface")
-            })?),
+            MessageInterfaceId::new(array_from_blob(
+                interface,
+                "message activity ingress_interface",
+            )?),
             Some(MessageSignalObservation::new(
                 i16::try_from(rssi)
                     .map_err(|_| SqliteStoreError::CorruptData("message activity ingress_rssi"))?,
@@ -1649,7 +1639,7 @@ struct RawRfTrace {
     event_sequence: Vec<u8>,
     observed_at_us: Vec<u8>,
     kind: i64,
-    interface_id: Option<i64>,
+    interface_id: Option<Vec<u8>>,
     packet_len: Option<i64>,
     packet_sha256: Option<Vec<u8>>,
     attempt_token: Option<Vec<u8>>,
@@ -1667,7 +1657,7 @@ struct RawRfTrace {
     rx_rssi: Option<i64>,
     rx_snr: Option<i64>,
     attempt_outcome: Option<i64>,
-    proof_interface: Option<i64>,
+    proof_interface: Option<Vec<u8>>,
     proof_rssi: Option<i64>,
     proof_snr: Option<i64>,
     inbound_stage: Option<i64>,
@@ -1889,9 +1879,6 @@ fn decode_rf_attempt_outcome(value: i64) -> Result<RfTraceAttemptOutcome, Sqlite
 fn decode_rf_inbound_proof_stage(value: i64) -> Result<RfTraceInboundProofStage, SqliteStoreError> {
     Ok(match value {
         0 => RfTraceInboundProofStage::DataLogicalRx,
-        1 => RfTraceInboundProofStage::DurableCommit,
-        2 => RfTraceInboundProofStage::ProofRetained,
-        3 => RfTraceInboundProofStage::ProofStaged,
         4 => RfTraceInboundProofStage::OrdinaryQueued,
         5 => RfTraceInboundProofStage::PhysicalTxDone,
         6 => RfTraceInboundProofStage::PhysicalTxFailed,
@@ -1906,13 +1893,12 @@ fn decode_rf_inbound_proof_stage(value: i64) -> Result<RfTraceInboundProofStage,
 fn decode_rf_packet(
     raw: &RawRfTrace,
 ) -> Result<(RfTraceInterfaceId, PacketEvidence), SqliteStoreError> {
-    let interface = RfTraceInterfaceId::new(
-        u8::try_from(
-            raw.interface_id
-                .ok_or(SqliteStoreError::CorruptData("RF trace interface"))?,
-        )
-        .map_err(|_| SqliteStoreError::CorruptData("RF trace interface"))?,
-    );
+    let interface = RfTraceInterfaceId::new(array_from_blob(
+        raw.interface_id
+            .clone()
+            .ok_or(SqliteStoreError::CorruptData("RF trace interface"))?,
+        "RF trace interface",
+    )?);
     let length = u16::try_from(
         raw.packet_len
             .ok_or(SqliteStoreError::CorruptData("RF trace packet length"))?,
@@ -2099,10 +2085,10 @@ fn decode_rf_trace(raw: RawRfTrace) -> Result<RfTraceEvent, SqliteStoreError> {
             }
             let interface = raw
                 .interface_id
+                .clone()
                 .map(|interface| {
-                    u8::try_from(interface)
+                    array_from_blob(interface, "RF trace proof interface")
                         .map(RfTraceInterfaceId::new)
-                        .map_err(|_| SqliteStoreError::CorruptData("RF trace proof interface"))
                 })
                 .transpose()?;
             let signal = match (raw.rx_rssi, raw.rx_snr) {
@@ -2147,33 +2133,33 @@ fn decode_rf_trace(raw: RawRfTrace) -> Result<RfTraceEvent, SqliteStoreError> {
             )
         }
         3 => {
-            let proof_ingress =
-                match (raw.proof_interface, raw.proof_rssi, raw.proof_snr) {
-                    (None, None, None) => None,
-                    (Some(interface), None, None) => Some(RfTraceProofIngress::new(
-                        RfTraceInterfaceId::new(u8::try_from(interface).map_err(|_| {
-                            SqliteStoreError::CorruptData("RF trace proof interface")
-                        })?),
-                        None,
+            let proof_ingress = match (raw.proof_interface, raw.proof_rssi, raw.proof_snr) {
+                (None, None, None) => None,
+                (Some(interface), None, None) => Some(RfTraceProofIngress::new(
+                    RfTraceInterfaceId::new(array_from_blob(
+                        interface,
+                        "RF trace proof interface",
+                    )?),
+                    None,
+                )),
+                (Some(interface), Some(rssi), Some(snr)) => Some(RfTraceProofIngress::new(
+                    RfTraceInterfaceId::new(array_from_blob(
+                        interface,
+                        "RF trace proof interface",
+                    )?),
+                    Some((
+                        i16::try_from(rssi)
+                            .map_err(|_| SqliteStoreError::CorruptData("RF trace proof RSSI"))?,
+                        i16::try_from(snr)
+                            .map_err(|_| SqliteStoreError::CorruptData("RF trace proof SNR"))?,
                     )),
-                    (Some(interface), Some(rssi), Some(snr)) => Some(RfTraceProofIngress::new(
-                        RfTraceInterfaceId::new(u8::try_from(interface).map_err(|_| {
-                            SqliteStoreError::CorruptData("RF trace proof interface")
-                        })?),
-                        Some((
-                            i16::try_from(rssi).map_err(|_| {
-                                SqliteStoreError::CorruptData("RF trace proof RSSI")
-                            })?,
-                            i16::try_from(snr)
-                                .map_err(|_| SqliteStoreError::CorruptData("RF trace proof SNR"))?,
-                        )),
-                    )),
-                    _ => {
-                        return Err(SqliteStoreError::CorruptData(
-                            "RF trace proof ingress evidence",
-                        ));
-                    }
-                };
+                )),
+                _ => {
+                    return Err(SqliteStoreError::CorruptData(
+                        "RF trace proof ingress evidence",
+                    ));
+                }
+            };
             RfTraceObservationKind::AttemptTerminal(RfTraceAttemptObservation::new(
                 token.ok_or(SqliteStoreError::CorruptData("RF trace terminal token"))?,
                 decode_rf_attempt_outcome(
@@ -2236,7 +2222,7 @@ fn decode_rf_trace(raw: RawRfTrace) -> Result<RfTraceEvent, SqliteStoreError> {
 
 struct EncodedRfObservation {
     kind: i64,
-    interface_id: Option<i64>,
+    interface_id: Option<Vec<u8>>,
     packet_len: Option<i64>,
     packet_sha256: Option<Vec<u8>>,
     attempt_token: Option<Vec<u8>>,
@@ -2254,7 +2240,7 @@ struct EncodedRfObservation {
     rx_rssi: Option<i64>,
     rx_snr: Option<i64>,
     attempt_outcome: Option<i64>,
-    proof_interface: Option<i64>,
+    proof_interface: Option<Vec<u8>>,
     proof_rssi: Option<i64>,
     proof_snr: Option<i64>,
     inbound_stage: Option<i64>,
@@ -2303,9 +2289,6 @@ fn encode_rf_attempt_outcome(outcome: RfTraceAttemptOutcome) -> i64 {
 fn encode_rf_inbound_proof_stage(stage: RfTraceInboundProofStage) -> i64 {
     match stage {
         RfTraceInboundProofStage::DataLogicalRx => 0,
-        RfTraceInboundProofStage::DurableCommit => 1,
-        RfTraceInboundProofStage::ProofRetained => 2,
-        RfTraceInboundProofStage::ProofStaged => 3,
         RfTraceInboundProofStage::OrdinaryQueued => 4,
         RfTraceInboundProofStage::PhysicalTxDone => 5,
         RfTraceInboundProofStage::PhysicalTxFailed => 6,
@@ -2342,7 +2325,7 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
     match observation.kind() {
         RfTraceObservationKind::DataTx(tx) => {
             encoded.kind = 0;
-            encoded.interface_id = Some(i64::from(tx.interface().get()));
+            encoded.interface_id = Some(tx.interface().as_bytes().to_vec());
             encoded.packet_len = Some(i64::from(tx.packet_evidence().encoded_packet_len()));
             encoded.packet_sha256 = Some(
                 tx.packet_evidence()
@@ -2366,7 +2349,7 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
         }
         RfTraceObservationKind::LogicalRx(rx) => {
             encoded.kind = 1;
-            encoded.interface_id = Some(i64::from(rx.interface().get()));
+            encoded.interface_id = Some(rx.interface().as_bytes().to_vec());
             encoded.packet_len = Some(i64::from(rx.packet_evidence().encoded_packet_len()));
             encoded.packet_sha256 = Some(
                 rx.packet_evidence()
@@ -2380,7 +2363,7 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
         }
         RfTraceObservationKind::RouteSelected(route) => {
             encoded.kind = 2;
-            encoded.interface_id = Some(i64::from(route.selected_interface().get()));
+            encoded.interface_id = Some(route.selected_interface().as_bytes().to_vec());
             encoded.packet_len = Some(i64::from(route.packet_evidence().encoded_packet_len()));
             encoded.packet_sha256 = Some(
                 route
@@ -2401,7 +2384,7 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
             encoded.attempt_token = Some(terminal.rns_attempt_token().as_bytes().to_vec());
             encoded.attempt_outcome = Some(encode_rf_attempt_outcome(terminal.outcome()));
             if let Some(proof) = terminal.proof_ingress() {
-                encoded.proof_interface = Some(i64::from(proof.interface().get()));
+                encoded.proof_interface = Some(proof.interface().as_bytes().to_vec());
                 if let Some((rssi, snr)) = proof.signal() {
                     encoded.proof_rssi = Some(i64::from(rssi));
                     encoded.proof_snr = Some(i64::from(snr));
@@ -2410,8 +2393,7 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
         }
         RfTraceObservationKind::InboundProof(proof) => {
             // Kind 3 is the persisted proof-event family. `inbound_stage`
-            // distinguishes receiver lifecycle events from attempt terminals
-            // while preserving existing version-10 rows during migration.
+            // distinguishes receiver lifecycle events from attempt terminals.
             encoded.kind = 3;
             encoded.attempt_token = Some(proof.rns_attempt_token().as_bytes().to_vec());
             encoded.inbound_stage = Some(encode_rf_inbound_proof_stage(proof.stage()));
@@ -2424,7 +2406,7 @@ fn encode_rf_observation(observation: RfTraceObservation) -> EncodedRfObservatio
             }
             encoded.interface_id = proof
                 .interface()
-                .map(|interface| i64::from(interface.get()));
+                .map(|interface| interface.as_bytes().to_vec());
             if let Some((rssi, snr)) = proof.signal() {
                 encoded.rx_rssi = Some(i64::from(rssi));
                 encoded.rx_snr = Some(i64::from(snr));

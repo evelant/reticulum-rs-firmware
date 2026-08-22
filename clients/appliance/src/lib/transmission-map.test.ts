@@ -7,6 +7,7 @@ import type {
   RadioTraceEventView,
   TimelineView,
 } from "../generated/api.ts";
+import { syntheticReticulumInterfaceId } from "./reticulum-interface-id.ts";
 import {
   buildTransmissionMapScene,
   selectedTransmissionMapFeatures,
@@ -196,7 +197,7 @@ describe("transmission map scene", () => {
             kind: "attempt_terminal",
             rns_attempt_token: "78".repeat(32),
             outcome: "delivered",
-            proof_interface_id: 1,
+            proof_interface_id: syntheticReticulumInterfaceId(1),
             proof_rssi_dbm: -101,
             proof_snr_db: 2,
           },
@@ -219,7 +220,7 @@ describe("transmission map scene", () => {
       1,
       {
         kind: "logical_rx",
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         packet_evidence: PACKET,
         rns_packet_hash: "90".repeat(32),
         rssi_dbm: -98,
@@ -288,7 +289,7 @@ describe("transmission map scene", () => {
   test("shows exact receiver-local final-hop signal on an inbound message location", () => {
     const received = timeline(11, 42_357_111, -71_061_924);
     received.ingress_observation = {
-      interface_id: 1,
+      interface_id: syntheticReticulumInterfaceId(1),
       signal: { rssi_dbm: -108, snr_db: -5 },
     };
     const scene = buildTransmissionMapScene({
@@ -298,7 +299,10 @@ describe("transmission map scene", () => {
     const point = scene.points.features[0];
     expect(point?.properties.label).toBe("Dad · RX -108 dBm · SNR -5 dB");
     const rows = scene.detailsByFeatureId[point?.properties.id ?? ""]?.rows;
-    expect(rows).toContainEqual({ label: "Received via", value: "Interface 1" });
+    expect(rows).toContainEqual({
+      label: "Received via",
+      value: "Interface 0000000000000001",
+    });
     expect(rows).toContainEqual({
       label: "Receiver-local signal",
       value: "RSSI -108 dBm · SNR -5 dB",
@@ -325,7 +329,7 @@ describe("transmission map scene", () => {
         message_location: senderLocation,
         receiver_location: receiverLocation,
         ingress_observation: {
-          interface_id: 1,
+          interface_id: syntheticReticulumInterfaceId(1),
           signal: { rssi_dbm: -112, snr_db: -7 },
         },
       },

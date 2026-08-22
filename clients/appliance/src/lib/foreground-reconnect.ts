@@ -8,7 +8,7 @@ export interface ForegroundConnectionClient {
   ensureConnected(): Promise<unknown>;
 }
 
-/** Wake the selected bearer without replacing an already usable link. */
+/** Wake the selected PRNS application session without replacing a usable one. */
 export async function ensureForegroundConnection(
   client: ForegroundConnectionClient,
 ): Promise<void> {
@@ -17,10 +17,10 @@ export async function ensureForegroundConnection(
 
 export function foregroundReconnectMessage(progress: ForegroundReconnectProgress): string {
   if (progress.state === "attempting") {
-    return "Pairing is saved. Connecting to the node.";
+    return "Appliance authorization is saved. Connecting through Reticulum.";
   }
   return (
-    "Pairing is saved. The node is not advertising yet; retrying automatically. " +
+    "Appliance authorization is saved. No route is ready yet; retrying automatically. " +
     `Last attempt: ${progress.reason}`
   );
 }
@@ -86,8 +86,8 @@ export class ForegroundReconnect {
    * Keep automatic attempts stopped across later begin() calls until a user
    * action explicitly clears the inhibition.
    *
-   * A failed BLE bond-repair scan uses this stronger state so an ordinary
-   * normal-name reconnect cannot immediately reclaim the bondless board.
+   * Use this stronger state when an operator workflow must keep automatic
+   * requests stopped until an explicit action clears the inhibition.
    */
   inhibit(): void {
     this.#inhibited = true;

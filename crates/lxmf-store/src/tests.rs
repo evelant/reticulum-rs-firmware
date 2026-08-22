@@ -8,7 +8,7 @@ use embedded_storage::nor_flash::{
 };
 use reticulum_lxmf_model::{
     AuthenticatedMaterialFingerprint, InboundInterfaceId, InboundSignalObservation,
-    InboundTransportObservation, NormalizedWire,
+    InboundTransportObservation, NormalizedWire, SignatureVerification,
 };
 use reticulum_lxmf_wire::{MessageView, WireLimits};
 use serde::Deserialize;
@@ -231,11 +231,42 @@ fn metadata(
     normalized_len: usize,
     carrier_len: usize,
 ) -> InboundMessageMetadata {
+    metadata_with_verification(
+        id,
+        authenticated_material,
+        destination,
+        source,
+        SignatureVerification::Validated,
+        timestamp,
+        carrier,
+        stamp,
+        normalized_len,
+        carrier_len,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "fixture exposes every persisted scalar including signature state"
+)]
+fn metadata_with_verification(
+    id: u8,
+    authenticated_material: u8,
+    destination: u8,
+    source: u8,
+    verification: SignatureVerification,
+    timestamp: u64,
+    carrier: CarrierProvenance,
+    stamp: StampAdmissionProvenance,
+    normalized_len: usize,
+    carrier_len: usize,
+) -> InboundMessageMetadata {
     InboundMessageMetadata::new(
         MessageId::new([id; 32]),
         AuthenticatedMaterialFingerprint::new([authenticated_material; 32]),
         DestinationHash::new([destination; 16]),
         SourceHash::new([source; 16]),
+        verification,
         timestamp,
         carrier,
         stamp,
@@ -331,7 +362,20 @@ fn geometry_reports_exact_payload_capacity() {
 #[test]
 fn commit_mount_and_remount_preserve_receipt_and_metadata() {
     let wire = complete_wire(0x22, 600, 0xa5);
-    let candidate = complete_candidate(&wire, 1, 9, 0x22, 7, normal_stamp());
+    let metadata = metadata_with_verification(
+        1,
+        9,
+        0x22,
+        0x33,
+        SignatureVerification::SourceUnknown,
+        7,
+        CarrierProvenance::Complete,
+        normal_stamp(),
+        wire.len(),
+        wire.len(),
+    );
+    let candidate =
+        InboundMessageCandidate::new(metadata, NormalizedWire::Contiguous(&wire)).unwrap();
     let mut access = bound(TestNor::erased(PARTITION_SIZE));
     let mut mounted_index = index::<4>();
     let mut mounted = mount(&mut access, &mut mounted_index).unwrap();
@@ -375,7 +419,7 @@ fn commit_and_remount_preserve_first_arrival_transport_observation() {
         wire.len(),
     )
     .with_ingress_observation(Some(InboundTransportObservation::new(
-        InboundInterfaceId::new(7),
+        InboundInterfaceId::new([0x17; 8]),
         Some(InboundSignalObservation::new(-101, -4)),
     )));
     let candidate =
@@ -711,6 +755,7 @@ fn released_python_corpus_commits_remounts_and_retains_exact_full_wire() {
             AuthenticatedMaterialFingerprint::new(parsed.authenticated_material_fingerprint()),
             DestinationHash::new(*parsed.destination_hash()),
             SourceHash::new(*parsed.source_hash()),
+            SignatureVerification::Validated,
             payload.timestamp_bits(),
             carrier,
             stamp,

@@ -4,12 +4,10 @@ Copyright 2026 Reticulum Appliance contributors
 Project-owned source is available under the MIT License or the Apache License,
 Version 2.0, at your option.
 
-The firmware uses Rete from https://github.com/evelant/rete, a fork of
-https://github.com/s-retlaw/rete, checked out as a git submodule at
-`vendor/rete`. Its package metadata declares the MIT OR Apache-2.0 license;
-the fork adds the corresponding `LICENSE-MIT` and `LICENSE-APACHE` files.
-Core Rete changes are made directly on the fork and versioned by the submodule
-pointer in this repository.
+The firmware and native clients use PRNS from https://github.com/evelant/Prns
+at the exact revision recorded in Cargo.lock. PRNS declares the MIT OR
+Apache-2.0 license. The source is resolved directly as a Cargo git dependency;
+the review checkout under `reference/Prns` is not a linked build input.
 
 The checked LXMF compatibility corpus is generated from Python LXMF 1.0.1 at
 revision fab12ad9bf9f997797034950f289fe41a79dcf5a and Python RNS at revision

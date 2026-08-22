@@ -14,10 +14,15 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+mod composer;
 mod msgpack;
 mod sideband_location;
 mod stamp;
 
+pub use composer::{
+    BasicLxmfComposeError, BasicLxmfSigner, MAX_BASIC_LXMF_WIRE_BYTES, MAX_LXMF_TIMESTAMP_UNIX_MS,
+    PreparedBasicLxmf, compose_basic_opportunistic_lxmf,
+};
 pub use msgpack::{Canonicality, MessagePackKind, MessagePackValue, validate_messagepack_value};
 pub use sideband_location::{
     FIELD_TELEMETRY, MAX_ENCODED_SIDEBAND_LOCATION_FIELDS_BYTES,

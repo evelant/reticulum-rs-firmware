@@ -11,8 +11,6 @@ android:
   apiLevel: 24
   targets:
     - arm64-v8a
-    - armeabi-v7a
-    - x86
     - x86_64
   cargoExtras:
     - --locked

@@ -321,99 +321,6 @@ pub enum InvalidReticulumTcpPeerHostname {
     LabelTooLong,
 }
 
-/// Validated borrowed UTF-8 board display name.
-///
-/// A display name is a single line of text without control or separator
-/// characters. It is shown on the appliance e-paper panel and published as the
-/// display-name field of the LXMF delivery announce.
-#[cfg(feature = "network-config")]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DeviceName<'a>(&'a str);
-
-#[cfg(feature = "network-config")]
-impl<'a> DeviceName<'a> {
-    /// Validate a bounded single-line UTF-8 display name without normalizing it.
-    pub fn new(name: &'a str) -> Result<Self, InvalidDeviceName> {
-        let bytes = name.as_bytes();
-        if bytes.is_empty() {
-            return Err(InvalidDeviceName::Empty);
-        }
-        if bytes.len() > MAX_DEVICE_NAME_BYTES {
-            return Err(InvalidDeviceName::TooLong {
-                actual: bytes.len(),
-            });
-        }
-        if name
-            .chars()
-            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
-        {
-            return Err(InvalidDeviceName::UnsupportedCharacter);
-        }
-        Ok(Self(name))
-    }
-
-    /// Borrow the exact validated display name.
-    pub const fn as_str(self) -> &'a str {
-        self.0
-    }
-}
-
-/// Why a board display name was rejected.
-#[cfg(feature = "network-config")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InvalidDeviceName {
-    /// A display name must contain at least one byte.
-    Empty,
-    /// The complete display name exceeded the fixed API limit.
-    TooLong {
-        /// Rejected UTF-8 byte count.
-        actual: usize,
-    },
-    /// The display name contains a control or separator character unsuitable
-    /// for one display line or an announce app-data field.
-    UnsupportedCharacter,
-}
-
-/// Owned bounded UTF-8 board display name used by redacted configuration
-/// responses.
-#[cfg(feature = "network-config")]
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub struct DeviceNameSummary {
-    bytes: [u8; MAX_DEVICE_NAME_BYTES],
-    len: u8,
-}
-
-#[cfg(feature = "network-config")]
-impl DeviceNameSummary {
-    /// Validate and copy one display name into fixed response storage.
-    pub fn new(name: &str) -> Result<Self, InvalidDeviceName> {
-        let validated = DeviceName::new(name)?;
-        let bytes = validated.as_str().as_bytes();
-        let mut owned = [0_u8; MAX_DEVICE_NAME_BYTES];
-        owned[..bytes.len()].copy_from_slice(bytes);
-        Ok(Self {
-            bytes: owned,
-            len: bytes.len() as u8,
-        })
-    }
-
-    /// Borrow the exact validated display name.
-    pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.bytes[..self.len as usize])
-            .expect("display-name validation accepts UTF-8 only")
-    }
-}
-
-#[cfg(feature = "network-config")]
-impl core::fmt::Debug for DeviceNameSummary {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_tuple("DeviceNameSummary")
-            .field(&self.as_str())
-            .finish()
-    }
-}
-
 /// Desired single outbound Reticulum TCP peer in a configuration mutation.
 #[cfg(feature = "network-config")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -883,9 +790,6 @@ pub enum NetworkConfigMutation<'a> {
     /// Atomically replace frequency, bandwidth, spreading factor, coding rate,
     /// and requested transmit power.
     SetLoraProfile(LoraRadioProfile),
-    /// Replace or clear the board display name shown on the appliance and in
-    /// LXMF delivery announces.
-    SetDeviceName(Option<DeviceName<'a>>),
 }
 
 /// Correlated compare-and-swap request for one desired-network mutation.
@@ -1181,7 +1085,6 @@ pub struct NetworkConfigSnapshot {
     rmap_share_location: bool,
     rmap_phone_location: Option<RmapLocation>,
     lora_profile: LoraRadioProfile,
-    device_name: Option<DeviceNameSummary>,
 }
 
 #[cfg(feature = "network-config")]
@@ -1200,7 +1103,6 @@ impl NetworkConfigSnapshot {
             GatewayPolicy::new(true, true),
             RmapConfig::new(false, false, None),
             LoraRadioProfile::DEFAULT,
-            None,
         )
     }
 
@@ -1217,7 +1119,6 @@ impl NetworkConfigSnapshot {
         gateway_policy: GatewayPolicy,
         rmap_config: RmapConfig,
         lora_profile: LoraRadioProfile,
-        device_name: Option<DeviceNameSummary>,
     ) -> Result<Self, InvalidNetworkConfigSnapshot> {
         let mut saw_empty = false;
         let mut index = 0;
@@ -1253,8 +1154,7 @@ impl NetworkConfigSnapshot {
                 || rmap_config.discovery_enabled()
                 || rmap_config.share_location()
                 || rmap_config.phone_location().is_some()
-                || lora_profile != LoraRadioProfile::DEFAULT
-                || device_name.is_some())
+                || lora_profile != LoraRadioProfile::DEFAULT)
         {
             return Err(InvalidNetworkConfigSnapshot::NonEmptyErasedRevision);
         }
@@ -1269,7 +1169,6 @@ impl NetworkConfigSnapshot {
             rmap_share_location: rmap_config.share_location(),
             rmap_phone_location: rmap_config.phone_location(),
             lora_profile,
-            device_name,
         })
     }
 
@@ -1335,11 +1234,6 @@ impl NetworkConfigSnapshot {
     /// Complete desired LoRa profile saved for the next boot.
     pub const fn lora_profile(self) -> LoraRadioProfile {
         self.lora_profile
-    }
-
-    /// Configured board display name, if any.
-    pub const fn device_name(self) -> Option<DeviceNameSummary> {
-        self.device_name
     }
 
     /// Complete gateway-wide policy.

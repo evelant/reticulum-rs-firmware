@@ -8,14 +8,15 @@ agents both follow.
 
 ## First setup
 
-Clone recursively so the owned Rete submodule is present:
+Clone the repository and verify the pinned toolchains and dependency graph:
 
 ```sh
-git clone --recursive <repository-url>
+git clone <repository-url>
 cargo run --locked -p xtask -- doctor
 ```
 
-`xtask doctor` checks the toolchain and the initialized `vendor/rete` submodule.
+`xtask doctor` checks the toolchain, exact PRNS pin, partition contract, and
+required E290 build inputs.
 Firmware builds additionally need the Espressif toolchain described in
 [Build and flash E290 firmware](docs/getting-started/firmware-e290.md).
 
@@ -55,12 +56,13 @@ build and ELF checks in
 `host` and `firmware` CI jobs run these gates; make sure the pull request keeps
 both green.
 
-## Ownership of Rete
+## Ownership of Reticulum behavior
 
-Rete lives in the `evelant/rete` fork and is consumed as the `vendor/rete`
-submodule. Changes to Rete itself are made on the fork, then versioned here by
-bumping the submodule pointer. Do not edit `vendor/rete` directly as part of an
-unrelated change.
+The product consumes the exact unmodified PRNS revision pinned in the
+workspace. Adapt product applications and board composition to its public APIs
+first. Change PRNS only for a demonstrated generic gap useful to unrelated
+Reticulum applications or boards, qualify that change against Python RNS, and
+then update the exact workspace revision.
 
 ## Pull requests
 

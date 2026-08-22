@@ -1,31 +1,25 @@
-//! Executable entrypoint for the BLE-backed appliance web service.
+//! Executable entrypoint for the PRNS-backed appliance web service.
 
 #![forbid(unsafe_code)]
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use reticulum_appliance_service::{
-    ApplianceConfig, BleConnector, BleConnectorConfig, ProfileRoot, WebConfig, normalize_eui48,
-    parse_eui48, serve_web, start_appliance,
-};
+use reticulum_appliance_native::{NativePrnsManagementIdentity, NativePrnsNode, PrnsConnector};
+use reticulum_appliance_service::{ApplianceConfig, WebConfig, serve_web, start_appliance};
+
+const PROFILE_DIRECTORY: &str = "profiles";
+const CHAT_DATABASE_FILE: &str = "chat.sqlite3";
 
 #[derive(Debug, Eq, PartialEq)]
 struct Options {
-    eui48: String,
-    storage: StorageOptions,
-    peripheral_id: Option<String>,
+    state_root: PathBuf,
+    management_destination: [u8; 16],
+    management_destination_hex: String,
+    enroll: bool,
     http_port: u16,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum StorageOptions {
-    Explicit {
-        credential: PathBuf,
-        database: PathBuf,
-    },
-    ProfileRoot(PathBuf),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -51,27 +45,36 @@ async fn main() -> ExitCode {
 }
 
 async fn run(options: Options) -> Result<(), String> {
-    let (credential, database) = match options.storage {
-        StorageOptions::Explicit {
-            credential,
-            database,
-        } => (credential, database),
-        StorageOptions::ProfileRoot(path) => {
-            let profile = ProfileRoot::open(path)?.device(&options.eui48)?;
-            profile.prepare_database()?;
-            (profile.credential_path(), profile.database_path())
-        }
-    };
-    let expected_eui48 =
-        parse_eui48(&options.eui48).expect("the command-line parser retains one normalized EUI-48");
-    let connector = BleConnector::new(
-        BleConnectorConfig::new(expected_eui48, credential)
-            .with_peripheral_id(options.peripheral_id),
-    );
+    let state_root = prepare_state_root(&options.state_root)?;
+    let storage_directory = state_root
+        .to_str()
+        .ok_or_else(|| "--state-root must be valid UTF-8".to_owned())?
+        .to_owned();
+    let prns = NativePrnsNode::start(storage_directory).map_err(|error| error.to_string())?;
+
+    if options.enroll {
+        enroll_exact_management_application(&prns, &options.management_destination_hex).await?;
+    }
+
+    let database = profile_database(&state_root, &options.management_destination_hex);
+    if let Some(parent) = database.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create appliance profile directory: {error}"))?;
+    }
+    let connector = PrnsConnector::new(Arc::clone(&prns), Some(options.management_destination));
     let appliance = start_appliance(ApplianceConfig::new(database), connector)
         .map_err(|error| error.to_string())?;
     let web = serve_web(appliance.clone(), WebConfig::new(options.http_port)).await?;
+    let identity = prns
+        .snapshot()
+        .identity_hash
+        .unwrap_or_else(|| "unavailable".to_owned());
     println!("Reticulum appliance: {}", web.url());
+    println!("Client identity: {identity}");
+    println!(
+        "Management destination: {}",
+        options.management_destination_hex
+    );
     println!("Press Ctrl-C to stop.");
     tokio::signal::ctrl_c()
         .await
@@ -79,28 +82,80 @@ async fn run(options: Options) -> Result<(), String> {
     let (web_result, appliance_result) =
         tokio::join!(web.shutdown(), appliance.shutdown_and_wait());
     web_result?;
-    appliance_result.map_err(|error| error.to_string())
+    appliance_result.map_err(|error| error.to_string())?;
+    prns.close().map_err(|error| error.to_string())
+}
+
+async fn enroll_exact_management_application(
+    prns: &NativePrnsNode,
+    management_destination: &str,
+) -> Result<(), String> {
+    let public = prns
+        .public_management_identity(management_destination.to_owned())
+        .await
+        .map_err(|error| format!("could not verify public management application: {error}"))?;
+    validate_management_identity(&public, management_destination)?;
+    prns.enroll_management(management_destination.to_owned())
+        .await
+        .map_err(|error| format!("management enrollment failed: {error}"))?;
+    let authorized = prns
+        .management_identity(management_destination.to_owned())
+        .await
+        .map_err(|error| format!("authorized management verification failed: {error}"))?;
+    validate_management_identity(&authorized, management_destination)
+}
+
+fn validate_management_identity(
+    identity: &NativePrnsManagementIdentity,
+    expected_destination: &str,
+) -> Result<(), String> {
+    if identity.management_destination != expected_destination {
+        return Err("management application returned a different primary destination".to_owned());
+    }
+    if identity.lxmf_destination.is_none() {
+        return Err("management application did not publish an LXMF destination".to_owned());
+    }
+    Ok(())
+}
+
+fn prepare_state_root(path: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("could not create --state-root: {error}"))?;
+    let root = path
+        .canonicalize()
+        .map_err(|error| format!("could not resolve --state-root: {error}"))?;
+    if !root.is_dir() {
+        return Err("--state-root must name a directory".to_owned());
+    }
+    Ok(root)
+}
+
+fn profile_database(state_root: &Path, management_destination: &str) -> PathBuf {
+    state_root
+        .join(PROFILE_DIRECTORY)
+        .join(management_destination)
+        .join(CHAT_DATABASE_FILE)
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
-    let mut eui48 = None;
-    let mut credential = None;
-    let mut database = None;
-    let mut profile_root = None;
-    let mut peripheral_id = None;
+    let mut state_root = None;
+    let mut management_destination = None;
+    let mut enroll = false;
     let mut http_port = None;
     let mut index = 0_usize;
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
+        if flag == "--enroll" {
+            if enroll {
+                return Err("--enroll may be specified only once".to_owned());
+            }
+            enroll = true;
+            continue;
+        }
         if !matches!(
             flag,
-            "--eui48"
-                | "--credential"
-                | "--database"
-                | "--profile-root"
-                | "--ble-peripheral-id"
-                | "--http-port"
+            "--state-root" | "--management-destination" | "--http-port"
         ) {
             return Err(format!("unknown option {flag}\n{}", usage()));
         }
@@ -111,11 +166,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
             return Err(format!("{flag} requires a value\n{}", usage()));
         }
         match flag {
-            "--eui48" => set_once(&mut eui48, value.clone(), flag)?,
-            "--credential" => set_once(&mut credential, PathBuf::from(value), flag)?,
-            "--database" => set_once(&mut database, PathBuf::from(value), flag)?,
-            "--profile-root" => set_once(&mut profile_root, PathBuf::from(value), flag)?,
-            "--ble-peripheral-id" => set_once(&mut peripheral_id, value.clone(), flag)?,
+            "--state-root" => set_once(&mut state_root, PathBuf::from(value), flag)?,
+            "--management-destination" => {
+                set_once(&mut management_destination, parse_destination(value)?, flag)?;
+            }
             "--http-port" => {
                 let parsed = value
                     .parse::<u16>()
@@ -126,41 +180,24 @@ fn parse(args: &[String]) -> Result<Options, String> {
         }
         index += 1;
     }
-    let storage = match (profile_root, credential, database) {
-        (Some(profile_root), None, None) => StorageOptions::ProfileRoot(profile_root),
-        (None, Some(credential), Some(database)) => StorageOptions::Explicit {
-            credential,
-            database,
-        },
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-            return Err(
-                "--profile-root cannot be combined with --credential or --database".to_owned(),
-            );
-        }
-        (None, _, _) => {
-            return Err(
-                "either --profile-root or both --credential and --database are required".to_owned(),
-            );
-        }
-    };
-    let eui48 = normalize_eui48(
-        eui48
-            .as_deref()
-            .ok_or_else(|| "--eui48 is required".to_owned())?,
-    )
-    .ok_or_else(|| "--eui48 must contain exactly twelve hexadecimal digits".to_owned())?;
-    if peripheral_id
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("--ble-peripheral-id must not be empty".to_owned());
-    }
+    let state_root = state_root.ok_or_else(|| "--state-root is required".to_owned())?;
+    let management_destination =
+        management_destination.ok_or_else(|| "--management-destination is required".to_owned())?;
     Ok(Options {
-        eui48,
-        storage,
-        peripheral_id,
+        state_root,
+        management_destination,
+        management_destination_hex: hex::encode(management_destination),
+        enroll,
         http_port: http_port.unwrap_or(0),
     })
+}
+
+fn parse_destination(value: &str) -> Result<[u8; 16], String> {
+    let mut destination = [0; 16];
+    hex::decode_to_slice(value, &mut destination).map_err(|_| {
+        "--management-destination must contain exactly 32 hexadecimal digits".to_owned()
+    })?;
+    Ok(destination)
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), String> {
@@ -172,64 +209,59 @@ fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), String>
 
 fn usage() -> &'static str {
     "usage: reticulum-appliance-service \\
-       --eui48 <12-hex-board-eui48> \\
-       --profile-root <private-directory> \\
-       [--ble-peripheral-id <platform-id>] [--http-port <0..65535>]\n\
-     or: reticulum-appliance-service \\
-       --eui48 <12-hex-board-eui48> \\
-       --credential <activated-credential> --database <sqlite-path> \\
-       [--ble-peripheral-id <platform-id>] [--http-port <0..65535>]"
+       --state-root <private-directory> \\
+       --management-destination <32-hex-destination> \\
+       [--enroll] [--http-port <0..65535>]"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const DESTINATION: &str = "00112233445566778899aabbccddeeff";
+
     #[test]
-    fn profile_options_are_ble_only_and_bearer_neutral() {
+    fn one_state_root_selects_an_exact_reticulum_application() {
         let parsed = parse(&[
-            "--eui48".to_owned(),
-            "ac:a7:04:e1:3e:88".to_owned(),
-            "--profile-root".to_owned(),
-            "/tmp/profiles".to_owned(),
-            "--ble-peripheral-id".to_owned(),
-            "peripheral-a".to_owned(),
+            "--state-root".to_owned(),
+            "/tmp/reticulum-client".to_owned(),
+            "--management-destination".to_owned(),
+            DESTINATION.to_uppercase(),
+            "--enroll".to_owned(),
             "--http-port".to_owned(),
             "43123".to_owned(),
         ])
         .unwrap();
-        assert_eq!(parsed.eui48, "ACA704E13E88");
+        assert_eq!(parsed.state_root, PathBuf::from("/tmp/reticulum-client"));
         assert_eq!(
-            parsed.storage,
-            StorageOptions::ProfileRoot(PathBuf::from("/tmp/profiles"))
+            parsed.management_destination,
+            parse_destination(DESTINATION).unwrap()
         );
-        assert_eq!(parsed.peripheral_id.as_deref(), Some("peripheral-a"));
+        assert_eq!(parsed.management_destination_hex, DESTINATION);
+        assert!(parsed.enroll);
         assert_eq!(parsed.http_port, 43123);
     }
 
     #[test]
-    fn explicit_storage_requires_both_paths() {
-        let base = ["--eui48".to_owned(), "ACA704E13E88".to_owned()];
-        assert!(parse(&base).is_err());
+    fn each_management_application_gets_app_private_state_without_a_partition_scheme() {
+        assert_eq!(
+            profile_database(Path::new("/private/state"), DESTINATION),
+            PathBuf::from(format!(
+                "/private/state/{PROFILE_DIRECTORY}/{DESTINATION}/{CHAT_DATABASE_FILE}"
+            ))
+        );
+    }
+
+    #[test]
+    fn destination_is_exact_and_required() {
+        assert!(parse_destination(DESTINATION).is_ok());
+        assert!(parse_destination("0011").is_err());
         assert!(
             parse(&[
-                base[0].clone(),
-                base[1].clone(),
-                "--credential".to_owned(),
-                "/tmp/key".to_owned(),
+                "--state-root".to_owned(),
+                "/tmp/reticulum-client".to_owned(),
             ])
             .is_err()
-        );
-        assert!(
-            parse(&[
-                base[0].clone(),
-                base[1].clone(),
-                "--credential".to_owned(),
-                "/tmp/key".to_owned(),
-                "--database".to_owned(),
-                "/tmp/chat.sqlite3".to_owned(),
-            ])
-            .is_ok()
         );
     }
 }

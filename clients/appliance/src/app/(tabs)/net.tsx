@@ -13,6 +13,7 @@ export default function NetworkScreen() {
     networkState,
     networkSubtopicHint,
     onRefreshRadioRoutes,
+    radioRoutesAvailable,
     radioRoutesState,
   } = useAppliance();
 
@@ -36,6 +37,7 @@ export default function NetworkScreen() {
       key={networkDeviceKey}
       onRefreshRadioRoutes={onRefreshRadioRoutes}
       onSubtopicHintConsumed={consumeNetworkSubtopicHint}
+      radioRoutesAvailable={radioRoutesAvailable}
       radioRoutesState={radioRoutesState}
       state={networkState}
       subtopicHint={networkSubtopicHint}

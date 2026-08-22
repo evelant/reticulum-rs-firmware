@@ -8,13 +8,12 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+reticulum-lxmf-model = { path = "../lxmf-model", default-features = false }
 reticulum-lxmf-wire = { path = "../lxmf-wire", default-features = false }
-reticulum-node-core = { path = "../node-core", default-features = false }
 
 [dev-dependencies]
 hex.workspace = true
 rand_core.workspace = true
-reticulum-rns-rete = { path = "../rns-rete", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 

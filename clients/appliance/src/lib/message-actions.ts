@@ -1,4 +1,5 @@
 import type { RetrySendRequest, TimelineStatus, TimelineView } from "../generated/api.ts";
+import { reticulumInterfaceIdHex } from "./reticulum-interface-id.ts";
 
 const REPLACEMENT_RETRYABLE_STATUSES = new Set<TimelineStatus>([
   "failed_no_path",
@@ -31,7 +32,9 @@ export function timelineActivityRevision(entry: TimelineView): string {
     entry.current_attempt_number ?? "no-attempt",
     entry.packet_evidence?.encoded_packet_len ?? "no-packet-length",
     entry.packet_evidence?.encoded_packet_sha256 ?? "no-packet-hash",
-    entry.ingress_observation?.interface_id ?? "no-ingress-interface",
+    entry.ingress_observation === null
+      ? "no-ingress-interface"
+      : reticulumInterfaceIdHex(entry.ingress_observation.interface_id),
     entry.ingress_observation?.signal?.rssi_dbm ?? "no-ingress-rssi",
     entry.ingress_observation?.signal?.snr_db ?? "no-ingress-snr",
   ].join(":");

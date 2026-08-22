@@ -8,29 +8,30 @@ identities and secrets only; never add a real appliance identity or credential.
 
 The current suites cover:
 
-- Reticulum 1.3.8 packet, identity, announce, Link, and MessagePack behavior;
-- LXMF 1.0.1 message encoding, signatures, stamps, fields, and delivery forms;
-- BLE GATT local-API authenticated-session framing and key derivation;
-- BLE GATT local-API pairing transcript and activation records.
+- Reticulum 1.4.2 packet, identity, announce, immediate proof callback, Link,
+  and MessagePack behavior;
+- LXMF 1.0.1 message encoding, signatures, stamps, fields, and delivery forms.
 
-## Reticulum 1.3.8
+## Reticulum 1.4.2
 
 The generator requires CPython 3.13.7 and the exact dependency set in
-`requirements-rns-1.3.8.txt`:
+`requirements-rns-1.4.2.txt`:
 
 ```sh
 python3.13 -m pip install \
-  --target target/interop/rns-1.3.8 \
-  -r interop/python/requirements-rns-1.3.8.txt
+  --target target/interop/rns-1.4.2 \
+  -r interop/python/requirements-rns-1.4.2.txt
 
-PYTHONPATH=target/interop/rns-1.3.8 \
+PYTHONPATH=target/interop/rns-1.4.2 \
   python3.13 interop/python/generate_rns_vectors.py --check
-PYTHONPATH=interop/python:target/interop/rns-1.3.8 \
+PYTHONPATH=interop/python:target/interop/rns-1.4.2 \
   python3.13 -m unittest -v interop/python/test_rns_vectors.py
 ```
 
 The corpus excludes nondeterministic ciphertext. It checks stable encodings
 and semantic outcomes rather than treating random ephemeral bytes as fixtures.
+Its proof cases run the released `Transport.inbound` path and record delivery,
+`PROVE_APP`, and proof invocation ordering without transmitting a proof.
 
 ## LXMF 1.0.1
 
@@ -46,23 +47,6 @@ PYTHONPATH=target/interop/lxmf-1.0.1 \
   python3.13 interop/python/generate_lxmf_1_0_1_vectors.py --check
 PYTHONPATH=interop/python:target/interop/lxmf-1.0.1 \
   python3.13 -m unittest -v interop/python/test_lxmf_1_0_1_vectors.py
-```
-
-## Local device API
-
-The session and pairing generators use only the Python standard library, so
-they remain independent of the Rust codecs:
-
-```sh
-python3 interop/python/generate_device_api_session_vectors.py --check
-PYTHONPATH=interop/python python3 -m unittest -v \
-  interop/python/test_device_api_session_vectors.py
-cargo test --locked -p reticulum-device-api-session
-
-python3 interop/python/generate_device_api_pairing_vectors.py --check
-PYTHONPATH=interop/python python3 -m unittest -v \
-  interop/python/test_device_api_pairing_vectors.py
-cargo test --locked -p reticulum-device-api-pairing
 ```
 
 When a wire contract changes, update its generator, committed vector, Python

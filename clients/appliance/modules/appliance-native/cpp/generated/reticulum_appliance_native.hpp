@@ -38,31 +38,11 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_ble_profile(
+  cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeappliance_open_prns_profile(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_disconnected(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_ingest_indication(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_link_connected(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_next_platform_command(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_failed(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ble_write_succeeded(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_appliance_label_json(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -78,15 +58,7 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_credential_status(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
   cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_ensure_connected(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_import_activated_credential(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -95,6 +67,10 @@ protected:
       size_t count);
   jsi::Value
   cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_message_activity_json(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_mutate_appliance_label_json(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -173,54 +149,46 @@ protected:
   cpp_uniffi_reticulum_appliance_native_fn_method_nativeappliance_upsert_contact_json(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
-  jsi::Value cpp_uniffi_reticulum_appliance_native_fn_clone_nativebleonboarding(
+  jsi::Value cpp_uniffi_reticulum_appliance_native_fn_clone_nativeprnsnode(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
-  jsi::Value cpp_uniffi_reticulum_appliance_native_fn_free_nativebleonboarding(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_constructor_nativebleonboarding_open(
+  jsi::Value cpp_uniffi_reticulum_appliance_native_fn_free_nativeprnsnode(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_abort_current(
+  cpp_uniffi_reticulum_appliance_native_fn_constructor_nativeprnsnode_start(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_disconnected(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_close(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_ingest_indication(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_enroll_management(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_link_connected(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_management_candidates(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_next_platform_command(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_management_identity(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_write_failed(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_public_management_identity(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_ble_write_succeeded(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_reboot_into_staged_ota(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_pair(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_snapshot(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_resume(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativebleonboarding_snapshot(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprnsnode_stage_ota_image(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_reticulum_appliance_native_fn_clone_nativeprofilestore(
@@ -238,15 +206,11 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_credential_status(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
   cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_delete_inactive_profile(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_reconcile_onboarding_publication(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_remember_profile(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -254,7 +218,7 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_fn_func_native_ble_gatt_profile(
+  cpp_uniffi_reticulum_appliance_native_fn_method_nativeprofilestore_update_active_appliance_label(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -407,35 +371,11 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_func_native_ble_gatt_profile(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
   cpp_uniffi_reticulum_appliance_native_checksum_func_native_bridge_contract(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_disconnected(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_ingest_indication(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_link_connected(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_next_platform_command(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_failed(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ble_write_succeeded(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_appliance_label_json(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -451,15 +391,7 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_credential_status(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
   cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_ensure_connected(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_import_activated_credential(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -468,6 +400,10 @@ protected:
       size_t count);
   jsi::Value
   cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_message_activity_json(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeappliance_mutate_appliance_label_json(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -547,43 +483,35 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_abort_current(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_close(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_disconnected(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_enroll_management(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_ingest_indication(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_management_candidates(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_link_connected(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_management_identity(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_next_platform_command(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_public_management_identity(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_write_failed(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_reboot_into_staged_ota(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_ble_write_succeeded(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_snapshot(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_pair(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_resume(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativebleonboarding_snapshot(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprnsnode_stage_ota_image(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -591,15 +519,11 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_credential_status(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value
   cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_delete_inactive_profile(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_reconcile_onboarding_publication(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_remember_profile(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -607,11 +531,15 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_ble_profile(
+  cpp_uniffi_reticulum_appliance_native_checksum_method_nativeprofilestore_update_active_appliance_label(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
-  cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativebleonboarding_open(
+  cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeappliance_open_prns_profile(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_reticulum_appliance_native_checksum_constructor_nativeprnsnode_start(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -624,8 +552,7 @@ protected:
   jsi::Value cpp_uniffi_internal_fn_method_nativeappliance_ffi__bless_pointer(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
-  jsi::Value
-  cpp_uniffi_internal_fn_method_nativebleonboarding_ffi__bless_pointer(
+  jsi::Value cpp_uniffi_internal_fn_method_nativeprnsnode_ffi__bless_pointer(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value

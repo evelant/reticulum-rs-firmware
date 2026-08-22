@@ -1,28 +1,37 @@
 import { MAX_CONTACT_NAME_BYTES, type NearbyPeerView } from "../generated/api.ts";
 import { utf8ByteLength } from "./limits.ts";
+import { reticulumInterfaceIdHex } from "./reticulum-interface-id.ts";
 
 export type { NearbyPeerView } from "../generated/api.ts";
 
-export interface NearbyInterfaceSummary {
-  /** Product-owned observing-interface slot. */
-  readonly interfaceId: number;
-  /** Firmware-projected label, when the slot is known to this product. */
-  readonly interfaceName: string | null;
-  /** Distinct authenticated peers most recently observed on this interface. */
+export interface NearbyContactSummary {
+  /** Canonical authenticated LXMF destination. */
+  readonly destination: string;
+  /** Best current metadata for contact naming and actions. */
+  readonly representative: NearbyPeerView;
+  /** Node-scoped observations of this destination. */
+  readonly observations: readonly NearbyPeerView[];
+}
+
+export interface NearbyObserverSummary {
+  readonly observerKind: NearbyPeerView["observer_kind"];
+  readonly observerManagementDestination: string | null;
+  /** Distinct authenticated LXMF destinations observed by this node. */
   readonly peerCount: number;
-  /** Observed peers that are not present in the app's contact store. */
-  readonly unaddedPeerCount: number;
-  /** Peers whose latest announce was received directly (one Reticulum hop). */
-  readonly directPeerCount: number;
-  /** Freshest retained observation age for this interface. */
+  /** Retained node/interface observations represented by the summary. */
+  readonly observationCount: number;
+  /** Human-readable interface labels, still scoped to this observer. */
+  readonly interfaceLabels: readonly string[];
   readonly freshestObservedAgeMs: number;
 }
 
 export interface NearbyNetworkSummary {
+  /** Distinct authenticated LXMF destinations, not observation-row count. */
   readonly peerCount: number;
+  readonly observationCount: number;
   readonly unaddedPeerCount: number;
-  readonly interfaceCount: number;
-  readonly interfaces: readonly NearbyInterfaceSummary[];
+  readonly observerCount: number;
+  readonly observers: readonly NearbyObserverSummary[];
 }
 
 /** Bounded cadence used only while the Nearby surface is visible and connected. */
@@ -36,6 +45,23 @@ function normalizedFingerprint(peer: NearbyPeerView): string {
 
 function normalizedDestination(destination: string): string {
   return destination.trim().toLowerCase();
+}
+
+function observerKind(peer: NearbyPeerView): NearbyPeerView["observer_kind"] {
+  return peer.observer_kind === "appliance" ? "appliance" : "phone";
+}
+
+function observerDestination(peer: NearbyPeerView): string | null {
+  const destination = peer.observer_management_destination?.trim().toLowerCase() ?? "";
+  return /^[0-9a-f]{32}$/.test(destination) ? destination : null;
+}
+
+function observerKey(peer: NearbyPeerView): string {
+  return `${observerKind(peer)}\u0000${observerDestination(peer) ?? ""}`;
+}
+
+function observationKey(peer: NearbyPeerView): string {
+  return `${observerKey(peer)}\u0000${reticulumInterfaceIdHex(peer.interface_id)}`;
 }
 
 function advancedObservationAge(ageMs: number, elapsedSinceFetchMs: number): number {
@@ -52,14 +78,55 @@ export function nearbySnapshotElapsedMs(fetchedAtMs: number | null, nowMs: numbe
   return Math.max(0, Math.floor(nowMs - fetchedAtMs));
 }
 
-/**
- * Project the authenticated nearby-announcement view into compact,
- * transport-neutral network state.
- *
- * This deliberately reports observed peers and observing interfaces, not a
- * route-table size or interface-health claim. The current device API exposes
- * neither an enumerable route table nor an authoritative interface registry.
- */
+/** Group node-scoped observations without merging their route authority. */
+export function nearbyContacts(peers: readonly NearbyPeerView[]): NearbyContactSummary[] {
+  const grouped = new Map<
+    string,
+    { representative: NearbyPeerView; observations: Map<string, NearbyPeerView> }
+  >();
+  for (const peer of peers) {
+    const destination = normalizedDestination(peer.destination);
+    if (!/^[0-9a-f]{32}$/.test(destination)) continue;
+    const existing = grouped.get(destination);
+    if (existing === undefined) {
+      grouped.set(destination, {
+        representative: peer,
+        observations: new Map([[observationKey(peer), peer]]),
+      });
+      continue;
+    }
+    const key = observationKey(peer);
+    const retained = existing.observations.get(key);
+    if (retained === undefined || peer.observed_age_ms < retained.observed_age_ms) {
+      existing.observations.set(key, peer);
+    }
+    const retainedHasName = existing.representative.display_name !== null;
+    const candidateHasName = peer.display_name !== null;
+    if (
+      (candidateHasName && !retainedHasName) ||
+      (candidateHasName === retainedHasName &&
+        peer.observed_age_ms < existing.representative.observed_age_ms)
+    ) {
+      existing.representative = peer;
+    }
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([destination, group]) => ({
+      destination,
+      representative: group.representative,
+      observations: [...group.observations.values()].sort((left, right) => {
+        const observerOrder = observerKey(left).localeCompare(observerKey(right));
+        return observerOrder === 0
+          ? reticulumInterfaceIdHex(left.interface_id).localeCompare(
+              reticulumInterfaceIdHex(right.interface_id),
+            )
+          : observerOrder;
+      }),
+    }));
+}
+
+/** Compact counts of contacts and the Reticulum nodes that observed them. */
 export function nearbyNetworkSummary(
   peers: readonly NearbyPeerView[],
   contacts: readonly { readonly destination: string }[],
@@ -68,54 +135,88 @@ export function nearbyNetworkSummary(
   const contactsByDestination = new Set(
     contacts.map((contact) => normalizedDestination(contact.destination)),
   );
-  const interfaces = new Map<number, NearbyInterfaceSummary>();
+  const groupedContacts = nearbyContacts(peers);
+  const observers = new Map<
+    string,
+    {
+      observerKind: NearbyPeerView["observer_kind"];
+      observerManagementDestination: string | null;
+      peers: Set<string>;
+      observationCount: number;
+      interfaceLabels: Set<string>;
+      freshestObservedAgeMs: number;
+    }
+  >();
   let unaddedPeerCount = 0;
 
-  for (const peer of peers) {
-    const unadded = !contactsByDestination.has(normalizedDestination(peer.destination));
-    if (unadded) unaddedPeerCount += 1;
-
-    const existing = interfaces.get(peer.interface_id);
-    const interfaceName = peer.interface_name?.trim() || existing?.interfaceName || null;
-    const observedAge = advancedObservationAge(peer.observed_age_ms, elapsedSinceFetchMs);
-    interfaces.set(peer.interface_id, {
-      interfaceId: peer.interface_id,
-      interfaceName,
-      peerCount: (existing?.peerCount ?? 0) + 1,
-      unaddedPeerCount: (existing?.unaddedPeerCount ?? 0) + Number(unadded),
-      directPeerCount: (existing?.directPeerCount ?? 0) + Number(peer.hops === 1),
-      freshestObservedAgeMs:
-        existing === undefined
-          ? observedAge
-          : Math.min(existing.freshestObservedAgeMs, observedAge),
-    });
+  for (const contact of groupedContacts) {
+    if (!contactsByDestination.has(contact.destination)) unaddedPeerCount += 1;
+    for (const peer of contact.observations) {
+      const key = observerKey(peer);
+      const existing = observers.get(key);
+      const observedAge = advancedObservationAge(peer.observed_age_ms, elapsedSinceFetchMs);
+      const interfaceLabel =
+        peer.interface_name?.trim() || `Interface ${reticulumInterfaceIdHex(peer.interface_id)}`;
+      if (existing === undefined) {
+        observers.set(key, {
+          observerKind: observerKind(peer),
+          observerManagementDestination: observerDestination(peer),
+          peers: new Set([contact.destination]),
+          observationCount: 1,
+          interfaceLabels: new Set([interfaceLabel]),
+          freshestObservedAgeMs: observedAge,
+        });
+      } else {
+        existing.peers.add(contact.destination);
+        existing.observationCount += 1;
+        existing.interfaceLabels.add(interfaceLabel);
+        existing.freshestObservedAgeMs = Math.min(existing.freshestObservedAgeMs, observedAge);
+      }
+    }
   }
 
-  const observedInterfaces = [...interfaces.values()].sort(
-    (left, right) => left.interfaceId - right.interfaceId,
-  );
+  const observedNodes = [...observers.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, observer]) => ({
+      observerKind: observer.observerKind,
+      observerManagementDestination: observer.observerManagementDestination,
+      peerCount: observer.peers.size,
+      observationCount: observer.observationCount,
+      interfaceLabels: [...observer.interfaceLabels].sort(),
+      freshestObservedAgeMs: observer.freshestObservedAgeMs,
+    }));
   return {
-    peerCount: peers.length,
+    peerCount: groupedContacts.length,
+    observationCount: groupedContacts.reduce(
+      (count, contact) => count + contact.observations.length,
+      0,
+    ),
     unaddedPeerCount,
-    interfaceCount: observedInterfaces.length,
-    interfaces: observedInterfaces,
+    observerCount: observedNodes.length,
+    observers: observedNodes,
   };
 }
 
-export function nearbyInterfaceLabel(summary: NearbyInterfaceSummary): string {
-  const name = summary.interfaceName?.trim();
-  return name === undefined || name.length === 0
-    ? `Interface ${summary.interfaceId}`
-    : `${name} · interface ${summary.interfaceId}`;
+export function nearbyObserverLabel(
+  observer: Pick<NearbyObserverSummary, "observerKind" | "observerManagementDestination">,
+  applianceLabel: string | null,
+): string {
+  if (observer.observerKind === "phone") return "This phone";
+  const label = applianceLabel?.trim();
+  if (label !== undefined && label.length > 0) return label;
+  const destination = observer.observerManagementDestination;
+  return destination === null
+    ? "Connected appliance"
+    : `Appliance ${destination.slice(0, 4)} ${destination.slice(4, 8)}`;
 }
 
-export function nearbyInterfaceSummaryHint(summary: NearbyInterfaceSummary): string {
+export function nearbyObserverSummaryHint(summary: NearbyObserverSummary): string {
   const peerLabel = summary.peerCount === 1 ? "peer" : "peers";
-  const directLabel = summary.directPeerCount === 1 ? "direct peer" : "direct peers";
+  const observationLabel = summary.observationCount === 1 ? "observation" : "observations";
   return [
     `${summary.peerCount} ${peerLabel}`,
-    `${summary.unaddedPeerCount} not in contacts`,
-    `${summary.directPeerCount} ${directLabel}`,
+    `${summary.observationCount} ${observationLabel}`,
+    summary.interfaceLabels.join(", "),
     `last announce ${nearbyPeerAge(summary.freshestObservedAgeMs)}`,
   ].join(" · ");
 }
@@ -172,16 +273,26 @@ export function nearbyPeerAge(ageMs: number): string {
   return `${Math.floor(safeAge / 86_400_000)}d ago`;
 }
 
-export function nearbyPeerRouteHint(peer: NearbyPeerView, elapsedSinceFetchMs = 0): string {
+export function nearbyPeerObservationHint(
+  peer: NearbyPeerView,
+  applianceLabel: string | null,
+  elapsedSinceFetchMs = 0,
+): string {
   const interfaceName = peer.interface_name?.trim();
+  const observer = nearbyObserverLabel(
+    {
+      observerKind: observerKind(peer),
+      observerManagementDestination: observerDestination(peer),
+    },
+    applianceLabel,
+  );
   const parts = [
-    peer.hops === 1 ? "direct" : `${peer.hops} hops`,
+    observer,
+    `${peer.hops} ${peer.hops === 1 ? "hop" : "hops"}`,
     interfaceName === undefined || interfaceName.length === 0
-      ? `interface ${peer.interface_id}`
+      ? `interface ${reticulumInterfaceIdHex(peer.interface_id)}`
       : interfaceName,
     `announced ${nearbyPeerAge(advancedObservationAge(peer.observed_age_ms, elapsedSinceFetchMs))}`,
   ];
-  if (peer.rssi_dbm !== null) parts.push(`RX ${peer.rssi_dbm} dBm`);
-  if (peer.snr_db !== null) parts.push(`SNR ${peer.snr_db} dB`);
   return parts.join(" · ");
 }

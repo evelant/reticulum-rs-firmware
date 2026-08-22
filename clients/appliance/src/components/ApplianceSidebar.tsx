@@ -30,11 +30,12 @@ import {
   associatedNomadDestinationForLxmf,
   NEARBY_FOREGROUND_POLL_INTERVAL_MS,
   type NearbyPeerView,
-  nearbyInterfaceLabel,
-  nearbyInterfaceSummaryHint,
+  nearbyContacts,
   nearbyNetworkSummary,
+  nearbyObserverLabel,
+  nearbyObserverSummaryHint,
   nearbyPeerFingerprint,
-  nearbyPeerRouteHint,
+  nearbyPeerObservationHint,
   nearbyPeerSuggestedName,
   nearbySnapshotElapsedMs,
 } from "../lib/nearby-peers.ts";
@@ -46,6 +47,7 @@ const KEYBOARD_LAYOUT = APPLIANCE_KEYBOARD_LAYOUT;
 
 interface NearbyPanelProps {
   readonly active: boolean;
+  readonly applianceLabel: string | null;
   readonly busy: boolean;
   readonly compact: boolean;
   readonly connected: boolean;
@@ -63,6 +65,7 @@ interface NearbyPanelProps {
 
 function NearbyPanel({
   active,
+  applianceLabel,
   busy,
   compact,
   connected,
@@ -87,6 +90,7 @@ function NearbyPanel({
   }, [active]);
   const elapsedSinceFetchMs = nearbySnapshotElapsedMs(snapshotFetchedAtMs, ageClockMs);
   const networkSummary = nearbyNetworkSummary(peers, contacts, elapsedSinceFetchMs);
+  const nearbyContactSummaries = nearbyContacts(peers);
 
   const choosePeer = async (peer: NearbyPeerView, alreadyAdded: boolean) => {
     if (alreadyAdded) {
@@ -101,12 +105,13 @@ function NearbyPanel({
     }
   };
 
-  const peerRows = peers.map((peer) => {
-    const existing = contacts.some((contact) => contact.destination === peer.destination);
-    const adding = addingDestination === peer.destination;
+  const peerRows = nearbyContactSummaries.map((nearbyContact) => {
+    const peer = nearbyContact.representative;
+    const existing = contacts.some((contact) => contact.destination === nearbyContact.destination);
+    const adding = addingDestination === nearbyContact.destination;
     return (
       <View
-        key={peer.destination}
+        key={nearbyContact.destination}
         style={[
           styles.nearbyPeer,
           existing && styles.nearbyPeerAdded,
@@ -152,7 +157,14 @@ function NearbyPanel({
             </Pressable>
           </View>
         </View>
-        <Text style={styles.nearbyStatus}>{nearbyPeerRouteHint(peer, elapsedSinceFetchMs)}</Text>
+        {nearbyContact.observations.map((observation) => (
+          <Text
+            key={`${observation.observer_kind}:${observation.observer_management_destination ?? "phone"}:${observation.interface_id.join(":")}`}
+            style={styles.nearbyStatus}
+          >
+            {nearbyPeerObservationHint(observation, applianceLabel, elapsedSinceFetchMs)}
+          </Text>
+        ))}
         <Text selectable style={styles.monospace}>
           ID {nearbyPeerFingerprint(peer)}
         </Text>
@@ -167,7 +179,7 @@ function NearbyPanel({
           <Text style={styles.contactName}>Nearby</Text>
           <Text style={styles.nearbyCaption}>
             {loaded
-              ? `${networkSummary.peerCount} authenticated · ${networkSummary.unaddedPeerCount} not in contacts`
+              ? `${networkSummary.peerCount} authenticated contacts · ${networkSummary.observationCount} observations · ${networkSummary.unaddedPeerCount} not saved`
               : "Authenticated LXMF announces"}
           </Text>
         </View>
@@ -187,7 +199,7 @@ function NearbyPanel({
       </View>
       {onRefresh === null ? (
         <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
-          Nearby discovery is not included in this app build yet.
+          Nearby discovery is not available from this firmware yet.
         </Text>
       ) : !connected ? (
         <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
@@ -202,7 +214,7 @@ function NearbyPanel({
           <Text style={styles.inlineError}>{loadError}</Text>
           <Text style={styles.nearbyStatus}>Tap Refresh to try again.</Text>
         </View>
-      ) : loaded && peers.length === 0 ? (
+      ) : loaded && networkSummary.peerCount === 0 ? (
         <Text accessibilityLiveRegion="polite" style={styles.nearbyStatus}>
           No authenticated LXMF announces received yet. Leave both nodes powered, then refresh.
         </Text>
@@ -210,16 +222,17 @@ function NearbyPanel({
         <>
           <View style={styles.nearbyInterfaces}>
             <Text style={styles.applianceDestinationLabel}>
-              OBSERVED INTERFACES ({networkSummary.interfaceCount})
+              OBSERVING NODES ({networkSummary.observerCount})
             </Text>
-            {networkSummary.interfaces.map((observedInterface) => (
-              <View key={observedInterface.interfaceId} style={styles.nearbyInterfaceRow}>
+            {networkSummary.observers.map((observer) => (
+              <View
+                key={`${observer.observerKind}:${observer.observerManagementDestination ?? "phone"}`}
+                style={styles.nearbyInterfaceRow}
+              >
                 <Text style={styles.nearbyInterfaceName}>
-                  {nearbyInterfaceLabel(observedInterface)}
+                  {nearbyObserverLabel(observer, applianceLabel)}
                 </Text>
-                <Text style={styles.nearbyStatus}>
-                  {nearbyInterfaceSummaryHint(observedInterface)}
-                </Text>
+                <Text style={styles.nearbyStatus}>{nearbyObserverSummaryHint(observer)}</Text>
               </View>
             ))}
           </View>
@@ -243,6 +256,7 @@ function NearbyPanel({
 }
 
 interface ApplianceSidebarProps {
+  readonly applianceLabel: string | null;
   readonly busy: boolean;
   readonly compact: boolean;
   readonly contacts: ContactView[];
@@ -264,6 +278,7 @@ interface ApplianceSidebarProps {
 }
 
 export function ApplianceSidebar({
+  applianceLabel,
   busy,
   compact,
   contacts,
@@ -623,6 +638,7 @@ export function ApplianceSidebar({
       {showNearby ? (
         <NearbyPanel
           active={foreground && visible}
+          applianceLabel={applianceLabel}
           busy={busy}
           compact={compact}
           connected={readyConnection !== undefined}

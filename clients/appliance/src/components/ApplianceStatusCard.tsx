@@ -35,24 +35,18 @@ type ProfileConfirmation =
   | {
       readonly action: "forget";
       readonly profile: ApplianceProfilePresentation;
-    }
-  | {
-      readonly action: "repair";
-      readonly profile: ApplianceProfilePresentation;
     };
 
 interface ApplianceProfileManagerProps {
   readonly busy: boolean;
   readonly canAdd: boolean;
   readonly catalog: NativeProfileStoreSnapshot;
-  readonly exactBleTargetRequired: boolean;
   readonly onActivate: (profileKey: string) => Promise<boolean>;
   readonly onAdd: () => void;
   readonly onClearOperation: () => void;
   readonly onClose: () => void;
   readonly onForget: ((profileKey: string) => Promise<boolean>) | null;
   readonly onReconnect: () => Promise<boolean>;
-  readonly onRepairBond: (() => Promise<boolean>) | null;
   readonly operation: ProfileOperation;
   readonly visible: boolean;
 }
@@ -61,14 +55,12 @@ function ApplianceProfileManager({
   busy,
   canAdd,
   catalog,
-  exactBleTargetRequired,
   onActivate,
   onAdd,
   onClearOperation,
   onClose,
   onForget,
   onReconnect,
-  onRepairBond,
   operation,
   visible,
 }: ApplianceProfileManagerProps) {
@@ -85,9 +77,7 @@ function ApplianceProfileManager({
     const completed =
       confirmation.action === "switch"
         ? await onActivate(confirmation.profile.profileKey)
-        : confirmation.action === "forget"
-          ? await onForget?.(confirmation.profile.profileKey)
-          : await onRepairBond?.();
+        : await onForget?.(confirmation.profile.profileKey);
     if (completed) setConfirmation(null);
   };
 
@@ -114,7 +104,7 @@ function ApplianceProfileManager({
           style={styles.profileManagerScroller}
         >
           <Text style={styles.secondaryText}>
-            Each board keeps its own credential, contacts, conversations, and durable outbox.
+            Each appliance keeps isolated local contacts, conversations, and durable outbox state.
           </Text>
           {operation.state === "idle" ? null : (
             <View
@@ -138,17 +128,11 @@ function ApplianceProfileManager({
           )}
           <View style={styles.profileList}>
             {presentation.profiles.map((profile) => {
-              const incompatible =
-                exactBleTargetRequired && !profile.active && profile.advertisedName === null;
               return (
                 <View
                   accessibilityLabel={`${profile.active ? "Active" : "Saved"} appliance ${profile.boardLabel}`}
                   key={profile.profileKey}
-                  style={[
-                    styles.profileRow,
-                    profile.active && styles.profileRowActive,
-                    incompatible && styles.profileRowUnavailable,
-                  ]}
+                  style={[styles.profileRow, profile.active && styles.profileRowActive]}
                 >
                   <View style={styles.profileRowHeading}>
                     <Text selectable style={styles.profileBoardLabel}>
@@ -157,18 +141,13 @@ function ApplianceProfileManager({
                     <Text
                       style={[styles.profileBadge, profile.active && styles.profileBadgeActive]}
                     >
-                      {profile.active ? "ACTIVE" : incompatible ? "NO BLE NAME" : "SAVED"}
+                      {profile.active ? "ACTIVE" : "SAVED"}
                     </Text>
                   </View>
                   <Text selectable style={styles.monospace}>
-                    {profile.bleLabel}
+                    {profile.managementDestination}
                   </Text>
-                  <Text style={styles.profileGeneration}>{profile.generationLabel}</Text>
-                  {incompatible ? (
-                    <Text style={styles.profileGeneration}>
-                      Re-import or repair this profile before selecting it over Bluetooth.
-                    </Text>
-                  ) : null}
+                  <Text style={styles.profileGeneration}>LXMF {profile.lxmfDestination}</Text>
                   {profile.active ? (
                     <>
                       <View style={styles.profileRowActions}>
@@ -181,17 +160,6 @@ function ApplianceProfileManager({
                           }}
                           secondary
                         />
-                        {onRepairBond === null ? null : (
-                          <ActionButton
-                            disabled={busy || operating}
-                            label="Repair Bluetooth"
-                            onPress={() => {
-                              onClearOperation();
-                              setConfirmation({ action: "repair", profile });
-                            }}
-                            secondary
-                          />
-                        )}
                       </View>
                       <Text style={styles.profileGeneration}>
                         Switch to another appliance before forgetting this active profile.
@@ -200,7 +168,7 @@ function ApplianceProfileManager({
                   ) : (
                     <View style={styles.profileRowActions}>
                       <ActionButton
-                        disabled={busy || operating || incompatible}
+                        disabled={busy || operating}
                         label="Switch"
                         onPress={() => {
                           onClearOperation();
@@ -229,16 +197,12 @@ function ApplianceProfileManager({
               <Text style={styles.profileConfirmationTitle}>
                 {confirmation.action === "switch"
                   ? `Switch to ${confirmation.profile.boardLabel}?`
-                  : confirmation.action === "forget"
-                    ? `Forget ${confirmation.profile.boardLabel} from this phone?`
-                    : `Repair Bluetooth for ${confirmation.profile.boardLabel}?`}
+                  : `Forget ${confirmation.profile.boardLabel} from this phone?`}
               </Text>
               <Text style={styles.secondaryText}>
                 {confirmation.action === "switch"
                   ? "The current connection will close. Profile-local messages and contacts stay isolated, and any unsent composer text will be discarded."
-                  : confirmation.action === "forget"
-                    ? "This permanently deletes this phone's local credential, messages, contacts, and outbox for this appliance. It does not revoke the board's credential or remove its Bluetooth bond."
-                    : `This keeps the local credential, messages, contacts, and outbox. The alpha board retains one phone connection and one phone bond, so first force-quit this app or disable Bluetooth on the previous phone. On this phone, forget ${confirmation.profile.bleLabel} in system Bluetooth settings. Then hold GPIO21 before pressing RST, keep holding it for at least three seconds, and release it only after the board shows BLE Recovery. Choose Repair Bluetooth while that recovery screen is visible. When the app later asks for physical presence, hold GPIO21 again for about two seconds and enter the displayed code. Repair moves Bluetooth access to this phone and displaces the previous phone.`}
+                  : "This permanently deletes this phone's local messages, contacts, and outbox for this appliance. It does not revoke this app's Reticulum identity from the board allow-list."}
               </Text>
               <View style={styles.actionRow}>
                 <ActionButton
@@ -247,26 +211,16 @@ function ApplianceProfileManager({
                     operating
                       ? confirmation.action === "switch"
                         ? "Switching…"
-                        : confirmation.action === "forget"
-                          ? "Forgetting…"
-                          : "Repairing…"
+                        : "Forgetting…"
                       : confirmation.action === "switch"
                         ? "Switch appliance"
-                        : confirmation.action === "forget"
-                          ? "Delete local data"
-                          : "Start Bluetooth repair"
+                        : "Delete local data"
                   }
                   onPress={() => void confirmOperation()}
                 />
                 <ActionButton
                   disabled={operating}
-                  label={
-                    confirmation.action === "switch"
-                      ? "Keep current"
-                      : confirmation.action === "forget"
-                        ? "Keep appliance"
-                        : "Cancel"
-                  }
+                  label={confirmation.action === "switch" ? "Keep current" : "Keep appliance"}
                   onPress={() => setConfirmation(null)}
                   secondary
                 />
@@ -276,7 +230,7 @@ function ApplianceProfileManager({
           <View style={styles.profileAddSection}>
             <Text style={styles.profileConfirmationTitle}>Another physical node</Text>
             <Text style={styles.secondaryText}>
-              Find a nearby unpaired appliance and use the existing secure Bluetooth ceremony.
+              Select a verified management announce and authorize this app-owned Reticulum identity.
             </Text>
             <View style={styles.actionRow}>
               <ActionButton
@@ -305,15 +259,13 @@ interface ApplianceStatusCardProps {
   readonly busy: boolean;
   readonly canAddAppliance: boolean;
   readonly compact: boolean;
-  readonly deviceName: string | null;
-  readonly exactBleTargetRequired: boolean;
+  readonly applianceLabel: string | null;
   readonly nativeCore: NativeCoreStatus | null;
   readonly onActivateProfile: (profileKey: string) => Promise<boolean>;
   readonly onAddAppliance: () => void;
   readonly onClearProfileOperation: () => void;
   readonly onForgetProfile: ((profileKey: string) => Promise<boolean>) | null;
   readonly onReconnect: () => Promise<boolean>;
-  readonly onRepairBleBond: (() => Promise<boolean>) | null;
   readonly onSync: () => void;
   readonly profileOperation: ProfileOperation;
   readonly profiles: NativeProfileStoreSnapshot | null;
@@ -324,15 +276,13 @@ export function ApplianceStatusCard({
   busy,
   canAddAppliance,
   compact,
-  deviceName,
-  exactBleTargetRequired,
+  applianceLabel,
   nativeCore,
   onActivateProfile,
   onAddAppliance,
   onClearProfileOperation,
   onForgetProfile,
   onReconnect,
-  onRepairBleBond,
   onSync,
   profileOperation,
   profiles,
@@ -361,7 +311,7 @@ export function ApplianceStatusCard({
             selectable
             style={[styles.applianceStatusBoard, compact && styles.applianceStatusBoardCompact]}
           >
-            {deviceName ?? activeProfile?.boardLabel ?? presentation.boardLabel}
+            {applianceLabel ?? activeProfile?.boardLabel ?? presentation.boardLabel}
           </Text>
           <Text
             accessibilityLiveRegion="polite"
@@ -476,7 +426,6 @@ export function ApplianceStatusCard({
           busy={busy}
           canAdd={canAddAppliance}
           catalog={profiles}
-          exactBleTargetRequired={exactBleTargetRequired}
           onActivate={onActivateProfile}
           onAdd={onAddAppliance}
           onClearOperation={onClearProfileOperation}
@@ -486,7 +435,6 @@ export function ApplianceStatusCard({
           }}
           onForget={onForgetProfile}
           onReconnect={onReconnect}
-          onRepairBond={onRepairBleBond}
           operation={profileOperation}
           visible={showProfiles}
         />

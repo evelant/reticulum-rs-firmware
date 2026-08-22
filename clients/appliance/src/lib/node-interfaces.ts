@@ -8,10 +8,22 @@ import type {
   ReticulumTcpPeerView,
 } from "../generated/api.ts";
 import { networkBytesText } from "./network-config-input.ts";
+import {
+  reticulumInterfaceFamily,
+  reticulumInterfaceIdHex,
+  reticulumInterfaceKind,
+  reticulumInterfaceKindName,
+} from "./reticulum-interface-id.ts";
 import { reticulumTcpDiagnostic, reticulumTcpStateLabel } from "./tcp-runtime-diagnostics.ts";
 
 /** Transport family of one displayed node interface or link. */
-export type NodeInterfaceKind = "lora" | "tcp_client" | "tcp_server" | "wifi_station" | "other";
+export type NodeInterfaceKind =
+  | "bluetooth"
+  | "lora"
+  | "tcp_client"
+  | "tcp_server"
+  | "wifi_station"
+  | "other";
 
 /** Coarse availability tone for an interface or link summary. */
 export type NodeInterfaceState = "online" | "offline" | "faulted" | "unknown";
@@ -51,15 +63,21 @@ function tcpPeerAddress(peer: ReticulumTcpPeerView): string {
   return "ipv4_address" in peer ? peer.ipv4_address : peer.hostname;
 }
 
-function loraState(record: DiagnosticInterfaceView | undefined): NodeInterfaceState {
+function interfaceState(record: DiagnosticInterfaceView | undefined): NodeInterfaceState {
   if (record === undefined) return "unknown";
   switch (record.state) {
-    case "online":
+    case "connected":
+    case "degraded":
       return "online";
-    case "offline":
+    case "initializing":
+    case "reconnecting":
+    case "disconnected":
+    case "disabled":
       return "offline";
-    case "faulted":
+    case "failed":
       return "faulted";
+    case "unknown":
+      return "unknown";
   }
 }
 
@@ -127,7 +145,7 @@ function buildLora(
     kind: "lora",
     label: "LoRa radio",
     enabled: true,
-    state: loraState(record),
+    state: interfaceState(record),
     summary: loraSummary(lora),
     metrics: loraMetrics(profile, lora),
   };
@@ -138,7 +156,9 @@ function buildTcp(
   runtime: NetworkRuntimeStatusView | null,
   record: DiagnosticInterfaceView | undefined,
 ): NodeInterfaceSummary {
-  const kind: NodeInterfaceKind = record?.kind === "tcp_server" ? "tcp_server" : "tcp_client";
+  const interfaceKind = record === undefined ? null : reticulumInterfaceKind(record.id);
+  const kind: NodeInterfaceKind =
+    interfaceKind === 2 || interfaceKind === 11 ? "tcp_server" : "tcp_client";
   const diagnostic = reticulumTcpDiagnostic(runtime);
   const metrics: NodeInterfaceMetric[] = [];
   if (peer !== null) {
@@ -157,6 +177,26 @@ function buildTcp(
       diagnostic ??
       `${reticulumTcpStateLabel(runtime?.tcp_peer_state ?? null)}${peer === null ? " · no peer configured" : ""}`,
     metrics,
+  };
+}
+
+function buildPrnsInterface(record: DiagnosticInterfaceView): NodeInterfaceSummary {
+  const family = reticulumInterfaceFamily(record.id);
+  const kind: NodeInterfaceKind = family === "bluetooth" ? "bluetooth" : "other";
+  return {
+    key: reticulumInterfaceIdHex(record.id),
+    kind,
+    label: reticulumInterfaceKindName(record.id),
+    enabled: record.state !== "disabled",
+    state: interfaceState(record),
+    summary:
+      record.failure_reason ??
+      `${record.mode.replaceAll("_", " ")} · ${record.destinations} destinations · ${record.links} links`,
+    metrics: [
+      { label: "Received", value: `${record.rx_bytes} bytes` },
+      { label: "Transmitted", value: `${record.tx_bytes} bytes` },
+      { label: "Transported links", value: String(record.transported_links) },
+    ],
   };
 }
 
@@ -204,10 +244,8 @@ function buildWifi(
 export function buildNodeInterfaces(input: NodeInterfaceInput): NodeInterfaceSummary[] {
   const { config, runtime, radioRoutes } = input;
   const records = radioRoutes?.interfaces ?? [];
-  const loraRecord = records.find((record) => record.kind === "lora");
-  const tcpRecord = records.find(
-    (record) => record.kind === "tcp_client" || record.kind === "tcp_server",
-  );
+  const loraRecord = records.find((record) => reticulumInterfaceFamily(record.id) === "lora");
+  const tcpRecord = records.find((record) => reticulumInterfaceFamily(record.id) === "tcp");
 
   const summaries: NodeInterfaceSummary[] = [];
 
@@ -223,6 +261,11 @@ export function buildNodeInterfaces(input: NodeInterfaceInput): NodeInterfaceSum
 
   if (config !== null && wifiEnabled) {
     summaries.push(buildWifi(config, runtime));
+  }
+
+  for (const record of records) {
+    const family = reticulumInterfaceFamily(record.id);
+    if (family !== "lora" && family !== "tcp") summaries.push(buildPrnsInterface(record));
   }
 
   return summaries;

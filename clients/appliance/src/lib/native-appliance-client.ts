@@ -1,16 +1,19 @@
 import type {
   NativeApplianceLike,
-  NativeBleGattProfile,
-  NativeBleOnboardingLike,
   NativeBridgeContract,
-  NativeCredentialSummary,
-  NativeOnboardingPublicationReconciliation,
+  NativePrnsManagementCandidate,
+  NativePrnsManagementIdentity,
+  NativePrnsNodeLike,
+  NativePrnsOtaStatus,
   NativeProfileStoreLike,
   NativeProfileStoreSnapshot,
   NativeProfileSummary,
 } from "@reticulum/appliance-native";
 
 import type {
+  ApplianceLabelMutationOutcome,
+  ApplianceLabelMutationRequest,
+  ApplianceLabelView,
   ApplianceSnapshot,
   ContactRequest,
   ContactView,
@@ -29,12 +32,10 @@ import type {
   NomadFetchPollResponse,
   NomadFetchStartRequest,
   NomadFetchStartResponse,
-  OnboardingView,
   PhoneLocationObservationView,
   RadioRoutesStatusView,
   RadioTracePageRequest,
   RadioTracePageView,
-  RecoveryRequest,
   ReticulumProbePollRequest,
   ReticulumProbePollResponse,
   ReticulumProbeStartRequest,
@@ -46,106 +47,64 @@ import type {
   TimelineView,
 } from "../generated/api.ts";
 import type { ApplianceClient } from "./appliance-client.ts";
-import type { BleBondRepairProgress } from "./ble-bond-repair.ts";
-import type { BleCandidate, BleGattProfile, BleScanOptions } from "./ble-central-types.ts";
 import { acquireExclusiveResource, type ExclusiveResource } from "./exclusive-resource.ts";
 import { nativePathFromFileUri } from "./file-uri.ts";
-import {
-  NativeBleOnboardingTransport,
-  NativeBleTransport,
-  type NativeBleTransportConfig,
-} from "./native-ble-transport.ts";
 import { assertNativeBridgeContract } from "./native-contract.ts";
 import { type NativeErrorPredicate, normalizeNativeError } from "./native-error.ts";
-import { nativePlatformOs } from "./native-platform";
+import type { OnboardingView } from "./onboarding.ts";
+import type {
+  ReticulumApplianceCandidate,
+  ReticulumDiscoveryOptions,
+} from "./reticulum-appliance-candidate.ts";
 
-const PROFILE_STORE_DIRECTORY_NAME = "reticulum-appliance-profiles";
-
-export type NativeCredentialState =
-  | { readonly state: "missing" }
-  | { readonly state: "active"; readonly summary: NativeCredentialSummary }
-  | { readonly state: "invalid"; readonly reason: string };
-
-export interface StagedNativeCredential {
-  /**
-   * Absolute path to an app-owned temporary copy. The selected external file
-   * itself is never handed to Rust and its secret bytes never enter JS.
-   */
-  readonly stagingPath: string;
-  cleanup(): void | Promise<void>;
-}
-
-export type NativeCredentialPicker = () => Promise<StagedNativeCredential | null>;
+const PROFILE_STORE_DIRECTORY_NAME = "reticulum-appliance-profiles-v3";
+const PRNS_STORE_DIRECTORY_NAME = "reticulum-prns";
+const DESTINATION_PATTERN = /^[0-9a-f]{32}$/;
 
 export interface NativeApplianceBridge {
   readonly contract: NativeBridgeContract;
   readonly isNativeError: NativeErrorPredicate;
   activateProfile(profileStore: NativeProfileStoreLike, profileKey: string): NativeProfileSummary;
-  credentialStatus(appliance: NativeApplianceLike): NativeCredentialState;
   destroy(appliance: NativeApplianceLike): void;
   destroyProfileStore(profileStore: NativeProfileStoreLike): void;
-  forgetProfile?(
+  forgetProfile(
     profileStore: NativeProfileStoreLike,
     profileKey: string,
   ): NativeProfileStoreSnapshot;
-  importCredential(appliance: NativeApplianceLike, stagingPath: string): NativeCredentialSummary;
   open(profileStore: NativeProfileStoreLike): NativeApplianceLike;
   profileSnapshot(profileStore: NativeProfileStoreLike): NativeProfileStoreSnapshot;
-  reconcileOnboardingPublication?(
+  rememberProfile(
     profileStore: NativeProfileStoreLike,
-  ): NativeOnboardingPublicationReconciliation;
+    managementDestination: string,
+    lxmfDestination: string,
+  ): NativeProfileSummary;
 }
 
-export type NativeBleOnboardingPhase =
-  | "idle"
-  | "link_ready"
-  | "preparing"
-  | "checking_initialization"
-  | "initializing"
-  | "initialized"
-  | "waiting_for_initialization_presence"
-  | "waiting_for_begin_presence"
-  | "pending_persisted"
-  | "waiting_for_proof_presence"
-  | "proof_challenge_accepted"
-  | "activation_prepared"
-  | "publishing_profile"
-  | "complete"
-  | "waiting_for_abort_presence"
-  | "finalizing_abort"
-  | "aborted"
-  | "failed";
-
-export type NativeBleOnboardingFailure =
-  | "busy"
-  | "no_subscribed_link"
-  | "initialization_incomplete"
-  | "resume_required"
-  | "abort_required"
-  | "reconciliation_required"
-  | "invalid_recovery_state"
-  | "protocol_failure"
-  | "profile_publication_failure"
-  | "internal";
-
-export interface NativeBleOnboardingProjection {
-  readonly completedProfile?: NativeProfileSummary;
-  readonly failure?: NativeBleOnboardingFailure;
-  readonly phase: NativeBleOnboardingPhase;
-  readonly revision: bigint;
-}
-
-export interface NativeBleOnboardingBridge {
-  destroy(onboarding: NativeBleOnboardingLike): void;
-  open(profileStore: NativeProfileStoreLike): NativeBleOnboardingLike;
-  snapshot(onboarding: NativeBleOnboardingLike): NativeBleOnboardingProjection;
+export interface NativePrnsBridge {
+  readonly node: NativePrnsNodeLike;
+  close(): void;
+  enroll(destinationHash: string, signal?: AbortSignal): Promise<void>;
+  managementCandidates(): readonly NativePrnsManagementCandidate[];
+  managementIdentity(
+    destinationHash: string,
+    signal?: AbortSignal,
+  ): Promise<NativePrnsManagementIdentity>;
+  publicIdentity(
+    destinationHash: string,
+    signal?: AbortSignal,
+  ): Promise<NativePrnsManagementIdentity>;
+  rebootOta(destinationHash: string, signal?: AbortSignal): Promise<NativePrnsOtaStatus>;
+  stageOta(
+    destinationHash: string,
+    image: ArrayBuffer,
+    version: string,
+    signal?: AbortSignal,
+  ): Promise<NativePrnsOtaStatus>;
 }
 
 export interface NativeApplianceRuntime {
-  readonly bleOnboarding?: NativeBleOnboardingBridge;
   readonly bridge: NativeApplianceBridge;
-  readonly createBle?: () => NativeBleTransportConfig;
-  readonly pickCredential?: NativeCredentialPicker;
+  readonly prns: NativePrnsBridge;
   readonly profileStore: NativeProfileStoreLike;
 }
 
@@ -153,53 +112,6 @@ export type NativeApplianceRuntimeLoader = () => Promise<NativeApplianceRuntime>
 
 interface OwnedNativeAppliance {
   readonly appliance: NativeApplianceLike;
-  readonly ble: NativeBleTransport | null;
-  readonly pickCredential?: NativeCredentialPicker;
-}
-
-interface ActiveNativeBleOnboarding {
-  readonly action: NativeBleOnboardingAction;
-  readonly bridge: NativeBleOnboardingBridge;
-  cancelRequested: boolean;
-  linkReady: boolean;
-  readonly native: NativeBleOnboardingLike;
-  operationStarted: boolean;
-  readonly peripheralId: string;
-  released: boolean;
-  readonly transport: NativeBleOnboardingTransport;
-}
-
-interface AdditionalApplianceSession {
-  bleConfig: NativeBleTransportConfig | null;
-  readonly previousProfileKey: string;
-}
-
-type NativeBleOnboardingAction = "pair" | "resume" | "abort";
-
-export function bleGattProfileFromNative(profile: NativeBleGattProfile): BleGattProfile {
-  return {
-    indicateCharacteristicUuid: profile.txUuid,
-    maximumWriteValueBytes: profile.maximumAttValueBytes,
-    securityConfirmationCharacteristicUuid: profile.securityConfirmationUuid,
-    securityConfirmationReadyValue: new Uint8Array(profile.securityConfirmationReadyValue),
-    serviceUuid: profile.serviceUuid,
-    writeCharacteristicUuid: profile.rxUuid,
-  };
-}
-
-export function normalizeBlePeripheralName(value: string | undefined): string | undefined {
-  const normalized = value?.trim();
-  return normalized === "" ? undefined : normalized;
-}
-
-export function cleanupPickerOwnedCredential(
-  platformOs: string,
-  picked: { readonly exists: boolean; delete(): void },
-): void {
-  // Expo's iOS picker uses UIDocumentPicker's asCopy mode, so its result is
-  // another app-owned temporary secret copy. Android returns a content://
-  // provider handle instead; deleting that could delete the user's source.
-  if (platformOs === "ios" && picked.exists) picked.delete();
 }
 
 function parseNativeJson<T>(label: string, value: string): T {
@@ -210,315 +122,35 @@ function parseNativeJson<T>(label: string, value: string): T {
   }
 }
 
-function isCredentialPublicationUncertain(
-  error: unknown,
-  isNativeError: NativeErrorPredicate,
-): boolean {
-  return isNativeError(error) && error.tag === "CredentialPublicationUncertain";
-}
-
-function unsupportedOnboardingRecovery(): never {
-  throw new Error(
-    "Resumable pairing recovery is unavailable without the native BLE onboarding owner.",
-  );
-}
-
-function surfacedBleOnboardingError(error: unknown, platformReason: string | null): unknown {
-  if (platformReason === null) return error;
-  return new Error(`Secure BLE transport failed: ${platformReason}`, { cause: error });
-}
-
-function nativeOnboardingView(
-  status: NativeCredentialState,
-  bleTargetAvailable: boolean,
-  usesBle: boolean,
-  filelessBleAvailable = false,
-): OnboardingView {
-  if (status.state === "missing") {
-    return {
-      available: true,
-      method: filelessBleAvailable ? "managed_pairing" : "credential_import",
-      snapshot: {
-        revision: 0,
-        device_label: "",
-        lifecycle: { state: "needs_pairing" },
-      },
-    };
+function normalizeDestination(value: string, label: string): string {
+  const destination = value.trim().toLowerCase();
+  if (!DESTINATION_PATTERN.test(destination)) {
+    throw new Error(`${label} must be 32 hexadecimal characters.`);
   }
-  if (status.state === "invalid") {
-    return {
-      available: true,
-      method: "credential_import",
-      snapshot: {
-        revision: 0,
-        device_label: "",
-        lifecycle: { state: "faulted", reason: "invalid_credential_artifact" },
-      },
-    };
-  }
-  if (
-    status.state === "active" &&
-    usesBle &&
-    !bleTargetAvailable &&
-    status.summary.expectedBleLocalName === undefined
-  ) {
-    return {
-      available: true,
-      method: "credential_import",
-      snapshot: {
-        revision: 0,
-        device_label: "",
-        lifecycle: { state: "faulted", reason: "unsupported_device" },
-      },
-    };
-  }
-  return {
-    available: true,
-    method: "credential_import",
-    snapshot: {
-      // The native generation is a u64 and therefore is not necessarily a
-      // lossless JavaScript number. This projection only needs a stable local
-      // revision; the generated native summary retains the exact bigint.
-      revision: 0,
-      device_label: "",
-      lifecycle: { state: "credential_ready" },
-    },
-  };
-}
-
-function boundedOnboardingRevision(revision: bigint): number {
-  return Number(revision > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : revision);
-}
-
-function failedBleOnboardingView(
-  peripheralId: string,
-  revision: bigint,
-  failure: NativeBleOnboardingFailure | undefined,
-): OnboardingView {
-  const lifecycle =
-    failure === "resume_required"
-      ? ({ state: "resume_available" } as const)
-      : failure === "abort_required"
-        ? ({ state: "abort_required" } as const)
-        : failure === "reconciliation_required"
-          ? ({ state: "activation_ambiguous" } as const)
-          : ({
-              state: "faulted",
-              reason:
-                failure === "invalid_recovery_state"
-                  ? ("invalid_credential_artifact" as const)
-                  : failure === "no_subscribed_link"
-                    ? ("device_unavailable" as const)
-                    : ("protocol_or_persistence_failure" as const),
-            } as const);
-  return {
-    available: true,
-    method: "managed_pairing",
-    snapshot: {
-      lifecycle,
-      revision: boundedOnboardingRevision(revision),
-      device_label: peripheralId,
-    },
-  };
-}
-
-function nativeBleOnboardingView(
-  projection: NativeBleOnboardingProjection,
-  peripheralId: string,
-): OnboardingView {
-  if (projection.phase === "failed") {
-    return failedBleOnboardingView(peripheralId, projection.revision, projection.failure);
-  }
-
-  const lifecycle = (() => {
-    switch (projection.phase) {
-      case "idle":
-      case "aborted":
-        return { state: "needs_pairing" } as const;
-      case "link_ready":
-        return { state: "working", stage: "waiting_for_ble_security" } as const;
-      case "preparing":
-      case "checking_initialization":
-        return { state: "working", stage: "checking_initialization" } as const;
-      case "initializing":
-      case "initialized":
-        return { state: "working", stage: "initializing" } as const;
-      case "waiting_for_initialization_presence":
-        return { state: "working", stage: "waiting_for_initialization_presence" } as const;
-      case "waiting_for_begin_presence":
-      case "waiting_for_proof_presence":
-        return { state: "working", stage: "waiting_for_pairing_presence" } as const;
-      case "pending_persisted":
-      case "proof_challenge_accepted":
-        return { state: "working", stage: "proving" } as const;
-      case "activation_prepared":
-      case "publishing_profile":
-        return { state: "working", stage: "activating" } as const;
-      case "complete":
-        return { state: "credential_ready" } as const;
-      case "waiting_for_abort_presence":
-        return { state: "working", stage: "waiting_for_abort_presence" } as const;
-      case "finalizing_abort":
-        return { state: "working", stage: "resuming" } as const;
-    }
-  })();
-
-  return {
-    available: true,
-    method: "managed_pairing",
-    snapshot: {
-      lifecycle,
-      revision: boundedOnboardingRevision(projection.revision),
-      device_label: peripheralId,
-    },
-  };
-}
-
-function connectingBleOnboardingView(peripheralId: string): OnboardingView {
-  return {
-    available: true,
-    method: "managed_pairing",
-    snapshot: {
-      lifecycle: { state: "working", stage: "opening_device" },
-      revision: 0,
-      device_label: peripheralId,
-    },
-  };
+  return destination;
 }
 
 async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
-  const [bindings, crypto, fileSystem] = await Promise.all([
+  const [bindings, fileSystem] = await Promise.all([
     import("@reticulum/appliance-native"),
-    import("expo-crypto"),
     import("expo-file-system"),
   ]);
   const profileStoreUri = new fileSystem.Directory(
     fileSystem.Paths.document,
     PROFILE_STORE_DIRECTORY_NAME,
   ).uri;
-  const blePeripheralName = normalizeBlePeripheralName(process.env.EXPO_PUBLIC_APPLIANCE_BLE_NAME);
-  const bleCentral = await import("./ble-central");
+  const prnsStoreUri = new fileSystem.Directory(
+    fileSystem.Paths.document,
+    PRNS_STORE_DIRECTORY_NAME,
+  ).uri;
   const profileStore = bindings.NativeProfileStore.open(nativePathFromFileUri(profileStoreUri));
-  const onboardingPhase = (phase: number): NativeBleOnboardingPhase => {
-    switch (phase) {
-      case bindings.NativeBleOnboardingPhase.Idle:
-        return "idle";
-      case bindings.NativeBleOnboardingPhase.LinkReady:
-        return "link_ready";
-      case bindings.NativeBleOnboardingPhase.Preparing:
-        return "preparing";
-      case bindings.NativeBleOnboardingPhase.CheckingInitialization:
-        return "checking_initialization";
-      case bindings.NativeBleOnboardingPhase.Initializing:
-        return "initializing";
-      case bindings.NativeBleOnboardingPhase.Initialized:
-        return "initialized";
-      case bindings.NativeBleOnboardingPhase.WaitingForInitializationPresence:
-        return "waiting_for_initialization_presence";
-      case bindings.NativeBleOnboardingPhase.WaitingForBeginPresence:
-        return "waiting_for_begin_presence";
-      case bindings.NativeBleOnboardingPhase.PendingPersisted:
-        return "pending_persisted";
-      case bindings.NativeBleOnboardingPhase.WaitingForProofPresence:
-        return "waiting_for_proof_presence";
-      case bindings.NativeBleOnboardingPhase.ProofChallengeAccepted:
-        return "proof_challenge_accepted";
-      case bindings.NativeBleOnboardingPhase.ActivationPrepared:
-        return "activation_prepared";
-      case bindings.NativeBleOnboardingPhase.PublishingProfile:
-        return "publishing_profile";
-      case bindings.NativeBleOnboardingPhase.Complete:
-        return "complete";
-      case bindings.NativeBleOnboardingPhase.WaitingForAbortPresence:
-        return "waiting_for_abort_presence";
-      case bindings.NativeBleOnboardingPhase.FinalizingAbort:
-        return "finalizing_abort";
-      case bindings.NativeBleOnboardingPhase.Aborted:
-        return "aborted";
-      case bindings.NativeBleOnboardingPhase.Failed:
-        return "failed";
-      default:
-        throw new Error("native Rust bridge returned an unknown BLE onboarding phase");
-    }
-  };
-  const onboardingFailure = (failure: number): NativeBleOnboardingFailure => {
-    switch (failure) {
-      case bindings.NativeBleOnboardingFailure.Busy:
-        return "busy";
-      case bindings.NativeBleOnboardingFailure.NoSubscribedLink:
-        return "no_subscribed_link";
-      case bindings.NativeBleOnboardingFailure.InitializationIncomplete:
-        return "initialization_incomplete";
-      case bindings.NativeBleOnboardingFailure.ResumeRequired:
-        return "resume_required";
-      case bindings.NativeBleOnboardingFailure.AbortRequired:
-        return "abort_required";
-      case bindings.NativeBleOnboardingFailure.ReconciliationRequired:
-        return "reconciliation_required";
-      case bindings.NativeBleOnboardingFailure.InvalidRecoveryState:
-        return "invalid_recovery_state";
-      case bindings.NativeBleOnboardingFailure.ProtocolFailure:
-        return "protocol_failure";
-      case bindings.NativeBleOnboardingFailure.ProfilePublicationFailure:
-        return "profile_publication_failure";
-      case bindings.NativeBleOnboardingFailure.Internal:
-        return "internal";
-      default:
-        throw new Error("native Rust bridge returned an unknown BLE onboarding failure");
-    }
-  };
+  const prnsNode = bindings.NativePrnsNode.start(nativePathFromFileUri(prnsStoreUri));
   return {
-    bleOnboarding: {
-      destroy(onboarding): void {
-        if (bindings.NativeBleOnboarding.instanceOf(onboarding)) {
-          onboarding.uniffiDestroy();
-        }
-      },
-      open(store): NativeBleOnboardingLike {
-        return bindings.NativeBleOnboarding.open(store);
-      },
-      snapshot(onboarding): NativeBleOnboardingProjection {
-        const snapshot = onboarding.snapshot();
-        return {
-          completedProfile: snapshot.completedProfile,
-          failure: snapshot.failure === undefined ? undefined : onboardingFailure(snapshot.failure),
-          phase: onboardingPhase(snapshot.phase),
-          revision: snapshot.revision,
-        };
-      },
-    },
-    createBle: () => ({
-      central: bleCentral.createBleCentral(),
-      decodeCommand(command) {
-        if (bindings.NativeBlePlatformCommand.Write.instanceOf(command)) {
-          return { kind: "write", ...command.inner };
-        }
-        if (bindings.NativeBlePlatformCommand.Disconnect.instanceOf(command)) {
-          return { kind: "disconnect", ...command.inner };
-        }
-        throw new Error("native Rust bridge returned an unknown BLE platform command");
-      },
-      peripheralName: blePeripheralName,
-      profile: bleGattProfileFromNative(bindings.nativeBleGattProfile()),
-    }),
     bridge: {
       contract: bindings.nativeBridgeContract(),
       isNativeError: bindings.NativeApplianceError.instanceOf,
       activateProfile(store, profileKey): NativeProfileSummary {
         return store.activateProfile(profileKey);
-      },
-      credentialStatus(appliance): NativeCredentialState {
-        const status = appliance.credentialStatus();
-        if (bindings.NativeCredentialStatus.Missing.instanceOf(status)) {
-          return { state: "missing" };
-        }
-        if (bindings.NativeCredentialStatus.Active.instanceOf(status)) {
-          return { state: "active", summary: status.inner.summary };
-        }
-        if (bindings.NativeCredentialStatus.Invalid.instanceOf(status)) {
-          return { state: "invalid", reason: status.inner.reason };
-        }
-        throw new Error("native Rust bridge returned an unknown credential status");
       },
       destroy(appliance): void {
         if (bindings.NativeAppliance.instanceOf(appliance)) appliance.uniffiDestroy();
@@ -529,83 +161,75 @@ async function loadNativeApplianceRuntime(): Promise<NativeApplianceRuntime> {
       forgetProfile(store, profileKey): NativeProfileStoreSnapshot {
         return store.deleteInactiveProfile(profileKey);
       },
-      importCredential(appliance, stagingPath): NativeCredentialSummary {
-        return appliance.importActivatedCredential(stagingPath);
-      },
       open(store): NativeApplianceLike {
-        return bindings.NativeAppliance.openBleProfile(store);
+        return bindings.NativeAppliance.openPrnsProfile(store, prnsNode);
       },
       profileSnapshot(store): NativeProfileStoreSnapshot {
         return store.snapshot();
       },
-      reconcileOnboardingPublication(store): NativeOnboardingPublicationReconciliation {
-        return store.reconcileOnboardingPublication();
+      rememberProfile(store, managementDestination, lxmfDestination): NativeProfileSummary {
+        return store.rememberProfile(managementDestination, lxmfDestination);
       },
     },
-    async pickCredential(): Promise<StagedNativeCredential | null> {
-      const picked = await fileSystem.File.pickFileAsync({
-        mimeTypes: ["application/octet-stream"],
-        multipleFiles: false,
-      });
-      if (picked.canceled) return null;
-
-      // Expo performs the copy natively. TypeScript receives only file handles,
-      // never the activated credential bytes.
-      const staging = new fileSystem.File(
-        fileSystem.Paths.cache,
-        `.reticulum-credential-import-${crypto.randomUUID()}.rdpkey`,
-      );
-      const cleanup = (): void => {
-        if (staging.exists) staging.delete();
-      };
-      try {
-        await picked.result.copy(staging, { overwrite: false });
-        const stagingPath = nativePathFromFileUri(staging.uri);
-        cleanupPickerOwnedCredential(nativePlatformOs, picked.result);
-        return { stagingPath, cleanup };
-      } catch (error) {
-        const cleanupErrors: unknown[] = [];
+    prns: {
+      node: prnsNode,
+      close(): void {
         try {
-          cleanup();
-        } catch (cleanupError) {
-          cleanupErrors.push(cleanupError);
+          prnsNode.close();
+        } finally {
+          if (bindings.NativePrnsNode.instanceOf(prnsNode)) prnsNode.uniffiDestroy();
         }
-        try {
-          cleanupPickerOwnedCredential(nativePlatformOs, picked.result);
-        } catch (cleanupError) {
-          cleanupErrors.push(cleanupError);
-        }
-        if (cleanupErrors.length > 0) {
-          throw new AggregateError([error, ...cleanupErrors], "Credential staging cleanup failed.");
-        }
-        throw error;
-      }
+      },
+      enroll(destinationHash, signal): Promise<void> {
+        return prnsNode.enrollManagement(
+          destinationHash,
+          signal === undefined ? undefined : { signal },
+        );
+      },
+      managementCandidates(): readonly NativePrnsManagementCandidate[] {
+        return prnsNode.managementCandidates();
+      },
+      managementIdentity(destinationHash, signal): Promise<NativePrnsManagementIdentity> {
+        return prnsNode.managementIdentity(
+          destinationHash,
+          signal === undefined ? undefined : { signal },
+        );
+      },
+      publicIdentity(destinationHash, signal): Promise<NativePrnsManagementIdentity> {
+        return prnsNode.publicManagementIdentity(
+          destinationHash,
+          signal === undefined ? undefined : { signal },
+        );
+      },
+      rebootOta(destinationHash, signal): Promise<NativePrnsOtaStatus> {
+        return prnsNode.rebootIntoStagedOta(
+          destinationHash,
+          signal === undefined ? undefined : { signal },
+        );
+      },
+      stageOta(destinationHash, image, version, signal): Promise<NativePrnsOtaStatus> {
+        return prnsNode.stageOtaImage(
+          destinationHash,
+          image,
+          version,
+          signal === undefined ? undefined : { signal },
+        );
+      },
     },
     profileStore,
   };
 }
 
-/**
- * Offline-first native adapter backed by the Rust single-owner actor and an
- * active device profile's app-private SQLite database.
- *
- * The platform foreground BLE central owns GATT while the Rust bridge owns
- * authentication and protocol bytes. Local contacts, timelines, and durable
- * outbox writes work immediately, even while the initial BLE scan runs in the
- * background.
- */
+/** Offline-first native client over one app-wide PRNS node. */
 export class NativeApplianceClient implements ApplianceClient {
   readonly #loadRuntime: NativeApplianceRuntimeLoader;
-  #additionalAppliance: AdditionalApplianceSession | null = null;
-  #bleOnboarding: ActiveNativeBleOnboarding | null = null;
-  #bridge: NativeApplianceBridge | null = null;
-  #lastBleOnboardingView: OnboardingView | null = null;
   #opening: Promise<void> | null = null;
   #ownerFault: Error | null = null;
   #ownership: ExclusiveResource<OwnedNativeAppliance> | null = null;
   #profileSwitchTail: Promise<void> = Promise.resolve();
   #reopening: Promise<void> | null = null;
   #runtime: NativeApplianceRuntime | null = null;
+  #enrollmentDestination: string | null = null;
   #disposed = false;
 
   constructor(loadRuntime: NativeApplianceRuntimeLoader = loadNativeApplianceRuntime) {
@@ -617,7 +241,6 @@ export class NativeApplianceClient implements ApplianceClient {
     if (this.#ownerFault !== null) throw this.#ownerFault;
     if (this.#ownership !== null) return;
     if (this.#opening !== null) return this.#opening;
-
     const opening = this.#open();
     this.#opening = opening;
     try {
@@ -633,8 +256,7 @@ export class NativeApplianceClient implements ApplianceClient {
 
   async profiles(): Promise<NativeProfileStoreSnapshot> {
     await this.#awaitReopening();
-    const runtime = this.#runtime;
-    if (runtime === null) throw new Error("native appliance client has not been bootstrapped");
+    const runtime = this.#requiredRuntime();
     try {
       return runtime.bridge.profileSnapshot(runtime.profileStore);
     } catch (error) {
@@ -643,13 +265,11 @@ export class NativeApplianceClient implements ApplianceClient {
   }
 
   async activateProfile(profileKey: string): Promise<NoContent> {
-    const normalizedProfileKey = profileKey.trim().toLowerCase();
+    const key = normalizeDestination(profileKey, "profile key");
     const switching = this.#profileSwitchTail.then(
-      () => this.#activateProfileSerialized(normalizedProfileKey),
-      () => this.#activateProfileSerialized(normalizedProfileKey),
+      () => this.#activateProfileSerialized(key),
+      () => this.#activateProfileSerialized(key),
     );
-    // Retain a settled tail so one failed switch does not prevent a later
-    // explicit request from entering the serialized transition boundary.
     this.#profileSwitchTail = switching.then(
       () => undefined,
       () => undefined,
@@ -659,10 +279,10 @@ export class NativeApplianceClient implements ApplianceClient {
   }
 
   async forgetProfile(profileKey: string): Promise<NoContent> {
-    const normalizedProfileKey = profileKey.trim().toLowerCase();
+    const key = normalizeDestination(profileKey, "profile key");
     const forgetting = this.#profileSwitchTail.then(
-      () => this.#forgetProfileSerialized(normalizedProfileKey),
-      () => this.#forgetProfileSerialized(normalizedProfileKey),
+      () => this.#forgetProfileSerialized(key),
+      () => this.#forgetProfileSerialized(key),
     );
     this.#profileSwitchTail = forgetting.then(
       () => undefined,
@@ -672,240 +292,98 @@ export class NativeApplianceClient implements ApplianceClient {
     return undefined;
   }
 
-  async #activateProfileSerialized(profileKey: string): Promise<void> {
-    if (this.#disposed) throw new Error("native appliance client has been disposed");
-    await this.#awaitReopening();
-    if (this.#ownerFault !== null) throw this.#ownerFault;
-    if (this.#bleOnboarding !== null || this.#additionalAppliance !== null) {
-      throw new Error("finish or cancel secure appliance pairing before switching profiles");
-    }
-    const runtime = this.#runtime;
-    if (runtime === null) throw new Error("native appliance client has not been bootstrapped");
-
-    let catalog: NativeProfileStoreSnapshot;
-    try {
-      catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
-    } catch (error) {
-      throw normalizeNativeError(error, runtime.bridge.isNativeError);
-    }
-    const target = catalog.profiles.find((profile) => profile.profileKey === profileKey);
-    if (target === undefined) {
-      throw new Error("the selected appliance profile no longer exists");
-    }
-    if (catalog.activeProfileKey === target.profileKey) return undefined;
-    if (catalog.activeProfileKey === undefined) {
-      throw new Error("the native profile store has no active appliance to switch from");
-    }
-
-    await this.#switchProfile(runtime, catalog.activeProfileKey, target.profileKey);
-    this.#lastBleOnboardingView = null;
-  }
-
-  async #forgetProfileSerialized(profileKey: string): Promise<void> {
-    if (this.#disposed) throw new Error("native appliance client has been disposed");
-    await this.#awaitReopening();
-    if (this.#ownerFault !== null) throw this.#ownerFault;
-    if (this.#bleOnboarding !== null || this.#additionalAppliance !== null) {
-      throw new Error("finish or cancel secure appliance pairing before forgetting a profile");
-    }
-    const runtime = this.#runtime;
-    if (runtime === null) throw new Error("native appliance client has not been bootstrapped");
-    const forget = runtime.bridge.forgetProfile;
-    if (forget === undefined) {
-      throw new Error("the installed native bridge cannot forget appliance profiles");
-    }
-
-    let catalog: NativeProfileStoreSnapshot;
-    try {
-      catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
-    } catch (error) {
-      throw normalizeNativeError(error, runtime.bridge.isNativeError);
-    }
-    const target = catalog.profiles.find((profile) => profile.profileKey === profileKey);
-    if (target === undefined) {
-      throw new Error("the selected appliance profile no longer exists");
-    }
-    if (catalog.activeProfileKey === target.profileKey) {
-      throw new Error("switch to another appliance before forgetting the active profile");
-    }
-
-    try {
-      const updated = forget.call(runtime.bridge, runtime.profileStore, target.profileKey);
-      if (updated.activeProfileKey !== catalog.activeProfileKey) {
-        throw new Error("forgetting an inactive profile unexpectedly changed the active appliance");
-      }
-      if (updated.profiles.some((profile) => profile.profileKey === target.profileKey)) {
-        throw new Error("the native profile store still lists the forgotten appliance");
-      }
-    } catch (error) {
-      const normalized = normalizeNativeError(error, runtime.bridge.isNativeError);
-      try {
-        const reconciled = runtime.bridge.profileSnapshot(runtime.profileStore);
-        if (
-          reconciled.activeProfileKey === catalog.activeProfileKey &&
-          !reconciled.profiles.some((profile) => profile.profileKey === target.profileKey)
-        ) {
-          return;
-        }
-      } catch (snapshotError) {
-        throw new AggregateError(
-          [normalized, normalizeNativeError(snapshotError, runtime.bridge.isNativeError)],
-          "The appliance profile could not be forgotten and its authoritative state could not be read back.",
-        );
-      }
-      throw normalized;
-    }
-  }
-
   async beginAddAppliance(): Promise<NoContent> {
     await this.#awaitReopening();
-    if (this.#additionalAppliance !== null || this.#bleOnboarding !== null) {
-      throw new Error("another BLE onboarding operation is already active");
-    }
-    const runtime = this.#runtime;
-    if (
-      runtime === null ||
-      runtime.bleOnboarding === undefined ||
-      runtime.createBle === undefined
-    ) {
-      throw new Error("adding another appliance over BLE is unavailable in this native build");
-    }
-
-    let catalog: NativeProfileStoreSnapshot;
-    try {
-      catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
-    } catch (error) {
-      throw normalizeNativeError(error, runtime.bridge.isNativeError);
-    }
-    const previousProfileKey = catalog.activeProfileKey;
-    if (previousProfileKey === undefined) {
-      throw new Error("complete first-run setup before adding another appliance");
-    }
-
-    const session: AdditionalApplianceSession = {
-      bleConfig: null,
-      previousProfileKey,
-    };
-    this.#additionalAppliance = session;
-    this.#lastBleOnboardingView = null;
-    try {
-      // The ordinary BLE central and SQLite actor must be completely quiescent
-      // before the additional-appliance scanner/onboarding owner is created.
-      await this.#closeAppliance();
-      session.bleConfig = runtime.createBle();
-    } catch (error) {
-      this.#additionalAppliance = null;
-      // A failed close means the previous actor may still own SQLite. Do not
-      // turn onboarding recovery into an immediate second-owner open.
-      if (this.#ownerFault !== null) throw this.#ownerFault;
-      let restoreError: unknown;
-      try {
-        await this.#reopenAppliance();
-      } catch (nextError) {
-        restoreError = nextError;
-      }
-      const normalized = normalizeNativeError(error, runtime.bridge.isNativeError);
-      if (restoreError !== undefined) {
-        throw new AggregateError(
-          [normalized, restoreError],
-          "Adding an appliance could not start and the previous profile could not be reopened.",
-        );
-      }
-      throw normalized;
-    }
+    this.#requiredRuntime();
     return undefined;
   }
 
-  supportsAdditionalBleOnboarding(): boolean {
-    const runtime = this.#runtime;
-    return (
-      !this.#disposed && runtime?.bleOnboarding !== undefined && runtime.createBle !== undefined
-    );
+  supportsAdditionalApplianceEnrollment(): boolean {
+    return !this.#disposed && this.#runtime !== null;
   }
 
   async onboarding(): Promise<OnboardingView> {
-    const activeOnboarding = this.#bleOnboarding;
-    const runtime = this.#runtime;
-    if (activeOnboarding !== null && runtime?.bleOnboarding !== undefined) {
-      if (!activeOnboarding.linkReady) {
-        return connectingBleOnboardingView(activeOnboarding.peripheralId);
-      }
-      if (!activeOnboarding.operationStarted && !activeOnboarding.transport.usable) {
-        await this.#releaseBleOnboarding(activeOnboarding);
-        this.#lastBleOnboardingView = failedBleOnboardingView(
-          activeOnboarding.peripheralId,
-          0n,
-          "no_subscribed_link",
-        );
-        return this.#lastBleOnboardingView;
-      }
-      const projection = runtime.bleOnboarding.snapshot(activeOnboarding.native);
-      // Pairing has completed inside Rust, but the ordinary authenticated
-      // appliance actor is not ready until it reopens the newly selected
-      // device profile with its own BLE hub.
-      if (projection.phase === "complete") {
-        return {
-          available: true,
-          method: "managed_pairing",
-          snapshot: {
-            lifecycle: { state: "working", stage: "activating" },
-            revision: boundedOnboardingRevision(projection.revision),
-            device_label: activeOnboarding.peripheralId,
-          },
-        };
-      }
-      return nativeBleOnboardingView(projection, activeOnboarding.peripheralId);
-    }
-
-    await this.#awaitReopening();
-    if (this.#additionalAppliance !== null) {
-      if (this.#lastBleOnboardingView !== null) return this.#lastBleOnboardingView;
-      return nativeOnboardingView({ state: "missing" }, false, true, true);
-    }
-    const { ble } = this.#active();
-    const credential = this.#credentialState();
-    if (credential.state === "missing" && this.#lastBleOnboardingView !== null) {
-      return this.#lastBleOnboardingView;
-    }
-    return nativeOnboardingView(
-      credential,
-      ble?.hasPeripheralName ?? false,
-      ble !== null,
-      runtime?.bleOnboarding !== undefined && runtime.createBle !== undefined,
+    const catalog = await this.profiles();
+    const active = catalog.profiles.find(
+      (profile) => profile.profileKey === catalog.activeProfileKey,
     );
+    if (active !== undefined) {
+      return {
+        available: true,
+        lifecycle: {
+          state: "ready",
+          managementDestination: active.managementDestination,
+        },
+      };
+    }
+    return {
+      available: true,
+      lifecycle:
+        this.#enrollmentDestination === null
+          ? { state: "needs_candidate" }
+          : {
+              state: "authorizing",
+              managementDestination: this.#enrollmentDestination,
+            },
+    };
   }
 
-  supportsBleCandidateDiscovery(): boolean {
-    return (
-      !this.#disposed &&
-      (this.#additionalAppliance !== null || (this.#ownership?.value.ble ?? null) !== null)
-    );
+  supportsReticulumCandidateDiscovery(): boolean {
+    return !this.#disposed && this.#runtime !== null;
   }
 
-  async scanBleCandidates(options?: BleScanOptions): Promise<readonly BleCandidate[]> {
+  supportsFirmwareUpdate(): boolean {
+    return !this.#disposed && this.#runtime !== null;
+  }
+
+  async stageFirmwareUpdate(image: ArrayBuffer, version: string): Promise<NativePrnsOtaStatus> {
     await this.#awaitReopening();
-    if (this.#bleOnboarding !== null) {
-      throw new Error("Nearby BLE discovery is unavailable while onboarding owns a link.");
-    }
-    const additional = this.#additionalAppliance;
-    if (additional !== null) {
-      const runtime = this.#runtime;
-      if (runtime?.createBle === undefined) {
-        throw new Error("Nearby BLE appliance discovery is unavailable for this transport.");
-      }
-      if (this.#ownership !== null) await this.#closeAppliance();
-      additional.bleConfig ??= runtime.createBle();
-      return additional.bleConfig.central.scan(additional.bleConfig.profile.serviceUuid, options);
-    }
-    const { ble } = this.#active();
-    const credential = this.#credentialState();
-    if (credential.state !== "missing") {
-      throw new Error("Nearby BLE appliance discovery is available only before credential setup.");
-    }
-    if (ble === null) {
-      throw new Error("Nearby BLE appliance discovery is unavailable for this transport.");
-    }
-    return ble.scan(options);
+    const runtime = this.#requiredRuntime();
+    const destination = this.#activeManagementDestination(runtime);
+    return runtime.prns.stageOta(destination, image, version);
+  }
+
+  async rebootIntoStagedFirmware(): Promise<NativePrnsOtaStatus> {
+    await this.#awaitReopening();
+    const runtime = this.#requiredRuntime();
+    const destination = this.#activeManagementDestination(runtime);
+    return runtime.prns.rebootOta(destination);
+  }
+
+  async scanReticulumCandidates(
+    options?: ReticulumDiscoveryOptions,
+  ): Promise<readonly ReticulumApplianceCandidate[]> {
+    await this.#awaitReopening();
+    const runtime = this.#requiredRuntime();
+    if (options?.signal?.aborted === true) throw options.signal.reason;
+    const verified = await Promise.all(
+      runtime.prns.managementCandidates().map(async (candidate) => {
+        try {
+          const identity = await runtime.prns.publicIdentity(
+            candidate.destinationHash,
+            options?.signal,
+          );
+          if (
+            identity.managementDestination !== candidate.destinationHash ||
+            identity.lxmfDestination === undefined
+          ) {
+            return null;
+          }
+          return {
+            managementDestination: identity.managementDestination,
+            lxmfDestination: identity.lxmfDestination,
+            interfaceId: candidate.interfaceId,
+            hops: candidate.hops,
+          } satisfies ReticulumApplianceCandidate;
+        } catch (error) {
+          if (options?.signal?.aborted === true) throw error;
+          return null;
+        }
+      }),
+    );
+    return verified.filter(
+      (candidate): candidate is ReticulumApplianceCandidate => candidate !== null,
+    );
   }
 
   async contacts(): Promise<ContactView[]> {
@@ -916,6 +394,22 @@ export class NativeApplianceClient implements ApplianceClient {
     return parseNativeJson(
       "conversation peers",
       await this.#call((appliance) => appliance.conversationPeersJson()),
+    );
+  }
+
+  async applianceLabel(): Promise<ApplianceLabelView> {
+    return parseNativeJson(
+      "appliance label",
+      await this.#call((appliance) => appliance.applianceLabelJson()),
+    );
+  }
+
+  async mutateApplianceLabel(
+    request: ApplianceLabelMutationRequest,
+  ): Promise<ApplianceLabelMutationOutcome> {
+    return parseNativeJson(
+      "appliance label mutation",
+      await this.#call((appliance) => appliance.mutateApplianceLabelJson(JSON.stringify(request))),
     );
   }
 
@@ -964,8 +458,6 @@ export class NativeApplianceClient implements ApplianceClient {
   async mutateNetworkConfig(
     request: NetworkConfigMutationRequest,
   ): Promise<NetworkConfigMutationOutcome> {
-    // The serialized request can contain a passphrase. It is passed directly
-    // into Rust's zeroizing decoder and is never logged or retained here.
     return parseNativeJson(
       "network configuration mutation",
       await this.#call((appliance) => appliance.mutateNetworkConfigJson(JSON.stringify(request))),
@@ -1059,210 +551,43 @@ export class NativeApplianceClient implements ApplianceClient {
     );
   }
 
-  async startOnboarding(candidate?: BleCandidate): Promise<NoContent> {
+  async startOnboarding(candidate?: ReticulumApplianceCandidate): Promise<NoContent> {
     await this.#awaitReopening();
-    if (this.#additionalAppliance !== null) {
-      if (candidate === undefined) {
-        throw new Error("Select a nearby BLE appliance before starting secure pairing.");
-      }
-      const runtime = this.#runtime;
-      if (runtime === null) throw new Error("native appliance client has not been bootstrapped");
-      const advertisedName = normalizeBlePeripheralName(candidate.peripheralName)?.toLowerCase();
-      if (advertisedName !== undefined) {
-        let catalog: NativeProfileStoreSnapshot;
-        try {
-          catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
-        } catch (error) {
-          throw normalizeNativeError(error, runtime.bridge.isNativeError);
-        }
-        const known = catalog.profiles.find((profile) => {
-          const normalName = normalizeBlePeripheralName(
-            profile.credential.expectedBleLocalName,
-          )?.toLowerCase();
-          const recoveryName = normalizeBlePeripheralName(
-            profile.credential.expectedBleRecoveryLocalName,
-          )?.toLowerCase();
-          return normalName === advertisedName || recoveryName === advertisedName;
-        });
-        if (known !== undefined) {
-          throw new Error(
-            "This advertised appliance is already stored. Cancel adding and switch to its existing profile.",
-          );
-        }
-      }
-      try {
-        await this.#prepareBleOnboarding("pair", candidate);
-      } catch (error) {
-        await this.#restoreAdditionalApplianceOwner();
-        throw error;
-      }
-      return undefined;
-    }
-    const { appliance, ble, bridge, pickCredential } = this.#active();
-    const current = this.#credentialState();
-    if (current.state === "active") {
-      if (
-        ble !== null &&
-        current.summary.expectedBleLocalName === undefined &&
-        !ble.hasPeripheralName
-      ) {
-        throw new Error(
-          "The active credential does not identify an exact BLE advertising name; refusing an untargeted scan.",
-        );
-      }
-      return undefined;
-    }
-    if (current.state === "invalid") {
-      throw new Error(
-        "The app-private credential is invalid and cannot be replaced in place; remove this app's local data before importing a new credential.",
-      );
-    }
-    const runtime = this.#runtime;
-    if (runtime?.bleOnboarding !== undefined && runtime.createBle !== undefined) {
-      if (candidate === undefined) {
-        throw new Error("Select a nearby BLE appliance before starting secure pairing.");
-      }
-      await this.#prepareBleOnboarding("pair", candidate);
-      return undefined;
-    }
-    if (pickCredential === undefined) {
-      throw new Error("Credential file selection is unavailable in this native build.");
-    }
-
-    const staged = await pickCredential();
-    if (staged === null) return undefined;
-
-    let summary: NativeCredentialSummary | null = null;
-    let importFailure: unknown;
-    try {
-      summary = bridge.importCredential(appliance, staged.stagingPath);
-    } catch (error) {
-      if (!isCredentialPublicationUncertain(error, bridge.isNativeError)) {
-        importFailure = normalizeNativeError(error, bridge.isNativeError);
-      } else {
-        // Publication is atomic, but removing its temporary link or syncing
-        // the directory can fail after the destination became visible. Rust
-        // exposes only that post-publication phase as reconcilable. Validation
-        // and exact-readback failures remain ordinary Storage errors and must
-        // never be converted into success merely because the changed bytes
-        // still decode as an Active credential.
-        let reconciled: NativeCredentialState | null = null;
-        try {
-          reconciled = bridge.credentialStatus(appliance);
-        } catch {
-          // Preserve the more specific publication failure below.
-        }
-        if (reconciled?.state !== "active") {
-          importFailure = normalizeNativeError(error, bridge.isNativeError);
-        } else {
-          summary = reconciled.summary;
-        }
-      }
-    }
-
-    let cleanupFailure: unknown;
-    try {
-      await staged.cleanup();
-    } catch (error) {
-      cleanupFailure = error;
-    }
-
-    if (summary === null) {
-      if (importFailure !== undefined && cleanupFailure !== undefined) {
-        throw new AggregateError(
-          [importFailure, cleanupFailure],
-          "Credential import failed and its app-private staging copy could not be removed.",
-        );
-      }
-      if (importFailure !== undefined) throw importFailure;
-      if (cleanupFailure !== undefined) throw cleanupFailure;
-      throw new Error("Credential import did not produce an activated credential.");
-    }
-
-    // Import activates a device-keyed profile. Reopen the native actor so both
-    // its credential and identity-bound SQLite database come from that profile;
-    // this also gives BLE a fresh platform central after disposing the
-    // credential-free discovery owner.
-    await this.#reopenAppliance();
-    if (cleanupFailure !== undefined) {
-      throw new Error(
-        "The credential was installed, but its app-private staging copy could not be removed.",
-        { cause: cleanupFailure },
-      );
-    }
-    return undefined;
-  }
-
-  async refreshOnboarding(): Promise<NoContent> {
-    await this.onboarding();
-    return undefined;
-  }
-
-  async recoverOnboarding(request: RecoveryRequest, candidate?: BleCandidate): Promise<NoContent> {
-    await this.#awaitReopening();
-    const runtime = this.#runtime;
-    if (runtime?.bleOnboarding === undefined || runtime.createBle === undefined) {
-      unsupportedOnboardingRecovery();
-    }
     if (candidate === undefined) {
-      throw new Error("Select the same nearby BLE appliance before recovering pairing.");
+      throw new Error("Select a verified Reticulum appliance before enrollment.");
     }
-    await this.#prepareBleOnboarding(
-      request.action === "resume_known_pending" ? "resume" : "abort",
-      candidate,
+    const runtime = this.#requiredRuntime();
+    const destination = normalizeDestination(
+      candidate.managementDestination,
+      "management destination",
     );
-    return undefined;
-  }
-
-  async continueOnboarding(): Promise<NoContent> {
-    await this.#continueBleOnboarding();
-    return undefined;
-  }
-
-  async cancelOnboarding(): Promise<NoContent> {
-    const active = this.#bleOnboarding;
-    if (active === null) {
-      if (this.#additionalAppliance !== null) {
-        await this.#finishAdditionalAppliance();
-      }
-      return undefined;
-    }
-    const onboardingBridge = this.#runtime?.bleOnboarding;
-    if (active.linkReady && onboardingBridge !== undefined) {
-      const phase = onboardingBridge.snapshot(active.native).phase;
+    const expectedLxmf = normalizeDestination(candidate.lxmfDestination, "LXMF destination");
+    this.#enrollmentDestination = destination;
+    try {
+      const publicIdentity = await runtime.prns.publicIdentity(destination);
       if (
-        phase === "activation_prepared" ||
-        phase === "publishing_profile" ||
-        phase === "complete"
+        publicIdentity.managementDestination !== destination ||
+        publicIdentity.lxmfDestination !== expectedLxmf
       ) {
-        throw new Error(
-          "Pairing activation is already committing and can no longer be safely cancelled.",
-        );
+        throw new Error("The selected announce no longer identifies the verified appliance.");
       }
-    }
-    active.cancelRequested = true;
-    if (!active.operationStarted) {
       try {
-        await active.transport.disconnect("BLE onboarding cancelled by the user");
-      } finally {
-        await this.#releaseBleOnboarding(active);
-        if (this.#additionalAppliance !== null) {
-          await this.#finishAdditionalAppliance();
-        } else {
-          this.#lastBleOnboardingView = {
-            available: true,
-            method: "managed_pairing",
-            snapshot: {
-              lifecycle: { state: "needs_pairing" },
-              revision: 0,
-              device_label: active.peripheralId,
-            },
-          };
-        }
+        await runtime.prns.managementIdentity(destination);
+      } catch {
+        await runtime.prns.enroll(destination);
       }
-      return undefined;
+      const authorized = await runtime.prns.managementIdentity(destination);
+      if (
+        authorized.managementDestination !== destination ||
+        authorized.lxmfDestination !== expectedLxmf
+      ) {
+        throw new Error("The appliance did not authorize the selected management application.");
+      }
+      await this.#rememberAndOpen(runtime, destination, expectedLxmf);
+      await this.#call((appliance) => appliance.ensureConnected());
+    } finally {
+      this.#enrollmentDestination = null;
     }
-    await active.transport.disconnect("BLE onboarding cancelled by the user");
     return undefined;
   }
 
@@ -1271,370 +596,41 @@ export class NativeApplianceClient implements ApplianceClient {
     return undefined;
   }
 
-  /**
-   * Start or wake the active connector without invalidating a usable BLE GATT
-   * generation. This is the automatic foreground-recovery path.
-   */
   async ensureConnected(): Promise<NoContent> {
-    await this.#awaitReopening();
-    const { appliance, ble, bridge } = this.#active();
-    const credential = this.#credentialState();
-    if (credential.state !== "active") {
-      throw new Error("Import an activated device credential before connecting.");
-    }
-    if (
-      ble !== null &&
-      credential.summary.expectedBleLocalName === undefined &&
-      !ble.hasPeripheralName
-    ) {
-      throw new Error(
-        "The active credential does not identify an exact BLE advertising name; refusing an untargeted scan.",
-      );
-    }
-    try {
-      if (ble === null) {
-        await appliance.ensureConnected();
-      } else {
-        if (credential.summary.expectedBleLocalName !== undefined) {
-          ble.configurePeripheralName(credential.summary.expectedBleLocalName);
-        }
-        await ble.ensureLink();
-      }
-    } catch (error) {
-      throw normalizeNativeError(error, bridge.isNativeError);
-    }
+    await this.#call((appliance) => appliance.ensureConnected());
     return undefined;
   }
 
   async reconnect(): Promise<NoContent> {
-    await this.#awaitReopening();
-    const { appliance, ble, bridge } = this.#active();
-    const credential = this.#credentialState();
-    if (credential.state !== "active") {
-      throw new Error("Import an activated device credential before connecting.");
-    }
-    if (
-      ble !== null &&
-      credential.summary.expectedBleLocalName === undefined &&
-      !ble.hasPeripheralName
-    ) {
-      throw new Error(
-        "The active credential does not identify an exact BLE advertising name; refusing an untargeted scan.",
-      );
-    }
-    try {
-      if (ble === null) {
-        await appliance.reconnect();
-      } else {
-        if (credential.summary.expectedBleLocalName !== undefined) {
-          ble.configurePeripheralName(credential.summary.expectedBleLocalName);
-        }
-        await ble.reconnect();
-      }
-    } catch (error) {
-      throw normalizeNativeError(error, bridge.isNativeError);
-    }
+    await this.#call((appliance) => appliance.reconnect());
     return undefined;
   }
 
-  async repairBleBond(onProgress?: BleBondRepairProgress): Promise<NoContent> {
-    await this.#awaitReopening();
-    const { ble, bridge } = this.#active();
-    const credential = this.#credentialState();
-    if (credential.state !== "active") {
-      throw new Error("Complete appliance setup before repairing its Bluetooth bond.");
-    }
-    if (ble === null) {
-      throw new Error("Bluetooth bond repair is unavailable for this transport.");
-    }
-    if (
-      credential.summary.expectedBleLocalName === undefined ||
-      credential.summary.expectedBleRecoveryLocalName === undefined
-    ) {
-      throw new Error(
-        "The active credential does not identify exact normal and recovery BLE advertising names; refusing an untargeted bond repair.",
-      );
-    }
-    ble.configurePeripheralNames(
-      credential.summary.expectedBleLocalName,
-      credential.summary.expectedBleRecoveryLocalName,
-    );
-    try {
-      await ble.repairBond(onProgress);
-    } catch (error) {
-      throw normalizeNativeError(error, bridge.isNativeError);
-    }
-    return undefined;
-  }
-
-  subscribeInvalidations(_onInvalidate: () => void, _onError: () => void): (() => void) | null {
+  subscribeInvalidations(): null {
     return null;
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    const additional = this.#additionalAppliance;
-    const onboarding = this.#bleOnboarding;
     const ownership = this.#ownership;
-    const reopening = this.#reopening;
     const runtime = this.#runtime;
-    this.#additionalAppliance = null;
-    this.#bleOnboarding = null;
     this.#ownership = null;
-    this.#bridge = null;
     this.#runtime = null;
-    if (runtime !== null) {
-      void (async () => {
-        try {
-          if (onboarding !== null && !onboarding.released) {
-            onboarding.cancelRequested = true;
-            onboarding.released = true;
-            await onboarding.transport.dispose().catch(() => undefined);
-            onboarding.bridge.destroy(onboarding.native);
-          }
-        } finally {
-          await reopening?.catch(() => undefined);
-          await additional?.bleConfig?.central.dispose().catch(() => undefined);
-          await ownership?.release().catch(() => undefined);
-        }
-        runtime.bridge.destroyProfileStore(runtime.profileStore);
-      })();
-    } else if (ownership !== null) {
-      void ownership.release().catch(() => undefined);
-    }
-  }
-
-  async #prepareBleOnboarding(
-    action: NativeBleOnboardingAction,
-    candidate: BleCandidate,
-  ): Promise<void> {
-    if (this.#disposed) throw new Error("native appliance client has been disposed");
-    if (this.#bleOnboarding !== null) {
-      throw new Error("another BLE onboarding operation is already active");
-    }
-    const runtime = this.#runtime;
-    const onboardingBridge = runtime?.bleOnboarding;
-    const createBle = runtime?.createBle;
-    if (
-      runtime === null ||
-      runtime === undefined ||
-      onboardingBridge === undefined ||
-      createBle === undefined
-    ) {
-      throw new Error("fileless BLE onboarding is unavailable in this native build");
-    }
-
-    const peripheralId = candidate.peripheralId.trim();
-    if (peripheralId === "") {
-      throw new Error("select a nearby BLE appliance before pairing");
-    }
-
-    const additional = this.#additionalAppliance;
-    if (additional !== null && this.#ownership !== null) {
-      await this.#closeAppliance();
-    }
-    const native = onboardingBridge.open(runtime.profileStore);
-    let bleConfig: NativeBleTransportConfig;
-    try {
-      if (additional === null) {
-        bleConfig = createBle();
-      } else {
-        additional.bleConfig ??= createBle();
-        bleConfig = additional.bleConfig;
-      }
-    } catch (error) {
-      onboardingBridge.destroy(native);
-      throw error;
-    }
-    let transport: NativeBleOnboardingTransport;
-    try {
-      transport = new NativeBleOnboardingTransport(native, bleConfig);
-    } catch (error) {
-      onboardingBridge.destroy(native);
-      await bleConfig.central.dispose().catch(() => undefined);
-      if (additional?.bleConfig === bleConfig) additional.bleConfig = null;
-      throw error;
-    }
-    if (additional?.bleConfig === bleConfig) additional.bleConfig = null;
-
-    const active: ActiveNativeBleOnboarding = {
-      action,
-      bridge: onboardingBridge,
-      cancelRequested: false,
-      linkReady: false,
-      native,
-      operationStarted: false,
-      peripheralId,
-      released: false,
-      transport,
-    };
-    this.#bleOnboarding = active;
-    this.#lastBleOnboardingView = null;
-
-    try {
-      await transport.connectSelected(peripheralId);
-      active.linkReady = true;
-      if (active.cancelRequested) {
-        throw new Error("BLE onboarding cancelled by the user");
-      }
-    } catch (error) {
-      const platformFailure = transport.failureReason;
-      await this.#releaseBleOnboarding(active);
-      if (this.#additionalAppliance !== null) {
-        await this.#restoreAdditionalApplianceOwner();
-      }
-      if (active.cancelRequested) {
-        this.#lastBleOnboardingView = {
-          available: true,
-          method: "managed_pairing",
-          snapshot: {
-            lifecycle: { state: "needs_pairing" },
-            revision: 0,
-            device_label: peripheralId,
-          },
-        };
-        return;
-      }
-      this.#lastBleOnboardingView = failedBleOnboardingView(peripheralId, 0n, "no_subscribed_link");
-      throw surfacedBleOnboardingError(error, platformFailure);
-    }
-  }
-
-  async #continueBleOnboarding(): Promise<void> {
-    if (this.#disposed) throw new Error("native appliance client has been disposed");
-    const active = this.#bleOnboarding;
-    if (active === null || active.released) {
-      throw new Error("open a selected BLE appliance before continuing secure pairing");
-    }
-    if (!active.linkReady) {
-      throw new Error("the selected BLE appliance is still opening");
-    }
-    if (!active.transport.usable) {
-      const platformFailure = active.transport.failureReason;
-      await this.#releaseBleOnboarding(active);
-      if (this.#additionalAppliance !== null) {
-        await this.#restoreAdditionalApplianceOwner();
-      }
-      this.#lastBleOnboardingView = failedBleOnboardingView(
-        active.peripheralId,
-        0n,
-        "no_subscribed_link",
-      );
-      throw surfacedBleOnboardingError(
-        new Error("the selected BLE appliance disconnected before secure pairing continued"),
-        platformFailure,
-      );
-    }
-    if (active.operationStarted) {
-      throw new Error("the retained BLE onboarding operation has already started");
-    }
-    active.operationStarted = true;
-
-    let failureView: OnboardingView | null = null;
-    let publicationFailure = false;
-    try {
-      // The explicit UI Continue action may reach this boundary before or after
-      // the OS passkey prompt. Poll only the public firmware-owned marker; it
-      // cannot initiate SMP. Do not let Rust emit its first pairing record
-      // until firmware reports that PairingComplete was consumed and the bond
-      // was durably committed for this retained application-pairing link.
-      await active.transport.confirmAuthenticated();
-      if (active.action === "pair") {
-        await active.native.pair();
-      } else if (active.action === "resume") {
-        await active.native.resume();
-      } else {
-        await active.native.abortCurrent();
-      }
-    } catch (error) {
+    this.#ownerFault = null;
+    void (async () => {
       try {
-        const projection = active.bridge.snapshot(active.native);
-        if (projection.phase === "failed") {
-          failureView = nativeBleOnboardingView(projection, active.peripheralId);
-          publicationFailure = projection.failure === "profile_publication_failure";
-        }
-      } catch {
-        // Preserve the operation error. The UI projection remains coarse.
-      }
-      const platformFailure = active.transport.failureReason;
-      let operationError = error;
-      if (publicationFailure) {
-        try {
-          if (this.#reconcileOnboardingPublication(this.#runtime, this.#additionalAppliance)) {
-            await this.#releaseBleOnboarding(active);
-            await this.#reopenAppliance();
-            this.#additionalAppliance = null;
-            this.#lastBleOnboardingView = null;
-            return;
-          }
-        } catch (reconciliationError) {
-          operationError = new AggregateError(
-            [error, reconciliationError],
-            "Secure pairing activated a credential, but profile publication recovery failed.",
-          );
-        }
-      }
-      await this.#releaseBleOnboarding(active);
-      if (this.#additionalAppliance !== null) {
-        await this.#restoreAdditionalApplianceOwner();
-      }
-      if (active.cancelRequested) {
-        if (this.#additionalAppliance !== null) {
-          await this.#finishAdditionalAppliance();
-        } else {
-          this.#lastBleOnboardingView = {
-            available: true,
-            method: "managed_pairing",
-            snapshot: {
-              lifecycle: { state: "needs_pairing" },
-              revision: 0,
-              device_label: active.peripheralId,
-            },
-          };
-        }
-        return;
-      }
-      this.#lastBleOnboardingView =
-        failureView ?? failedBleOnboardingView(active.peripheralId, 0n, "no_subscribed_link");
-      throw surfacedBleOnboardingError(operationError, platformFailure);
-    }
-
-    await this.#releaseBleOnboarding(active);
-    if (active.action === "abort") {
-      if (this.#additionalAppliance !== null) {
-        await this.#finishAdditionalAppliance();
-        return;
-      }
-      this.#lastBleOnboardingView = {
-        available: true,
-        method: "managed_pairing",
-        snapshot: {
-          lifecycle: { state: "needs_pairing" },
-          revision: 0,
-          device_label: active.peripheralId,
-        },
-      };
-      return;
-    }
-
-    await this.#reopenAppliance();
-    this.#additionalAppliance = null;
-    this.#lastBleOnboardingView = null;
-  }
-
-  async #releaseBleOnboarding(active: ActiveNativeBleOnboarding): Promise<void> {
-    if (active.released) return;
-    active.released = true;
-    try {
-      await active.transport.dispose().catch(() => undefined);
-    } finally {
-      try {
-        active.bridge.destroy(active.native);
+        await ownership?.release();
       } finally {
-        if (this.#bleOnboarding === active) this.#bleOnboarding = null;
+        if (runtime !== null) {
+          try {
+            runtime.prns.close();
+          } finally {
+            runtime.bridge.destroyProfileStore(runtime.profileStore);
+          }
+        }
       }
-    }
+    })();
   }
 
   async #open(): Promise<void> {
@@ -1642,25 +638,20 @@ export class NativeApplianceClient implements ApplianceClient {
     if (runtime === null) {
       runtime = await this.#loadRuntime();
       if (this.#disposed) {
+        runtime.prns.close();
         runtime.bridge.destroyProfileStore(runtime.profileStore);
         throw new Error("native appliance client has been disposed");
       }
       try {
         assertNativeBridgeContract(runtime.bridge.contract);
       } catch (error) {
+        runtime.prns.close();
         runtime.bridge.destroyProfileStore(runtime.profileStore);
         throw error;
       }
       this.#runtime = runtime;
-      this.#bridge = runtime.bridge;
     }
-
-    const ownership = await this.#acquireAppliance(runtime);
-    if (this.#disposed) {
-      await ownership.release().catch(() => undefined);
-      throw new Error("native appliance client has been disposed");
-    }
-    this.#ownership = ownership;
+    this.#ownership = await this.#acquireAppliance(runtime);
     this.#ownerFault = null;
   }
 
@@ -1669,39 +660,15 @@ export class NativeApplianceClient implements ApplianceClient {
   ): Promise<ExclusiveResource<OwnedNativeAppliance>> {
     try {
       return await acquireExclusiveResource(
-        async () => {
+        () => {
           if (this.#disposed) throw new Error("native appliance client has been disposed");
-          const appliance = runtime.bridge.open(runtime.profileStore);
-          try {
-            const credential = runtime.bridge.credentialStatus(appliance);
-            const bleConfig = runtime.createBle?.();
-            const ble =
-              bleConfig === undefined ? null : new NativeBleTransport(appliance, bleConfig);
-            if (ble !== null && credential.state === "active") {
-              if (credential.summary.expectedBleLocalName !== undefined) {
-                ble.configurePeripheralNames(
-                  credential.summary.expectedBleLocalName,
-                  credential.summary.expectedBleRecoveryLocalName,
-                );
-              }
-              if (ble.hasPeripheralName) ble.start();
-            }
-            return { appliance, ble, pickCredential: runtime.pickCredential };
-          } catch (error) {
-            await appliance.close().catch(() => undefined);
-            runtime.bridge.destroy(appliance);
-            throw error;
-          }
+          return { appliance: runtime.bridge.open(runtime.profileStore) };
         },
-        async ({ appliance, ble }) => {
+        async ({ appliance }) => {
           try {
-            await ble?.dispose();
+            await appliance.close();
           } finally {
-            try {
-              await appliance.close();
-            } finally {
-              runtime.bridge.destroy(appliance);
-            }
+            runtime.bridge.destroy(appliance);
           }
         },
       );
@@ -1710,261 +677,148 @@ export class NativeApplianceClient implements ApplianceClient {
     }
   }
 
-  async #reopenAppliance(): Promise<void> {
-    if (this.#reopening !== null) return this.#reopening;
-    const reopening = this.#replaceAppliance();
-    this.#reopening = reopening;
-    try {
-      await reopening;
-    } finally {
-      if (this.#reopening === reopening) this.#reopening = null;
+  async #activateProfileSerialized(profileKey: string): Promise<void> {
+    if (this.#disposed) throw new Error("native appliance client has been disposed");
+    await this.#awaitReopening();
+    const runtime = this.#requiredRuntime();
+    const catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
+    if (!catalog.profiles.some((profile) => profile.profileKey === profileKey)) {
+      throw new Error("the selected appliance profile no longer exists");
     }
+    if (catalog.activeProfileKey === profileKey) return;
+    await this.#replaceSelectedProfile(runtime, profileKey, catalog.activeProfileKey);
   }
 
-  async #replaceAppliance(): Promise<void> {
-    const runtime = this.#runtime;
-    const previous = this.#ownership;
-    if (runtime === null) {
-      throw new Error("native appliance client has not been bootstrapped");
+  async #forgetProfileSerialized(profileKey: string): Promise<void> {
+    if (this.#disposed) throw new Error("native appliance client has been disposed");
+    await this.#awaitReopening();
+    const runtime = this.#requiredRuntime();
+    const catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
+    if (catalog.activeProfileKey === profileKey) {
+      throw new Error("switch to another appliance before forgetting the active profile");
     }
-    if (this.#ownerFault !== null) throw this.#ownerFault;
-    if (previous !== null) {
-      this.#ownership = null;
-      try {
-        await previous.release();
-      } catch (error) {
-        throw this.#recordOwnerTeardownFailure(runtime, error);
-      }
+    if (!catalog.profiles.some((profile) => profile.profileKey === profileKey)) {
+      throw new Error("the selected appliance profile no longer exists");
     }
-    const replacement = await this.#acquireAppliance(runtime);
-    if (this.#disposed) {
-      await replacement.release().catch(() => undefined);
-      throw new Error("native appliance client has been disposed");
-    }
-    this.#ownership = replacement;
-    this.#ownerFault = null;
+    runtime.bridge.forgetProfile(runtime.profileStore, profileKey);
   }
 
-  async #closeAppliance(): Promise<void> {
-    if (this.#reopening !== null) await this.#reopening;
-    if (this.#ownerFault !== null) throw this.#ownerFault;
-    const previous = this.#ownership;
-    if (previous === null) return;
-    const runtime = this.#runtime;
-    if (runtime === null) {
-      throw new Error("native appliance client has not been bootstrapped");
-    }
-    const closing = (async () => {
-      this.#ownership = null;
-      try {
-        await previous.release();
-      } catch (error) {
-        throw this.#recordOwnerTeardownFailure(runtime, error);
-      }
-    })();
-    this.#reopening = closing;
-    try {
-      await closing;
-    } finally {
-      if (this.#reopening === closing) this.#reopening = null;
-    }
-  }
-
-  async #switchProfile(
+  async #rememberAndOpen(
     runtime: NativeApplianceRuntime,
-    previousProfileKey: string,
-    targetProfileKey: string,
+    managementDestination: string,
+    lxmfDestination: string,
   ): Promise<void> {
-    if (this.#reopening !== null) await this.#reopening;
-    const switching = this.#performProfileSwitch(runtime, previousProfileKey, targetProfileKey);
-    this.#reopening = switching;
+    const previous = runtime.bridge.profileSnapshot(runtime.profileStore).activeProfileKey;
+    await this.#closeAppliance(runtime);
     try {
-      await switching;
-    } finally {
-      if (this.#reopening === switching) this.#reopening = null;
-    }
-  }
-
-  async #performProfileSwitch(
-    runtime: NativeApplianceRuntime,
-    previousProfileKey: string,
-    targetProfileKey: string,
-  ): Promise<void> {
-    const previous = this.#ownership;
-    if (previous === null) {
-      throw new Error("native appliance client has no active owner to switch");
-    }
-    this.#ownership = null;
-    try {
-      await previous.release();
+      runtime.bridge.rememberProfile(runtime.profileStore, managementDestination, lxmfDestination);
+      this.#ownership = await this.#acquireAppliance(runtime);
+      this.#ownerFault = null;
     } catch (error) {
-      throw this.#recordOwnerTeardownFailure(runtime, error);
-    }
-
-    try {
-      await this.#activateProfileReconciled(runtime, targetProfileKey);
-    } catch (activationError) {
+      if (previous !== undefined && previous !== managementDestination) {
+        try {
+          runtime.bridge.activateProfile(runtime.profileStore, previous);
+        } catch {
+          // The original error remains primary; the reopen below provides the
+          // authoritative usable-state check.
+        }
+      }
       try {
         this.#ownership = await this.#acquireAppliance(runtime);
         this.#ownerFault = null;
       } catch (restoreError) {
         const fault = new AggregateError(
-          [activationError, restoreError],
-          "Profile activation failed and the previous appliance could not be reopened.",
+          [error, restoreError],
+          "The Reticulum profile could not be opened and no appliance owner could be restored.",
         );
         this.#ownerFault = fault;
         throw fault;
       }
-      throw activationError;
+      throw error;
     }
+  }
 
+  async #replaceSelectedProfile(
+    runtime: NativeApplianceRuntime,
+    target: string,
+    previous: string | undefined,
+  ): Promise<void> {
+    await this.#closeAppliance(runtime);
     try {
+      runtime.bridge.activateProfile(runtime.profileStore, target);
       this.#ownership = await this.#acquireAppliance(runtime);
       this.#ownerFault = null;
-      return;
-    } catch (openError) {
-      let rollbackError: unknown;
-      try {
-        await this.#activateProfileReconciled(runtime, previousProfileKey);
-      } catch (error) {
-        rollbackError = error;
+    } catch (error) {
+      if (previous !== undefined) {
+        try {
+          runtime.bridge.activateProfile(runtime.profileStore, previous);
+        } catch {
+          // Reopening below determines whether a usable owner remains.
+        }
       }
-      let restoreError: unknown;
       try {
-        // If rollback publication was uncertain, Rust still resolves whichever
-        // profile is authoritative. Retain a usable owner and report the full
-        // transition failure rather than guessing at credential files.
         this.#ownership = await this.#acquireAppliance(runtime);
         this.#ownerFault = null;
-      } catch (error) {
-        restoreError = error;
+      } catch (restoreError) {
+        const fault = new AggregateError(
+          [error, restoreError],
+          "The selected Reticulum profile could not open and the previous owner was not restored.",
+        );
+        this.#ownerFault = fault;
+        throw fault;
       }
-      const failures = [openError, rollbackError, restoreError].filter(
-        (error) => error !== undefined,
-      );
-      const failure = new AggregateError(
-        failures,
-        rollbackError === undefined
-          ? "The selected appliance could not open; the previous profile was restored."
-          : "The selected appliance could not open and profile rollback was incomplete.",
-      );
-      if (this.#ownership === null) this.#ownerFault = failure;
-      throw failure;
+      throw error;
     }
   }
 
-  #recordOwnerTeardownFailure(runtime: NativeApplianceRuntime, error: unknown): Error {
-    const normalized = normalizeNativeError(error, runtime.bridge.isNativeError);
-    const fault = new Error(
-      "The current appliance could not close cleanly, so no replacement appliance owner will be opened until the native client is recreated.",
-      { cause: normalized },
-    );
-    this.#ownerFault = fault;
-    return fault;
-  }
-
-  async #activateProfileReconciled(
-    runtime: NativeApplianceRuntime,
-    profileKey: string,
-  ): Promise<void> {
+  async #closeAppliance(runtime: NativeApplianceRuntime): Promise<void> {
+    const ownership = this.#ownership;
+    if (ownership === null) return;
+    this.#ownership = null;
     try {
-      runtime.bridge.activateProfile(runtime.profileStore, profileKey);
-      return;
+      await ownership.release();
     } catch (error) {
-      const normalized = normalizeNativeError(error, runtime.bridge.isNativeError);
-      try {
-        const snapshot = runtime.bridge.profileSnapshot(runtime.profileStore);
-        if (snapshot.activeProfileKey === profileKey) return;
-      } catch (snapshotError) {
-        throw new AggregateError(
-          [normalized, normalizeNativeError(snapshotError, runtime.bridge.isNativeError)],
-          "Profile activation failed and its authoritative state could not be read back.",
-        );
-      }
-      throw normalized;
+      const fault = new Error(
+        "The current appliance could not close cleanly, so another owner was not opened.",
+        { cause: normalizeNativeError(error, runtime.bridge.isNativeError) },
+      );
+      this.#ownerFault = fault;
+      throw fault;
     }
-  }
-
-  #reconcileOnboardingPublication(
-    runtime: NativeApplianceRuntime | null,
-    additional: AdditionalApplianceSession | null,
-  ): boolean {
-    const reconcile = runtime?.bridge.reconcileOnboardingPublication;
-    if (runtime === null || reconcile === undefined) return false;
-
-    let firstError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let reconciliation: NativeOnboardingPublicationReconciliation;
-      try {
-        reconciliation = reconcile.call(runtime.bridge, runtime.profileStore);
-      } catch (error) {
-        const normalized = normalizeNativeError(error, runtime.bridge.isNativeError);
-        if (firstError === undefined) {
-          firstError = normalized;
-          continue;
-        }
-        throw new AggregateError(
-          [firstError, normalized],
-          "The paired credential was activated, but its profile publication could not be reconciled.",
-        );
-      }
-
-      if (reconciliation.finalizedActiveArtifact) return true;
-      const activeProfileKey = reconciliation.activeProfile?.profileKey;
-      if (activeProfileKey === undefined) return false;
-      return additional === null || activeProfileKey !== additional.previousProfileKey;
-    }
-    return false;
-  }
-
-  async #restoreAdditionalApplianceOwner(): Promise<void> {
-    const additional = this.#additionalAppliance;
-    if (additional === null || this.#ownership !== null) return;
-    await additional.bleConfig?.central.dispose().catch(() => undefined);
-    additional.bleConfig = null;
-    await this.#reopenAppliance();
-  }
-
-  async #finishAdditionalAppliance(): Promise<void> {
-    const additional = this.#additionalAppliance;
-    if (additional === null) return;
-    await additional.bleConfig?.central.dispose().catch(() => undefined);
-    additional.bleConfig = null;
-    if (this.#ownership === null) await this.#reopenAppliance();
-    this.#additionalAppliance = null;
-    this.#lastBleOnboardingView = null;
   }
 
   async #awaitReopening(): Promise<void> {
     await this.#reopening;
   }
 
-  #active(): {
-    readonly appliance: NativeApplianceLike;
-    readonly ble: NativeBleTransport | null;
-    readonly bridge: NativeApplianceBridge;
-    readonly pickCredential?: NativeCredentialPicker;
-  } {
+  #requiredRuntime(): NativeApplianceRuntime {
     if (this.#disposed) throw new Error("native appliance client has been disposed");
     if (this.#ownerFault !== null) throw this.#ownerFault;
-    if (this.#ownership === null || this.#bridge === null) {
+    if (this.#runtime === null)
       throw new Error("native appliance client has not been bootstrapped");
-    }
-    return {
-      appliance: this.#ownership.value.appliance,
-      ble: this.#ownership.value.ble,
-      bridge: this.#bridge,
-      pickCredential: this.#ownership.value.pickCredential,
-    };
+    return this.#runtime;
   }
 
-  #credentialState(): NativeCredentialState {
-    const { appliance, bridge } = this.#active();
-    try {
-      return bridge.credentialStatus(appliance);
-    } catch (error) {
-      throw normalizeNativeError(error, bridge.isNativeError);
+  #activeManagementDestination(runtime: NativeApplianceRuntime): string {
+    if (this.#ownership === null) {
+      throw new Error("select an appliance before starting a firmware update");
     }
+    const catalog = runtime.bridge.profileSnapshot(runtime.profileStore);
+    const active = catalog.profiles.find(
+      (profile) => profile.profileKey === catalog.activeProfileKey,
+    );
+    if (active === undefined) {
+      throw new Error("the active appliance profile no longer exists");
+    }
+    return normalizeDestination(active.managementDestination, "management destination");
+  }
+
+  #active(): { readonly appliance: NativeApplianceLike; readonly bridge: NativeApplianceBridge } {
+    const runtime = this.#requiredRuntime();
+    if (this.#ownership === null) {
+      throw new Error("native appliance client has no active profile owner");
+    }
+    return { appliance: this.#ownership.value.appliance, bridge: runtime.bridge };
   }
 
   async #call<T>(operation: (appliance: NativeApplianceLike) => T | Promise<T>): Promise<T> {

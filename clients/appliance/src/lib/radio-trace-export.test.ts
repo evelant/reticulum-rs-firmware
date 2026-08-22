@@ -8,6 +8,7 @@ import {
   radioTraceCsvArtifact,
   radioTraceJsonArtifact,
 } from "./radio-trace-export.ts";
+import { syntheticReticulumInterfaceId } from "./reticulum-interface-id.ts";
 
 const SOURCE = {
   board_label: "E290 13F88",
@@ -106,7 +107,7 @@ describe("RF trace export", () => {
       event: {
         correlation_token: "45".repeat(32),
         dispatch_outcome: "tx_fault",
-        interface_id: 1,
+        interface_id: syntheticReticulumInterfaceId(1),
         kind: "inbound_proof",
         message_id: "67".repeat(32),
         packet_evidence: null,

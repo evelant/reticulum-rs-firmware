@@ -14,6 +14,7 @@ const FIRMWARE_PACKAGE: &str = "reticulum-e290-firmware";
 const FIRMWARE_BINARY: &str = "reticulum-e290-firmware";
 const TARGET: &str = "xtensa-esp32s3-none-elf";
 const PARTITION_TABLE: &str = "partitions/e290.csv";
+const ROLLBACK_BOOTLOADER: &str = "target/e290-bootloader/bootloader/bootloader.bin";
 const STACK_GUARD_OFFSET_BYTES: u64 = 60;
 const STACK_GUARD_BYTES: u64 = size_of::<u32>() as u64;
 // The reviewed powered credential-boot failure needed roughly 38 KiB beyond
@@ -185,12 +186,6 @@ fn doctor(workspace: &Path) -> Result<(), String> {
             return Err(format!("required workspace file {required} is missing"));
         }
     }
-    if !workspace.join("vendor/rete/Cargo.toml").is_file() {
-        return Err(
-            "the owned Rete submodule is not initialized; run `git submodule update --init`"
-                .to_owned(),
-        );
-    }
     println!("toolchain and workspace layout are ready");
     Ok(())
 }
@@ -221,6 +216,16 @@ fn build(workspace: &Path, profile: Profile) -> Result<(), String> {
 }
 
 fn package(workspace: &Path, profile: Profile, output: Option<PathBuf>) -> Result<(), String> {
+    let bootloader = workspace.join(ROLLBACK_BOOTLOADER);
+    match fs::metadata(&bootloader) {
+        Ok(metadata) if metadata.is_file() && metadata.len() != 0 => {}
+        _ => {
+            return Err(format!(
+                "rollback-enabled bootloader is missing at {}; run firmware/e290/bootloader/build-container.sh first",
+                bootloader.display()
+            ));
+        }
+    }
     build(workspace, profile)?;
     let elf = firmware_elf(workspace, profile);
     let output = output.unwrap_or_else(|| {
@@ -243,6 +248,7 @@ fn package(workspace: &Path, profile: Profile, output: Option<PathBuf>) -> Resul
         .join(PARTITION_TABLE)
         .to_string_lossy()
         .into_owned();
+    let bootloader_value = bootloader.to_string_lossy().into_owned();
     let arguments = [
         "save-image",
         "--skip-update-check",
@@ -258,10 +264,12 @@ fn package(workspace: &Path, profile: Profile, output: Option<PathBuf>) -> Resul
         "16mb",
         "--xtal-freq",
         "40mhz",
+        "--bootloader",
+        bootloader_value.as_str(),
         "--partition-table",
         partition_value.as_str(),
         "--target-app-partition",
-        "factory",
+        "ota_0",
         elf_value.as_str(),
         output_value.as_str(),
     ];

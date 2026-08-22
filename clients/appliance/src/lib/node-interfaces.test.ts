@@ -10,6 +10,10 @@ import type {
 } from "../generated/api.ts";
 import { buildNodeInterfaces } from "./node-interfaces.ts";
 
+function interfaceId(kind: number, instance: number): DiagnosticInterfaceView["id"] {
+  return [kind, 0, 0, 0, 0, 0, 0, instance];
+}
+
 function lora(overrides: Partial<LoraDiagnosticsView> = {}): LoraDiagnosticsView {
   return {
     applied_tx_power_dbm: 22,
@@ -37,10 +41,21 @@ function lora(overrides: Partial<LoraDiagnosticsView> = {}): LoraDiagnosticsView
 
 function record(
   id: number,
-  kind: DiagnosticInterfaceView["kind"],
-  state: DiagnosticInterfaceView["state"] = "online",
+  kind: number,
+  state: DiagnosticInterfaceView["state"] = "connected",
 ): DiagnosticInterfaceView {
-  return { id, kind, state, generation: 1, logical_mtu: 500, bitrate: 5_470 };
+  return {
+    id: interfaceId(kind, id),
+    mode: "full",
+    state,
+    failure_reason: null,
+    rx_bytes: 100,
+    tx_bytes: 200,
+    destinations: 1,
+    links: 0,
+    transported_links: 0,
+    supervisor: null,
+  };
 }
 
 function radioRoutes(
@@ -50,31 +65,16 @@ function radioRoutes(
   return {
     interfaces,
     lora: loraDiagnostics,
-    observed_peer_count: 0,
-    retained_route_count: 0,
-    rns: {
-      announces_received: 0,
-      dedup_drops: 0,
-      forwarded: 0,
-      invalid_drops: 0,
-      links_closed: 0,
-      links_established: 0,
-      links_failed: 0,
-      paths_expired: 0,
-      paths_learned: 0,
-      received: 0,
-    },
-    route_table_revision: 0,
+    link_count: 0,
+    route_count: 0,
     routes: [],
     uptime_ms: 0,
-    usable_route_count: 0,
   };
 }
 
 function configuration(overrides: Partial<NetworkConfigView> = {}): NetworkConfigView {
   return {
     automatic_announces_enabled: true,
-    device_name: null,
     lora_profile: {
       bandwidth_hz: 125_000,
       coding_rate_denominator: 5,
@@ -119,7 +119,7 @@ describe("buildNodeInterfaces", () => {
   test("lists LoRa, TCP client, and the Wi-Fi link for a gateway node", () => {
     const summaries = buildNodeInterfaces({
       config: configuration({ tcp_peer: tcpPeer() }),
-      radioRoutes: radioRoutes([record(1, "lora"), record(2, "tcp_client")]),
+      radioRoutes: radioRoutes([record(1, 14), record(2, 1)]),
       runtime: runtime({
         ipv4_address: "192.168.1.20",
         tcp_peer_state: "connected",
@@ -141,7 +141,7 @@ describe("buildNodeInterfaces", () => {
   test("reports only LoRa when no network configuration is available", () => {
     const summaries = buildNodeInterfaces({
       config: null,
-      radioRoutes: radioRoutes([record(1, "lora")]),
+      radioRoutes: radioRoutes([record(1, 14)]),
       runtime: null,
     });
 
@@ -152,7 +152,7 @@ describe("buildNodeInterfaces", () => {
   test("shows the TCP interface offline when no peer is configured", () => {
     const summaries = buildNodeInterfaces({
       config: configuration(),
-      radioRoutes: radioRoutes([record(1, "lora"), record(2, "tcp_client", "offline")]),
+      radioRoutes: radioRoutes([record(1, 14), record(2, 1, "disconnected")]),
       runtime: runtime({ tcp_peer_state: "disabled", wifi_state: "disconnected" }),
     });
 
@@ -164,7 +164,7 @@ describe("buildNodeInterfaces", () => {
   test("maps faulted and non-connected states to coarse tones", () => {
     const summaries = buildNodeInterfaces({
       config: configuration({ tcp_peer: tcpPeer() }),
-      radioRoutes: radioRoutes([record(1, "lora", "faulted"), record(2, "tcp_client")]),
+      radioRoutes: radioRoutes([record(1, 14, "failed"), record(2, 1)]),
       runtime: runtime({ tcp_peer_state: "faulted", wifi_state: "connecting" }),
     });
 
@@ -176,7 +176,7 @@ describe("buildNodeInterfaces", () => {
   test("falls back to desired LoRa profile when no applied diagnostics exist", () => {
     const summaries = buildNodeInterfaces({
       config: configuration(),
-      radioRoutes: radioRoutes([record(1, "lora")], null),
+      radioRoutes: radioRoutes([record(1, 14)], null),
       runtime: runtime(),
     });
 

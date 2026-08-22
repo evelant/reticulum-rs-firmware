@@ -10,24 +10,23 @@ publish.workspace = true
 [dependencies]
 getrandom.workspace = true
 hex.workspace = true
-rand_core.workspace = true
-reticulum-device-client = { path = "../device-client" }
+log.workspace = true
+personal-rns = { workspace = true, features = ["bluetooth-auto", "log", "parallel-persistence", "tokio-host"] }
 reticulum-device-api = { path = "../device-api", default-features = false, features = ["lxmf", "nomad", "network-config"] }
-reticulum-device-api-ble = { path = "../device-api-ble" }
-reticulum-device-api-pairing = { path = "../device-api-pairing", default-features = false }
 reticulum-appliance-sync = { path = "../appliance-sync" }
 reticulum-appliance-runtime = { path = "../appliance-runtime" }
-reticulum-device-pairing-client = { path = "../device-pairing-client" }
-rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 uniffi = { workspace = true, features = ["tokio"] }
 zeroize = { workspace = true, features = ["alloc"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+prns-ffi.workspace = true
+
 [dev-dependencies]
-reticulum-device-api-framing = { path = "../device-api-framing" }
-reticulum-device-api-session = { path = "../device-api-session" }
 reticulum-appliance-store = { path = "../appliance-store" }
 
 [lib]

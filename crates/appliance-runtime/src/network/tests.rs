@@ -50,7 +50,6 @@ fn projections_preserve_non_utf8_ssids_and_exact_network_state() {
                 "coding_rate_denominator": 5,
                 "tx_power_dbm": 14
             },
-            "device_name": null
         })
     );
 
@@ -409,7 +408,6 @@ fn hostname_gateway_and_rmap_state_project_without_losing_fixed_point_coordinate
         device_api::RmapConfig::new(true, true, Some(location)),
         device_api::LoraRadioProfile::DEFAULT
             .with_tx_power(device_api::LoraTransmitPowerDbm::DBM_22),
-        None,
     )
     .unwrap();
 
@@ -445,7 +443,6 @@ fn hostname_gateway_and_rmap_state_project_without_losing_fixed_point_coordinate
                 "coding_rate_denominator": 5,
                 "tx_power_dbm": 22
             },
-            "device_name": null
         })
     );
 }

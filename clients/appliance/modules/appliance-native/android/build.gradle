@@ -28,6 +28,9 @@ def isNewArchitectureEnabled() {
 apply plugin: "com.android.library"
 apply plugin: "kotlin-android"
 
+// Product-owned platform half of PRNS's public Android Bluetooth Auto bridge.
+android.sourceSets.main.java.srcDirs += ["../android-prns"]
+
 if (isNewArchitectureEnabled()) {
   apply plugin: "com.facebook.react"
 }
@@ -79,7 +82,7 @@ android {
       }
     }
     ndk {
-      abiFilters "arm64-v8a", "armeabi-v7a", "x86", "x86_64"
+      abiFilters "arm64-v8a", "x86_64"
     }
   }
 

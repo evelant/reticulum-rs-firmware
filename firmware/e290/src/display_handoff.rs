@@ -2,13 +2,14 @@
 //!
 //! E-paper refreshes are intentionally much slower than ordinary node state
 //! changes. This handoff therefore stores only the newest complete
-//! [`DisplayRequest`]. Publishing never waits for a refresh and overwriting a
-//! queued pairing view drops and zeroizes its passkey owner. A separate
+//! [`DisplayRequest`]. Publishing never waits for a refresh. A separate
 //! latest-value acknowledgement path lets the publisher distinguish a desired
 //! semantic view from one that the actor physically rendered.
 
 use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
-use reticulum_appliance_display_model::{DisplayCommand, DisplayHomeSnapshot, DisplayViewKind};
+use reticulum_appliance_display_model::{
+    DisplayCommand, DisplayHomeSnapshot, DisplayLabel, DisplayViewKind,
+};
 
 /// Pixel width of the fitted E290 monochrome panel.
 pub const E290_DISPLAY_WIDTH_PIXELS: usize = 296;
@@ -27,21 +28,26 @@ const _: () = assert!(E290_MONOCHROME_FRAMEBUFFER_BYTES <= E290_DISPLAY_FRAMEBUF
 
 /// Latest non-secret live fields folded into the complete Home presentation.
 ///
-/// This is deliberately separate from [`DisplayRequest`]. Pairing and recovery
-/// remain the only producer of protected presentation commands, while the node
-/// actor may replace this small telemetry snapshot without waiting for an
-/// e-paper refresh.
+/// This is deliberately separate from [`DisplayRequest`] so the node actor may
+/// replace this small telemetry snapshot without waiting for an e-paper refresh.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DisplayHomeTelemetry {
+    appliance_label: Option<DisplayLabel>,
     uncollected_messages: u32,
 }
 
 impl DisplayHomeTelemetry {
     /// Construct the current live Home projection.
-    pub const fn new(uncollected_messages: u32) -> Self {
+    pub const fn new(appliance_label: Option<DisplayLabel>, uncollected_messages: u32) -> Self {
         Self {
+            appliance_label,
             uncollected_messages,
         }
+    }
+
+    /// Current product-owned appliance label.
+    pub const fn appliance_label(self) -> Option<DisplayLabel> {
+        self.appliance_label
     }
 
     /// Messages durably retained by the appliance but not yet acknowledged as
@@ -60,7 +66,9 @@ pub const fn overlay_observed_home_telemetry(
     telemetry: Option<DisplayHomeTelemetry>,
 ) -> DisplayHomeSnapshot {
     match telemetry {
-        Some(telemetry) => snapshot.with_uncollected_messages(telemetry.uncollected_messages()),
+        Some(telemetry) => snapshot
+            .with_appliance_label(telemetry.appliance_label())
+            .with_uncollected_messages(telemetry.uncollected_messages()),
         None => snapshot,
     }
 }
@@ -171,8 +179,8 @@ pub struct DisplayRequestIdExhausted;
 /// Exact request transferred from the publisher to the display actor.
 ///
 /// This owner deliberately implements neither `Clone` nor `Debug` because its
-/// command may own a pairing passkey.
-#[must_use = "a display request may own a pairing passkey and must be rendered or dropped"]
+/// command owns the complete desired presentation.
+#[must_use = "a display request must be rendered or dropped"]
 pub struct DisplayRequest {
     request_id: DisplayRequestId,
     command: DisplayCommand,
@@ -278,15 +286,6 @@ pub enum DisplayCompletionGateError {
     },
 }
 
-/// Physical boot-clear result reported before fresh pairing may be admitted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DisplayBootClearOutcome {
-    /// The actor completed a physical blank refresh, removing retained content.
-    Ready,
-    /// The actor could not prove that retained panel content was cleared.
-    Faulted,
-}
-
 /// Unique producer for complete semantic display states.
 #[must_use = "dropping the display publisher abandons the sole update capability"]
 pub struct DisplayPublisher<M>
@@ -295,7 +294,6 @@ where
 {
     latest: &'static Signal<M, DisplayRequest>,
     completion: &'static Signal<M, DisplayCompletion>,
-    boot_clear: &'static Signal<M, DisplayBootClearOutcome>,
     next_request_id: Option<u64>,
 }
 
@@ -308,7 +306,7 @@ where
     /// The returned identifier is strictly newer than every identifier
     /// previously returned by this publisher. Identifier exhaustion rejects
     /// the command without replacing an already pending request; dropping the
-    /// rejected command still zeroizes any owned passkey.
+    /// rejected command is dropped without replacing the retained request.
     pub fn publish_latest(
         &mut self,
         command: DisplayCommand,
@@ -367,19 +365,6 @@ where
             };
         }
     }
-
-    /// Take the boot-clear readiness or fault acknowledgement immediately.
-    pub fn try_take_boot_clear(&mut self) -> Option<DisplayBootClearOutcome> {
-        self.boot_clear.try_take()
-    }
-
-    /// Wait until the actor reports boot-clear readiness or failure.
-    ///
-    /// Fresh pairing admission must proceed only for
-    /// [`DisplayBootClearOutcome::Ready`].
-    pub async fn wait_for_boot_clear(&mut self) -> DisplayBootClearOutcome {
-        self.boot_clear.wait().await
-    }
 }
 
 /// Unique consumer owned by the future asynchronous display actor.
@@ -390,7 +375,6 @@ where
 {
     latest: &'static Signal<M, DisplayRequest>,
     completion: &'static Signal<M, DisplayCompletion>,
-    boot_clear: &'static Signal<M, DisplayBootClearOutcome>,
 }
 
 impl<M> DisplayReceiver<M>
@@ -414,15 +398,6 @@ where
     pub fn report_completion(&mut self, completion: DisplayCompletion) {
         self.completion.signal(completion);
     }
-
-    /// Report whether the mandatory physical boot clear completed.
-    ///
-    /// The actor should call this exactly once after attempting the initial
-    /// blank refresh. A fault acknowledgement keeps fresh pairing fail-closed
-    /// while allowing unrelated appliance services to continue.
-    pub fn report_boot_clear(&mut self, outcome: DisplayBootClearOutcome) {
-        self.boot_clear.signal(outcome);
-    }
 }
 
 /// Static storage for one coalescing producer-to-display relationship.
@@ -432,7 +407,6 @@ where
 {
     latest: Signal<M, DisplayRequest>,
     completion: Signal<M, DisplayCompletion>,
-    boot_clear: Signal<M, DisplayBootClearOutcome>,
 }
 
 impl<M> DisplayHandoff<M>
@@ -444,7 +418,6 @@ where
         Self {
             latest: Signal::new(),
             completion: Signal::new(),
-            boot_clear: Signal::new(),
         }
     }
 
@@ -454,13 +427,11 @@ where
             DisplayPublisher {
                 latest: &self.latest,
                 completion: &self.completion,
-                boot_clear: &self.boot_clear,
                 next_request_id: Some(1),
             },
             DisplayReceiver {
                 latest: &self.latest,
                 completion: &self.completion,
-                boot_clear: &self.boot_clear,
             },
         )
     }

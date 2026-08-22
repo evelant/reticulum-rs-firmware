@@ -140,7 +140,7 @@ fn rf_route(sequence: u64, token: u8, submission: u64) -> RfTraceObservation {
             destination(0x91),
             None,
             0,
-            RfTraceInterfaceId::new(1),
+            RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1]),
             RfTraceRouteResolution::BroadcastReady,
             evidence(0x55),
             RnsAttemptToken::new([token; 32]),
@@ -156,7 +156,7 @@ fn rf_tx(sequence: u64, token: u8) -> RfTraceObservation {
         RfTraceObservationKind::DataTx(
             RfTraceTxObservation::new(
                 RnsAttemptToken::new([token; 32]),
-                RfTraceInterfaceId::new(1),
+                RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1]),
                 evidence(0x55),
                 RfTraceTxOutcome::Transmitted,
                 2,
@@ -180,7 +180,7 @@ fn rf_inbound_proof(sequence: u64, token: u8) -> RfTraceObservation {
                 RfTraceInboundProofStage::PhysicalTxFailed,
                 Some(MessageId::new([0xc1; 32])),
                 Some(evidence(0xc2)),
-                Some(RfTraceInterfaceId::new(1)),
+                Some(RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1])),
                 Some((-104, 7)),
                 Some(RfTraceTxOutcome::TxFault),
             )
@@ -273,14 +273,14 @@ fn non_current_schema_is_rejected_without_mutation() {
             )
             .unwrap();
         connection
-            .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION - 2)
+            .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION - 1)
             .unwrap();
     }
 
     assert!(matches!(
         SqliteChatStore::open(&database.path),
         Err(SqliteStoreError::UnsupportedSchemaVersion(version))
-            if version == SQLITE_SCHEMA_VERSION - 2
+            if version == SQLITE_SCHEMA_VERSION - 1
     ));
 
     let connection = rusqlite::Connection::open(&database.path).unwrap();
@@ -288,7 +288,7 @@ fn non_current_schema_is_rejected_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        SQLITE_SCHEMA_VERSION - 2
+        SQLITE_SCHEMA_VERSION - 1
     );
     assert_eq!(
         connection
@@ -305,58 +305,6 @@ fn non_current_schema_is_rejected_without_mutation() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(outbox_columns, vec!["obsolete"]);
-}
-
-#[test]
-fn schema_ten_rf_trace_rows_migrate_to_eleven_without_data_loss() {
-    let database = TestDatabase::new("schema-ten-rf-trace-migration");
-    let expected = rf_tx(1, 0xa1);
-    {
-        let mut store = SqliteChatStore::open(&database.path).unwrap();
-        let batch = RfTraceImportBatch::new(
-            RfTraceBootId::new(0xa2),
-            rf_profile(0xa3),
-            2_000,
-            false,
-            vec![expected],
-        )
-        .unwrap();
-        assert_eq!(store.import_rf_trace_batch(batch).unwrap().inserted(), 1);
-        store.close().unwrap();
-    }
-
-    {
-        let connection = rusqlite::Connection::open(&database.path).unwrap();
-        connection
-            .execute_batch(
-                "ALTER TABLE rf_trace_events DROP COLUMN inbound_message_id;\n\
-                 ALTER TABLE rf_trace_events DROP COLUMN inbound_stage;",
-            )
-            .unwrap();
-        connection
-            .pragma_update(None, "user_version", 10_u32)
-            .unwrap();
-    }
-
-    let reopened = SqliteChatStore::open(&database.path).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), SQLITE_SCHEMA_VERSION);
-    let page = reopened
-        .rf_trace(RfTracePageRequest::new(RfTraceScope::All, None, 10).unwrap())
-        .unwrap();
-    assert_eq!(page.events().len(), 1);
-    assert_eq!(page.events()[0].observation(), expected);
-
-    let connection = rusqlite::Connection::open(&database.path).unwrap();
-    let mut statement = connection
-        .prepare("PRAGMA table_info(rf_trace_events)")
-        .unwrap();
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(columns.iter().any(|name| name == "inbound_stage"));
-    assert!(columns.iter().any(|name| name == "inbound_message_id"));
 }
 
 #[test]
@@ -503,6 +451,54 @@ fn close_and_reopen_preserves_complete_chat_and_reconcile_state() {
         OutboxStatus::Device(SubmissionState::Delivered(_))
     ));
     reopened_again.close().unwrap();
+}
+
+#[test]
+fn application_delivered_status_is_constraint_safe_and_restart_safe() {
+    let database = TestDatabase::new("application-delivered");
+    let peer = destination(0x4a);
+    let outbox_id;
+
+    {
+        let mut store = SqliteChatStore::open(&database.path).unwrap();
+        outbox_id = store
+            .commit_outbound(outbound(0x4b, 0x4a, 8_000, b"link-delivered"))
+            .unwrap()
+            .outbox_id();
+        let accepted = acceptance(0x4c, 0x4d);
+        store.record_acceptance(outbox_id, accepted).unwrap();
+        store
+            .project_submission_status(
+                accepted.submission_id(),
+                SubmissionState::ApplicationDelivered,
+            )
+            .unwrap();
+        assert_eq!(
+            store.outbox(outbox_id).unwrap().unwrap().status(),
+            OutboxStatus::Device(SubmissionState::ApplicationDelivered)
+        );
+        store.close().unwrap();
+    }
+
+    let reopened = SqliteChatStore::open(&database.path).unwrap();
+    assert_eq!(
+        reopened.outbox(outbox_id).unwrap().unwrap().status(),
+        OutboxStatus::Device(SubmissionState::ApplicationDelivered)
+    );
+    assert!(reopened.reconcile().unwrap().is_empty());
+    let activity = reopened
+        .message_activity(
+            MessageActivityPageRequest::new(MessageActivityScope::All, None, 10).unwrap(),
+        )
+        .unwrap();
+    assert!(activity.events().iter().any(|event| matches!(
+        event.kind(),
+        MessageActivityKind::OutboundStatus {
+            state: SubmissionState::ApplicationDelivered
+        }
+    )));
+    assert_eq!(reopened.conversation_timeline(peer).unwrap().len(), 1);
+    reopened.close().unwrap();
 }
 
 #[test]
@@ -821,7 +817,10 @@ fn sqlite_rf_trace_restart_preserves_inbound_proof_lifecycle_evidence() {
     assert_eq!(proof.stage(), RfTraceInboundProofStage::PhysicalTxFailed);
     assert_eq!(proof.message_id(), Some(MessageId::new([0xc1; 32])));
     assert_eq!(proof.packet_evidence(), Some(evidence(0xc2)));
-    assert_eq!(proof.interface(), Some(RfTraceInterfaceId::new(1)));
+    assert_eq!(
+        proof.interface(),
+        Some(RfTraceInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 1]))
+    );
     assert_eq!(proof.signal(), Some((-104, 7)));
     assert_eq!(proof.dispatch_outcome(), Some(RfTraceTxOutcome::TxFault));
 }

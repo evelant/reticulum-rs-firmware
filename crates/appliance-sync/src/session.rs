@@ -7,8 +7,10 @@ use reticulum_appliance_store::{
     UnixTimestampMillis,
 };
 use reticulum_device_api as device_api;
-use reticulum_device_client::{BasicLxmfSend, ClientError, ClientTransport, DeviceClient};
-use reticulum_lxmf_wire::{WireLimits, decode_sideband_location_fields};
+use reticulum_lxmf_wire::{MessageView, WireLimits, decode_sideband_location_fields};
+use sha2::{Digest, Sha256};
+
+const MAX_REQUEST_SESSION_LXMF_WIRE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stable committed-message handle used only within one live device session.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -60,6 +62,15 @@ pub trait LxmfSession {
 
     /// Read the authenticated device and local-destination binding.
     fn binding(&mut self) -> Result<DeviceBinding, Self::Error>;
+
+    /// Read the durable product-owned appliance label.
+    fn appliance_label_get(&mut self) -> Result<device_api::ApplianceLabelSnapshot, Self::Error>;
+
+    /// Compare-and-swap the durable product-owned appliance label.
+    fn appliance_label_mutate(
+        &mut self,
+        request: device_api::ApplianceLabelMutationRequest<'_>,
+    ) -> Result<device_api::ApplianceLabelMutationOutcome, Self::Error>;
 
     /// Durably submit exact previously committed outbound material.
     fn submit(&mut self, material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error>;
@@ -155,11 +166,20 @@ pub trait LxmfSession {
     fn is_usable(&self) -> bool;
 }
 
-/// Typed application adapter failure around [`DeviceClient`].
+/// Typed application adapter failure around an identified PRNS request.
 #[derive(Debug)]
 pub enum DeviceSessionError {
-    /// Authenticated device protocol or transport failure.
-    Client(ClientError),
+    /// An identified Reticulum request could not complete.
+    Request(String),
+    /// The appliance returned a typed application-level rejection.
+    Api(device_api::ApiErrorResponse),
+    /// The appliance returned a response for a different operation.
+    UnexpectedResponse {
+        /// Operation response expected by the caller.
+        expected: u16,
+        /// Response kind returned by the appliance.
+        actual: u16,
+    },
     /// The node did not publish the required local `lxmf.delivery` destination.
     MissingLxmfDeliveryDestination,
     /// The device returned a zero submission identifier.
@@ -180,7 +200,18 @@ pub enum DeviceSessionError {
 impl fmt::Display for DeviceSessionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Client(error) => write!(formatter, "device client failed: {error}"),
+            Self::Request(reason) => {
+                write!(formatter, "Reticulum application request failed: {reason}")
+            }
+            Self::Api(error) => write!(
+                formatter,
+                "device API operation {:?} failed with {:?}",
+                error.operation, error.code
+            ),
+            Self::UnexpectedResponse { expected, actual } => write!(
+                formatter,
+                "device API response kind {actual} did not match operation {expected}"
+            ),
             Self::MissingLxmfDeliveryDestination => {
                 formatter.write_str("device has no local LXMF delivery destination")
             }
@@ -202,77 +233,172 @@ impl fmt::Display for DeviceSessionError {
     }
 }
 
-impl std::error::Error for DeviceSessionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Client(error) => Some(error),
-            Self::MissingLxmfDeliveryDestination
-            | Self::InvalidSubmissionId
-            | Self::InvalidPacketEvidence
-            | Self::InvalidTimestamp { .. }
-            | Self::InboxSummaryNotRetained
-            | Self::InvalidLxmf(_) => None,
-        }
-    }
+impl std::error::Error for DeviceSessionError {}
+
+/// One identified Reticulum application requester used by the durable client
+/// runtime.
+///
+/// Implementations own network lifecycle and authorization. The adapter below
+/// owns only typed Device API operations and LXMF validation; it does not
+/// introduce another transport protocol or Reticulum state machine.
+pub trait DeviceApiRequester: Send {
+    /// Stable appliance identity used to bind one clean-reset SQLite profile.
+    fn appliance_id(&self) -> [u8; 16];
+
+    /// Issue one typed request over the implementation's identified session.
+    fn request(
+        &mut self,
+        request: device_api::DeviceRequest<'_>,
+    ) -> Result<device_api::DeviceResponse, String>;
+
+    /// Whether another request can be attempted without replacing the owner.
+    fn is_usable(&self) -> bool;
 }
 
-impl From<ClientError> for DeviceSessionError {
-    fn from(value: ClientError) -> Self {
-        Self::Client(value)
-    }
-}
-
-/// [`LxmfSession`] implementation over one reusable authenticated client.
-pub struct DeviceClientSession<T> {
-    client: DeviceClient<T>,
+/// [`LxmfSession`] over identified Reticulum application requests.
+///
+/// This is the post-bearer adapter used by PRNS clients. It consumes ordinary
+/// request/response operations and deliberately knows nothing about Bluetooth,
+/// framing, pairing credentials, Links, routes, or packet receipts.
+pub struct DeviceApiRequestSession<R> {
+    requester: R,
     retained_inbox: Option<(InboxSummary, device_api::LxmfMessageSummary)>,
 }
 
-impl<T: ClientTransport> DeviceClientSession<T> {
-    /// Wrap an established authenticated device client.
-    pub const fn new(client: DeviceClient<T>) -> Self {
+impl<R: DeviceApiRequester> DeviceApiRequestSession<R> {
+    /// Wrap one usable identified requester.
+    pub const fn new(requester: R) -> Self {
         Self {
-            client,
+            requester,
             retained_inbox: None,
         }
     }
 
-    /// Borrow the underlying client for connection diagnosis.
-    pub const fn client(&self) -> &DeviceClient<T> {
-        &self.client
+    fn exchange(
+        &mut self,
+        request: device_api::DeviceRequest<'_>,
+    ) -> Result<device_api::DeviceResponse, DeviceSessionError> {
+        let expected = request.operation();
+        match self
+            .requester
+            .request(request)
+            .map_err(DeviceSessionError::Request)?
+        {
+            device_api::DeviceResponse::Error(error) => Err(DeviceSessionError::Api(error)),
+            response if response.kind() == expected => Ok(response),
+            response => Err(DeviceSessionError::UnexpectedResponse {
+                expected,
+                actual: response.kind(),
+            }),
+        }
     }
 
-    /// Recover the underlying client, ending application-layer ownership.
-    pub fn into_inner(self) -> DeviceClient<T> {
-        self.client
+    fn read_complete_lxmf(
+        &mut self,
+        summary: device_api::LxmfMessageSummary,
+    ) -> Result<Vec<u8>, DeviceSessionError> {
+        let total = usize::try_from(summary.normalized_wire_len()).map_err(|_| {
+            DeviceSessionError::InvalidLxmf("wire length does not fit this client".to_owned())
+        })?;
+        if total > MAX_REQUEST_SESSION_LXMF_WIRE_BYTES {
+            return Err(DeviceSessionError::InvalidLxmf(
+                "wire exceeds the client collection limit".to_owned(),
+            ));
+        }
+        let mut wire = Vec::new();
+        wire.try_reserve_exact(total)
+            .map_err(|_| DeviceSessionError::InvalidLxmf("wire allocation failed".to_owned()))?;
+        let mut offset = 0_u32;
+        let mut hasher = Sha256::new();
+        while offset < summary.normalized_wire_len() {
+            let remaining = summary.normalized_wire_len() - offset;
+            let maximum = remaining.min(device_api::MAX_LXMF_READ_CHUNK_BYTES as u32) as u16;
+            let max_bytes = device_api::LxmfReadLength::new(maximum)
+                .expect("a non-final LXMF read always requests positive bytes");
+            let response = self.exchange(device_api::DeviceRequest::LxmfRead {
+                handle: summary.handle(),
+                offset,
+                max_bytes,
+            })?;
+            let device_api::DeviceResponse::LxmfRead(chunk) = response else {
+                unreachable!("exchange validated the response operation")
+            };
+            if chunk.handle() != summary.handle()
+                || chunk.offset() != offset
+                || chunk.total_len() != summary.normalized_wire_len()
+                || chunk.bytes().is_empty()
+                || chunk.bytes().len() > usize::from(max_bytes.get())
+            {
+                return Err(DeviceSessionError::InvalidLxmf(
+                    "read chunk did not match its authenticated summary".to_owned(),
+                ));
+            }
+            let next = offset
+                .checked_add(chunk.bytes().len() as u32)
+                .ok_or_else(|| {
+                    DeviceSessionError::InvalidLxmf("read offset overflowed".to_owned())
+                })?;
+            if next > summary.normalized_wire_len()
+                || chunk.is_final() != (next == summary.normalized_wire_len())
+            {
+                return Err(DeviceSessionError::InvalidLxmf(
+                    "read chunk had an invalid final boundary".to_owned(),
+                ));
+            }
+            wire.extend_from_slice(chunk.bytes());
+            hasher.update(chunk.bytes());
+            offset = next;
+        }
+        let digest: [u8; 32] = hasher.finalize().into();
+        if digest != *summary.exact_wire_sha256() {
+            return Err(DeviceSessionError::InvalidLxmf(
+                "complete wire digest did not match its summary".to_owned(),
+            ));
+        }
+        Ok(wire)
     }
 }
 
-impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
+impl<R: DeviceApiRequester> LxmfSession for DeviceApiRequestSession<R> {
     type Error = DeviceSessionError;
 
     fn binding(&mut self) -> Result<DeviceBinding, Self::Error> {
-        let identity = self.client.identity_summary()?;
+        let response = self.exchange(device_api::DeviceRequest::IdentitySummary)?;
+        let device_api::DeviceResponse::IdentitySummary(identity) = response else {
+            unreachable!("exchange validated the response operation")
+        };
         let lxmf = identity
             .lxmf_delivery_destination()
             .ok_or(DeviceSessionError::MissingLxmfDeliveryDestination)?;
         Ok(DeviceBinding::new(
-            *self.client.device_id().as_bytes(),
+            self.requester.appliance_id(),
             DestinationHash::new(identity.primary_destination().0),
             DestinationHash::new(lxmf.0),
         ))
     }
 
+    fn appliance_label_get(&mut self) -> Result<device_api::ApplianceLabelSnapshot, Self::Error> {
+        let response = self.exchange(device_api::DeviceRequest::ApplianceLabelGet)?;
+        let device_api::DeviceResponse::ApplianceLabel(snapshot) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(snapshot)
+    }
+
+    fn appliance_label_mutate(
+        &mut self,
+        request: device_api::ApplianceLabelMutationRequest<'_>,
+    ) -> Result<device_api::ApplianceLabelMutationOutcome, Self::Error> {
+        let response = self.exchange(device_api::DeviceRequest::ApplianceLabelMutate(request))?;
+        let device_api::DeviceResponse::ApplianceLabelMutation(outcome) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(outcome)
+    }
+
     fn submit(&mut self, material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
-        let mut request = BasicLxmfSend::new(
-            device_api::DestinationHash(*material.destination().as_bytes()),
-            material.timestamp().get(),
-            material.title(),
-            material.content(),
-            device_api::IdempotencyKey(*material.idempotency_key().as_bytes()),
-        );
-        if let Some(location) = material.location() {
-            let location = device_api::LxmfMessageLocation::new(
+        let location = material.location().map(|location| {
+            device_api::LxmfMessageLocation::new(
                 location.latitude_e6(),
                 location.longitude_e6(),
                 location.altitude_cm(),
@@ -281,10 +407,19 @@ impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
                 location.accuracy_cm(),
                 location.updated_at_unix_seconds(),
             )
-            .expect("appliance-store and device API enforce identical coordinate bounds");
-            request = request.with_location(location);
-        }
-        let accepted = self.client.lxmf_basic_send(request)?;
+            .expect("store and Device API enforce identical location bounds")
+        });
+        let response = self.exchange(device_api::DeviceRequest::LxmfBasicSend {
+            destination: device_api::DestinationHash(*material.destination().as_bytes()),
+            timestamp_unix_ms: material.timestamp().get(),
+            title: material.title(),
+            content: material.content(),
+            location,
+            idempotency_key: device_api::IdempotencyKey(*material.idempotency_key().as_bytes()),
+        })?;
+        let device_api::DeviceResponse::LxmfBasicSendAccepted(accepted) = response else {
+            unreachable!("exchange validated the response operation")
+        };
         let submission_id = SubmissionId::new(accepted.id.0)
             .map_err(|_| DeviceSessionError::InvalidSubmissionId)?;
         Ok(AcceptanceIds::new(
@@ -294,9 +429,12 @@ impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
     }
 
     fn submission_status(&mut self, id: SubmissionId) -> Result<SubmissionState, Self::Error> {
-        let status = self
-            .client
-            .submission_status(device_api::SubmissionId(id.get()))?;
+        let response = self.exchange(device_api::DeviceRequest::SubmissionStatus {
+            id: device_api::SubmissionId(id.get()),
+        })?;
+        let device_api::DeviceResponse::SubmissionStatus(status) = response else {
+            unreachable!("exchange validated the response operation")
+        };
         map_submission_state(status.state)
     }
 
@@ -306,14 +444,28 @@ impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
     ) -> Result<Option<InboxSummary>, Self::Error> {
         let after = after.map(|cursor| {
             device_api::LxmfMessageHandle::new(cursor.get())
-                .expect("application inbox cursor is always nonzero")
+                .expect("application inbox cursors are nonzero")
         });
-        let Some(raw) = self.client.lxmf_next(after)? else {
-            self.retained_inbox = None;
-            return Ok(None);
+        let response = match self.exchange(device_api::DeviceRequest::LxmfNext { after }) {
+            Ok(response) => response,
+            Err(DeviceSessionError::Api(error))
+                if error.code == device_api::ApiErrorCode::NotFound =>
+            {
+                self.retained_inbox = None;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         };
-        let cursor = InboxCursor::new(raw.handle().get())
-            .expect("device API message handles are always nonzero");
+        let device_api::DeviceResponse::LxmfNext(raw) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        if after.is_some_and(|previous| raw.handle().get() <= previous.get()) {
+            return Err(DeviceSessionError::InvalidLxmf(
+                "inbox cursor did not advance".to_owned(),
+            ));
+        }
+        let cursor =
+            InboxCursor::new(raw.handle().get()).expect("device message handles are nonzero");
         let summary = InboxSummary::new(cursor, MessageId::new(*raw.message_id()));
         self.retained_inbox = Some((summary, raw));
         Ok(Some(summary))
@@ -326,12 +478,23 @@ impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
         if retained != summary {
             return Err(DeviceSessionError::InboxSummaryNotRetained);
         }
-        let message = self.client.lxmf_read_summary(raw)?;
-        let view = message
-            .view()
+        let wire = self.read_complete_lxmf(raw)?;
+        let view = MessageView::parse_complete(&wire, location_wire_limits(wire.len()))
             .map_err(|error| DeviceSessionError::InvalidLxmf(error.to_string()))?;
+        if view.normalized_wire_len() != raw.normalized_wire_len() as usize
+            || view.message_id() != *raw.message_id()
+            || view.destination_hash() != &raw.destination().0
+            || view.source_hash() != &raw.source().0
+            || view.payload().timestamp_bits() != raw.timestamp_bits()
+            || view.payload().title().as_bytes().len() != raw.title_len() as usize
+            || view.payload().content().as_bytes().len() != raw.content_len() as usize
+            || view.payload().fields().raw().len() != raw.fields_encoded_len() as usize
+        {
+            return Err(DeviceSessionError::InvalidLxmf(
+                "complete wire did not match its authenticated summary".to_owned(),
+            ));
+        }
         let timestamp = inbound_timestamp(view.payload().timestamp())?;
-        let ingress = map_ingress_observation(raw.ingress_observation());
         let location = decode_message_location(view.payload().fields().raw());
         Ok(InboundMessage::new(
             summary.message_id(),
@@ -342,98 +505,159 @@ impl<T: ClientTransport> LxmfSession for DeviceClientSession<T> {
             view.payload().content().as_bytes().to_vec(),
         )
         .with_location(location)
-        .with_ingress_observation(ingress))
+        .with_ingress_observation(map_ingress_observation(raw.ingress_observation())))
     }
 
     fn inbox_status(&mut self) -> Result<device_api::LxmfMailboxStatus, Self::Error> {
-        Ok(self.client.lxmf_mailbox_status()?)
+        let response = self.exchange(device_api::DeviceRequest::LxmfMailboxStatus)?;
+        let device_api::DeviceResponse::LxmfMailboxStatus(status) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(status)
     }
 
     fn acknowledge_inbox_through(
         &mut self,
         through: InboxCursor,
     ) -> Result<device_api::LxmfMailboxStatus, Self::Error> {
-        let handle = device_api::LxmfMessageHandle::new(through.get())
-            .expect("application inbox cursors are always nonzero");
-        Ok(self.client.lxmf_mailbox_acknowledge(handle)?)
+        let through = device_api::LxmfMessageHandle::new(through.get())
+            .expect("application inbox cursors are nonzero");
+        let response =
+            self.exchange(device_api::DeviceRequest::LxmfMailboxAcknowledge { through })?;
+        let device_api::DeviceResponse::LxmfMailboxAcknowledged(status) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(status)
     }
 
     fn next_nearby_peer(
         &mut self,
         after: Option<device_api::LxmfPeerDiscoveryCursor>,
     ) -> Result<device_api::LxmfPeerDiscoveryPage, Self::Error> {
-        Ok(self.client.lxmf_peer_next(after)?)
+        let response = self.exchange(device_api::DeviceRequest::LxmfPeerNext { after })?;
+        let device_api::DeviceResponse::LxmfPeerNext(page) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(page)
     }
 
     fn nomad_fetch_start(
         &mut self,
         request: device_api::NomadFetchStartRequest<'_>,
     ) -> Result<device_api::NomadFetchStartAccepted, Self::Error> {
-        Ok(self.client.nomad_fetch_start(request)?)
+        let response = self.exchange(device_api::DeviceRequest::NomadFetchStart(request))?;
+        let device_api::DeviceResponse::NomadFetchStartAccepted(accepted) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(accepted)
     }
 
     fn nomad_fetch_poll(
         &mut self,
         id: device_api::NomadFetchId,
     ) -> Result<device_api::NomadFetchPollResponse, Self::Error> {
-        Ok(self.client.nomad_fetch_poll(id)?)
+        let response = self.exchange(device_api::DeviceRequest::NomadFetchPoll(
+            device_api::NomadFetchPollRequest { id },
+        ))?;
+        let device_api::DeviceResponse::NomadFetchPoll(response) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(response)
     }
 
     fn reticulum_probe_start(
         &mut self,
         request: device_api::ProbeStartRequest,
     ) -> Result<device_api::ProbeStartAccepted, Self::Error> {
-        Ok(self.client.reticulum_probe_start(request)?)
+        let response = self.exchange(device_api::DeviceRequest::ReticulumProbeStart(request))?;
+        let device_api::DeviceResponse::ReticulumProbeStartAccepted(accepted) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(accepted)
     }
 
     fn reticulum_probe_poll(
         &mut self,
         id: device_api::ProbeId,
     ) -> Result<device_api::ProbePollResponse, Self::Error> {
-        Ok(self.client.reticulum_probe_poll(id)?)
+        let response = self.exchange(device_api::DeviceRequest::ReticulumProbePoll(
+            device_api::ProbePollRequest::new(id),
+        ))?;
+        let device_api::DeviceResponse::ReticulumProbePoll(response) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(response)
     }
 
     fn network_config_get(&mut self) -> Result<device_api::NetworkConfigSnapshot, Self::Error> {
-        Ok(self.client.network_config_get()?)
+        let response = self.exchange(device_api::DeviceRequest::NetworkConfigGet)?;
+        let device_api::DeviceResponse::NetworkConfig(config) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(config)
     }
 
     fn network_config_mutate(
         &mut self,
         request: device_api::NetworkConfigMutationRequest<'_>,
     ) -> Result<device_api::NetworkConfigMutationOutcome, Self::Error> {
-        Ok(self.client.network_config_mutate(request)?)
+        let response = self.exchange(device_api::DeviceRequest::NetworkConfigMutate(request))?;
+        let device_api::DeviceResponse::NetworkConfigMutation(outcome) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(outcome)
     }
 
     fn network_status(&mut self) -> Result<device_api::NetworkRuntimeStatus, Self::Error> {
-        Ok(self.client.network_status()?)
+        let response = self.exchange(device_api::DeviceRequest::NetworkStatus)?;
+        let device_api::DeviceResponse::NetworkStatus(status) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(status)
     }
 
     fn manual_service_announce(
         &mut self,
     ) -> Result<device_api::ManualServiceAnnounceDisposition, Self::Error> {
-        Ok(self.client.manual_service_announce()?)
+        let response = self.exchange(device_api::DeviceRequest::ManualServiceAnnounce)?;
+        let device_api::DeviceResponse::ManualServiceAnnounce(disposition) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(disposition)
     }
 
     fn node_diagnostics(&mut self) -> Result<device_api::NodeDiagnosticsSnapshot, Self::Error> {
-        Ok(self.client.node_diagnostics()?)
+        let response = self.exchange(device_api::DeviceRequest::NodeDiagnostics)?;
+        let device_api::DeviceResponse::NodeDiagnostics(snapshot) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(snapshot)
     }
 
     fn route_diagnostics_page(
         &mut self,
         request: device_api::RouteDiagnosticsRequest,
     ) -> Result<device_api::RouteDiagnosticsPage, Self::Error> {
-        Ok(self.client.route_diagnostics_page(request)?)
+        let response = self.exchange(device_api::DeviceRequest::RouteDiagnosticsPage(request))?;
+        let device_api::DeviceResponse::RouteDiagnosticsPage(page) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(page)
     }
 
     fn radio_trace_page(
         &mut self,
         request: device_api::RadioTracePageRequest,
     ) -> Result<device_api::RadioTracePage, Self::Error> {
-        Ok(self.client.radio_trace_page(request)?)
+        let response = self.exchange(device_api::DeviceRequest::RadioTracePage(request))?;
+        let device_api::DeviceResponse::RadioTracePage(page) = response else {
+            unreachable!("exchange validated the response operation")
+        };
+        Ok(page)
     }
 
     fn is_usable(&self) -> bool {
-        self.client.is_session_available()
+        self.requester.is_usable()
     }
 }
 
@@ -471,7 +695,7 @@ fn map_ingress_observation(
 ) -> Option<MessageIngressObservation> {
     ingress.map(|ingress| {
         MessageIngressObservation::new(
-            MessageInterfaceId::new(ingress.interface_id()),
+            MessageInterfaceId::new(*ingress.interface_id().as_bytes()),
             ingress
                 .signal()
                 .map(|signal| MessageSignalObservation::new(signal.rssi_dbm(), signal.snr_db())),
@@ -497,6 +721,9 @@ fn map_submission_state(
         }
         device_api::SubmissionState::Delivered(details) => {
             Ok(SubmissionState::Delivered(evidence(details)?))
+        }
+        device_api::SubmissionState::ApplicationDelivered => {
+            Ok(SubmissionState::ApplicationDelivered)
         }
         device_api::SubmissionState::Failed(failure) => {
             let failure = match failure {
@@ -538,12 +765,12 @@ mod tests {
     #[test]
     fn ingress_mapping_preserves_historical_interface_and_receiver_signal() {
         let mapped = map_ingress_observation(Some(device_api::IngressObservation::new(
-            7,
+            device_api::ReticulumInterfaceId::new([0, 0, 0, 0, 0, 0, 0, 7]),
             Some(device_api::IngressSignal::new(-97, 4)),
         )))
         .expect("ingress observation");
 
-        assert_eq!(mapped.interface().get(), 7);
+        assert_eq!(mapped.interface().as_bytes(), &[0, 0, 0, 0, 0, 0, 0, 7]);
         let signal = mapped.signal().expect("physical signal");
         assert_eq!(signal.rssi_dbm(), -97);
         assert_eq!(signal.snr_db(), 4);

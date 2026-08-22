@@ -105,7 +105,7 @@ fn core_observation(
                     .next_hop_identity()
                     .map(|identity| core::RfTraceIdentityHash::new(*identity.as_bytes())),
                 route.hops(),
-                core::RfTraceInterfaceId::new(packet.interface_id()),
+                core::RfTraceInterfaceId::new(*packet.interface_id().as_bytes()),
                 core_route_resolution(route.resolution()),
                 core_packet(packet),
                 core_token(token),
@@ -119,7 +119,7 @@ fn core_observation(
                 .ok_or_else(|| "DATA TX trace omitted its attempt token".to_owned())?;
             let tx = core::RfTraceTxObservation::new(
                 core_token(token),
-                core::RfTraceInterfaceId::new(packet.interface_id()),
+                core::RfTraceInterfaceId::new(*packet.interface_id().as_bytes()),
                 core_packet(packet),
                 core_tx_outcome(tx.outcome()),
                 tx.planned_frames(),
@@ -134,7 +134,7 @@ fn core_observation(
         device_api::RadioTraceEventKind::LogicalRx(rx) => {
             let packet = rx.packet();
             core::RfTraceObservationKind::LogicalRx(core::RfTraceRxObservation::new(
-                core::RfTraceInterfaceId::new(packet.interface_id()),
+                core::RfTraceInterfaceId::new(*packet.interface_id().as_bytes()),
                 core_packet(packet),
                 packet.attempt_token().map(core_token),
                 rx.rssi_dbm(),
@@ -144,7 +144,7 @@ fn core_observation(
         device_api::RadioTraceEventKind::AttemptTerminal(terminal) => {
             let ingress = terminal.proof_ingress().map(|ingress| {
                 core::RfTraceProofIngress::new(
-                    core::RfTraceInterfaceId::new(ingress.interface_id()),
+                    core::RfTraceInterfaceId::new(*ingress.interface_id().as_bytes()),
                     ingress
                         .signal()
                         .map(|signal| (signal.rssi_dbm(), signal.snr_db())),
@@ -178,15 +178,6 @@ fn core_observation(
                 device_api::RadioTraceInboundProofStage::DataLogicalRx => {
                     core::RfTraceInboundProofStage::DataLogicalRx
                 }
-                device_api::RadioTraceInboundProofStage::DurableCommit => {
-                    core::RfTraceInboundProofStage::DurableCommit
-                }
-                device_api::RadioTraceInboundProofStage::ProofRetained => {
-                    core::RfTraceInboundProofStage::ProofRetained
-                }
-                device_api::RadioTraceInboundProofStage::ProofStaged => {
-                    core::RfTraceInboundProofStage::ProofStaged
-                }
                 device_api::RadioTraceInboundProofStage::OrdinaryQueued => {
                     core::RfTraceInboundProofStage::OrdinaryQueued
                 }
@@ -203,7 +194,9 @@ fn core_observation(
                     stage,
                     proof.message_id().map(core::MessageId::new),
                     packet,
-                    proof.interface_id().map(core::RfTraceInterfaceId::new),
+                    proof
+                        .interface_id()
+                        .map(|interface| core::RfTraceInterfaceId::new(*interface.as_bytes())),
                     proof
                         .signal()
                         .map(|signal| (signal.rssi_dbm(), signal.snr_db())),
@@ -487,15 +480,12 @@ pub enum RadioTraceAttemptOutcomeView {
     Unsent,
 }
 
-/// Receiver-side durable DATA-to-proof lifecycle stage.
+/// Receiver-side immediate DATA-to-proof lifecycle stage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum RadioTraceInboundProofStageView {
     DataLogicalRx,
-    DurableCommit,
-    ProofRetained,
-    ProofStaged,
     OrdinaryQueued,
     PhysicalTxDone,
     PhysicalTxFailed,
@@ -505,9 +495,6 @@ impl From<core::RfTraceInboundProofStage> for RadioTraceInboundProofStageView {
     fn from(stage: core::RfTraceInboundProofStage) -> Self {
         match stage {
             core::RfTraceInboundProofStage::DataLogicalRx => Self::DataLogicalRx,
-            core::RfTraceInboundProofStage::DurableCommit => Self::DurableCommit,
-            core::RfTraceInboundProofStage::ProofRetained => Self::ProofRetained,
-            core::RfTraceInboundProofStage::ProofStaged => Self::ProofStaged,
             core::RfTraceInboundProofStage::OrdinaryQueued => Self::OrdinaryQueued,
             core::RfTraceInboundProofStage::PhysicalTxDone => Self::PhysicalTxDone,
             core::RfTraceInboundProofStage::PhysicalTxFailed => Self::PhysicalTxFailed,
@@ -527,13 +514,13 @@ pub enum RadioTraceEventKindView {
         destination: String,
         next_hop_identity: Option<String>,
         hops: u8,
-        interface_id: u8,
+        interface_id: [u8; 8],
         resolution: RadioTraceRouteResolutionView,
         packet_evidence: PacketEvidenceView,
         rns_attempt_token: String,
     },
     DataTx {
-        interface_id: u8,
+        interface_id: [u8; 8],
         packet_evidence: PacketEvidenceView,
         rns_attempt_token: String,
         outcome: RadioTraceTxOutcomeView,
@@ -548,7 +535,7 @@ pub enum RadioTraceEventKindView {
         authorized_frame_observed: bool,
     },
     LogicalRx {
-        interface_id: u8,
+        interface_id: [u8; 8],
         packet_evidence: PacketEvidenceView,
         rns_packet_hash: Option<String>,
         rssi_dbm: i16,
@@ -557,7 +544,7 @@ pub enum RadioTraceEventKindView {
     AttemptTerminal {
         rns_attempt_token: String,
         outcome: RadioTraceAttemptOutcomeView,
-        proof_interface_id: Option<u8>,
+        proof_interface_id: Option<[u8; 8]>,
         proof_rssi_dbm: Option<i16>,
         proof_snr_db: Option<i16>,
     },
@@ -566,7 +553,7 @@ pub enum RadioTraceEventKindView {
         stage: RadioTraceInboundProofStageView,
         message_id: Option<String>,
         packet_evidence: Option<PacketEvidenceView>,
-        interface_id: Option<u8>,
+        interface_id: Option<[u8; 8]>,
         rssi_dbm: Option<i16>,
         snr_db: Option<i16>,
         dispatch_outcome: Option<RadioTraceTxOutcomeView>,
@@ -581,7 +568,7 @@ impl From<core::RfTraceObservationKind> for RadioTraceEventKindView {
                 destination: hex::encode(route.destination().as_bytes()),
                 next_hop_identity: route.next_hop().map(|hash| hex::encode(hash.as_bytes())),
                 hops: route.hops(),
-                interface_id: route.selected_interface().get(),
+                interface_id: *route.selected_interface().as_bytes(),
                 resolution: route.resolution().into(),
                 packet_evidence: route.packet_evidence().into(),
                 rns_attempt_token: hex::encode(route.rns_attempt_token().as_bytes()),
@@ -589,7 +576,7 @@ impl From<core::RfTraceObservationKind> for RadioTraceEventKindView {
             core::RfTraceObservationKind::DataTx(tx) => {
                 let completed = tx.frame_completed_at_us();
                 Self::DataTx {
-                    interface_id: tx.interface().get(),
+                    interface_id: *tx.interface().as_bytes(),
                     packet_evidence: tx.packet_evidence().into(),
                     rns_attempt_token: hex::encode(tx.rns_attempt_token().as_bytes()),
                     outcome: tx.outcome().into(),
@@ -601,7 +588,7 @@ impl From<core::RfTraceObservationKind> for RadioTraceEventKindView {
                 }
             }
             core::RfTraceObservationKind::LogicalRx(rx) => Self::LogicalRx {
-                interface_id: rx.interface().get(),
+                interface_id: *rx.interface().as_bytes(),
                 packet_evidence: rx.packet_evidence().into(),
                 rns_packet_hash: rx
                     .rns_packet_hash()
@@ -623,7 +610,7 @@ impl From<core::RfTraceObservationKind> for RadioTraceEventKindView {
                         }
                         core::RfTraceAttemptOutcome::Unsent => RadioTraceAttemptOutcomeView::Unsent,
                     },
-                    proof_interface_id: ingress.map(|ingress| ingress.interface().get()),
+                    proof_interface_id: ingress.map(|ingress| *ingress.interface().as_bytes()),
                     proof_rssi_dbm: signal.map(|signal| signal.0),
                     proof_snr_db: signal.map(|signal| signal.1),
                 }
@@ -637,7 +624,7 @@ impl From<core::RfTraceObservationKind> for RadioTraceEventKindView {
                         .message_id()
                         .map(|message_id| hex::encode(message_id.as_bytes())),
                     packet_evidence: proof.packet_evidence().map(Into::into),
-                    interface_id: proof.interface().map(|interface| interface.get()),
+                    interface_id: proof.interface().map(|interface| *interface.as_bytes()),
                     rssi_dbm: signal.map(|signal| signal.0),
                     snr_db: signal.map(|signal| signal.1),
                     dispatch_outcome: proof.dispatch_outcome().map(Into::into),
@@ -749,7 +736,9 @@ mod tests {
             device_api::RadioTraceInboundProofStage::PhysicalTxFailed,
             Some([0x22; 32]),
             Some(packet),
-            Some(7),
+            Some(device_api::ReticulumInterfaceId::new([
+                0, 0, 0, 0, 0, 0, 0, 7,
+            ])),
             Some(device_api::IngressSignal::new(-104, 7)),
             Some(device_api::RadioTraceTxOutcome::TxFault),
         )
@@ -771,7 +760,10 @@ mod tests {
         );
         assert_eq!(proof.message_id().unwrap().as_bytes(), &[0x22; 32]);
         assert_eq!(proof.packet_evidence().unwrap().encoded_packet_len(), 123);
-        assert_eq!(proof.interface().unwrap().get(), 7);
+        assert_eq!(
+            proof.interface().unwrap().as_bytes(),
+            &[0, 0, 0, 0, 0, 0, 0, 7]
+        );
         assert_eq!(proof.signal(), Some((-104, 7)));
         assert_eq!(
             proof.dispatch_outcome(),
@@ -791,7 +783,10 @@ mod tests {
             value["packet_evidence"]["encoded_packet_sha256"],
             "33".repeat(32)
         );
-        assert_eq!(value["interface_id"], 7);
+        assert_eq!(
+            value["interface_id"],
+            serde_json::json!([0, 0, 0, 0, 0, 0, 0, 7])
+        );
         assert_eq!(value["rssi_dbm"], -104);
         assert_eq!(value["snr_db"], 7);
         assert_eq!(value["dispatch_outcome"], "tx_fault");

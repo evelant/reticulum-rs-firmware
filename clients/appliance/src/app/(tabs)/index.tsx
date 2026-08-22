@@ -8,6 +8,7 @@ import { useAppliance } from "../../lib/appliance-context.tsx";
 export default function MessagesScreen() {
   const appliance = useAppliance();
   const {
+    applianceLabel,
     browseNomad,
     busy,
     chooseContact,
@@ -24,6 +25,7 @@ export default function MessagesScreen() {
     nearbyReader,
     onAbandonRetainedProbe,
     onMeasurePath,
+    reticulumProbeAvailable,
     reticulumProbeState,
     retryMessage,
     selectMessagePane,
@@ -42,6 +44,7 @@ export default function MessagesScreen() {
     <View style={[styles.shell, compact && styles.shellCompact]}>
       {showContacts ? (
         <ApplianceSidebar
+          applianceLabel={applianceLabel}
           busy={busy}
           compact={compact}
           contacts={contacts}
@@ -61,7 +64,7 @@ export default function MessagesScreen() {
       {showConversation ? (
         <ConversationPanel
           busy={busy}
-          canMeasurePath={snapshot?.connection.state === "ready"}
+          canMeasurePath={reticulumProbeAvailable && snapshot?.connection.state === "ready"}
           compact={compact}
           key={selectedConversation?.destination ?? "empty"}
           messageLocationDefaultEnabled={messageLocationPreference.attachByDefault}

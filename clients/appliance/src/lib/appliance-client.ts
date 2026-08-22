@@ -1,6 +1,9 @@
-import type { NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
+import type { NativePrnsOtaStatus, NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
 
 import type {
+  ApplianceLabelMutationOutcome,
+  ApplianceLabelMutationRequest,
+  ApplianceLabelView,
   ApplianceSnapshot,
   ContactRequest,
   ContactView,
@@ -18,12 +21,10 @@ import type {
   NomadFetchPollResponse,
   NomadFetchStartRequest,
   NomadFetchStartResponse,
-  OnboardingView,
   PhoneLocationObservationView,
   RadioRoutesStatusView,
   RadioTracePageRequest,
   RadioTracePageView,
-  RecoveryRequest,
   ReticulumProbePollRequest,
   ReticulumProbePollResponse,
   ReticulumProbeStartRequest,
@@ -34,58 +35,75 @@ import type {
   SendResponse,
   TimelineView,
 } from "../generated/api.ts";
-import type { BleBondRepairProgress } from "./ble-bond-repair.ts";
-import type { BleCandidate, BleScanOptions } from "./ble-central-types.ts";
 import type { NearbyPeerView } from "./nearby-peers.ts";
+import type { OnboardingView } from "./onboarding.ts";
+import type {
+  ReticulumApplianceCandidate,
+  ReticulumDiscoveryOptions,
+} from "./reticulum-appliance-candidate.ts";
 
 export interface ApplianceClient {
   bootstrapSession(): Promise<void>;
   snapshot(): Promise<ApplianceSnapshot>;
   onboarding(): Promise<OnboardingView>;
   /**
-   * List the native, device-keyed appliance profiles without exposing
-   * credential bytes or app-private filesystem paths.
+   * List native profiles keyed by verified management destination without
+   * exposing app-private filesystem paths.
    *
    * HTTP/web clients omit this native-only appliance-management capability.
    */
   profiles?(): Promise<NativeProfileStoreSnapshot>;
   /**
    * Close the current native owner, select an existing Rust-owned profile, and
-   * open its isolated credential/database pair.
+   * open its isolated local application database.
    */
   activateProfile?(profileKey: string): Promise<NoContent>;
   /**
    * Delete one inactive, device-keyed profile from this client.
    *
-   * This removes local credentials, contacts, messages, and outbox state. It
-   * does not revoke the credential or Bluetooth bond retained by the board.
+   * This removes local contacts, messages, and outbox state. It does not revoke
+   * the app identity from the appliance management allow-list.
    */
   forgetProfile?(profileKey: string): Promise<NoContent>;
   /**
-   * Quiesce the current native owner and enter the existing secure BLE
-   * onboarding flow for one additional physical appliance.
+   * Enter Reticulum discovery and enrollment for another physical appliance.
    */
   beginAddAppliance?(): Promise<NoContent>;
   /**
-   * Report whether this bootstrapped client can add an appliance over BLE.
+   * Report whether this client can enroll another appliance over Reticulum.
    */
-  supportsAdditionalBleOnboarding?(): boolean;
+  supportsAdditionalApplianceEnrollment?(): boolean;
   /**
-   * Credential-free, advertisement-only discovery for native first-run UI.
-   *
-   * Implementations must not connect or exchange appliance protocol bytes.
+   * Verify management announces through the app-owned PRNS node.
    */
-  scanBleCandidates?(options?: BleScanOptions): Promise<readonly BleCandidate[]>;
+  scanReticulumCandidates?(
+    options?: ReticulumDiscoveryOptions,
+  ): Promise<readonly ReticulumApplianceCandidate[]>;
   /**
-   * Report whether the bootstrapped runtime owns a BLE central capable of
-   * credential-free discovery.
+   * Report whether the bootstrapped runtime owns a PRNS node capable of
+   * management-application discovery.
    *
    * This check must be synchronous and side-effect free.
    */
-  supportsBleCandidateDiscovery?(): boolean;
+  supportsReticulumCandidateDiscovery?(): boolean;
+  /**
+   * Report whether this client owns a native PRNS node that can stage firmware
+   * through the appliance management destination.
+   */
+  supportsFirmwareUpdate?(): boolean;
+  /** Stage one complete ESP application image without rebooting the board. */
+  stageFirmwareUpdate?(image: ArrayBuffer, version: string): Promise<NativePrnsOtaStatus>;
+  /** Reboot the board only after it reports a completely verified staged slot. */
+  rebootIntoStagedFirmware?(): Promise<NativePrnsOtaStatus>;
   contacts(): Promise<ContactView[]>;
   /** List saved contacts together with otherwise-unknown durable message peers. */
   conversationPeers(): Promise<ConversationPeerView[]>;
+  /** Read the product-owned label for this physical appliance. */
+  applianceLabel?(): Promise<ApplianceLabelView>;
+  /** Compare-and-swap the product-owned label without changing app announce names. */
+  mutateApplianceLabel?(
+    request: ApplianceLabelMutationRequest,
+  ): Promise<ApplianceLabelMutationOutcome>;
   /**
    * Rust-owned authenticated peer discovery, when compiled into this client.
    *
@@ -98,7 +116,7 @@ export interface ApplianceClient {
   /**
    * Read the board-owned desired Wi-Fi and Reticulum TCP configuration.
    *
-   * These operations are optional because not every local bearer exposes the
+   * These operations are optional because not every client backend exposes the
    * authenticated network-management lane. Callers must
    * capability-gate the Connectivity workspace rather than inventing a second
    * protocol path.
@@ -142,34 +160,14 @@ export interface ApplianceClient {
    */
   retryMessage(request: RetrySendRequest): Promise<RetrySendResponse>;
   /**
-   * Start first-run setup. Native BLE callers pass the exact candidate chosen
-   * during the preceding advertisement-only scan.
+   * Start first-run setup for the exact verified management application chosen
+   * during the preceding PRNS discovery pass.
    */
-  startOnboarding(candidate?: BleCandidate): Promise<NoContent>;
-  /**
-   * Continue a retained native BLE onboarding ceremony only after Bluetooth
-   * security completed. The operating system may either show a passkey sheet
-   * for a new bond or silently reuse a saved bond. Native implementations
-   * expose this deterministic barrier because iOS does not report the latter
-   * transition; host-service clients do not need it.
-   */
-  continueOnboarding?(): Promise<NoContent>;
-  refreshOnboarding(): Promise<NoContent>;
-  recoverOnboarding(request: RecoveryRequest, candidate?: BleCandidate): Promise<NoContent>;
-  /**
-   * Close an in-flight native onboarding link. Durable Rust recovery state is
-   * retained and classified on the next explicit attempt.
-   */
-  cancelOnboarding?(): Promise<NoContent>;
-  /**
-   * Replace a stale platform Bluetooth bond while retaining the active
-   * appliance credential and all profile-local data.
-   */
-  repairBleBond?(onProgress?: BleBondRepairProgress): Promise<NoContent>;
+  startOnboarding(candidate?: ReticulumApplianceCandidate): Promise<NoContent>;
   sync(): Promise<NoContent>;
   /**
-   * Ensure that the selected bearer is being opened without replacing an
-   * already usable physical link. Foreground automatic recovery uses this
+   * Ensure that the Reticulum session is being opened without replacing an
+   * already usable Link. Foreground automatic recovery uses this
    * idempotent path; explicit operator reconnect remains destructive.
    */
   ensureConnected(): Promise<NoContent>;

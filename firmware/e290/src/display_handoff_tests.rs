@@ -9,13 +9,13 @@ use core::{
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use reticulum_appliance_display_model::{
     DisplayCommand, DisplayCompositionState, DisplayHomeSnapshot, DisplayLabel, DisplaySetupState,
-    DisplayState, DisplayViewKind, PairingPasskey, PairingWindowSeconds,
+    DisplayState, DisplayViewKind,
 };
 
 use super::{
-    DisplayBootClearOutcome, DisplayCompletion, DisplayCompletionGateError, DisplayHandoff,
-    DisplayHomeTelemetry, DisplayPublisher, DisplayReceiver, DisplayRenderOutcome,
-    DisplayRequestIdExhausted, DisplayTelemetryHandoff, E290_DISPLAY_FRAMEBUFFER_CEILING_BYTES,
+    DisplayCompletion, DisplayCompletionGateError, DisplayHandoff, DisplayHomeTelemetry,
+    DisplayPublisher, DisplayReceiver, DisplayRenderOutcome, DisplayRequestIdExhausted,
+    DisplayTelemetryHandoff, E290_DISPLAY_FRAMEBUFFER_CEILING_BYTES,
     E290_MONOCHROME_FRAMEBUFFER_BYTES, overlay_observed_home_telemetry,
 };
 
@@ -27,7 +27,7 @@ fn home() -> DisplayHomeSnapshot {
     DisplayHomeSnapshot::new(
         label(),
         DisplayLabel::new("e13f88").expect("test suffix fits"),
-        DisplaySetupState::Paired,
+        DisplaySetupState::Enrolled,
         DisplayCompositionState::Configured,
         DisplayCompositionState::Configured,
         DisplayCompositionState::Configured,
@@ -52,20 +52,20 @@ fn home_telemetry_pressure_keeps_only_the_latest_complete_snapshot() {
         DisplayTelemetryHandoff::<NoopRawMutex>::new(),
     ))
     .split();
-    publisher.publish_latest(DisplayHomeTelemetry::new(1));
-    publisher.publish_latest(DisplayHomeTelemetry::new(7));
-    publisher.publish_latest(DisplayHomeTelemetry::new(12));
+    publisher.publish_latest(DisplayHomeTelemetry::new(None, 1));
+    publisher.publish_latest(DisplayHomeTelemetry::new(None, 7));
+    publisher.publish_latest(DisplayHomeTelemetry::new(None, 12));
 
     assert_eq!(
         receiver.try_take_latest(),
-        Some(DisplayHomeTelemetry::new(12))
+        Some(DisplayHomeTelemetry::new(None, 12))
     );
     assert!(receiver.try_take_latest().is_none());
 
-    publisher.publish_latest(DisplayHomeTelemetry::new(13));
+    publisher.publish_latest(DisplayHomeTelemetry::new(None, 13));
     assert_eq!(
         embassy_futures::block_on(receiver.next()),
-        DisplayHomeTelemetry::new(13)
+        DisplayHomeTelemetry::new(None, 13)
     );
 }
 
@@ -77,7 +77,7 @@ fn absent_home_telemetry_preserves_the_durable_boot_count() {
         7
     );
     assert_eq!(
-        overlay_observed_home_telemetry(durable, Some(DisplayHomeTelemetry::new(0)))
+        overlay_observed_home_telemetry(durable, Some(DisplayHomeTelemetry::new(None, 0)))
             .uncollected_messages(),
         0
     );
@@ -94,13 +94,10 @@ fn pressure_keeps_only_the_latest_complete_state() {
         .expect("second request ID");
     assert!(first < second);
     let mut newest = second;
-    for passkey in 0..64 {
+    for count in 0..64 {
         let request_id = publisher
-            .publish_latest(DisplayCommand::ShowPairing {
-                label: label(),
-                passkey: PairingPasskey::from_number(passkey).expect("six-digit passkey"),
-                expires_after_seconds: PairingWindowSeconds::new(60)
-                    .expect("nonzero pairing window"),
+            .publish_latest(DisplayCommand::ShowHome {
+                snapshot: home().with_uncollected_messages(count),
             })
             .expect("request ID");
         assert!(newest < request_id);
@@ -111,27 +108,28 @@ fn pressure_keeps_only_the_latest_complete_state() {
         .try_take_latest()
         .expect("one latest state must remain");
     assert_eq!(request.request_id(), newest);
-    assert_eq!(request.requested_view(), DisplayViewKind::Pairing);
+    assert_eq!(request.requested_view(), DisplayViewKind::Home);
     let (request_id, command) = request.into_parts();
     assert_eq!(request_id, newest);
     let mut state = DisplayState::new();
     let _ = state.apply(command);
-    state
-        .view()
-        .expose_pairing_passkey(|digits| assert_eq!(digits, Some(b"000063")));
+    assert_eq!(
+        state
+            .view()
+            .home()
+            .expect("latest request is Home")
+            .uncollected_messages(),
+        63
+    );
     assert!(receiver.try_take_latest().is_none());
 }
 
 #[test]
-fn paired_home_supersedes_a_queued_passkey() {
+fn home_supersedes_a_queued_boot_view() {
     let (mut publisher, mut receiver) = handoff();
     publisher
-        .publish_latest(DisplayCommand::ShowPairing {
-            label: label(),
-            passkey: PairingPasskey::from_number(123_456).expect("six-digit passkey"),
-            expires_after_seconds: PairingWindowSeconds::new(60).expect("nonzero pairing window"),
-        })
-        .expect("pairing request ID");
+        .publish_latest(DisplayCommand::ShowBooting { label: label() })
+        .expect("booting request ID");
     let terminal_id = publisher
         .publish_latest(show_home())
         .expect("terminal request ID");
@@ -139,13 +137,12 @@ fn paired_home_supersedes_a_queued_passkey() {
     let mut state = DisplayState::new();
     let terminal = receiver
         .try_take_latest()
-        .expect("terminal state must replace pending passkey");
+        .expect("Home must replace pending boot view");
     assert_eq!(terminal.request_id(), terminal_id);
     let (_, command) = terminal.into_parts();
     let _ = state.apply(command);
     assert_eq!(state.view().kind(), DisplayViewKind::Home);
     assert_eq!(state.view().home(), Some(home()));
-    assert!(!state.owns_pairing_secret());
     assert!(receiver.try_take_latest().is_none());
 }
 
@@ -362,54 +359,6 @@ fn physical_gate_rejects_later_mismatched_and_faulted_completions() {
 }
 
 #[test]
-fn boot_clear_ready_and_faulted_acknowledgements_are_bounded() {
-    let (mut publisher, mut receiver) = handoff();
-    assert!(publisher.try_take_boot_clear().is_none());
-
-    receiver.report_boot_clear(DisplayBootClearOutcome::Faulted);
-    receiver.report_boot_clear(DisplayBootClearOutcome::Ready);
-    assert_eq!(
-        publisher.try_take_boot_clear(),
-        Some(DisplayBootClearOutcome::Ready)
-    );
-    assert!(publisher.try_take_boot_clear().is_none());
-
-    receiver.report_boot_clear(DisplayBootClearOutcome::Faulted);
-    assert_eq!(
-        embassy_futures::block_on(publisher.wait_for_boot_clear()),
-        DisplayBootClearOutcome::Faulted
-    );
-}
-
-#[test]
-fn boot_clear_acknowledgement_is_independent_of_requests_and_completions() {
-    let (mut publisher, mut receiver) = handoff();
-    let request_id = publisher.publish_latest(show_home()).expect("request ID");
-    receiver.report_boot_clear(DisplayBootClearOutcome::Ready);
-    receiver.report_completion(DisplayCompletion::new(
-        request_id,
-        DisplayViewKind::Home,
-        DisplayRenderOutcome::Rendered,
-    ));
-
-    assert_eq!(
-        publisher.try_take_boot_clear(),
-        Some(DisplayBootClearOutcome::Ready)
-    );
-    assert_eq!(
-        publisher
-            .try_take_completion()
-            .expect("completion")
-            .request_id(),
-        request_id
-    );
-    assert_eq!(
-        receiver.try_take_latest().expect("request").request_id(),
-        request_id
-    );
-}
-
-#[test]
 fn request_id_exhaustion_rejects_without_replacing_the_pending_request() {
     let (mut publisher, mut receiver) = handoff();
     publisher.next_request_id = Some(u64::MAX);
@@ -419,11 +368,7 @@ fn request_id_exhaustion_rejects_without_replacing_the_pending_request() {
     assert_eq!(final_id.sequence(), u64::MAX);
 
     assert_eq!(
-        publisher.publish_latest(DisplayCommand::ShowPairing {
-            label: label(),
-            passkey: PairingPasskey::from_number(654_321).expect("six-digit passkey"),
-            expires_after_seconds: PairingWindowSeconds::new(60).expect("nonzero pairing window"),
-        }),
+        publisher.publish_latest(DisplayCommand::ShowBooting { label: label() }),
         Err(DisplayRequestIdExhausted)
     );
 

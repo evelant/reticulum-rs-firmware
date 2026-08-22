@@ -12,7 +12,7 @@ active direction.
 ## Understand the project
 
 - [Architecture](architecture.md)
-- [Over-the-air firmware updates](ota-updates.md) (plan)
+- [Over-the-air firmware updates](ota-updates.md) (active implementation)
 - [Current capabilities and roadmap](roadmap.md)
 - [Crate index](reference/crates.md)
 - [E290 hardware](hardware/e290.md)
@@ -23,6 +23,7 @@ active direction.
 ## Develop and test
 
 - [Verification](development/verification.md)
+- [PRNS migration plan](development/prns-migration.md)
 - [Controlled LoRa range testing](development/range-testing.md)
 - [Expo client contributor guide](../clients/appliance/README.md)
 - [Interoperability vectors](../interop/README.md)

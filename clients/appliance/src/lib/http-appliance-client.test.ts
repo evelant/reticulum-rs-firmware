@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { syntheticReticulumInterfaceId } from "./reticulum-interface-id.ts";
 
 mock.module("expo-linking", () => ({
   getInitialURL: async () => null,
@@ -178,7 +179,7 @@ describe("HTTP appliance Nomad bridge", () => {
                 round_trip_ms: 1_234,
                 hops: 2,
                 ingress_observation: {
-                  interface_id: 7,
+                  interface_id: syntheticReticulumInterfaceId(7),
                   signal: { rssi_dbm: -91, snr_db: 7 },
                 },
               },
@@ -201,7 +202,7 @@ describe("HTTP appliance Nomad bridge", () => {
           round_trip_ms: 1_234,
           hops: 2,
           ingress_observation: {
-            interface_id: 7,
+            interface_id: syntheticReticulumInterfaceId(7),
             signal: { rssi_dbm: -91, snr_db: 7 },
           },
         },

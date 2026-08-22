@@ -1,231 +1,204 @@
 # Architecture
 
-The firmware is a standalone Reticulum node. It owns routing, radio access,
-application services, and durable state; a phone or browser is a client of the
-node rather than the node's runtime host.
+The firmware is a standalone Reticulum appliance. PRNS owns the Reticulum
+node, every packet interface, and all network protocol state. Product code
+registers ordinary Reticulum applications above PRNS and owns their durable
+state. A phone, desktop process, or browser gateway is another Reticulum node,
+not the runtime host for the appliance.
 
-The design has four durable rules:
+The design has five durable rules:
 
-1. Reticulum behavior is independent of a particular packet interface.
+1. PRNS behavior remains independent of product applications and E290 policy.
 2. Each hardware or persistent resource has one explicit owner.
-3. Accepted application intent is persisted before success is reported.
-4. Rust owns protocol and persistence types; generated bindings carry them to
-   TypeScript and native platforms.
+3. Accepted product intent is persisted before product success is reported.
+4. Reticulum proofs and receipts keep Python RNS and PRNS semantics; product
+   durability does not redefine them.
+5. Rust owns protocol and persistence types; generated bindings carry product
+   operations to TypeScript and native platforms.
 
 ## Runtime
 
 ```mermaid
 flowchart LR
   App["Expo app"]
-  Web["Web client"]
-  BLE["BLE local API"]
   Host["Host web gateway"]
-  Session["Authenticated device API"]
-  Services["LXMF, Nomad, discovery, diagnostics"]
-  Storage["Flash coordinator"]
-  Node["Rete / Reticulum node"]
-  Router["Interface registry and router"]
-  LoRa["LoRa interface"]
-  TCP["Reticulum TCP interface"]
-  Radio["HT-RA62 / SX1262"]
-  WiFi["Wi-Fi station"]
+  Native["Native PRNS node"]
+  Product["Management, LXMF, NomadNet, OTA"]
+  Store["Product-state owner"]
+  PRNS["PRNS node"]
+  Persist["PRNS persistence"]
+  BLE["Bluetooth Auto"]
+  LoRa["E290 LoRa"]
+  TCP["TCP over Wi-Fi"]
 
-  App --> BLE --> Session
-  Web --> Host --> Session
-  Session --> Services
-  Services <--> Storage
-  Services <--> Node
-  Node <--> Router
-  Router <--> LoRa <--> Radio
-  Router <--> TCP
-  WiFi --> TCP
+  App --> Native
+  Host --> Native
+  Native <-->|"Links, requests, Resources, DATA"| PRNS
+  Product <--> PRNS
+  Product <--> Store
+  PRNS <--> Persist
+  PRNS <--> BLE
+  PRNS <--> LoRa
+  PRNS <--> TCP
 ```
 
-BLE and the host gateway are local control bearers. They carry the authenticated
-device API and are not Reticulum packet interfaces. LoRa is interface 1 and the
-outbound TCP client is interface 2. A future Ethernet, USB, BLE, or second-radio
-packet interface joins the router beside those interfaces without changing
-application or storage ownership.
+Bluetooth Auto, LoRa, and TCP are Reticulum packet interfaces with the same
+application semantics. There is no separate BLE device-control protocol,
+custom GATT/HDLC session, or TypeScript-owned Reticulum engine in the supported
+design. USB Serial/JTAG remains a diagnostic and recovery channel.
 
-A **control bearer** transports the authenticated device API to a nearby
-client; a **packet interface** carries Reticulum traffic. The two terms name a
-durable boundary. A future USB or RNode host-control bearer replaces only the
-BLE bearer profile (`device-api-ble`) and reuses the portable framing, session,
-and handoff crates, while a future BLE packet interface would be a new actor
-beside LoRa and TCP, distinct from the BLE control bearer. See the
-[crate index](reference/crates.md#control-bearer-vs-packet-interface) for the
-package mapping.
+## Applications and destinations
+
+The default image derives three protocol destinations from one durable
+Reticulum identity:
+
+| Destination | Purpose | Policy |
+| --- | --- | --- |
+| `reticulum.appliance` | Public identity, authorized management, enrollment, and OTA | Ratcheted Links; privileged paths require an identified allow-listed requester; Resource reception starts closed |
+| `lxmf.delivery` | LXMF delivery and announce | Python-compatible immediate proofs |
+| `nomadnetwork.node` | Bounded NomadNet page service | Public request endpoint |
+
+Opt-in RMAP publication adds `rnstransport.discovery.interface` as an
+announce-only fourth destination. Destinations are protocol rows, not flash
+partitions. Adding or removing an application does not create another physical
+board layout.
+
+Application behavior belongs above PRNS. Management request bodies, LXMF wire
+and signature semantics, NomadNet content, RMAP payloads, OTA manifests, and
+product retry policy do not belong in the PRNS engine.
 
 ## Portable and target-specific code
 
-Portable crates contain Reticulum adaptation, LXMF, NomadNet, routing, device
-API, persistence, and client behavior. Target crates contain board facts and
-physical drivers. The E290 composition connects them and owns task scheduling,
-memory placement, and peripheral construction.
+The exact PRNS revision pinned in `Cargo.toml` supplies the network engine,
+routing, Links, requests, Resources, persistence, Bluetooth Auto, host and
+embedded runtime adapters, and the generic live-engine inspection lane. This
+repository supplies:
 
-The main ownership boundaries are:
+- E290 peripheral composition and memory placement;
+- E290 configuration of PRNS's public LoRa and Bluetooth interfaces;
+- application protocols and typed product request handlers;
+- generic product-state quotas and application stores;
+- native and host PRNS clients; and
+- the Expo presentation layer.
 
-| Layer | Primary packages |
-| --- | --- |
-| Reticulum protocol | `rns-rete`, `node-core`, `nomad-protocol` |
-| Packet interfaces | `interface-router`, `tx-supervisor`, `tx-handoff`, `radio-*` |
-| Durable messaging | `storage-*`, `submission-*`, `lxmf-*` |
-| Local control API | `device-api` and its framing, session, pairing, credential, BLE, client, and adapter packages |
-| Client data and sync | `appliance-store`, `appliance-sync`, `appliance-runtime` |
-| Client adapters | `appliance-native`, `appliance-service`, `host-ble` |
-| E290 target | `board-e290`, `board-e290-radio`, `firmware/e290` |
+An E290-specific fact remains here unless it is independently reusable by
+other PRNS boards. A PRNS change requires a demonstrated generic gap that
+cannot be expressed through its public API; preserving an alpha-era product
+abstraction is not sufficient justification.
 
-Keep a behavior in its owning package. Add a module or integration test before
-creating another package; a new package should represent a durable ownership,
-portability, or dependency boundary rather than a development milestone.
-
-A new board should provide:
-
-- an exhaustive pin and board-facts module;
-- a radio wrapper for its module, oscillator, RF switch, and power path;
-- a flash and memory profile;
-- a firmware composition selecting portable services; and
-- target and powered tests specific to that hardware.
-
-The full appliance requires PSRAM. Large protocol objects, indexes, and the
-display framebuffer can live there. Task stacks, synchronization primitives,
-interrupt-visible state, Wi-Fi/BLE controller memory, DMA buffers, and
-cache-off flash state require audited internal memory.
-
-The fixed route-diagnostics snapshot and radio-trace ring are plain,
-task-owned backing storage in PSRAM. The radio diagnostics mutexes, pending
-correlation owner, and all interrupt-visible radio state remain in internal
-memory; no trace or route backing is accessed from an interrupt or cache-off
-flash path.
+The complete appliance requires PSRAM. PRNS's bounded engine storage,
+application-event copies, message indexes, and display framebuffer can live in
+mapped external memory. Task stacks, synchronization primitives,
+interrupt-visible state, controller memory, DMA buffers, and cache-off flash
+state require audited internal memory.
 
 ## Ownership and concurrency
 
-The target uses bounded queues and sole owners instead of sharing mutable
-drivers:
+The target uses bounded lanes and sole owners:
 
-- one radio task owns the complete SX1262 lifecycle;
-- one node task owns Rete and application protocol state;
-- one interface actor owns each packet link's ingress, egress, generation, and
-  completion outcomes;
-- one flash coordinator serializes persistent mutations across stores;
-- one task owns each active local API bearer;
-- one Wi-Fi station task owns association and IP configuration, while one TCP
-  task owns the upstream Reticulum stream; and
+- one PRNS node owner holds all Reticulum state;
+- one interface task owns each LoRa, TCP, or Bluetooth Auto lane;
+- one Trouble/ESP controller owner serves Bluetooth Auto and Wi-Fi coexistence;
+- one product-store owner serializes application-state and OTA flash access;
+- one independent PRNS persistence owner holds routes, ratchets, and timebase;
+- one Wi-Fi task owns station association and IP configuration; and
 - one display task owns its SPI bus, framebuffer, panel power, and refresh.
 
-Cancellation, timeout, queue rejection, and link loss must return or reconcile
-the exact owner. An interface generation prevents work retained for an old
-connection from being reused after reconnect.
-
-Cancelling an in-flight SX1262 future is a destructive hardware boundary. Once
-the dispatcher has returned the exact completion and crossed any authorized
-frame durability gate, firmware may use one rate-limited software reset to
-reconstruct the consumed radio owner. An early repeat stays contained as an
-interface-local fail-stop rather than rebooting the independent appliance.
+Application callbacks copy borrowed PRNS events into bounded owned lanes before
+awaiting. Lane exhaustion is an observable product fault; it does not change
+PRNS deduplication, proof timing, or retry behavior.
 
 ## Routing and interface roles
 
-The router operates on stable interface IDs and explicit targets. Medium-
-specific behavior stays in its actor: the LoRa actor owns RNode framing,
-CAD/backoff, airtime authorization, RF deadlines, and physical `TxDone`; the
-TCP actor owns name resolution, connection backoff, HDLC framing, and stream
-credit.
+LoRa is an Internal interface and the public TCP uplink is a Boundary
+interface. PRNS owns forwarding, path discovery, recursive path requests,
+source-bound responses, receipts, and interface lifecycle. Product code does
+not retain a second route table or special-case public TCP traffic onto LoRa.
 
-Interface roles constrain discovery forwarding. The local LoRa mesh is an
-Internal domain and the public point-to-point TCP uplink is a Boundary. Announce
-propagation follows Reticulum's mode matrix: a Boundary announce cannot enter an
-Internal interface, while an Internal announce may cross the Boundary.
-Recursive unknown-path search is a separate policy. An Internal request searches
-every other online interface, and a Boundary request searches only other
-Boundary or Gateway interfaces; every recursive request excludes its ingress
-interface, including a shared medium. With the current two-interface gateway,
-this lets LoRa discovery query TCP without reflecting onto LoRa and prevents a
-public TCP query from becoming LoRa traffic.
-
-Path requests are deduplicated by their exact destination and tag. An unknown
-recursive request retains its original requesting interface for 15 seconds,
-even when no eligible egress is online, so a newly learned matching path returns
-as an exact source-only `PATH_RESPONSE`. Known and local responses are likewise
-source-bound. A `PATH_RESPONSE` can restore a missing path but is never queued
-as an ordinary announce rebroadcast. The embedded pending-discovery and delayed-
-response queues are bounded, coalesce by destination where Reticulum does, and
-fail closed with observable counters when full. Addressed DATA, proofs, and
-Links remain routed by Reticulum rather than by a bearer-specific shortcut.
+Bluetooth Auto peers are dynamic PRNS interfaces. The E290 storage profile
+retains one LoRa lane, one optional TCP lane, and one Bluetooth Auto fleet lane,
+with four live Bluetooth peers and explicit bounded queue capacities.
 
 ## Durable messaging
 
-Outbound application intent is committed before the device reports acceptance.
-One durable submission remains the authority while Reticulum discovers a path,
-sends opportunistically or through a direct Link, waits for a proof, retries,
-and recovers after reboot. Automatic retry is board-owned so delivery continues
-when every app is disconnected. A retry keeps the same signed LXMF message and
-message ID while each Reticulum attempt gets fresh transport state.
+Outbound LXMF intent is committed to the product journal before the appliance
+reports application acceptance. The exact signed wire and LXMF message ID are
+stable across product retries. Each PRNS send uses fresh transport state, and
+an ordinary PRNS receipt advances the product's delivered marker. Product
+acceptance does not claim socket completion, radio `TxDone`, or durable PRNS
+custody.
 
-Inbound LXMF uses the opposite barrier. A proof is retained until a validated
-message is newly committed or confirmed already durable. Only then may the
-proof leave the node. A sender therefore cannot observe delivery before the
-receiving appliance can recover the message.
+Incoming LXMF follows Python behavior. PRNS may emit its immediate Reticulum
+proof before the product parses or persists the message. Product code then
+records the message as `validated`, `source unknown`, or `invalid`, deduplicates
+by LXMF message ID, and commits it to the inbox. The residual power-loss window
+between proof and persistence is accepted and tested; there is no deferred-
+proof extension.
 
-Each inbound record may retain its first-arrival interface and paired RSSI/SNR.
-This is final-hop evidence measured by the receiver and may describe a relay;
-it is not end-to-end hop history. A separate bounded radio trace records route
-selection, DATA dispatch, physical frame completion, logical receive, and
-proof/timeout events without retaining payload bytes.
-
-The app imports messages into an identity-bound SQLite database and advances a
-separate durable collection watermark only after a contiguous import. Human
+The client imports messages into an identity-bound SQLite database and advances
+a separate durable collection watermark only after a contiguous import. Human
 read state is app-local and distinct from board collection state.
 
-## Device API and clients
+## Storage
 
-All local bearers expose the same bounded, versioned logical API. It covers
-identity, capabilities, LXMF, NomadNet, nearby peers, network configuration,
-announces, diagnostics, radio traces, and mailbox collection. Bearer framing,
-authentication, and connection lifecycle sit below those operations.
+The bootloader sees only two OTA slots, `otadata`, one generic
+`product_state` arena, and one independent `prns_state` arena. Typed quotas
+inside `product_state` currently cover identity, network configuration,
+management authorization, appliance settings, LXMF mailbox state, outbound
+intent, and inbound payloads. The appliance label is product UI metadata, not
+Reticulum application announce data. These are product-store format choices,
+not partitions per app.
 
-The Expo UI does not implement Reticulum. Its native Rust owner holds device
-credentials, authenticated sessions, per-appliance SQLite databases, and
-message synchronization. Rust DTOs generate TypeScript with `ts-rs`; UniFFI
-and the Expo TurboModule expose the native boundary. TypeScript owns
-presentation, platform BLE calls, and opaque byte transport only.
+The alpha migration is a clean reset boundary. Earlier product formats and
+client SQLite databases are not imported. See the
+[partition contract](../partitions/README.md) for exact ranges.
 
-The web build uses the same source tree through the supported host gateway. It
-does not connect directly to BLE from the browser.
+## Management and security
 
-## Location and notifications
+An app owns a normal Reticulum identity and explicitly identifies its Link.
+GPIO21 physical presence opens a short single-use enrollment window. The
+product durably adds the identified peer hash to its bounded allow-list, then
+asks PRNS to admit that requester on the privileged management and OTA paths.
+PRNS remains the sole live request gate.
 
-Three location concepts remain separate:
+Link encryption and identified-requester authorization replace the old device
+credential, possession-proof, and BLE-bond authority. Bluetooth bonding may be
+a platform transport detail, but it is never application authorization.
+Product and PRNS state are not encrypted at rest in the alpha image.
 
-- an optional sender location signed into one LXMF message;
-- private phone observations attached to local transmission diagnostics; and
-- explicitly enabled public RMAP location.
+## OTA
 
-None is board GNSS or Reticulum routing metadata. The receiver may combine a
-message's sender location with its own import-time phone location for mapping,
-distance, and elevation display.
+OTA uses ordinary PRNS requests and Resources on the shared management
+destination. One identified Link opens a session, then sends ordered 7 KiB
+application chunks. PRNS verifies each bounded Resource; the product closes the
+per-Link Resource gate, writes and reads back the chunk, and explicitly arms
+the next one. The complete image digest and ESP structure are checked before
+the inactive slot is selected.
 
-The board's `NEW` indicator derives from durable uncollected ingress. The app
-reconciles durable imported activity into local notifications while active or
-resuming. Reliable locked-phone delivery needs a later native background BLE
-lifecycle.
+Staging, activation, explicit reboot, the rollback-enabled bootloader build,
+and a 30-second post-start health confirmation are implemented. The product
+uses ESP-IDF's `otadata` state instead of maintaining an application-specific
+last-known-good record. Generated app UI and powered Bluetooth Auto, LoRa, TCP,
+and rollback qualification remain required. See [OTA updates](ota-updates.md).
 
-## Security boundary
+## Clients
 
-Bluetooth bonding protects the nearby BLE link. A separate device credential
-authorizes application operations. GPIO21 confirms physical presence and the
-e-paper panel displays the Bluetooth passkey. Device credentials and Bluetooth
-bonds are separate durable authorities.
+The native mobile module and host web service each own one persisted PRNS node.
+They discover the public management path, establish and identify fresh Links,
+and expose typed product operations to the existing Rust SQLite/sync actor.
+TypeScript owns presentation and platform integration, not packet routing,
+identity secrets, or durable message state.
 
-The alpha stores identities, credentials, configuration, journals, and message
-content without at-rest encryption. Public TCP peers can observe connection
-metadata even though Reticulum protects application payloads end to end.
-Multi-user policy, revocation, secure backup, credential rotation, background
-mobile operation, and broader pairing fault coverage remain future work.
+The web build uses `appliance-service`; direct Web Bluetooth is not a supported
+network implementation.
 
 ## Source of truth
 
-- Rust types and wire tests define the device API.
-- Checked partition CSV files define flash geometry.
-- `Cargo.toml` and `Cargo.lock` define dependency resolution.
-- Generated TypeScript and native bindings must match their Rust sources.
-- This document defines current system boundaries rather than release claims.
+- Python RNS 1.4.2 and Python LXMF 1.0.1 are compatibility authorities.
+- The exact PRNS git revision in `Cargo.toml` and `Cargo.lock` is the network
+  implementation input.
+- Rust types and wire tests define product application protocols.
+- The checked partition CSV defines physical flash geometry.
+- Generated TypeScript, UniFFI, native bindings, and web assets must match their
+  Rust sources.
+- Powered behavior is proven only by the corresponding device/network test.

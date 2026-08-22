@@ -22,24 +22,9 @@ function nonempty(value: string | null | undefined): string | null {
   return normalized.length === 0 ? null : normalized;
 }
 
-function readableOtherTransport(value: string): string {
-  const words = value.trim().replaceAll("_", " ");
-  return words.length === 0 ? "Other transport" : `${words[0]?.toUpperCase()}${words.slice(1)}`;
-}
-
-/** Friendly, transport-neutral label for a generated connection transport. */
-export function connectionTransportLabel(transport: ConnectionTransport): string {
-  if (typeof transport !== "string") return readableOtherTransport(transport.other);
-  switch (transport) {
-    case "bluetooth_low_energy":
-      return "Bluetooth LE";
-    case "usb_serial":
-      return "USB serial";
-    case "usb_otg":
-      return "USB OTG";
-    case "wifi":
-      return "Wi-Fi";
-  }
+/** Friendly label for the PRNS-owned connection network. */
+export function connectionTransportLabel(_transport: ConnectionTransport): string {
+  return "Reticulum";
 }
 
 /** Compact lifecycle wording for surfaces that do not show connection metadata. */
@@ -102,7 +87,7 @@ export function applianceStatusPresentation(
   let connectionLabel = connectionStateLabel(connection);
   let tone: ApplianceStatusTone = "neutral";
   if (readyConnection !== null) {
-    connectionLabel = `Connected over ${connectionTransportLabel(readyConnection.transport)}`;
+    connectionLabel = `Connected through ${connectionTransportLabel(readyConnection.transport)}`;
     tone = "ready";
   } else if (connection?.state === "faulted" || connection?.state === "stopped") {
     tone = "faulted";

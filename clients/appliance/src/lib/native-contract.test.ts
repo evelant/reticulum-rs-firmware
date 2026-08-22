@@ -1,16 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import type {
-  NativeBleOnboardingSnapshot,
-  NativeBridgeContract,
-} from "@reticulum/appliance-native";
+import type { NativeBridgeContract } from "@reticulum/appliance-native";
 
 import { assertNativeBridgeContract } from "./native-contract.ts";
 
 const EXPECTED_CONTRACT = {
-  bridgeApiMajor: 2,
-  bridgeApiMinor: 0,
-  deviceApiMajor: 3,
+  bridgeApiMajor: 3,
+  bridgeApiMinor: 2,
+  deviceApiMajor: 6,
   deviceApiMinor: 0,
   maxMessageBytes: 512,
   maxLxmfReadChunkBytes: 416,
@@ -33,23 +30,5 @@ describe("native Rust bridge contract", () => {
         deviceApiMinor: EXPECTED_CONTRACT.deviceApiMinor + 1,
       }),
     ).toThrow("deviceApiMinor: expected 0, observed 1");
-  });
-
-  test("keeps BLE onboarding progress coarse and free of secret or path fields", () => {
-    type ExpectedOnboardingKeys =
-      | "completedProfile"
-      | "failure"
-      | "linkGeneration"
-      | "operation"
-      | "phase"
-      | "revision";
-    type KeysMatch = keyof NativeBleOnboardingSnapshot extends ExpectedOnboardingKeys
-      ? ExpectedOnboardingKeys extends keyof NativeBleOnboardingSnapshot
-        ? true
-        : false
-      : false;
-    const keysMatch: KeysMatch = true;
-
-    expect(keysMatch).toBe(true);
   });
 });

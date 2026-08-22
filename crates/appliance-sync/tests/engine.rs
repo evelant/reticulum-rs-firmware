@@ -71,6 +71,19 @@ impl LxmfSession for FakeSession {
         ))
     }
 
+    fn appliance_label_get(
+        &mut self,
+    ) -> Result<reticulum_device_api::ApplianceLabelSnapshot, Self::Error> {
+        unreachable!("the chat engine does not read appliance settings")
+    }
+
+    fn appliance_label_mutate(
+        &mut self,
+        _request: reticulum_device_api::ApplianceLabelMutationRequest<'_>,
+    ) -> Result<reticulum_device_api::ApplianceLabelMutationOutcome, Self::Error> {
+        unreachable!("the chat engine does not mutate appliance settings")
+    }
+
     fn submit(&mut self, material: &OutboxMaterial) -> Result<AcceptanceIds, Self::Error> {
         self.submitted.push(material.clone());
         let id = SubmissionId::new(self.next_submission.max(1)).unwrap();

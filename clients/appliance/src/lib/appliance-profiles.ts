@@ -1,14 +1,10 @@
 import type { NativeProfileStoreSnapshot, NativeProfileSummary } from "@reticulum/appliance-native";
 
-import { formatDeviceId } from "./appliance-status.ts";
-
 export interface ApplianceProfilePresentation {
   readonly active: boolean;
-  readonly advertisedName: string | null;
   readonly boardLabel: string;
-  readonly bleLabel: string;
-  readonly deviceId: string;
-  readonly generationLabel: string;
+  readonly lxmfDestination: string;
+  readonly managementDestination: string;
   readonly profileKey: string;
 }
 
@@ -21,63 +17,52 @@ function normalizedIdentity(value: string | undefined): string {
   return value?.trim().toLowerCase() ?? "";
 }
 
-/** Return the exact, nonempty BLE advertising name authorized by a profile. */
-export function knownAdvertisedName(profile: NativeProfileSummary): string | null {
-  const advertisedName = profile.credential.expectedBleLocalName?.trim() ?? "";
-  return advertisedName === "" ? null : advertisedName;
-}
-
-/** Whether a profile can target one exact BLE advertiser without a broad scan. */
-export function hasKnownAdvertisedName(profile: NativeProfileSummary): boolean {
-  return knownAdvertisedName(profile) !== null;
-}
-
-/** Present one generated, secret-free native profile for an appliance selector. */
+/** Present one saved Reticulum management application for the node selector. */
 export function applianceProfilePresentation(
   profile: NativeProfileSummary,
   activeProfileKey: string | undefined,
 ): ApplianceProfilePresentation {
-  const profileKey = profile.profileKey.trim();
-  const deviceId = profile.credential.deviceId.trim();
-  const advertisedName = knownAdvertisedName(profile);
-  const activeKey = normalizedIdentity(activeProfileKey);
-  const profileIdentity = normalizedIdentity(profileKey);
-
+  const profileKey = profile.profileKey.trim().toLowerCase();
+  const managementDestination = profile.managementDestination.trim().toLowerCase();
+  const lxmfDestination = profile.lxmfDestination.trim().toLowerCase();
+  const applianceLabel = profile.applianceLabel?.trim();
   return {
-    active: activeKey !== "" && activeKey === profileIdentity,
-    advertisedName,
-    boardLabel: formatDeviceId(deviceId === "" ? profileKey : deviceId),
-    bleLabel: advertisedName ?? "BLE name unavailable",
-    deviceId,
-    generationLabel: `Credential generation ${profile.credential.generation.toString()}`,
+    active:
+      normalizedIdentity(activeProfileKey) !== "" &&
+      normalizedIdentity(activeProfileKey) === profileKey,
+    boardLabel:
+      applianceLabel === undefined || applianceLabel === ""
+        ? `reticulum:${managementDestination.slice(-8)}`
+        : applianceLabel,
+    lxmfDestination,
+    managementDestination,
     profileKey,
   };
 }
 
-/** Project the generated store snapshot without reordering its canonical profile list. */
+/** Project the generated store snapshot without reordering its canonical list. */
 export function applianceProfilesPresentation(
   snapshot: NativeProfileStoreSnapshot,
 ): ApplianceProfilesPresentation {
   const profiles = snapshot.profiles.map((profile) =>
     applianceProfilePresentation(profile, snapshot.activeProfileKey),
   );
-
   return {
     activeProfile: profiles.find((profile) => profile.active) ?? null,
     profiles,
   };
 }
 
-/** Resolve an exact discovered BLE name to an already stored profile. */
-export function knownProfileForAdvertisedName(
+/** Resolve one exact management destination to a saved profile. */
+export function knownProfileForManagementDestination(
   snapshot: NativeProfileStoreSnapshot,
-  advertisedName: string | undefined,
+  managementDestination: string,
 ): ApplianceProfilePresentation | null {
-  const normalizedName = advertisedName?.trim().toLowerCase() ?? "";
-  if (normalizedName === "") return null;
+  const destination = normalizedIdentity(managementDestination);
+  if (destination === "") return null;
   return (
     applianceProfilesPresentation(snapshot).profiles.find(
-      (profile) => profile.advertisedName?.toLowerCase() === normalizedName,
+      (profile) => profile.managementDestination === destination,
     ) ?? null
   );
 }

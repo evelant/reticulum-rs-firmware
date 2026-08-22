@@ -13,11 +13,10 @@ test-support = []
 [dependencies]
 hex.workspace = true
 reticulum-device-api = { path = "../device-api", default-features = false, features = ["lxmf", "nomad", "network-config"] }
-reticulum-device-client = { path = "../device-client", features = ["network-config"] }
 reticulum-appliance-sync = { path = "../appliance-sync" }
 reticulum-appliance-store = { path = "../appliance-store" }
 reticulum-lxmf-wire = { path = "../lxmf-wire" }
-rete-core.workspace = true
+personal-rns.workspace = true
 serde.workspace = true
 tokio.workspace = true
 ts-rs.workspace = true

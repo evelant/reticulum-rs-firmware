@@ -2,22 +2,15 @@ import type { NativeProfileStoreSnapshot } from "@reticulum/appliance-native";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
-import type { OnboardingView, RecoveryRequest } from "../generated/api.ts";
 import { errorText } from "../lib/app-error.ts";
-import { knownProfileForAdvertisedName } from "../lib/appliance-profiles.ts";
-import type { BleCandidate, BleScanOptions } from "../lib/ble-central-types.ts";
-import {
-  BLE_SECURITY_CONTINUE_LABEL,
-  bleCandidateDetails,
-  bleCandidateName,
-  bleDiscoveryPresentation,
-  onboardingPresentation,
-  selectedBleCandidate,
-} from "../lib/onboarding.ts";
+import { knownProfileForManagementDestination } from "../lib/appliance-profiles.ts";
+import type { OnboardingView } from "../lib/onboarding.ts";
+import type {
+  ReticulumApplianceCandidate,
+  ReticulumDiscoveryOptions,
+} from "../lib/reticulum-appliance-candidate.ts";
 import { ActionButton } from "./AppliancePrimitives.tsx";
 import { styles } from "./appliance-screen-styles.ts";
-
-const ONBOARDING_BLE_SCAN_TIMEOUT_MS = 15_000;
 
 interface OnboardingPanelProps {
   readonly addingAppliance: boolean;
@@ -25,14 +18,15 @@ interface OnboardingPanelProps {
   readonly knownProfiles: NativeProfileStoreSnapshot | null;
   readonly onboarding: OnboardingView;
   readonly onCancel: (() => Promise<void>) | null;
-  readonly onMutation: (
-    path: "start" | "continue" | "refresh" | RecoveryRequest["action"],
-    candidate: BleCandidate | null,
-  ) => void;
-  readonly onScanBleCandidates:
-    | ((options?: BleScanOptions) => Promise<readonly BleCandidate[]>)
+  readonly onMutation: (candidate: ReticulumApplianceCandidate | null) => void;
+  readonly onScanCandidates:
+    | ((options?: ReticulumDiscoveryOptions) => Promise<readonly ReticulumApplianceCandidate[]>)
     | null;
   readonly onSwitchKnownProfile: (profileKey: string) => void;
+}
+
+function candidateLabel(candidate: ReticulumApplianceCandidate): string {
+  return `reticulum:${candidate.managementDestination.slice(-8)}`;
 }
 
 export function OnboardingPanel({
@@ -42,102 +36,58 @@ export function OnboardingPanel({
   onboarding,
   onCancel,
   onMutation,
-  onScanBleCandidates,
+  onScanCandidates,
   onSwitchKnownProfile,
 }: OnboardingPanelProps) {
-  const [bleCandidates, setBleCandidates] = useState<readonly BleCandidate[]>([]);
-  const [bleScanError, setBleScanError] = useState<string | null>(null);
-  const [bleScanFinished, setBleScanFinished] = useState(false);
-  const [bleScanning, setBleScanning] = useState(false);
-  const [cancelError, setCancelError] = useState<string | null>(null);
-  const [cancelling, setCancelling] = useState(false);
-  const [selectedPeripheralId, setSelectedPeripheralId] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<readonly ReticulumApplianceCandidate[]>([]);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [scanFinished, setScanFinished] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [selectedDestination, setSelectedDestination] = useState<string | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
-  const presentation = onboardingPresentation(onboarding);
-  const discovery = bleDiscoveryPresentation(onboarding, onScanBleCandidates !== null);
-  const selectedCandidate = selectedBleCandidate(bleCandidates, selectedPeripheralId);
-  const lifecycle = onboarding.snapshot?.lifecycle;
-  const lifecycleStage = lifecycle?.state === "working" ? lifecycle.stage : null;
-  const scrollEpoch =
-    `${lifecycle?.state ?? "unavailable"}:${lifecycleStage ?? "idle"}:` +
-    (bleScanning ? "scanning" : "settled");
-  const canRetryBle =
-    discovery.available &&
-    onboarding.method === "managed_pairing" &&
-    lifecycle?.state === "faulted" &&
-    lifecycle.reason !== "invalid_credential_artifact";
-  const canContinueBle =
-    lifecycle?.state === "working" && lifecycle.stage === "waiting_for_ble_security";
-  const canCancelBle =
-    onCancel !== null &&
-    onboarding.method === "managed_pairing" &&
-    ((addingAppliance && !(lifecycle?.state === "working" && lifecycle.stage === "activating")) ||
-      (lifecycle?.state === "working" && lifecycle.stage !== "activating"));
+  const { lifecycle } = onboarding;
+  const ready = lifecycle.state === "ready" || lifecycle.state === "unavailable";
+  const working = lifecycle.state === "authorizing";
+  const selected =
+    candidates.find((candidate) => candidate.managementDestination === selectedDestination) ?? null;
 
+  // A scan owns its controller across state-driven renders; only leaving this
+  // screen cancels the in-flight native request.
   useEffect(
     () => () => {
-      scanAbort.current?.abort(new Error("BLE discovery screen closed"));
+      scanAbort.current?.abort(new Error("Reticulum discovery screen closed"));
       scanAbort.current = null;
     },
     [],
   );
 
-  useEffect(() => {
-    if (discovery.available) return;
-    scanAbort.current?.abort(new Error("BLE discovery is no longer available"));
-    scanAbort.current = null;
-    setBleCandidates([]);
-    setBleScanError(null);
-    setBleScanFinished(false);
-    setBleScanning(false);
-    setSelectedPeripheralId(null);
-  }, [discovery.available]);
-
-  const scanBleCandidates = async () => {
-    if (onScanBleCandidates === null || bleScanning || scanAbort.current !== null) return;
+  const scan = async () => {
+    if (onScanCandidates === null || scanning || scanAbort.current !== null) return;
     const abort = new AbortController();
     scanAbort.current = abort;
-    setBleScanning(true);
-    setBleCandidates([]);
-    setBleScanError(null);
-    setBleScanFinished(false);
-    setSelectedPeripheralId(null);
+    setScanning(true);
+    setScanError(null);
+    setScanFinished(false);
     try {
-      const candidates = await onScanBleCandidates({
-        scanTimeoutMs: ONBOARDING_BLE_SCAN_TIMEOUT_MS,
-        signal: abort.signal,
-      });
+      const observed = await onScanCandidates({ signal: abort.signal });
       if (scanAbort.current !== abort) return;
-      setBleCandidates(candidates);
-      setSelectedPeripheralId(
-        (current) => selectedBleCandidate(candidates, current)?.peripheralId ?? null,
+      setCandidates(observed);
+      setSelectedDestination((current) =>
+        observed.some((candidate) => candidate.managementDestination === current) ? current : null,
       );
-      setBleScanFinished(true);
-    } catch (scanError) {
+      setScanFinished(true);
+    } catch (error) {
       if (scanAbort.current !== abort || abort.signal.aborted) return;
-      setBleScanError(errorText(scanError));
+      setScanError(errorText(error));
     } finally {
       if (scanAbort.current === abort) {
         scanAbort.current = null;
-        setBleScanning(false);
+        setScanning(false);
       }
     }
   };
 
-  const cancelBleOnboarding = async () => {
-    if (onCancel === null || cancelling) return;
-    setCancelling(true);
-    setCancelError(null);
-    try {
-      await onCancel();
-    } catch (cancelError) {
-      setCancelError(errorText(cancelError));
-    } finally {
-      setCancelling(false);
-    }
-  };
-
-  if (presentation.ready) return null;
+  if (ready && !addingAppliance) return null;
   return (
     <ScrollView
       alwaysBounceVertical={false}
@@ -145,170 +95,110 @@ export function OnboardingPanel({
       automaticallyAdjustKeyboardInsets={false}
       bounces={false}
       contentContainerStyle={styles.onboardingScrollContent}
-      key={scrollEpoch}
       nestedScrollEnabled
       style={styles.onboardingScroller}
     >
       <View accessibilityLiveRegion="polite" style={styles.onboarding}>
         <Text style={styles.eyebrow}>{addingAppliance ? "ADD APPLIANCE" : "FIRST-RUN SETUP"}</Text>
-        <Text style={styles.onboardingTitle}>{presentation.title}</Text>
-        <Text style={styles.secondaryText}>{presentation.instruction}</Text>
-        {discovery.available || presentation.identifierLabel === null ? null : (
-          <View style={styles.serialRow}>
-            <Text style={styles.metaLabel}>{presentation.identifierLabel}</Text>
-            <Text selectable style={styles.monospace}>
-              {onboarding.snapshot?.device_label ?? "—"}
-            </Text>
-          </View>
-        )}
-        {discovery.available ? (
-          <View style={styles.bleDiscovery}>
-            <Text style={styles.bleDiscoveryTitle}>{discovery.title}</Text>
-            <Text style={styles.secondaryText}>{discovery.instruction}</Text>
-            <View style={styles.actionRow}>
-              <ActionButton
-                disabled={busy || bleScanning || lifecycle?.state === "working"}
-                label={bleScanning ? "Finding nearby boards…" : "Find nearby boards"}
-                onPress={() => void scanBleCandidates()}
-              />
-            </View>
-            {bleScanError === null ? null : (
-              <Text accessibilityLiveRegion="assertive" style={styles.inlineError}>
-                {bleScanError}
-              </Text>
-            )}
-            {cancelError === null ? null : (
-              <Text accessibilityLiveRegion="assertive" style={styles.inlineError}>
-                {cancelError}
-              </Text>
-            )}
-            {bleScanFinished && bleCandidates.length === 0 ? (
-              <Text style={styles.secondaryText}>No nearby appliances were found.</Text>
-            ) : null}
-            {bleCandidates.length === 0 ? null : (
-              <ScrollView
-                contentContainerStyle={styles.bleCandidateList}
-                nestedScrollEnabled
-                style={styles.bleCandidateScroller}
-              >
-                {bleCandidates.map((candidate) => {
-                  const selected = selectedCandidate?.peripheralId === candidate.peripheralId;
-                  const knownProfile =
-                    knownProfiles === null
-                      ? null
-                      : knownProfileForAdvertisedName(knownProfiles, candidate.peripheralName);
-                  return (
-                    <Pressable
-                      accessibilityLabel={
-                        knownProfile === null
-                          ? `Select ${bleCandidateName(candidate)}`
-                          : `Switch to saved appliance ${knownProfile.boardLabel}`
-                      }
-                      accessibilityRole="button"
-                      accessibilityState={{
-                        disabled: busy || lifecycle?.state === "working",
-                        selected,
-                      }}
-                      disabled={busy || lifecycle?.state === "working"}
-                      key={candidate.peripheralId}
-                      onPress={() => {
-                        if (knownProfile === null) {
-                          setSelectedPeripheralId(candidate.peripheralId);
-                        } else {
-                          onSwitchKnownProfile(knownProfile.profileKey);
-                        }
-                      }}
-                      style={({ pressed }) => [
-                        styles.bleCandidate,
-                        selected && styles.bleCandidateSelected,
-                        pressed && styles.buttonPressed,
-                      ]}
-                    >
-                      <View style={styles.bleCandidateHeading}>
-                        <Text numberOfLines={1} style={styles.bleCandidateName}>
-                          {bleCandidateName(candidate)}
-                        </Text>
-                        <Text style={styles.bleCandidateChoice}>
-                          {knownProfile === null ? (selected ? "Selected" : "Select") : "Switch"}
-                        </Text>
-                      </View>
-                      <Text selectable style={styles.monospace}>
-                        {bleCandidateDetails(candidate)}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-            )}
-            {selectedCandidate === null ? null : (
-              <Text accessibilityLiveRegion="polite" style={styles.bleSelectionStatus}>
-                {lifecycle?.state === "working"
-                  ? "Secure pairing is using this exact selected BLE peripheral."
-                  : "Selected for the upcoming secure pairing step. No connection has been made."}
-              </Text>
-            )}
-          </View>
-        ) : null}
+        <Text style={styles.onboardingTitle}>
+          {working ? "Authorizing Reticulum identity" : "Choose a Reticulum appliance"}
+        </Text>
+        <Text style={styles.secondaryText}>
+          {working
+            ? "Keep the board's enrollment window open while the app verifies its identified management request."
+            : "The app verifies management announces through its own PRNS node. Saved nodes use the same Reticulum identity over any available PRNS interface."}
+        </Text>
         <View style={styles.actionRow}>
-          {presentation.canStart ? (
+          <ActionButton
+            disabled={busy || scanning || working || onScanCandidates === null}
+            label={scanning ? "Checking announces…" : "Refresh announces"}
+            onPress={() => void scan()}
+          />
+        </View>
+        {scanError === null ? null : (
+          <Text accessibilityLiveRegion="assertive" style={styles.inlineError}>
+            {scanError}
+          </Text>
+        )}
+        {scanFinished && candidates.length === 0 ? (
+          <Text style={styles.secondaryText}>
+            No verified appliance management announces have been observed yet.
+          </Text>
+        ) : null}
+        {candidates.length === 0 ? null : (
+          <ScrollView
+            contentContainerStyle={styles.bleCandidateList}
+            nestedScrollEnabled
+            style={styles.bleCandidateScroller}
+          >
+            {candidates.map((candidate) => {
+              const isSelected =
+                selected?.managementDestination === candidate.managementDestination;
+              const known =
+                knownProfiles === null
+                  ? null
+                  : knownProfileForManagementDestination(
+                      knownProfiles,
+                      candidate.managementDestination,
+                    );
+              return (
+                <Pressable
+                  accessibilityLabel={
+                    known === null
+                      ? `Select ${candidateLabel(candidate)}`
+                      : `Switch to saved appliance ${known.boardLabel}`
+                  }
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: busy || working, selected: isSelected }}
+                  disabled={busy || working}
+                  key={candidate.managementDestination}
+                  onPress={() => {
+                    if (known === null) {
+                      setSelectedDestination(candidate.managementDestination);
+                    } else {
+                      onSwitchKnownProfile(known.profileKey);
+                    }
+                  }}
+                  style={({ pressed }) => [
+                    styles.bleCandidate,
+                    isSelected && styles.bleCandidateSelected,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <View style={styles.bleCandidateHeading}>
+                    <Text numberOfLines={1} style={styles.bleCandidateName}>
+                      {candidateLabel(candidate)}
+                    </Text>
+                    <Text style={styles.bleCandidateChoice}>
+                      {known === null ? (isSelected ? "Selected" : "Select") : "Switch"}
+                    </Text>
+                  </View>
+                  <Text selectable style={styles.monospace}>
+                    {candidate.managementDestination}
+                  </Text>
+                  <Text style={styles.secondaryText}>
+                    LXMF {candidate.lxmfDestination.slice(-8)} · {candidate.hops} hop
+                    {candidate.hops === 1 ? "" : "s"} · interface {candidate.interfaceId}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        )}
+        <View style={styles.actionRow}>
+          <ActionButton
+            disabled={busy || scanning || working || selected === null}
+            label={working ? "Authorizing…" : "Authorize selected appliance"}
+            onPress={() => onMutation(selected)}
+          />
+          {onCancel === null ? null : (
             <ActionButton
-              disabled={busy || bleScanning || (discovery.available && selectedCandidate === null)}
-              label={presentation.startLabel}
-              onPress={() => onMutation("start", selectedCandidate)}
-              secondary={discovery.available}
-            />
-          ) : null}
-          {canRetryBle ? (
-            <ActionButton
-              disabled={busy || bleScanning || selectedCandidate === null}
-              label="Retry secure pairing"
-              onPress={() => onMutation("start", selectedCandidate)}
-            />
-          ) : null}
-          {canContinueBle ? (
-            <ActionButton
-              disabled={busy}
-              label={BLE_SECURITY_CONTINUE_LABEL}
-              onPress={() => onMutation("continue", selectedCandidate)}
-            />
-          ) : null}
-          {presentation.canResume ? (
-            <ActionButton
-              disabled={busy || bleScanning || (discovery.available && selectedCandidate === null)}
-              label="Resume pairing"
-              onPress={() => onMutation("resume_known_pending", selectedCandidate)}
-            />
-          ) : null}
-          {presentation.canAbort ? (
-            <ActionButton
-              disabled={busy || bleScanning || (discovery.available && selectedCandidate === null)}
-              label="Abort pending state"
-              onPress={() => onMutation("abort_orphan", selectedCandidate)}
+              disabled={busy || working}
+              label="Cancel"
+              onPress={() => void onCancel()}
               secondary
             />
-          ) : null}
-          {presentation.canRefresh ? (
-            <ActionButton
-              disabled={busy || bleScanning}
-              label="Recheck local state"
-              onPress={() => onMutation("refresh", selectedCandidate)}
-              secondary
-            />
-          ) : null}
-          {canCancelBle ? (
-            <ActionButton
-              disabled={cancelling}
-              label={
-                cancelling
-                  ? "Cancelling…"
-                  : addingAppliance
-                    ? "Cancel adding appliance"
-                    : "Cancel secure pairing"
-              }
-              onPress={() => void cancelBleOnboarding()}
-              secondary
-            />
-          ) : null}
+          )}
         </View>
       </View>
     </ScrollView>
